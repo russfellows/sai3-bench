@@ -1,0 +1,17 @@
+# Build environment files
+.cargo/config.local
+.cargo/target
+
+# Rust-specific editor and IDE files
+.vscode-test/ # VS Code test extension files
+.rustup/ # Rustup specific files, if any
+rust-toolchain.toml # If you specify a toolchain in a separate file and don't want to commit it
+
+# Operating System Files
+.DS_Store # macOS
+Thumbs.db # Windows
+
+
+# Added by cargo
+
+/target

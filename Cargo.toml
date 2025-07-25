@@ -1,0 +1,17 @@
+[package]
+name = "warp-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# exact commit or tag recommended until s3dlio publishes on crates.io
+s3dlio            = { git = "https://github.com/russfellows/s3dlio" }
+
+tokio             = { version = "1.38", features = ["rt-multi-thread", "macros"] }
+clap              = { version = "4.5", features = ["derive"] }
+anyhow            = "1.0"
+hdrhistogram      = "7.5"
+tracing           = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dotenvy           = "0.15"
+url = "2.5.4"
