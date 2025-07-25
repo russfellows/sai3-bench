@@ -4055,6 +4055,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dotenvy",
+ "futures",
  "hdrhistogram",
  "regex",
  "s3dlio",
