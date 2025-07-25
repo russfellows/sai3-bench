@@ -4056,6 +4056,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "hdrhistogram",
+ "regex",
  "s3dlio",
  "tokio",
  "tracing",
