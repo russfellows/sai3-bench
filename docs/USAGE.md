@@ -21,6 +21,7 @@ and TLS (self‑signed) operation.
   The agent uses the AWS SDK default chain. Ensure one of the following is set:
   - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
   - or `~/.aws/credentials` with a default or selected profile.
+  - or `./.env` file containing ACCESS_KEY_ID, SECRET_ACCESS_KEY and other required params
 - **Open firewall** for the agent port (default: `7761`)
 
 Build all binaries:
