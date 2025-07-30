@@ -31,8 +31,7 @@ cargo build --release
 
 Binaries will be in target/release/
 
-#1 Agent & Controller CLI Summary
-
+# Agent & Controller CLI Summary
 ```
 s3bench-agent
 USAGE:
@@ -74,8 +73,7 @@ self‑signed certificate.
 If the agent cert doesn’t include the default DNS
 name the controller uses, add --agent-domain.
 
-#2 Quick Start — Single Host (PLAINTEXT)
-
+# 2 Quick Start — Single Host (PLAINTEXT)
 In one terminal:
 
 ## Run agent without TLS on port 7761
@@ -89,8 +87,7 @@ In another terminal:
 ./target/release/s3bench-ctl --insecure --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/path/ --jobs 8
 
-#3 Multi-Host (PLAINTEXT)
-
+# 3 Multi-Host (PLAINTEXT)
 On each agent host (e.g., node1, node2):
 
 ./s3bench-agent --listen 0.0.0.0:7761
@@ -101,18 +98,17 @@ From the controller host:
 ./s3bench-ctl --insecure --agents node1:7761,node2:7761 get \
   --uri s3://my-bucket/data/ --jobs 16
 
-#4 TLS with Self‑Signed Certificates (No CA hassles)
-
+# 4 TLS with Self‑Signed Certificates (No CA hassles)
 You can enable TLS on the agent with an ephemeral self‑signed certificate
 generated at startup. You do not need a public CA. The controller just needs
 the generated cert to trust the agent connection.
 
-##4.1 Start the Agent with TLS and write the cert
+## 4.1 Start the Agent with TLS and write the cert
 Pick a DNS name (CN) you’ll use from the controller—typically the agent’s
 resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 
-## Example: agent runs on loki-node3, reachable by name and IP
-## Write cert & key into /tmp/agent-ca/  (for you to scp to controller)
+### Example: agent runs on loki-node3, reachable by name and IP
+Write cert & key into /tmp/agent-ca/  (for you to scp to controller)
 ./s3bench-agent \
   --listen 0.0.0.0:7761 \
   --tls \
@@ -132,10 +128,10 @@ use to connect to this agent.
 
 Copy the certificate to the controller host (key stays on the agent):
 
-## From controller host:
+### From controller host:
 scp user@loki-node3:/tmp/agent-ca/agent_cert.pem /tmp/agent_ca.pem
 
-##4.2 Connect from the Controller (TLS)
+## 4.2 Connect from the Controller (TLS)
 Single agent:
 
 ```
@@ -172,11 +168,9 @@ Multiple agents (all in TLS mode):
   get --uri s3://my-bucket/data/ --jobs 16
 ```
 
-**Important:** Do not pass --insecure to the controller when the agent
-is running with --tls.
+**Important:** Do not pass --insecure to the controller when the agent is running with --tls.
 
-#5 Examples for Workloads
-
+# 5 Examples for Workloads
 GET (download) via controller
 ### PLAINTEXT
 ```
@@ -218,8 +212,7 @@ PUT (upload) via controller
   --concurrency 8
 ```
 
-#6 Localhost Demo (No Makefile Needed)
-
+# 6 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
 ./target/release/s3bench-agent --listen 127.0.0.1:7761
@@ -254,8 +247,7 @@ PUT (upload) via controller
   ping
 ```
 
-#7 Troubleshooting
-
+# 7 Troubleshooting
 TLS is enabled ... but --agent-ca was not provided
 You’re connecting to a TLS-enabled agent, but the controller is missing
 --agent-ca. Provide the agent’s agent_cert.pem or run the controller with
@@ -277,8 +269,7 @@ Increase --jobs (GET) or --concurrency (PUT), and/or add more agents.
 Verify network path and S3 region distance.
 Check CPU/network utilization on agent hosts.
 
-#8 Notes & Best Practices
-
+# 8 Notes and Best Practices
 Use resolvable hostnames for agents and include them in --tls-sans when
 using TLS. If connecting by IP from the controller, add that IP to
 --tls-sans or set --agent-domain to a SAN value.
@@ -287,8 +278,7 @@ Keep the private key (agent_key.pem) on the agent host; only the cert
 For repeatable test environments, you can pre-generate and persist the certs
 (via --tls-write-ca) and reuse them.
 
-#9 Running Tests
-
+# 9 Running Tests
 Unit + integration tests:
 
 cargo test
@@ -296,8 +286,7 @@ The gRPC integration test starts a local agent, then checks controller
 connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
-#10 Versioning
-
+# 10 Versioning
 The agent reports its version on ping:
 
 ```
