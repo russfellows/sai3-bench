@@ -1,19 +1,55 @@
 [package]
-name = "warp-test"
-version = "0.1.0"
+name    = "s3-bench"
+version = "0.2.0"
 edition = "2024"
+build   = "build.rs"
 
 [dependencies]
-# exact commit or tag recommended until s3dlio publishes on crates.io
-s3dlio            = { git = "https://github.com/russfellows/s3dlio" }
-
-tokio             = { version = "1.38", features = ["rt-multi-thread", "macros"] }
-clap              = { version = "4.5", features = ["derive"] }
-anyhow            = "1.0"
-hdrhistogram      = "7.5"
-tracing           = { version = "0.1", features = ["log"] }
+aws-config = "1"
+aws-sdk-s3 = "1"
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15"
+futures = "0.3"
+hdrhistogram = "7.5"
+regex = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-dotenvy           = "0.15"
-url = "2.5.4"
-regex = "1.11.1"
-futures = "0.3.31"
+url = "^2.5"
+
+# s3dlio (pull from git as you already had)
+s3dlio = { git = "https://github.com/russfellows/s3dlio" }
+
+# gRPC
+tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
+tonic-build = "0.13.1"
+prost = "^0.13"
+rcgen = "^0.14"
+
+# (optional) serialization for richer results later
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "^0.13"
+prost-build = "^0.13"
+
+# existing main (single-node CLI) remains:
+[[bin]]
+name = "s3-bench"
+path = "src/main.rs"
+
+# new agent (runs on each load-generator host)
+[[bin]]
+name = "s3bench-agent"
+path = "src/bin/agent.rs"
+
+# new controller (coordinates benchmark across agents)
+[[bin]]
+name = "s3bench-ctl"
+path = "src/bin/controller.rs"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "2.1"
+

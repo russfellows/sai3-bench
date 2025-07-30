@@ -12,4 +12,7 @@ So, what is different, and / or better?  In other words, why do we need this pro
 ## Initial Plan
 The initial plan for this project is captured in a [Discussion item #2](https://github.com/russfellows/warp-test/discussions/2)
 
+## Usage
+There is a brief user guide in docs/USAGE.md.
+
 
