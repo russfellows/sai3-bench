@@ -2,6 +2,9 @@
 
 use regex::escape;
 
+pub mod config;
+pub mod workload;
+
 /// Returns the bucket index for the size (0..8+) as per your CLI logic.
 pub fn bucket_index(nbytes: usize) -> usize {
     if nbytes == 0 {
