@@ -1,0 +1,9 @@
+# put_smoke.yaml
+duration: 3s
+concurrency: 8
+workload:
+  - weight: 100
+    op: put
+    bucket: my-bucket2
+    prefix: bench/smoke/ 
+    object_size: 131072   # 128 KiB

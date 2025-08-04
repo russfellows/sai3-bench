@@ -1,0 +1,13 @@
+# mixed.yaml
+duration: 30s
+concurrency: 32
+workload:
+  - weight: 70
+    op: get
+    uri: "s3://my-bucket2/bench/smoke/*"
+  - weight: 30
+    op: put
+    bucket: my-bucket2
+    prefix: bench/mixed/
+    object_size: 1048576
+

@@ -1,0 +1,19 @@
+# docs/CONFIG.sample.yaml
+# Run a 60s mixed workload with concurrency 32
+duration: "60s"
+concurrency: 32
+
+workload:
+  - op: get
+    # Can be: s3://bucket/exact_key
+    #      or: s3://bucket/prefix/        (lists & cycles)
+    #      or: s3://bucket/prefix*.ext    (glob, pre-listed & filtered)
+    uri: "s3://my-bucket/data/"
+    weight: 70
+
+  - op: put
+    bucket: "my-bucket"
+    prefix: "bench/"
+    object_size: 1048576   # 1 MiB
+    weight: 30
+

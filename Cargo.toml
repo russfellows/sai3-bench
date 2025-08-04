@@ -29,6 +29,10 @@ rcgen = "^0.14"
 
 # (optional) serialization for richer results later
 serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9.34"
+rand = "0.9.2"
+humantime-serde = "1.1.1"
+rand_distr = "0.5.1"
 
 [build-dependencies]
 tonic-build = "^0.13"
@@ -48,6 +52,11 @@ path = "src/bin/agent.rs"
 [[bin]]
 name = "s3bench-ctl"
 path = "src/bin/controller.rs"
+
+#New s3bench-run cli, separate for now, plan to integrate into main
+[[bin]]
+name = "s3bench-run"
+path = "src/bin/run.rs"
 
 [dev-dependencies]
 assert_cmd = "2.0"
