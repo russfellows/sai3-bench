@@ -16,6 +16,7 @@ use tonic::{transport::Server, Request, Response, Status};
 use aws_config::{self, BehaviorVersion};
 use aws_sdk_s3 as s3;
 
+// TODO: Remove legacy s3_utils imports as we migrate operations
 use s3dlio::s3_utils::{get_object, parse_s3_uri, put_object_async};
 
 pub mod pb {
