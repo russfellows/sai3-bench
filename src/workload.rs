@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use hdrhistogram::Histogram;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tracing::{debug, info};
 
 use rand::{rng, Rng};
 //use rand::rngs::SmallRng;
@@ -16,12 +17,7 @@ use crate::config::{Config, OpSpec};
 use std::collections::HashMap;
 use crate::bucket_index;
 
-use aws_config::{self, BehaviorVersion, Region};
-use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3 as s3;
 use s3dlio::object_store::{store_for_uri, ObjectStore};
-// TODO: Remove legacy s3_utils imports as we migrate operations
-use s3dlio::s3_utils::{get_object, parse_s3_uri, put_object_async};
 
 // -----------------------------------------------------------------------------
 // Multi-backend support infrastructure
@@ -109,6 +105,34 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
     }
 }
 
+/// Multi-backend GET operation using ObjectStore trait
+pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
+    debug!("GET operation starting for URI: {}", uri);
+    let store = create_store_for_uri(uri)?;
+    debug!("ObjectStore created successfully for URI: {}", uri);
+    
+    // Use ObjectStore get method with full URI (s3dlio handles URI parsing)
+    let bytes = store.get(uri).await
+        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+    
+    debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
+    Ok(bytes)
+}
+
+/// Multi-backend PUT operation using ObjectStore trait
+pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<()> {
+    debug!("PUT operation starting for URI: {}, {} bytes", uri, data.len());
+    let store = create_store_for_uri(uri)?;
+    debug!("ObjectStore created successfully for URI: {}", uri);
+    
+    // Use ObjectStore put method with full URI (s3dlio handles URI parsing)
+    store.put(uri, data).await
+        .with_context(|| format!("Failed to put object to URI: {}", uri))?;
+    
+    debug!("PUT operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // New summary/aggregation types
 // -----------------------------------------------------------------------------
@@ -191,55 +215,34 @@ impl Default for WorkerStats {
 
 /// Public entry: run a config and print a summary-like struct back.
 pub async fn run(cfg: &Config) -> Result<Summary> {
+    info!("Starting workload execution: duration={:?}, concurrency={}", cfg.duration, cfg.concurrency);
+    
     let start = Instant::now();
     let deadline = start + cfg.duration;
 
     // Pre-resolve any GET sources once.
+    info!("Pre-resolving GET sources for {} operations", cfg.workload.len());
     let mut pre = PreResolved::default();
     for wo in &cfg.workload {
-        if let OpSpec::Get { uri } = &wo.spec {
-            let backend_type = BackendType::from_uri(uri);
+        if let OpSpec::Get { .. } = &wo.spec {
+            let uri = cfg.get_uri(&wo.spec);
+            
+            info!("Resolving GET source for URI: {}", uri);
             
             // Try new multi-backend approach first
-            match prefetch_uris_multi_backend(uri).await {
+            match prefetch_uris_multi_backend(&uri).await {
                 Ok(full_uris) if !full_uris.is_empty() => {
-                    // Create legacy bucket/pattern for backward compatibility
-                    let (bucket, _pattern) = if backend_type == BackendType::S3 {
-                        parse_s3_uri(uri).unwrap_or_else(|_| ("".to_string(), "".to_string()))
-                    } else {
-                        ("".to_string(), "".to_string())
-                    };
-                    
+                    info!("Found {} objects for GET pattern: {}", full_uris.len(), uri);
                     pre.get_lists.push(GetSource {
+                        full_uris: full_uris.clone(),
                         uri: uri.clone(),
-                        bucket,
-                        keys: full_uris.iter().map(|u| {
-                            // Extract key part for legacy compatibility
-                            if backend_type == BackendType::S3 {
-                                u.split('/').last().unwrap_or("").to_string()
-                            } else {
-                                u.clone()
-                            }
-                        }).collect(),
                     });
                 }
-                _ => {
-                    // Fall back to legacy S3-only approach for compatibility
-                    if backend_type == BackendType::S3 {
-                        let (bucket, pat) = parse_s3_uri(uri).context("parse get uri")?;
-                        let keys = prefetch_keys(&bucket, &pat).await?;
-                        if keys.is_empty() {
-                            return Err(anyhow!("no keys found for GET uri: {}", uri));
-                        }
-                        
-                        pre.get_lists.push(GetSource {
-                            uri: uri.clone(),
-                            bucket,
-                            keys,
-                        });
-                    } else {
-                        return Err(anyhow!("no keys found for non-S3 uri: {}", uri));
-                    }
+                Ok(_) => {
+                    return Err(anyhow!("No URIs found for GET uri: {}", uri));
+                }
+                Err(e) => {
+                    return Err(anyhow!("Failed to prefetch URIs for {}: {}", uri, e));
                 }
             }
         }
@@ -253,12 +256,14 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let sem = Arc::new(Semaphore::new(cfg.concurrency));
 
     // Spawn workers
+    info!("Spawning {} worker tasks", cfg.concurrency);
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let sem = sem.clone();
         let workload = cfg.workload.clone();
         let chooser = chooser.clone();
         let pre = pre.clone();
+        let cfg = cfg.clone();
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -280,17 +285,20 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                 let op = &workload[idx].spec;
 
                 match op {
-                    OpSpec::Get { uri } => {
-                        // Pick key before await
-                        let (bucket, key) = {
+                    OpSpec::Get { .. } => {
+                        // Get resolved URI from config
+                        let uri = cfg.get_uri(op);
+                        
+                        // Pick full URI from pre-resolved list
+                        let full_uri = {
                             let src = pre.get_for_uri(&uri).unwrap();
                             let mut r = rng();
-                            let k = &src.keys[r.random_range(0..src.keys.len())];
-                            (src.bucket.clone(), k.to_string())
+                            let uri_idx = r.random_range(0..src.full_uris.len());
+                            src.full_uris[uri_idx].clone()
                         };
 
                         let t0 = Instant::now();
-                        let bytes = get_object(&bucket, &key).await?;
+                        let bytes = get_object_multi_backend(&full_uri).await?;
                         let ms = t0.elapsed().as_millis() as u64;
 
                         ws.hist_get.record(ms.max(1)).ok();
@@ -298,20 +306,25 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
                     }
-                    OpSpec::Put {
-                        bucket,
-                        prefix,
-                        object_size,
-                    } => {
-                        let sz = *object_size as u64; // adjust if your type is plain u64: `let sz = *object_size as u64` -> `let sz = *object_size` or `let sz = object_size as u64`
+                    OpSpec::Put { .. } => {
+                        // Get base URI from config  
+                        let (base_uri, sz) = cfg.get_put_info(op);
+                        
                         let key = {
                             let mut r = rng();
-                            format!("{}obj_{}", prefix, r.random::<u64>())
+                            format!("obj_{}", r.random::<u64>())
                         };
                         let buf = vec![0u8; sz as usize];
 
+                        // Build full URI for the specific object
+                        let full_uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, key)
+                        } else {
+                            format!("{}/{}", base_uri, key)
+                        };
+
                         let t0 = Instant::now();
-                        put_object_async(bucket, &key, &buf).await?;
+                        put_object_multi_backend(&full_uri, &buf).await?;
                         let ms = t0.elapsed().as_millis() as u64;
 
                         ws.hist_put.record(ms.max(1)).ok();
@@ -374,6 +387,13 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     combined.add(&merged_get).ok();
     combined.add(&merged_put).ok();
 
+    info!("Workload execution completed: {:.2}s wall time, {} total ops ({} GET, {} PUT), {:.2} MB total ({:.2} MB GET, {:.2} MB PUT)", 
+          wall, 
+          total_ops, get_ops, put_ops,
+          total_bytes as f64 / 1_048_576.0,
+          get_bytes as f64 / 1_048_576.0,
+          put_bytes as f64 / 1_048_576.0);
+
     Ok(Summary {
         wall_seconds: wall,
         total_bytes,
@@ -395,10 +415,8 @@ struct PreResolved {
 }
 #[derive(Clone)]
 struct GetSource {
-    // Legacy S3-specific fields still in use
-    uri: String,
-    bucket: String,
-    keys: Vec<String>,
+    full_uris: Vec<String>,     // Pre-resolved full URIs for random selection
+    uri: String,                // For lookup compatibility
 }
 impl PreResolved {
     fn get_for_uri(&self, uri: &str) -> Option<&GetSource> {
@@ -408,26 +426,7 @@ impl PreResolved {
 
 
 /// Expand keys for a GET uri: supports exact key, prefix, or glob '*'.
-async fn prefetch_keys(bucket: &str, pat: &str) -> Result<Vec<String>> {
-    if pat.contains('*') {
-        // base = path up to and including the last '/'
-        let base_end = pat.rfind('/').map(|i| i + 1).unwrap_or(0);
-        let base = &pat[..base_end];
 
-        // list returns keys relative to `base`; make them absolute, then filter by the full glob
-        let rels = list_keys_async(bucket, base).await?;
-        let re = glob_to_regex(pat)?;
-        let full: Vec<String> = rels.into_iter().map(|r| format!("{base}{r}")).collect();
-        Ok(full.into_iter().filter(|k| re.is_match(k)).collect())
-    } else if pat.ends_with('/') || pat.is_empty() {
-        // prefix-only: list relative, then make absolute
-        let rels = list_keys_async(bucket, pat).await?;
-        Ok(rels.into_iter().map(|r| format!("{pat}{r}")).collect())
-    } else {
-        // exact key
-        Ok(vec![pat.to_string()])
-    }
-}
 
 /// Multi-backend version: expand URIs for GET operations using ObjectStore trait
 async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
@@ -457,41 +456,5 @@ fn glob_to_regex(glob: &str) -> Result<regex::Regex> {
     Ok(regex::Regex::new(&re)?)
 }
 
-/// Async S3 list using AWS SDK (avoids nested runtimes)
-async fn list_keys_async(bucket: &str, prefix: &str) -> Result<Vec<String>> {
-    let region_provider = RegionProviderChain::first_try(
-        std::env::var("AWS_REGION").ok().map(Region::new)
-    )
-    .or_default_provider()
-    .or_else(Region::new("us-east-1"));
 
-    let cfg = aws_config::defaults(BehaviorVersion::latest())
-        .region(region_provider)
-        .load()
-        .await;
-
-    let client = s3::Client::new(&cfg);
-
-    let mut out = Vec::new();
-    let mut cont: Option<String> = None;
-    loop {
-        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
-        if let Some(c) = cont.as_deref() {
-            req = req.continuation_token(c);
-        }
-        let resp = req.send().await?;
-        for obj in resp.contents() {
-            if let Some(k) = obj.key() {
-                // store the key relative to prefix for matching
-                let rel = k.strip_prefix(prefix).unwrap_or(k);
-                out.push(rel.to_string());
-            }
-        }
-        match resp.next_continuation_token() {
-            Some(tok) if !tok.is_empty() => cont = Some(tok.to_string()),
-            _ => break,
-        }
-    }
-    Ok(out)
-}
 

@@ -11,10 +11,14 @@ use clap::{Parser, Subcommand};
 use futures::{stream::FuturesUnordered, StreamExt};
 use hdrhistogram::Histogram;
 use regex::{Regex, escape};
+use s3_bench::config::Config;
+use s3_bench::workload;
+use serde_yaml;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as RtBuilder;
 use tokio::sync::Semaphore;
+use tracing::info;
 use url::Url;
 
 // TODO: Remove legacy s3_utils imports as we migrate operations
@@ -104,6 +108,10 @@ impl OpHists {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    
+    /// Verbose output (-v for info, -vv for debug)
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Subcommand)]
@@ -156,6 +164,11 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
     },
+    /// Run workload from config file
+    Run {
+        #[arg(long)]
+        config: String,
+    },
 }
 
 // -----------------------------------------------------------------------------
@@ -163,6 +176,20 @@ enum Commands {
 // -----------------------------------------------------------------------------
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    
+    // Initialize logging based on verbosity level
+    let log_level = match cli.verbose {
+        0 => "warn",  // Default: only warnings and errors
+        1 => "info",  // -v: info level and above
+        _ => "debug", // -vv or more: debug level and above
+    };
+    
+    // Initialize tracing subscriber with the appropriate level
+    use tracing_subscriber::{fmt, EnvFilter};
+    fmt()
+        .with_env_filter(EnvFilter::new(format!("s3_bench={}", log_level)))
+        .init();
+    
     match cli.command {
         Commands::Health { uri, bucket, prefix } => {
             let (b, p) = parse_s3(&uri, bucket, prefix)?;
@@ -176,6 +203,7 @@ fn main() -> Result<()> {
             let (b, p) = parse_s3(&uri, bucket, prefix)?;
             put_bench(object_size, objects, &b, &p, concurrency)?;
         }
+        Commands::Run { config } => run_workload(&config)?,
     }
     Ok(())
 }
@@ -385,6 +413,58 @@ fn put_bench(
         mb / dt.as_secs_f64(),
     );
     hist.print_summary("PUT");
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Workload execution
+// -----------------------------------------------------------------------------
+fn run_workload(config_path: &str) -> Result<()> {
+    info!("Loading workload configuration from: {}", config_path);
+    let config_content = std::fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read config file: {}", config_path))?;
+    
+    let config: Config = serde_yaml::from_str(&config_content)
+        .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+    
+    info!("Configuration loaded successfully");
+    
+    println!("Running workload from: {}", config_path);
+    if let Some(target) = &config.target {
+        println!("Target: {}", target);
+        info!("Target backend: {}", target);
+    }
+    println!("Duration: {:?}", config.duration);
+    println!("Concurrency: {}", config.concurrency);
+    println!("Operations: {}", config.workload.len());
+    
+    info!("Starting workload execution with {} operation types", config.workload.len());
+    
+    // Run the workload
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    let summary = rt.block_on(workload::run(&config))?;
+    
+    // Print results
+    println!("\n=== Results ===");
+    println!("Wall time: {:.2}s", summary.wall_seconds);
+    println!("Total ops: {}", summary.total_ops);
+    println!("Total bytes: {} ({:.2} MB)", summary.total_bytes, summary.total_bytes as f64 / (1024.0 * 1024.0));
+    println!("Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
+    
+    if summary.get.ops > 0 {
+        println!("\nGET operations:");
+        println!("  Ops: {}", summary.get.ops);
+        println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Latency p50: {}ms, p95: {}ms, p99: {}ms", summary.get.p50_ms, summary.get.p95_ms, summary.get.p99_ms);
+    }
+    
+    if summary.put.ops > 0 {
+        println!("\nPUT operations:");
+        println!("  Ops: {}", summary.put.ops);
+        println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Latency p50: {}ms, p95: {}ms, p99: {}ms", summary.put.p50_ms, summary.put.p95_ms, summary.put.p99_ms);
+    }
+    
     Ok(())
 }
 
