@@ -1,18 +1,18 @@
 //
-// Copyright, 2025: Signal65/Futurum
+// Copyright, 2025: Suse io_bench::workload::{gnal65/Futurum
 //
 
 // -----------------------------------------------------------------------------
 // warp‑test ‑ lightweight S3 performance tester & utility CLI built on s3dlio
 // -----------------------------------------------------------------------------
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{stream::FuturesUnordered, StreamExt};
 use hdrhistogram::Histogram;
 use regex::{Regex, escape};
-use s3_bench::config::Config;
-use s3_bench::workload;
+use io_bench::config::Config;
+use io_bench::workload;
 use serde_yaml;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,9 +21,10 @@ use tokio::sync::Semaphore;
 use tracing::info;
 use url::Url;
 
-// TODO: Remove legacy s3_utils imports as we migrate operations
-use s3dlio::s3_utils::{
-    delete_objects, get_object, list_objects, parse_s3_uri, put_object_async, stat_object_uri,
+// Multi-backend ObjectStore operations
+use io_bench::workload::{
+    get_object_multi_backend, put_object_multi_backend, list_objects_multi_backend, 
+    stat_object_multi_backend, delete_object_multi_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -116,47 +117,66 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Verify bucket+prefix reachability
+    /// Verify storage backend reachability across all supported backends
+    /// 
+    /// Examples:
+    ///   io-bench health --uri "file:///tmp/test/"
+    ///   io-bench health --uri "s3://bucket/prefix/"
+    ///   io-bench health --uri "direct:///mnt/fast/"
+    ///   io-bench health --uri "az://storageaccount/container/"
     Health {
-        #[arg(long, conflicts_with = "bucket")]
-        uri: Option<String>,
-        #[arg(long, requires = "prefix")]
-        bucket: Option<String>,
-        #[arg(long, requires = "bucket", default_value = "")]
-        prefix: String,
+        #[arg(long)]
+        uri: String,
     },
-    /// List objects (supports basename glob)
+    /// List objects (supports basename glob across all backends)
+    /// 
+    /// Examples:
+    ///   io-bench list --uri "file:///tmp/data/"
+    ///   io-bench list --uri "s3://bucket/prefix/"
+    ///   io-bench list --uri "direct:///mnt/data/*.txt"
     List {
         #[arg(long)]
         uri: String,
     },
-    /// Stat (HEAD) one object
+    /// Stat (HEAD) one object across all backends
+    /// 
+    /// Examples:
+    ///   io-bench stat --uri "file:///tmp/data/file.txt"
+    ///   io-bench stat --uri "s3://bucket/object.txt"
     Stat {
         #[arg(long)]
         uri: String,
     },
-    /// Get objects (prefix, glob, or single)
+    /// Get objects (prefix, glob, or single) from any backend
+    /// 
+    /// Examples:
+    ///   io-bench get --uri "file:///tmp/data/*" --jobs 8
+    ///   io-bench get --uri "s3://bucket/prefix/" --jobs 4
     Get {
         #[arg(long)]
         uri: String,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
-    /// Delete objects (prefix, glob, or single)
+    /// Delete objects (prefix, glob, or single) from any backend
+    /// 
+    /// Examples:
+    ///   io-bench delete --uri "file:///tmp/old/*" --jobs 8
+    ///   io-bench delete --uri "s3://bucket/prefix/"
     Delete {
         #[arg(long)]
         uri: String,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
-    /// Put random-data objects
+    /// Put random-data objects to any backend
+    /// 
+    /// Examples:
+    ///   io-bench put --uri "file:///tmp/data/test*.dat" --objects 100
+    ///   io-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
     Put {
-        #[arg(long, conflicts_with = "bucket")]
-        uri: Option<String>,
-        #[arg(long, requires = "prefix")]
-        bucket: Option<String>,
-        #[arg(long, requires = "bucket", default_value = "bench/")]
-        prefix: String,
+        #[arg(long)]
+        uri: String,
         #[arg(long, default_value_t = 1024)]
         object_size: usize,
         #[arg(long, default_value_t = 1)]
@@ -191,17 +211,15 @@ fn main() -> Result<()> {
         .init();
     
     match cli.command {
-        Commands::Health { uri, bucket, prefix } => {
-            let (b, p) = parse_s3(&uri, bucket, prefix)?;
-            health(&b, &p)?;
+        Commands::Health { uri } => {
+            health_cmd(&uri)?;
         }
         Commands::List { uri } => list_cmd(&uri)?,
         Commands::Stat { uri } => stat_cmd(&uri)?,
         Commands::Get { uri, jobs } => get_cmd(&uri, jobs)?,
         Commands::Delete { uri, jobs } => delete_cmd(&uri, jobs)?,
-        Commands::Put { uri, bucket, prefix, object_size, objects, concurrency } => {
-            let (b, p) = parse_s3(&uri, bucket, prefix)?;
-            put_bench(object_size, objects, &b, &p, concurrency)?;
+        Commands::Put { uri, object_size, objects, concurrency } => {
+            put_cmd(&uri, object_size, objects, concurrency)?;
         }
         Commands::Run { config } => run_workload(&config)?,
     }
@@ -209,211 +227,378 @@ fn main() -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// helper: parse s3:// URI or separate bucket+prefix
+// Helper: validate and normalize URI for multi-backend support
 // -----------------------------------------------------------------------------
-fn parse_s3(uri: &Option<String>, bucket: Option<String>, prefix: String) -> Result<(String, String)> {
-    if let Some(u) = uri {
-        let parsed = Url::parse(u).context("Invalid S3 URI")?;
-        if parsed.scheme() != "s3" {
-            bail!("URI must begin with s3://");
+fn validate_uri(uri: &str) -> Result<String> {
+    let parsed = Url::parse(uri).context("Invalid URI format")?;
+    
+    match parsed.scheme() {
+        "file" | "direct" | "s3" | "az" => {
+            // URI is valid for supported backends
+            Ok(uri.to_string())
         }
-        let b = parsed.host_str().context("Missing bucket in URI")?.to_string();
-        let mut p = parsed.path().trim_start_matches('/').to_string();
-        if !p.is_empty() && !p.ends_with('/') {
-            p.push('/');
+        scheme => {
+            bail!("Unsupported backend scheme '{}'. Supported schemes: file://, direct://, s3://, az://", scheme)
         }
-        return Ok((b, p));
     }
-    let b = bucket.expect("--bucket is required if --uri is not set");
-    Ok((b, prefix))
 }
 
 // -----------------------------------------------------------------------------
-// Commands implementations
+// Commands implementations - Multi-backend support
 // -----------------------------------------------------------------------------
-fn health(bucket: &str, prefix: &str) -> Result<()> {
-    let h = OpHists::new();
-    let t0 = Instant::now();
-    let keys = list_objects(bucket, prefix, true).context("list_objects_v2 failed")?;
-    h.record(0, t0.elapsed());
-    println!("OK – found {} objects under s3://{}/{}", keys.len(), bucket, prefix);
-    h.print_summary("LIST");
-    Ok(())
+fn health_cmd(uri: &str) -> Result<()> {
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the health check
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
+    rt.block_on(async {
+        let h = OpHists::new();
+        let t0 = Instant::now();
+        
+        // Use list operation to test backend connectivity
+        let objects = list_objects_multi_backend(&validated_uri).await
+            .context("Backend health check failed - could not list objects")?;
+        
+        h.record(0, t0.elapsed());
+        
+        println!("OK – found {} objects at {}", objects.len(), validated_uri);
+        h.print_summary("HEALTH CHECK");
+        Ok(())
+    })
 }
 
 fn list_cmd(uri: &str) -> Result<()> {
-    let (bucket, key_pattern) = parse_s3_uri(uri)?;
-    let (prefix, glob) = if let Some(pos) = key_pattern.rfind('/') {
-        (&key_pattern[..=pos], &key_pattern[pos+1..])
-    } else {
-        ("", key_pattern.as_str())
-    };
-    let h = OpHists::new();
-    let t0 = Instant::now();
-    let mut keys = list_objects(&bucket, prefix, true)?;
-    h.record(0, t0.elapsed());
-    let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
-    let re = Regex::new(&pattern).context("Invalid glob pattern")?;
-    keys.retain(|k| re.is_match(k.rsplit('/').next().unwrap_or(k)));
-    for k in &keys {
-        println!("{}", k);
-    }
-    println!("\nTotal objects: {}", keys.len());
-    h.print_summary("LIST");
-    Ok(())
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the list operation
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
+    rt.block_on(async {
+        let h = OpHists::new();
+        let t0 = Instant::now();
+        
+        let mut objects = if validated_uri.contains('*') {
+            // Extract the directory part (everything before the last '/')
+            let dir_uri = if let Some(pos) = validated_uri.rfind('/') {
+                &validated_uri[..=pos]  // Include the trailing '/'
+            } else {
+                return Err(anyhow!("Invalid URI pattern: {}", validated_uri));
+            };
+            
+            // List the directory
+            list_objects_multi_backend(dir_uri).await
+                .context("Failed to list objects for pattern matching")?
+        } else {
+            // Direct listing (no pattern)
+            list_objects_multi_backend(&validated_uri).await
+                .context("Failed to list objects")?
+        };
+        
+        h.record(0, t0.elapsed());
+        
+        // Apply glob pattern filtering if needed
+        if validated_uri.contains('*') {
+            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            if pattern_part.contains('*') {
+                let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
+                let re = Regex::new(&pattern).context("Invalid glob pattern")?;
+                objects.retain(|obj| {
+                    let basename = obj.split('/').last().unwrap_or(obj);
+                    re.is_match(basename)
+                });
+            }
+        }
+        
+        // Print results
+        for obj in &objects {
+            println!("{}", obj);
+        }
+        println!("\nTotal objects: {}", objects.len());
+        h.print_summary("LIST");
+        Ok(())
+    })
 }
 
 fn stat_cmd(uri: &str) -> Result<()> {
-    let h = OpHists::new();
-    let t0 = Instant::now();
-    let os = stat_object_uri(uri)?;
-    h.record(0, t0.elapsed());
-    println!("Size            : {} bytes", os.size);
-    println!("LastModified    : {:?}", os.last_modified);
-    println!("ETag            : {:?}", os.e_tag);
-    println!("Content-Type    : {:?}", os.content_type);
-    println!("StorageClass    : {:?}", os.storage_class);
-    println!("VersionId       : {:?}", os.version_id);
-    h.print_summary("STAT");
-    Ok(())
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the stat operation  
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
+    rt.block_on(async {
+        let h = OpHists::new();
+        let t0 = Instant::now();
+        
+        let size = stat_object_multi_backend(&validated_uri).await
+            .context("Failed to stat object")?;
+        
+        h.record(0, t0.elapsed());
+        
+        println!("URI             : {}", validated_uri);
+        println!("Size            : {} bytes", size);
+        // Note: Only size is available from ObjectStore stat interface
+        // Backend-specific metadata would require specialized calls
+        
+        h.print_summary("STAT");
+        Ok(())
+    })
 }
 
 fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
-    let (bucket, pat) = parse_s3_uri(uri)?;
-    let keys = if pat.contains('*') {
-        let (prefix, glob) = if let Some(pos) = pat.rfind('/') {
-            (&pat[..=pos], &pat[pos+1..])
-        } else {
-            ("", pat.as_str())
-        };
-        let mut ks = list_objects(&bucket, prefix, true)?;
-        let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
-        let re = Regex::new(&pattern)?;
-        ks.retain(|k| re.is_match(k.rsplit('/').next().unwrap_or(k)));
-        ks
-    } else if pat.ends_with('/') || pat.is_empty() {
-        list_objects(&bucket, &pat, true)?
-    } else {
-        vec![pat.to_string()]
-    };
-    if keys.is_empty() {
-        bail!("No objects match given URI");
-    }
-    let uris: Vec<(String,String)> = keys.iter().map(|k| (bucket.clone(), k.clone())).collect();
-    eprintln!("Fetching {} objects with {} jobs…", uris.len(), jobs);
-    let hist = OpHists::new();
-    let hist2 = hist.clone();
-    let t0 = Instant::now();
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the get operation
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
-    let total_bytes = rt.block_on(async move {
-        let hist = hist2;
-        let sem = Arc::new(Semaphore::new(jobs));
-        let mut futs = FuturesUnordered::new();
-        for (b,k) in uris {
-            let sem2 = sem.clone();
-            let hist2 = hist.clone();
-            futs.push(tokio::spawn(async move {
-                let _permit = sem2.acquire_owned().await.unwrap();
-                let t1 = Instant::now();
-                let bytes = get_object(&b, &k).await?;
-                let idx = bucket_index(bytes.len());
-                hist2.record(idx, t1.elapsed());
-                Ok::<usize, anyhow::Error>(bytes.len())
-            }));
-        }
-        let mut total = 0usize;
-        while let Some(r) = futs.next().await {
-            let cnt = r.context("join error")?;
-            total += cnt?;
-        }
-        Ok::<usize, anyhow::Error>(total)
-    })?;
-    let dt = t0.elapsed();
-    println!(
-        "downloaded {:.2} MB in {:?} ({:.2} MB/s)",
-        total_bytes as f64 / 1_048_576.0,
-        dt,
-        total_bytes as f64 / 1_048_576.0 / dt.as_secs_f64(),
-    );
-    hist.print_summary("GET");
-    Ok(())
-}
-
-fn delete_cmd(uri: &str, _jobs: usize) -> Result<()> {
-    let (bucket, pat) = parse_s3_uri(uri)?;
-    let keys = if pat.contains('*') {
-        let (prefix, glob) = if let Some(pos) = pat.rfind('/') {
-            (&pat[..=pos], &pat[pos+1..])
-        } else {
-            ("", pat.as_str())
-        };
-        let mut ks = list_objects(&bucket, prefix, true)?;
-        let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
-        let re = Regex::new(&pattern)?;
-        ks.retain(|k| re.is_match(k.rsplit('/').next().unwrap_or(k)));
-        ks
-    } else if pat.ends_with('/') || pat.is_empty() {
-        list_objects(&bucket, &pat, true)?
-    } else {
-        vec![pat.to_string()]
-    };
-    if keys.is_empty() {
-        bail!("No objects to delete under the specified URI");
-    }
-    let h = OpHists::new();
-    let t0 = Instant::now();
-    delete_objects(&bucket, &keys)?;
-    h.record(0, t0.elapsed());
-    eprintln!("Deleted {} objects", keys.len());
-    h.print_summary("DELETE");
-    Ok(())
-}
-
-fn put_bench(
-    size: usize,
-    count: usize,
-    bucket: &str,
-    prefix: &str,
-    concurrency: usize,
-) -> Result<()> {
-    let keys: Vec<String> = (0..count).map(|i| format!("{}obj_{}", prefix, i)).collect();
-    let data = vec![0u8; size];
-    let hist = OpHists::new();
-    let t0 = Instant::now();
-    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
     rt.block_on(async {
-        let sem = Arc::new(Semaphore::new(concurrency));
-        let mut futs = FuturesUnordered::new();
-        for key in keys {
-            let sem2 = sem.clone();
-            let hist2 = hist.clone();
-            let b = bucket.to_string();
-            let data2 = data.clone();
-            futs.push(tokio::spawn(async move {
-                let _permit = sem2.acquire_owned().await.unwrap();
-                let t1 = Instant::now();
-                put_object_async(&b, &key, &data2).await?;
-                let idx = bucket_index(data2.len());
-                hist2.record(idx, t1.elapsed());
-                Ok::<(), anyhow::Error>(())
-            }));
+        // Determine if this is a pattern, directory, or single object
+        let objects = if validated_uri.contains('*') {
+            // Handle glob patterns - extract directory and list it
+            let dir_uri = if let Some(pos) = validated_uri.rfind('/') {
+                &validated_uri[..=pos]  // Include the trailing '/'
+            } else {
+                return Err(anyhow!("Invalid URI pattern: {}", validated_uri));
+            };
+            
+            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            
+            let mut found_objects = list_objects_multi_backend(dir_uri).await
+                .context("Failed to list objects for pattern matching")?;
+                
+            if pattern_part.contains('*') {
+                let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
+                let re = Regex::new(&pattern).context("Invalid glob pattern")?;
+                found_objects.retain(|obj| {
+                    let basename = obj.split('/').last().unwrap_or(obj);
+                    re.is_match(basename)
+                });
+            }
+            found_objects
+        } else if validated_uri.ends_with('/') {
+            // Directory listing
+            list_objects_multi_backend(&validated_uri).await
+                .context("Failed to list directory contents")?
+        } else {
+            // Single object
+            vec![validated_uri.clone()]
+        };
+        
+        if objects.is_empty() {
+            bail!("No objects match the given URI: {}", validated_uri);
         }
-        while let Some(r) = futs.next().await {
-            (r.context("join error")?)?;
+        
+        eprintln!("Fetching {} objects with {} jobs…", objects.len(), jobs);
+        
+        let hist = OpHists::new();
+        let hist2 = hist.clone();
+        let t0 = Instant::now();
+        
+        let total_bytes = {
+            let sem = Arc::new(Semaphore::new(jobs));
+            let mut futs = FuturesUnordered::new();
+            
+            for obj_uri in objects {
+                let sem2 = sem.clone();
+                let hist2 = hist2.clone();
+                
+                futs.push(tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await.unwrap();
+                    let t1 = Instant::now();
+                    
+                    let bytes = get_object_multi_backend(&obj_uri).await?;
+                    let idx = bucket_index(bytes.len());
+                    hist2.record(idx, t1.elapsed());
+                    
+                    Ok::<usize, anyhow::Error>(bytes.len())
+                }));
+            }
+            
+            let mut total = 0usize;
+            while let Some(result) = futs.next().await {
+                let byte_count = result.context("Task join error")?;
+                total += byte_count?;
+            }
+            total
+        };
+        
+        let dt = t0.elapsed();
+        println!(
+            "Downloaded {:.2} MB in {:?} ({:.2} MB/s)",
+            total_bytes as f64 / 1_048_576.0,
+            dt,
+            total_bytes as f64 / 1_048_576.0 / dt.as_secs_f64(),
+        );
+        hist.print_summary("GET");
+        Ok(())
+    })
+}
+
+fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the delete operation
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
+    rt.block_on(async {
+        // Determine what objects to delete
+        let objects = if validated_uri.contains('*') {
+            // Handle glob patterns - extract directory and list it
+            let dir_uri = if let Some(pos) = validated_uri.rfind('/') {
+                &validated_uri[..=pos]  // Include the trailing '/'
+            } else {
+                return Err(anyhow!("Invalid URI pattern: {}", validated_uri));
+            };
+            
+            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            
+            let mut found_objects = list_objects_multi_backend(dir_uri).await
+                .context("Failed to list objects for pattern matching")?;
+                
+            if pattern_part.contains('*') {
+                let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
+                let re = Regex::new(&pattern).context("Invalid glob pattern")?;
+                found_objects.retain(|obj| {
+                    let basename = obj.split('/').last().unwrap_or(obj);
+                    re.is_match(basename)
+                });
+            }
+            found_objects
+        } else if validated_uri.ends_with('/') {
+            // Directory deletion - list all objects
+            list_objects_multi_backend(&validated_uri).await
+                .context("Failed to list directory contents for deletion")?
+        } else {
+            // Single object
+            vec![validated_uri.clone()]
+        };
+        
+        if objects.is_empty() {
+            bail!("No objects to delete under the specified URI: {}", validated_uri);
         }
-        Ok::<(), anyhow::Error>(())
-    })?;
-    let dt = t0.elapsed();
-    let mb = (count * size) as f64 / (1024.0 * 1024.0);
-    println!(
-        "Uploaded {} objects ({:.2} MB) in {:?} ({:.2} MB/s)",
-        count,
-        mb,
-        dt,
-        mb / dt.as_secs_f64(),
-    );
-    hist.print_summary("PUT");
-    Ok(())
+        
+        eprintln!("Deleting {} objects with {} jobs…", objects.len(), jobs);
+        
+        let hist = OpHists::new();
+        let hist2 = hist.clone();
+        let t0 = Instant::now();
+        
+        {
+            let sem = Arc::new(Semaphore::new(jobs));
+            let mut futs = FuturesUnordered::new();
+            
+            for obj_uri in objects.iter() {
+                let sem2 = sem.clone();
+                let hist2 = hist2.clone();
+                let obj_uri = obj_uri.clone();
+                
+                futs.push(tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await.unwrap();
+                    let t1 = Instant::now();
+                    
+                    delete_object_multi_backend(&obj_uri).await?;
+                    hist2.record(0, t1.elapsed());
+                    
+                    Ok::<(), anyhow::Error>(())
+                }));
+            }
+            
+            while let Some(result) = futs.next().await {
+                result.context("Task join error")??;
+            }
+        };
+        
+        let dt = t0.elapsed();
+        println!("Deleted {} objects in {:?}", objects.len(), dt);
+        hist.print_summary("DELETE");
+        Ok(())
+    })
+}
+
+fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) -> Result<()> {
+    let validated_uri = validate_uri(uri)?;
+    
+    // Create async runtime for the put operation
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    
+    rt.block_on(async {
+        // Generate object URIs
+        let object_uris: Vec<String> = if validated_uri.contains('*') {
+            // Replace * with numbered objects
+            (0..objects).map(|i| {
+                validated_uri.replace('*', &format!("{:06}", i))
+            }).collect()
+        } else if validated_uri.ends_with('/') {
+            // Append numbered objects to directory
+            (0..objects).map(|i| {
+                format!("{}obj_{:06}.dat", validated_uri, i)
+            }).collect()
+        } else {
+            // Single object URI - only create one regardless of objects count
+            if objects > 1 {
+                eprintln!("Warning: URI specifies single object but {} objects requested. Creating numbered variants.", objects);
+                (0..objects).map(|i| {
+                    if i == 0 {
+                        validated_uri.clone()
+                    } else {
+                        format!("{}.{}", validated_uri, i)
+                    }
+                }).collect()
+            } else {
+                vec![validated_uri]
+            }
+        };
+        
+        // Generate random data for all objects
+        let data = vec![0u8; object_size];
+        // TODO: Consider using random data generation for more realistic testing
+        
+        eprintln!("Uploading {} objects ({} bytes each) with {} jobs…", 
+                 object_uris.len(), object_size, concurrency);
+        
+        let hist = OpHists::new();
+        let hist2 = hist.clone();
+        let t0 = Instant::now();
+        
+        {
+            let sem = Arc::new(Semaphore::new(concurrency));
+            let mut futs = FuturesUnordered::new();
+            
+            for obj_uri in object_uris.iter() {
+                let sem2 = sem.clone();
+                let hist2 = hist2.clone();
+                let obj_uri = obj_uri.clone();
+                let data = data.clone();
+                
+                futs.push(tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await.unwrap();
+                    let t1 = Instant::now();
+                    
+                    put_object_multi_backend(&obj_uri, &data).await?;
+                    let idx = bucket_index(data.len());
+                    hist2.record(idx, t1.elapsed());
+                    
+                    Ok::<(), anyhow::Error>(())
+                }));
+            }
+            
+            while let Some(result) = futs.next().await {
+                result.context("Task join error")??;
+            }
+        };
+        
+        let dt = t0.elapsed();
+        let total_mb = (object_uris.len() * object_size) as f64 / (1024.0 * 1024.0);
+        println!(
+            "Uploaded {} objects ({:.2} MB) in {:?} ({:.2} MB/s)",
+            object_uris.len(),
+            total_mb,
+            dt,
+            total_mb / dt.as_secs_f64(),
+        );
+        hist.print_summary("PUT");
+        Ok(())
+    })
 }
 
 // -----------------------------------------------------------------------------

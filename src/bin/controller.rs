@@ -9,16 +9,16 @@ use std::time::Duration;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 pub mod pb {
-    pub mod s3bench {
-        include!("../pb/s3bench.rs");
+    pub mod iobench {
+        include!("../pb/iobench.rs");
     }
 }
 
-use pb::s3bench::agent_client::AgentClient;
-use pb::s3bench::{Empty, RunGetRequest, RunPutRequest};
+use pb::iobench::agent_client::AgentClient;
+use pb::iobench::{Empty, RunGetRequest, RunPutRequest};
 
 #[derive(Parser)]
-#[command(name = "s3bench-ctl", version, about = "S3Bench Controller (gRPC)")]
+#[command(name = "iobench-ctl", version, about = "IO Benchmark Controller (gRPC)")]
 struct Cli {
     /// Comma-separated agent addresses (host:port)
     #[arg(long)]

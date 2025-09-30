@@ -17,11 +17,15 @@ and TLS (self‑signed) operation.
 - **Rust toolchain** (stable)  
 - **Protobuf compiler** (`protoc`) — required by `tonic-build`  
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
-- **AWS credentials** on each agent host  
-  The agent uses the AWS SDK default chain. Ensure one of the following is set:
-  - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
-  - or `~/.aws/credentials` with a default or selected profile.
-  - or `./.env` file containing ACCESS_KEY_ID, SECRET_ACCESS_KEY and other required params
+- **Storage Backend Credentials** on each agent host:
+  - **AWS S3**: The agent uses the AWS SDK default chain. Ensure one of:
+    - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
+    - or `~/.aws/credentials` with a default or selected profile
+    - or `./.env` file containing ACCESS_KEY_ID, SECRET_ACCESS_KEY and other required params
+  - **Azure Blob Storage**: Requires environment variables:
+    - `AZURE_STORAGE_ACCOUNT="your-storage-account-name"`
+    - `AZURE_STORAGE_ACCOUNT_KEY="your-account-key"`
+  - **File/Direct I/O**: No credentials required, uses local filesystem
 - **Open firewall** for the agent port (default: `7761`)
 
 Build all binaries:

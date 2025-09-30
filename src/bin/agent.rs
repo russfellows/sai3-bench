@@ -20,15 +20,15 @@ use aws_sdk_s3 as s3;
 use s3dlio::s3_utils::{get_object, parse_s3_uri, put_object_async};
 
 pub mod pb {
-    pub mod s3bench {
-        include!("../pb/s3bench.rs");
+    pub mod iobench {
+        include!("../pb/iobench.rs");
     }
 }
-use pb::s3bench::agent_server::{Agent, AgentServer};
-use pb::s3bench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest};
+use pb::iobench::agent_server::{Agent, AgentServer};
+use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest};
 
 #[derive(Parser)]
-#[command(name = "s3bench-agent", version, about = "S3Bench Agent (gRPC)")]
+#[command(name = "iobench-agent", version, about = "IO Benchmark Agent (gRPC)")]
 struct Cli {
     /// Listen address, e.g. 0.0.0.0:7761
     #[arg(long, default_value = "0.0.0.0:7761")]
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
 
     // Decide between plaintext and TLS
     if !args.tls {
-        println!("s3bench-agent listening (PLAINTEXT) on {}", addr);
+        println!("iobench-agent listening (PLAINTEXT) on {}", addr);
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::default()))
             .serve_with_shutdown(addr, async {
@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new().identity(identity);
 
     println!(
-        "s3bench-agent listening (TLS) on {} — SANs: {}",
+        "iobench-agent listening (TLS) on {} — SANs: {}",
         addr,
         if let Some(list) = &args.tls_sans {
             list

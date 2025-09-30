@@ -1,0 +1,19 @@
+# Azure Blob Storage test configuration
+# Tests az:// URI scheme with Azure Blob Storage backend
+# Requires environment variables:
+#   AZURE_STORAGE_ACCOUNT="your-storage-account-name"
+#   AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
+target: "az://STORAGE_ACCOUNT/CONTAINER/"
+
+workload:
+  - op: put
+    path: "s3-bench-azure-test/object-*"
+    object_size: 1048576  # 1MB objects
+    weight: 30
+  
+  - op: get
+    path: "fix_verification.txt"  # Use existing file for GET tests
+    weight: 70
+
+concurrency: 2
+duration: 10s

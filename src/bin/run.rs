@@ -5,7 +5,7 @@ use clap::Parser;
 use std::fs;
 
 #[derive(Parser, Debug)]
-#[command(name = "s3bench-run", version)]
+#[command(name = "iobench-run", version)]
 struct Cli {
     /// YAML config file path
     #[arg(short = 'c', long = "config")]
@@ -19,10 +19,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let buf = fs::read(&cli.config).with_context(|| format!("read {}", cli.config))?;
-    let cfg: s3_bench::config::Config =
+    let cfg: io_bench::config::Config =
         serde_yaml::from_slice(&buf).with_context(|| format!("parse {}", cli.config))?;
 
-    let summary = s3_bench::workload::run(&cfg).await?;
+    let summary = io_bench::workload::run(&cfg).await?;
 
     // ---- Overall combined line (back-compat) ----
     let mb = summary.total_bytes as f64 / (1024.0 * 1024.0);
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
 /// Helper: print bins sorted by bucket index.
 /// (Labels are shown as `bin #N`; if you later add a helper to map indices
 /// to human-readable ranges, swap it in here.)
-fn print_bins(bins: &s3_bench::workload::SizeBins) {
+fn print_bins(bins: &io_bench::workload::SizeBins) {
     let mut items: Vec<(usize, (u64, u64))> = bins.by_bucket.iter().map(|(k, v)| (*k, *v)).collect();
     items.sort_by_key(|(k, _)| *k);
     for (idx, (ops, bytes)) in items {

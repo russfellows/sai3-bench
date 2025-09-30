@@ -1,6 +1,6 @@
 [package]
-name    = "s3-bench"
-version = "0.2.3"
+name    = "io-bench"
+version = "0.3.0"
 edition = "2024"
 build   = "build.rs"
 
@@ -40,29 +40,35 @@ prost-build = "^0.13"
 
 # existing main (single-node CLI) remains:
 [[bin]]
-name = "s3-bench"
+name = "io-bench"
 path = "src/main.rs"
 
 # new agent (runs on each load-generator host)
 [[bin]]
-name = "s3bench-agent"
+name = "iobench-agent"
 path = "src/bin/agent.rs"
 
 # new controller (coordinates benchmark across agents)
 [[bin]]
-name = "s3bench-ctl"
+name = "iobench-ctl"
 path = "src/bin/controller.rs"
 
-#New s3bench-run cli, separate for now, plan to integrate into main
+#New iobench-run cli, separate for now, plan to integrate into main
 [[bin]]
-name = "s3bench-run"
+name = "iobench-run"
 path = "src/bin/run.rs"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "2.1"
 
-# Patch to use s3dlio's fork of aws-smithy-http-client with public hyper_builder
+# TEMPORARY: AWS Smithy HTTP Client Patch
+# 
+# This patch is required because s3dlio v0.8.7 uses private AWS SDK APIs.
+# The s3dlio team is considering removing this dependency since performance
+# improvements have not materialized and it creates build fragility.
+# 
+# TODO: Remove this patch once s3dlio no longer requires it
 [patch.crates-io]
 aws-smithy-http-client = { path = "../s3dlio/fork-patches/aws-smithy-http-client" }
 

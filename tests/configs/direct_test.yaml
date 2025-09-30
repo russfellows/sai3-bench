@@ -1,0 +1,16 @@
+# Direct I/O backend test configuration
+# Tests direct:// URI scheme with local filesystem operations using direct I/O
+target: "direct:///tmp/s3bench-direct-test/"
+
+workload:
+  - op: put
+    path: "data/object-*"
+    object_size: 1048576  # 1MB objects
+    weight: 30
+  
+  - op: get
+    path: "data/*"
+    weight: 70
+
+concurrency: 4
+duration: 10s

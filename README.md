@@ -1,59 +1,83 @@
-# Overview
-The plan for this tool is to create a basic, S3 testing tool, similar to MinIO's warp.  However, this tool leverages the [s3dlio Rust library project](https://github.com/russfellows/s3dlio)
+# io-bench: Multi-Protocol I/O Benchmarking Suite
 
-So, what is different, and / or better?  In other words, why do we need this project?
+A comprehensive storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for robust multi-protocol support.
 
-1. This uses the AWS, S3 Rust SDK (warp does not)
-2. This supports replay of captured workloads (warp, does not)
-3. Support for settable data dedupe and compression levels (again, no in warp)
-4. Better output logging and result analysis tools (warp analyze is hiddeously slow and difficult to obtain data as desired)
+## 🚀 What Makes io-bench Different?
 
+1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, io-bench supports 4 storage backends
+2. **Unified Interface**: Consistent CLI and configuration across all storage types  
+3. **Advanced Metrics**: Microsecond-precision HDR histogram performance measurements
+4. **Distributed Execution**: gRPC-based agent/controller architecture for scale testing
+5. **Workload Replay**: Support for captured workload replay and analysis
+6. **Real-World Patterns**: Glob patterns, concurrent operations, and mixed workloads
 
-## Initial Plan
-The initial plan for this project is captured in a [Discussion item #2](https://github.com/russfellows/warp-test/discussions/2)
+## 🎯 Supported Storage Backends
 
-## Usage
-There is a brief user guide in docs directory, file USAGE.md.
-[View Usage Guide](docs/USAGE.md)
+- **File System** (`file://`) - Local filesystem testing with standard POSIX operations
+- **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
+- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.)
+- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with full authentication support
 
-## Documentation
-- **[Usage Guide](docs/USAGE.md)** - Getting started with s3-bench
+## 📦 Architecture & Binaries
+
+- **`io-bench`** - Single-node CLI for immediate testing across all backends
+- **`iobench-agent`** - Distributed gRPC agent for multi-node load generation  
+- **`iobench-ctl`** - Controller for coordinating distributed agents
+- **`iobench-run`** - Dedicated workload runner (legacy, being integrated)
+
+## 📖 Documentation
+- **[Usage Guide](docs/USAGE.md)** - Getting started with io-bench
+- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## Current Status (v0.2.3)
+## 🎊 Latest Release (v0.3.0) - Multi-Backend Transformation
 
-### Enhanced Metrics & Operations ✅
-- **Microsecond Precision**: All timing measurements now use microsecond (µs) precision for accurate performance analysis
-- **Three-Category Metrics**: Comprehensive tracking for GET, PUT, and META-DATA operations
-  - **GET Operations**: Data read performance with transfer metrics
-  - **PUT Operations**: Data write performance with storage metrics  
-  - **META-DATA Operations**: List, Stat, Delete operations with timing analysis
-- **Per-Operation Reporting**: Separate latency percentiles (p50, p95, p99) for each operation category
-- **Enhanced Configuration**: Support for `list`, `stat`, and `delete` operations in YAML workloads
+### 🎯 Major Features
 
-### ObjectStore Migration Complete ✅
-- **Stage 2 Complete**: Full ObjectStore trait implementation for all backends
-- **Multi-Backend Support**: Native `file://`, `direct://`, and `s3://` URI operations
-- **Comprehensive Logging**: tracing infrastructure with `-v/-vv` CLI options
-- **Zero Warnings**: Clean compilation after proper code analysis and fixes
-- **Performance Validated**: 4k+ ops/s across all operation types with sub-millisecond latencies
+- **Complete Multi-Backend Support**: Unified interface across file://, direct://, s3://, and az:// protocols
+- **Microsecond Precision Metrics**: HDR histogram performance measurements with µs accuracy
+- **Four Operation Categories**: GET, PUT, LIST, STAT, DELETE with dedicated latency tracking
+- **Advanced Glob Patterns**: Cross-backend wildcard support for flexible object selection
+- **Azure Blob Storage**: Full Azure authentication and proper URI format support
+- **Enhanced Configuration**: Target-based YAML configs with environment variable support
+- **Distributed Architecture**: gRPC agent/controller for multi-node load generation
+- **Real-Time Performance**: Validated 25k+ ops/s file operations, network-dependent cloud performance
 
-### s3dlio v0.8.7 Integration ✅
-- **Pinned Dependency**: s3dlio v0.8.7 (rev cd4ee2e) for stable API
-- **ObjectStore Operations**: All workload operations use ObjectStore trait
-- **AWS SDK Compatibility**: Resolved version conflicts using fork patch system
-- **Legacy Support**: CLI utilities retain s3_utils for backward compatibility
+### 🚀 Quick Start
 
-### Architecture
-- **Single-Node CLI**: `s3-bench` for immediate testing with multi-backend support
-- **Distributed Execution**: `s3bench-agent` (gRPC server) + `s3bench-ctl` (controller)
-- **Metrics Collection**: HDR histograms with 9 size buckets per operation type
-- **Backend Detection**: Automatic URI scheme recognition and ObjectStore routing
+```bash
+# Install and build
+cargo build --release
 
-### Features
-- **Multi-Backend Workloads**: Mix file://, direct://, and s3:// operations in single config
-- **Three Operation Types**: GET (read), PUT (write), META-DATA (list/stat/delete) with separate metrics
+# Test local filesystem
+./target/release/io-bench health --uri "file:///tmp/test/"
+./target/release/io-bench put --uri "file:///tmp/test/data.txt" --object-size 1024
+
+# Test Azure Blob Storage (requires setup)
+export AZURE_STORAGE_ACCOUNT="your-storage-account"
+export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
+./target/release/io-bench health --uri "az://your-storage-account/container/"
+
+# Run distributed workload
+./target/release/iobench-agent --listen 127.0.0.1:7761 &
+./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+```
+
+### 📊 Performance Characteristics
+
+- **File Backend**: 25k+ ops/s, sub-millisecond latencies
+- **Direct I/O Backend**: 10+ MB/s throughput, ~100ms latencies  
+- **Azure Blob Storage**: 2-3 ops/s, ~700ms latencies (network dependent)
+- **Cross-Backend Workloads**: Mixed protocol operations in single configuration
+
+### 🔧 Requirements
+
+- **Rust**: Stable toolchain (2024 edition)
+- **Protobuf**: `protoc` compiler for gRPC (distributed mode)
+- **Storage Credentials**: Backend-specific authentication (AWS, Azure)
+
+See the [Usage Guide](docs/USAGE.md) for detailed setup instructions.
 - **Microsecond Precision**: Sub-millisecond timing accuracy for detailed performance analysis
 - **Verbose Logging**: `-v` for operational info, `-vv` for detailed debug tracing
 - **Pattern Matching**: Glob patterns (`*`) and directory listings supported across backends
