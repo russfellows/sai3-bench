@@ -39,12 +39,12 @@ fn agent_and_controller_ping() {
     let addr = format!("127.0.0.1:{port}");
 
     // 2) Start the agent on that address (PLAINTEXT)
-    let agent_bin = Command::cargo_bin("s3bench-agent").unwrap();
+    let agent_bin = Command::cargo_bin("iobench-agent").unwrap();
     let agent: Child = StdCommand::new(agent_bin.get_program())
         .arg("--listen")
         .arg(&addr)
         .spawn()
-        .expect("failed to spawn s3bench-agent");
+        .expect("failed to spawn iobench-agent");
 
     // Ensure we kill the agent at the end of the test, even on panic
     struct Guard(Option<Child>);
@@ -66,14 +66,14 @@ fn agent_and_controller_ping() {
 
     // 4) Run the controller `ping` against the agent using --insecure
     //    (the agent is PLAINTEXT in this test)
-    let output = Command::cargo_bin("s3bench-ctl")
+    let output = Command::cargo_bin("iobench-ctl")
         .unwrap()
         .arg("--insecure")
         .arg("--agents")
         .arg(&addr)
         .arg("ping")
         .output()
-        .expect("failed to run s3bench-ctl");
+        .expect("failed to run iobench-ctl");
 
     // 5) Assert success and that either stdout or stderr contains the "connected" line
     let out = String::from_utf8_lossy(&output.stdout);

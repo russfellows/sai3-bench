@@ -1,19 +1,67 @@
-# docs/CONFIG.sample.yaml
+# docs/CONFIG.sample.yaml - Multi-Backend Configuration Examples
 # Run a 60s mixed workload with concurrency 32
+
+# Example 1: S3 Backend
+target: "s3://my-bucket/"
 duration: "60s"
 concurrency: 32
 
 workload:
   - op: get
-    # Can be: s3://bucket/exact_key
-    #      or: s3://bucket/prefix/        (lists & cycles)
-    #      or: s3://bucket/prefix*.ext    (glob, pre-listed & filtered)
-    uri: "s3://my-bucket/data/"
+    path: "data/*"          # Glob pattern for existing objects
     weight: 70
 
   - op: put
-    bucket: "my-bucket"
-    prefix: "bench/"
-    object_size: 1048576   # 1 MiB
+    path: "bench/object-*"  # Template for new objects
+    object_size: 1048576    # 1 MiB
+    weight: 30
+
+---
+# Example 2: Azure Blob Storage Backend
+# Requires: AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_ACCOUNT_KEY environment variables
+target: "az://STORAGE_ACCOUNT/CONTAINER/"
+duration: "60s"
+concurrency: 16  # Lower concurrency for network operations
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+
+  - op: put
+    path: "benchmark/object-*"
+    object_size: 1048576
+    weight: 30
+
+---
+# Example 3: File Backend (Local Testing)
+target: "file:///tmp/s3bench-test/"
+duration: "30s"
+concurrency: 64  # Higher concurrency for local storage
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+
+  - op: put
+    path: "objects/item-*"
+    object_size: 1048576
+    weight: 30
+
+---
+# Example 4: Direct I/O Backend (High Performance Local)
+target: "direct:///tmp/s3bench-direct/"
+duration: "30s"
+concurrency: 32
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+
+  - op: put
+    path: "objects/file-*"
+    object_size: 1048576
     weight: 30
 

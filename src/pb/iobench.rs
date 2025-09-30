@@ -145,9 +145,9 @@ pub mod agent_client {
                     )
                 })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/s3bench.Agent/Ping");
+            let path = http::uri::PathAndQuery::from_static("/iobench.Agent/Ping");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("s3bench.Agent", "Ping"));
+            req.extensions_mut().insert(GrpcMethod::new("iobench.Agent", "Ping"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn run_get(
@@ -163,9 +163,9 @@ pub mod agent_client {
                     )
                 })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/s3bench.Agent/RunGet");
+            let path = http::uri::PathAndQuery::from_static("/iobench.Agent/RunGet");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("s3bench.Agent", "RunGet"));
+            req.extensions_mut().insert(GrpcMethod::new("iobench.Agent", "RunGet"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn run_put(
@@ -181,9 +181,9 @@ pub mod agent_client {
                     )
                 })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/s3bench.Agent/RunPut");
+            let path = http::uri::PathAndQuery::from_static("/iobench.Agent/RunPut");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("s3bench.Agent", "RunPut"));
+            req.extensions_mut().insert(GrpcMethod::new("iobench.Agent", "RunPut"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -290,7 +290,7 @@ pub mod agent_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/s3bench.Agent/Ping" => {
+                "/iobench.Agent/Ping" => {
                     #[allow(non_camel_case_types)]
                     struct PingSvc<T: Agent>(pub Arc<T>);
                     impl<T: Agent> tonic::server::UnaryService<super::Empty>
@@ -333,7 +333,7 @@ pub mod agent_server {
                     };
                     Box::pin(fut)
                 }
-                "/s3bench.Agent/RunGet" => {
+                "/iobench.Agent/RunGet" => {
                     #[allow(non_camel_case_types)]
                     struct RunGetSvc<T: Agent>(pub Arc<T>);
                     impl<T: Agent> tonic::server::UnaryService<super::RunGetRequest>
@@ -376,7 +376,7 @@ pub mod agent_server {
                     };
                     Box::pin(fut)
                 }
-                "/s3bench.Agent/RunPut" => {
+                "/iobench.Agent/RunPut" => {
                     #[allow(non_camel_case_types)]
                     struct RunPutSvc<T: Agent>(pub Arc<T>);
                     impl<T: Agent> tonic::server::UnaryService<super::RunPutRequest>
@@ -454,7 +454,7 @@ pub mod agent_server {
         }
     }
     /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "s3bench.Agent";
+    pub const SERVICE_NAME: &str = "iobench.Agent";
     impl<T> tonic::server::NamedService for AgentServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }

@@ -23,7 +23,7 @@ use s3dlio::object_store::{store_for_uri, ObjectStore};
 // Multi-backend support infrastructure
 // -----------------------------------------------------------------------------
 
-/// Backend types supported by s3-bench
+/// Backend types supported by io-bench
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType {
     S3,
@@ -551,8 +551,20 @@ async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
         let list_prefix = &base_uri[..base_end];
         
         let uris = store.list(list_prefix, false).await?;
-        let re = glob_to_regex(base_uri)?;
-        Ok(uris.into_iter().filter(|uri| re.is_match(uri)).collect())
+        
+        // Handle URI scheme normalization: s3dlio may return different schemes than input
+        // For pattern matching, normalize both pattern and results to the same scheme
+        let normalized_pattern = normalize_scheme_for_matching(base_uri);
+        let re = glob_to_regex(&normalized_pattern)?;
+        
+        let matched_uris: Vec<String> = uris.into_iter()
+            .filter(|uri| {
+                let normalized_uri = normalize_scheme_for_matching(uri);
+                re.is_match(&normalized_uri)
+            })
+            .collect();
+            
+        Ok(matched_uris)
     } else if base_uri.ends_with('/') {
         // Directory listing
         store.list(base_uri, false).await
@@ -567,6 +579,20 @@ fn glob_to_regex(glob: &str) -> Result<regex::Regex> {
     let s = regex::escape(glob).replace(r"\*", ".*");
     let re = format!("^{}$", s);
     Ok(regex::Regex::new(&re)?)
+}
+
+/// Normalize URI scheme for glob pattern matching
+/// s3dlio may return different schemes than input (e.g., direct:// -> file://)
+/// This function normalizes URIs to a consistent scheme for pattern matching
+fn normalize_scheme_for_matching(uri: &str) -> String {
+    if let Some(scheme_end) = uri.find("://") {
+        let path_part = &uri[scheme_end + 3..];
+        // Normalize to file:// scheme for consistent pattern matching
+        format!("file://{}", path_part)
+    } else {
+        // No scheme, treat as file path
+        format!("file://{}", uri)
+    }
 }
 
 

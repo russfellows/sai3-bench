@@ -1,6 +1,6 @@
 // tests/utils.rs
 
-// Integration tests for s3-bench helpers
+// Integration tests for io-bench helpers
 
 use regex::Regex;
 use s3_bench::{bucket_index, glob_to_regex};
