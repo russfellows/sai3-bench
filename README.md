@@ -21,14 +21,23 @@ There is a brief user guide in docs directory, file USAGE.md.
 - **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## Current Status (v0.2.2)
+## Current Status (v0.2.3)
+
+### Enhanced Metrics & Operations ✅
+- **Microsecond Precision**: All timing measurements now use microsecond (µs) precision for accurate performance analysis
+- **Three-Category Metrics**: Comprehensive tracking for GET, PUT, and META-DATA operations
+  - **GET Operations**: Data read performance with transfer metrics
+  - **PUT Operations**: Data write performance with storage metrics  
+  - **META-DATA Operations**: List, Stat, Delete operations with timing analysis
+- **Per-Operation Reporting**: Separate latency percentiles (p50, p95, p99) for each operation category
+- **Enhanced Configuration**: Support for `list`, `stat`, and `delete` operations in YAML workloads
 
 ### ObjectStore Migration Complete ✅
 - **Stage 2 Complete**: Full ObjectStore trait implementation for all backends
 - **Multi-Backend Support**: Native `file://`, `direct://`, and `s3://` URI operations
 - **Comprehensive Logging**: tracing infrastructure with `-v/-vv` CLI options
 - **Zero Warnings**: Clean compilation after proper code analysis and fixes
-- **Performance Validated**: 25k+ ops/s on file backend with 1ms latency
+- **Performance Validated**: 4k+ ops/s across all operation types with sub-millisecond latencies
 
 ### s3dlio v0.8.7 Integration ✅
 - **Pinned Dependency**: s3dlio v0.8.7 (rev cd4ee2e) for stable API
@@ -44,6 +53,8 @@ There is a brief user guide in docs directory, file USAGE.md.
 
 ### Features
 - **Multi-Backend Workloads**: Mix file://, direct://, and s3:// operations in single config
+- **Three Operation Types**: GET (read), PUT (write), META-DATA (list/stat/delete) with separate metrics
+- **Microsecond Precision**: Sub-millisecond timing accuracy for detailed performance analysis
 - **Verbose Logging**: `-v` for operational info, `-vv` for detailed debug tracing
 - **Pattern Matching**: Glob patterns (`*`) and directory listings supported across backends
 - **Concurrent Execution**: Semaphore-controlled concurrency with configurable worker counts
