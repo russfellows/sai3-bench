@@ -17,6 +17,7 @@ use tokio::runtime::Builder as RtBuilder;
 use tokio::sync::Semaphore;
 use url::Url;
 
+// TODO: Remove legacy s3_utils imports as we migrate operations
 use s3dlio::s3_utils::{
     delete_objects, get_object, list_objects, parse_s3_uri, put_object_async, stat_object_uri,
 };
@@ -205,7 +206,7 @@ fn parse_s3(uri: &Option<String>, bucket: Option<String>, prefix: String) -> Res
 fn health(bucket: &str, prefix: &str) -> Result<()> {
     let h = OpHists::new();
     let t0 = Instant::now();
-    let keys = list_objects(bucket, prefix).context("list_objects_v2 failed")?;
+    let keys = list_objects(bucket, prefix, true).context("list_objects_v2 failed")?;
     h.record(0, t0.elapsed());
     println!("OK – found {} objects under s3://{}/{}", keys.len(), bucket, prefix);
     h.print_summary("LIST");
@@ -221,7 +222,7 @@ fn list_cmd(uri: &str) -> Result<()> {
     };
     let h = OpHists::new();
     let t0 = Instant::now();
-    let mut keys = list_objects(&bucket, prefix)?;
+    let mut keys = list_objects(&bucket, prefix, true)?;
     h.record(0, t0.elapsed());
     let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
     let re = Regex::new(&pattern).context("Invalid glob pattern")?;
@@ -257,13 +258,13 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
         } else {
             ("", pat.as_str())
         };
-        let mut ks = list_objects(&bucket, prefix)?;
+        let mut ks = list_objects(&bucket, prefix, true)?;
         let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
         let re = Regex::new(&pattern)?;
         ks.retain(|k| re.is_match(k.rsplit('/').next().unwrap_or(k)));
         ks
     } else if pat.ends_with('/') || pat.is_empty() {
-        list_objects(&bucket, &pat)?
+        list_objects(&bucket, &pat, true)?
     } else {
         vec![pat.to_string()]
     };
@@ -318,13 +319,13 @@ fn delete_cmd(uri: &str, _jobs: usize) -> Result<()> {
         } else {
             ("", pat.as_str())
         };
-        let mut ks = list_objects(&bucket, prefix)?;
+        let mut ks = list_objects(&bucket, prefix, true)?;
         let pattern = format!("^{}$", escape(glob).replace(r"\*", ".*"));
         let re = Regex::new(&pattern)?;
         ks.retain(|k| re.is_match(k.rsplit('/').next().unwrap_or(k)));
         ks
     } else if pat.ends_with('/') || pat.is_empty() {
-        list_objects(&bucket, &pat)?
+        list_objects(&bucket, &pat, true)?
     } else {
         vec![pat.to_string()]
     };

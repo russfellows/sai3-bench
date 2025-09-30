@@ -19,7 +19,95 @@ use crate::bucket_index;
 use aws_config::{self, BehaviorVersion, Region};
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3 as s3;
+use s3dlio::object_store::{store_for_uri, ObjectStore};
+// TODO: Remove legacy s3_utils imports as we migrate operations
 use s3dlio::s3_utils::{get_object, parse_s3_uri, put_object_async};
+
+// -----------------------------------------------------------------------------
+// Multi-backend support infrastructure
+// -----------------------------------------------------------------------------
+
+/// Backend types supported by s3-bench
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendType {
+    S3,
+    Azure,
+    File,
+    DirectIO,
+}
+
+impl BackendType {
+    /// Detect backend type from URI scheme
+    pub fn from_uri(uri: &str) -> Self {
+        if uri.starts_with("s3://") {
+            BackendType::S3
+        } else if uri.starts_with("az://") || uri.starts_with("azure://") {
+            BackendType::Azure
+        } else if uri.starts_with("file://") {
+            BackendType::File
+        } else if uri.starts_with("direct://") {
+            BackendType::DirectIO
+        } else {
+            // Default to File for unrecognized schemes or bare paths
+            BackendType::File
+        }
+    }
+    
+    /// Get human-readable name for backend
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendType::S3 => "S3",
+            BackendType::Azure => "Azure Blob",
+            BackendType::File => "Local File",
+            BackendType::DirectIO => "Direct I/O",
+        }
+    }
+}
+
+/// Create ObjectStore instance for given URI
+pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    store_for_uri(uri).context("Failed to create object store")
+}
+
+/// Helper to build full URI from components for different backends
+pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
+    match backend {
+        BackendType::S3 => {
+            if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, key)
+            } else {
+                format!("{}/{}", base_uri, key)
+            }
+        }
+        BackendType::Azure => {
+            if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, key)
+            } else {
+                format!("{}/{}", base_uri, key)
+            }
+        }
+        BackendType::File | BackendType::DirectIO => {
+            let path = if base_uri.starts_with("file://") {
+                &base_uri[7..]
+            } else if base_uri.starts_with("direct://") {
+                &base_uri[9..]
+            } else {
+                base_uri
+            };
+            
+            let scheme = match backend {
+                BackendType::DirectIO => "direct://",
+                _ => "file://",
+            };
+            
+            if path.ends_with('/') {
+                format!("{}{}{}", scheme, path, key)
+            } else {
+                format!("{}{}/{}", scheme, path, key)
+            }
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // New summary/aggregation types
@@ -110,17 +198,50 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let mut pre = PreResolved::default();
     for wo in &cfg.workload {
         if let OpSpec::Get { uri } = &wo.spec {
-            let (bucket, pat) = parse_s3_uri(uri).context("parse get uri")?;
-            let keys = prefetch_keys(&bucket, &pat).await?;
-            if keys.is_empty() {
-                return Err(anyhow!("no keys found for GET uri: {}", uri));
+            let backend_type = BackendType::from_uri(uri);
+            
+            // Try new multi-backend approach first
+            match prefetch_uris_multi_backend(uri).await {
+                Ok(full_uris) if !full_uris.is_empty() => {
+                    // Create legacy bucket/pattern for backward compatibility
+                    let (bucket, _pattern) = if backend_type == BackendType::S3 {
+                        parse_s3_uri(uri).unwrap_or_else(|_| ("".to_string(), "".to_string()))
+                    } else {
+                        ("".to_string(), "".to_string())
+                    };
+                    
+                    pre.get_lists.push(GetSource {
+                        uri: uri.clone(),
+                        bucket,
+                        keys: full_uris.iter().map(|u| {
+                            // Extract key part for legacy compatibility
+                            if backend_type == BackendType::S3 {
+                                u.split('/').last().unwrap_or("").to_string()
+                            } else {
+                                u.clone()
+                            }
+                        }).collect(),
+                    });
+                }
+                _ => {
+                    // Fall back to legacy S3-only approach for compatibility
+                    if backend_type == BackendType::S3 {
+                        let (bucket, pat) = parse_s3_uri(uri).context("parse get uri")?;
+                        let keys = prefetch_keys(&bucket, &pat).await?;
+                        if keys.is_empty() {
+                            return Err(anyhow!("no keys found for GET uri: {}", uri));
+                        }
+                        
+                        pre.get_lists.push(GetSource {
+                            uri: uri.clone(),
+                            bucket,
+                            keys,
+                        });
+                    } else {
+                        return Err(anyhow!("no keys found for non-S3 uri: {}", uri));
+                    }
+                }
             }
-            pre.get_lists.push(GetSource {
-                uri: uri.clone(),
-                bucket,
-                pattern: pat,
-                keys,
-            });
         }
     }
 
@@ -274,9 +395,9 @@ struct PreResolved {
 }
 #[derive(Clone)]
 struct GetSource {
+    // Legacy S3-specific fields still in use
     uri: String,
     bucket: String,
-    pattern: String,
     keys: Vec<String>,
 }
 impl PreResolved {
@@ -305,6 +426,27 @@ async fn prefetch_keys(bucket: &str, pat: &str) -> Result<Vec<String>> {
     } else {
         // exact key
         Ok(vec![pat.to_string()])
+    }
+}
+
+/// Multi-backend version: expand URIs for GET operations using ObjectStore trait
+async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
+    let store = create_store_for_uri(base_uri)?;
+    
+    if base_uri.contains('*') {
+        // Glob pattern: list and filter
+        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
+        let list_prefix = &base_uri[..base_end];
+        
+        let uris = store.list(list_prefix, false).await?;
+        let re = glob_to_regex(base_uri)?;
+        Ok(uris.into_iter().filter(|uri| re.is_match(uri)).collect())
+    } else if base_uri.ends_with('/') {
+        // Directory listing
+        store.list(base_uri, false).await
+    } else {
+        // Exact URI
+        Ok(vec![base_uri.to_string()])
     }
 }
 
@@ -351,24 +493,5 @@ async fn list_keys_async(bucket: &str, prefix: &str) -> Result<Vec<String>> {
         }
     }
     Ok(out)
-}
-
-/// Lock-free counters for bytes & ops
-#[derive(Default)]
-struct Totals {
-    bytes: std::sync::atomic::AtomicU64,
-    ops: std::sync::atomic::AtomicU64,
-}
-impl Totals {
-    fn add(&self, b: u64, n: u64) {
-        self.bytes.fetch_add(b, std::sync::atomic::Ordering::Relaxed);
-        self.ops.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
-    }
-    fn snapshot(&self) -> (u64, u64) {
-        (
-            self.bytes.load(std::sync::atomic::Ordering::Relaxed),
-            self.ops.load(std::sync::atomic::Ordering::Relaxed),
-        )
-    }
 }
 
