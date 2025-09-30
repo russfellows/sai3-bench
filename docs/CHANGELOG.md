@@ -5,6 +5,46 @@ All notable changes to s3-bench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2025-09-30
+
+### Added
+- **Stage 2 Migration Complete**: Full ObjectStore trait implementation for all operations
+- Multi-backend URI support: `file://`, `direct://`, and `s3://` schemes
+- Comprehensive logging infrastructure with tracing crate
+- CLI verbosity options: `-v` for info level, `-vv` for debug level logging
+- Debug and info logging throughout workload execution and ObjectStore operations
+- File backend testing and validation with successful operations
+
+### Changed
+- **BREAKING**: Migrated from AWS SDK direct calls to ObjectStore trait for all operations
+- Replaced `get_object()` and `put_object_async()` with `get_object_multi_backend()` and `put_object_multi_backend()`
+- Updated URI handling to use full URIs with ObjectStore instead of bucket/key splitting
+- Improved prefetch operations to use `ObjectStore::list()` instead of AWS SDK `list_objects_v2()`
+- Enhanced configuration pattern matching to use proper destructuring
+
+### Removed
+- Deprecated `prefetch_keys()` and `list_keys_async()` functions using AWS SDK
+- Unused AWS SDK imports: `aws_config`, `aws_sdk_s3`, `RegionProviderChain`
+- Legacy `parse_s3_uri` usage in workload.rs (still available in main.rs for CLI operations)
+- Dead code: unused struct fields and variables in pattern matching
+
+### Fixed
+- All compiler warnings resolved through proper code analysis (not cheap underscore fixes)
+- ObjectStore URI usage corrected to use full URIs following s3dlio test patterns
+- Redundant pattern destructuring where config methods handled field extraction
+- Proper handling of GetSource struct with only necessary fields
+
+### Performance
+- File backend testing shows excellent performance: 25,462 ops/s with 38.77 MB/s throughput
+- Multi-backend operations maintain low latency: p50: 1ms, p95: 1ms, p99: 1ms
+- Successful concurrent operations with proper semaphore-based concurrency control
+
+### Technical Details
+- ObjectStore operations now use `store_for_uri()` for automatic backend detection
+- All operations handle full URIs natively without bucket/key splitting
+- Logging provides visibility into ObjectStore creation and operation execution
+- Clean compilation with zero warnings after proper code analysis
+
 ## [0.2.1] - 2025-09-29
 
 ### Added

@@ -11,6 +11,10 @@ pub struct Config {
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
 
+    /// Base URI for the target backend (e.g., "s3://bucket/path", "file:///tmp/test", "direct:///mnt/data")
+    /// If specified, all operations will be relative to this base URI.
+    pub target: Option<String>,
+
     /// Weighted list of operations to pick from.
     pub workload: Vec<WeightedOp>,
 }
@@ -26,12 +30,15 @@ pub struct WeightedOp {
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
-    Get { uri: String },
+    /// Can be absolute URI (s3://bucket/key) or relative path (data/file.txt) when target is set.
+    Get { 
+        path: String 
+    },
 
-    /// PUT objects of a fixed size under prefix.
+    /// PUT objects of a fixed size.
+    /// Uses 'path' relative to target, or absolute URI.
     Put {
-        bucket: String,
-        prefix: String,
+        path: String,
         object_size: u64,
     },
 }
@@ -42,5 +49,49 @@ fn default_duration() -> std::time::Duration {
 
 fn default_concurrency() -> usize {
     16
+}
+
+impl Config {
+    /// Resolve a path to a full URI using the target base URI
+    pub fn resolve_uri(&self, path: &str) -> String {
+        match &self.target {
+            Some(base) => {
+                if path.contains("://") {
+                    // Path is already an absolute URI
+                    path.to_string()
+                } else {
+                    // Combine base URI with relative path
+                    if base.ends_with('/') {
+                        format!("{}{}", base, path)
+                    } else {
+                        format!("{}/{}", base, path)
+                    }
+                }
+            }
+            None => {
+                // No target specified, path must be absolute URI
+                path.to_string()
+            }
+        }
+    }
+
+    /// Get the resolved URI for a GET operation
+    pub fn get_uri(&self, get_op: &OpSpec) -> String {
+        match get_op {
+            OpSpec::Get { path } => self.resolve_uri(path),
+            _ => panic!("Expected GET operation"),
+        }
+    }
+
+    /// Get the resolved PUT target information
+    pub fn get_put_info(&self, put_op: &OpSpec) -> (String, u64) {
+        match put_op {
+            OpSpec::Put { path, object_size } => {
+                let base_uri = self.resolve_uri(path);
+                (base_uri, *object_size)
+            }
+            _ => panic!("Expected PUT operation"),
+        }
+    }
 }
 

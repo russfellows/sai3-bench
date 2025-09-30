@@ -1,0 +1,14 @@
+# Quick debug test
+target: "file:///tmp/s3bench-test/"
+duration: "1s"
+concurrency: 1
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+
+  - op: put
+    path: "results/"
+    object_size: 512
+    weight: 30
