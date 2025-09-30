@@ -1,0 +1,14 @@
+# Test configuration with delete operation
+target: "file:///tmp/s3bench-test/"
+duration: "3s"
+concurrency: 1
+
+workload:
+  - op: put
+    path: "delete_test/"
+    object_size: 512
+    weight: 70
+
+  - op: delete
+    path: "delete_test/*.txt"
+    weight: 30

@@ -133,6 +133,51 @@ pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<
     Ok(())
 }
 
+/// Multi-backend LIST operation using ObjectStore trait
+pub async fn list_objects_multi_backend(uri: &str) -> anyhow::Result<Vec<String>> {
+    debug!("LIST operation starting for URI: {}", uri);
+    let store = create_store_for_uri(uri)?;
+    debug!("ObjectStore created successfully for URI: {}", uri);
+    
+    // Use ObjectStore list method with full URI and recursive=true (s3dlio handles URI parsing)
+    let keys = store.list(uri, true).await
+        .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
+    
+    debug!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
+    Ok(keys)
+}
+
+/// Multi-backend STAT operation using ObjectStore trait
+/// Since ObjectStore doesn't have a dedicated stat method, we use a minimal get operation
+pub async fn stat_object_multi_backend(uri: &str) -> anyhow::Result<u64> {
+    debug!("STAT operation starting for URI: {}", uri);
+    let store = create_store_for_uri(uri)?;
+    debug!("ObjectStore created successfully for URI: {}", uri);
+    
+    // For stat operation, we'll use a minimal get operation to get the size
+    // This simulates HEAD/stat behavior by getting the data and measuring size
+    let bytes = store.get(uri).await
+        .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
+    
+    let size = bytes.len() as u64;
+    debug!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
+    Ok(size)
+}
+
+/// Multi-backend DELETE operation using ObjectStore trait
+pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
+    debug!("DELETE operation starting for URI: {}", uri);
+    let store = create_store_for_uri(uri)?;
+    debug!("ObjectStore created successfully for URI: {}", uri);
+    
+    // Use ObjectStore delete method with full URI (s3dlio handles URI parsing)
+    store.delete(uri).await
+        .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
+    
+    debug!("DELETE operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // New summary/aggregation types
 // -----------------------------------------------------------------------------
@@ -140,9 +185,9 @@ pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<
 pub struct OpAgg {
     pub bytes: u64,
     pub ops: u64,
-    pub p50_ms: u64,
-    pub p95_ms: u64,
-    pub p99_ms: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -173,15 +218,17 @@ pub struct Summary {
     pub wall_seconds: f64,
     pub total_bytes: u64,
     pub total_ops: u64,
-    pub p50_ms: u64,
-    pub p95_ms: u64,
-    pub p99_ms: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
 
     // New: per-op aggregates and size bins
     pub get: OpAgg,
     pub put: OpAgg,
+    pub meta: OpAgg,
     pub get_bins: SizeBins,
     pub put_bins: SizeBins,
+    pub meta_bins: SizeBins,
 }
 
 // -----------------------------------------------------------------------------
@@ -190,25 +237,33 @@ pub struct Summary {
 struct WorkerStats {
     hist_get: Histogram<u64>,
     hist_put: Histogram<u64>,
+    hist_meta: Histogram<u64>,
     get_bytes: u64,
     get_ops: u64,
     put_bytes: u64,
     put_ops: u64,
+    meta_bytes: u64,
+    meta_ops: u64,
     get_bins: SizeBins,
     put_bins: SizeBins,
+    meta_bins: SizeBins,
 }
 
 impl Default for WorkerStats {
     fn default() -> Self {
         Self {
-            hist_get: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000, 3).unwrap(),
-            hist_put: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000, 3).unwrap(),
+            hist_get: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
+            hist_put: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
+            hist_meta: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
             get_bytes: 0,
             get_ops: 0,
             put_bytes: 0,
             put_ops: 0,
+            meta_bytes: 0,
+            meta_ops: 0,
             get_bins: SizeBins::default(),
             put_bins: SizeBins::default(),
+            meta_bins: SizeBins::default(),
         }
     }
 }
@@ -299,9 +354,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         let bytes = get_object_multi_backend(&full_uri).await?;
-                        let ms = t0.elapsed().as_millis() as u64;
+                        let micros = t0.elapsed().as_micros() as u64;
 
-                        ws.hist_get.record(ms.max(1)).ok();
+                        ws.hist_get.record(micros.max(1)).ok();
                         ws.get_ops += 1;
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
@@ -325,12 +380,51 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         put_object_multi_backend(&full_uri, &buf).await?;
-                        let ms = t0.elapsed().as_millis() as u64;
+                        let micros = t0.elapsed().as_micros() as u64;
 
-                        ws.hist_put.record(ms.max(1)).ok();
+                        ws.hist_put.record(micros.max(1)).ok();
                         ws.put_ops += 1;
                         ws.put_bytes += sz;
                         ws.put_bins.add(sz);
+                    }
+                    OpSpec::List { .. } => {
+                        // Get resolved URI from config
+                        let uri = cfg.get_meta_uri(op);
+
+                        let t0 = Instant::now();
+                        let _keys = list_objects_multi_backend(&uri).await?;
+                        let micros = t0.elapsed().as_micros() as u64;
+
+                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.meta_ops += 1;
+                        // List operations don't transfer data, just metadata
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Stat { .. } => {
+                        // Get resolved URI from config
+                        let uri = cfg.get_meta_uri(op);
+
+                        let t0 = Instant::now();
+                        let _size = stat_object_multi_backend(&uri).await?;
+                        let micros = t0.elapsed().as_micros() as u64;
+
+                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.meta_ops += 1;
+                        // Stat operations don't transfer data, just metadata about the size
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Delete { .. } => {
+                        // Get resolved URI from config
+                        let uri = cfg.get_meta_uri(op);
+
+                        let t0 = Instant::now();
+                        delete_object_multi_backend(&uri).await?;
+                        let micros = t0.elapsed().as_micros() as u64;
+
+                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.meta_ops += 1;
+                        // Delete operations don't transfer data
+                        ws.meta_bins.add(0);
                     }
                 }
             }
@@ -340,25 +434,33 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     }
 
     // Merge results
-    let mut merged_get = Histogram::<u64>::new_with_bounds(1, 60_000, 3).unwrap();
-    let mut merged_put = Histogram::<u64>::new_with_bounds(1, 60_000, 3).unwrap();
+    let mut merged_get = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+    let mut merged_put = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+    let mut merged_meta = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
     let mut get_bytes = 0u64;
     let mut get_ops = 0u64;
     let mut put_bytes = 0u64;
     let mut put_ops = 0u64;
+    let mut meta_bytes = 0u64;
+    let mut meta_ops = 0u64;
     let mut get_bins = SizeBins::default();
     let mut put_bins = SizeBins::default();
+    let mut meta_bins = SizeBins::default();
 
     for h in handles {
         let ws = h.await??;
         merged_get.add(&ws.hist_get).ok();
         merged_put.add(&ws.hist_put).ok();
+        merged_meta.add(&ws.hist_meta).ok();
         get_bytes += ws.get_bytes;
         get_ops += ws.get_ops;
         put_bytes += ws.put_bytes;
         put_ops += ws.put_ops;
+        meta_bytes += ws.meta_bytes;
+        meta_ops += ws.meta_ops;
         get_bins.merge_from(&ws.get_bins);
         put_bins.merge_from(&ws.put_bins);
+        meta_bins.merge_from(&ws.meta_bins);
     }
 
     let wall = start.elapsed().as_secs_f64();
@@ -366,45 +468,56 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let get = OpAgg {
         bytes: get_bytes,
         ops: get_ops,
-        p50_ms: merged_get.value_at_quantile(0.50),
-        p95_ms: merged_get.value_at_quantile(0.95),
-        p99_ms: merged_get.value_at_quantile(0.99),
+        p50_us: merged_get.value_at_quantile(0.50),
+        p95_us: merged_get.value_at_quantile(0.95),
+        p99_us: merged_get.value_at_quantile(0.99),
     };
     let put = OpAgg {
         bytes: put_bytes,
         ops: put_ops,
-        p50_ms: merged_put.value_at_quantile(0.50),
-        p95_ms: merged_put.value_at_quantile(0.95),
-        p99_ms: merged_put.value_at_quantile(0.99),
+        p50_us: merged_put.value_at_quantile(0.50),
+        p95_us: merged_put.value_at_quantile(0.95),
+        p99_us: merged_put.value_at_quantile(0.99),
+    };
+    let meta = OpAgg {
+        bytes: meta_bytes,
+        ops: meta_ops,
+        p50_us: merged_meta.value_at_quantile(0.50),
+        p95_us: merged_meta.value_at_quantile(0.95),
+        p99_us: merged_meta.value_at_quantile(0.99),
     };
 
     // Preserve combined line for compatibility
-    let total_bytes = get_bytes + put_bytes;
-    let total_ops = get_ops + put_ops;
+    let total_bytes = get_bytes + put_bytes + meta_bytes;
+    let total_ops = get_ops + put_ops + meta_ops;
 
     // Build a combined histogram just for the old p50/95/99
-    let mut combined = Histogram::<u64>::new_with_bounds(1, 60_000, 3).unwrap();
+    let mut combined = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
     combined.add(&merged_get).ok();
     combined.add(&merged_put).ok();
+    combined.add(&merged_meta).ok();
 
-    info!("Workload execution completed: {:.2}s wall time, {} total ops ({} GET, {} PUT), {:.2} MB total ({:.2} MB GET, {:.2} MB PUT)", 
+    info!("Workload execution completed: {:.2}s wall time, {} total ops ({} GET, {} PUT, {} META), {:.2} MB total ({:.2} MB GET, {:.2} MB PUT, {:.2} MB META)", 
           wall, 
-          total_ops, get_ops, put_ops,
+          total_ops, get_ops, put_ops, meta_ops,
           total_bytes as f64 / 1_048_576.0,
           get_bytes as f64 / 1_048_576.0,
-          put_bytes as f64 / 1_048_576.0);
+          put_bytes as f64 / 1_048_576.0,
+          meta_bytes as f64 / 1_048_576.0);
 
     Ok(Summary {
         wall_seconds: wall,
         total_bytes,
         total_ops,
-        p50_ms: combined.value_at_quantile(0.50),
-        p95_ms: combined.value_at_quantile(0.95),
-        p99_ms: combined.value_at_quantile(0.99),
+        p50_us: combined.value_at_quantile(0.50),
+        p95_us: combined.value_at_quantile(0.95),
+        p99_us: combined.value_at_quantile(0.99),
         get,
         put,
+        meta,
         get_bins,
         put_bins,
+        meta_bins,
     })
 }
 

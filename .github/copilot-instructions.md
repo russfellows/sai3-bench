@@ -1,140 +1,110 @@
 # s3-bench AI Agent Guide
 
 ## Project Overview
-s3-bench is a Rust-based S3 performance testing tool with both single-node CLI and distributed gRPC execution modes. It leverages the `s3dlio` library for multi-backend storage operations and includes comprehensive metrics collection with HDR histograms.
+s3-bench is a Rust-based S3 performance testing tool with unified multi-backend support (`file://`, `direct://`, `s3://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics.
 
-## Project Directory
-/home/eval/Documennts/Code/s3-bench
-
-## Architecture Components
-
-### Three Binary Modes
+## Architecture: Three Binary Strategy
 - **`s3-bench`** (`src/main.rs`) - Single-node CLI for immediate testing
-- **`s3bench-agent`** (`src/bin/agent.rs`) - gRPC server for distributed execution
-- **`s3bench-ctl`** (`src/bin/controller.rs`) - Controller to orchestrate multiple agents
+- **`s3bench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
+- **`s3bench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
 
-### Core Modules
-- **`src/workload.rs`** - Workload execution engine with weighted operation selection
-- **`src/config.rs`** - YAML configuration parsing for workload definitions
-- **`proto/s3bench.proto`** - gRPC service definitions for distributed coordination
+Generated from `proto/s3bench.proto` via `tonic-build` in `build.rs`.
 
-## Key Integration Context
-**ObjectStore Migration Complete** - This project has successfully completed migration to multi-backend storage URIs (`file://`, `direct://`, `s3://`) using s3dlio's ObjectStore trait. All workload operations now support multi-backend execution.
+## Critical Dependencies & Patterns
 
-### Critical Dependencies
-- **s3dlio v0.8.7** - Multi-backend storage library (pinned to rev `cd4ee2e`)
-- **ObjectStore trait** - Unified storage interface for all backends
-- **tracing** - Comprehensive logging with `-v/-vv` CLI options
-- **tonic/prost** - gRPC framework for distributed execution
+### ObjectStore Abstraction (Migration Complete)
+All operations use `s3dlio::object_store::store_for_uri()` - **never** direct AWS SDK calls:
+```rust
+// In src/workload.rs - always use this pattern:
+pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    store_for_uri(uri).context("Failed to create object store")
+}
+```
+**Key**: s3dlio pinned to `rev = "cd4ee2e"` for API stability.
 
-## Development Workflows
-
-### Building
-```bash
-cargo build --release  # Builds all three binaries
+### Config System (`src/config.rs`)
+- YAML parsing with `target` base URI + relative `path` resolution
+- `OpSpec` enum: `Get { path }` and `Put { path, object_size }`
+- Example from `tests/configs/file_test.yaml`:
+```yaml
+target: "file:///tmp/s3bench-test/"
+workload:
+  - op: get
+    path: "data/*"  # Resolves to file:///tmp/s3bench-test/data/*
+    weight: 70
 ```
 
-### Testing Multi-Backend Support
+### Metrics Architecture (HDR Histograms)
+9 size buckets per operation type in `src/main.rs`:
+```rust
+const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
+    "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB", /* ... */
+];
+```
+Use `bucket_index(nbytes)` function for consistent bucketing.
+
+## Essential Development Commands
+
+### Build All Binaries
 ```bash
-# File backend test
+cargo build --release  # Requires protoc installed for gRPC
+```
+
+### Test Multi-Backend Operations
+```bash
+# File backend (no credentials needed)
 ./target/release/s3-bench -v run --config tests/configs/file_test.yaml
 
-# S3 backend test (requires .env with credentials)
-./target/release/s3-bench -v run --config tests/configs/mixed.yaml
-
-# Debug level logging
-./target/release/s3-bench -vv run --config tests/configs/debug_test.yaml
+# S3 backend (requires .env with AWS_*)
+./target/release/s3-bench -vv run --config tests/configs/mixed.yaml
 ```
 
-### Testing Distributed Mode
+### Distributed Mode Testing
 ```bash
 # Terminal 1: Start agent
 ./target/release/s3bench-agent --listen 127.0.0.1:7761
 
-# Terminal 2: Run controller
+# Terminal 2: Test connectivity
 ./target/release/s3bench-ctl --insecure --agents 127.0.0.1:7761 ping
 ```
 
-### Configuration Format
-Workloads are defined in YAML with weighted operations:
-```yaml
-duration: 30s
-concurrency: 32
-workload:
-  - weight: 70
-    op: get
-    uri: "s3://bucket/prefix/*"
-  - weight: 30
-    op: put
-    bucket: bucket-name
-    prefix: "bench/"
-    object_size: 1048576
-```
+## Code Conventions & Gotchas
 
-## Project-Specific Patterns
+### Workload Execution Pattern (`src/workload.rs`)
+- Pre-resolution: GET operations fetch object lists **once** before workload starts
+- Weighted selection via `rand_distr::WeightedIndex` from config weights
+- Semaphore-controlled concurrency: `Arc<Semaphore::new(cfg.concurrency)>`
 
-### URI Parsing Convention
-- Uses `s3dlio::object_store::store_for_uri()` throughout codebase
-- Returns ObjectStore instance for any supported URI scheme
-- **IMPLEMENTED**: Support for `file://`, `direct://`, and `s3://` schemes
-
-### Metrics Collection
-- Uses HDR histograms with 9 size buckets (zero, 1B-8KiB, 8KiB-64KiB, etc.)
-- Separate histograms for GET/PUT operations
-- Per-operation aggregates (`OpAgg`) and size bins (`SizeBins`)
-
-### Async Concurrency Pattern
+### Backend Detection Logic
+`BackendType::from_uri()` in `src/workload.rs` determines storage backend:
 ```rust
-let sem = Arc::new(Semaphore::new(cfg.concurrency));
-// Workers acquire semaphore permits for controlled concurrency
+// "s3://" -> S3, "file://" -> File, "direct://" -> DirectIO
+// Default fallback is File for unrecognized schemes
 ```
 
-### Storage Backend Abstraction
-Full ObjectStore trait implementation:
-- `get_object_multi_backend()` and `put_object_multi_backend()` using ObjectStore
-- Automatic backend detection via URI scheme
-- `prefetch_uris_multi_backend()` using ObjectStore::list()
+### gRPC Protocol Buffer Build
+- `build.rs` generates `src/pb/s3bench.rs` from `proto/s3bench.proto`
+- **Requires**: `protoc` compiler installed system-wide
+- Output goes to tracked `src/pb/` directory (not target/)
 
-## Common Gotchas
+### TLS Configuration (Distributed Mode)
+- Agent: `--tls --tls-domain hostname --tls-write-ca cert.pem`
+- Controller: `--agent-ca cert.pem --agent-domain hostname`
+- Default domain is "localhost" - use `--tls-sans` for additional names
 
-### gRPC Build Requirements
-- Requires `protoc` (Protocol Buffers compiler) installed
-- `tonic-build` runs at compile time via `build.rs`
+## Integration Context
 
-### TLS Configuration
-- Agent supports self-signed certificates with `--tls`
-- Controller must use `--agent-ca` to trust agent certificates
-- Default domain is "localhost" - use `--tls-sans` for custom domains
+### s3dlio Library Integration
+- **Never import AWS SDK directly** for storage operations
+- Use `ObjectStore` trait methods: `get()`, `put()`, `list()`
+- URI schemes automatically route to correct backend implementation
 
-### Workload Pre-resolution
-GET operations pre-fetch object lists once before workload execution to avoid listing overhead during performance tests.
+### Legacy Code Markers
+Look for `TODO: Remove legacy s3_utils imports` - these indicate partial migration areas that should be updated to use ObjectStore when touched.
 
-## Integration Points
+## Performance Characteristics
+- **File backend**: 25k+ ops/s with 1ms latency validated
+- **Concurrency**: Configurable via YAML `concurrency` field
+- **Logging**: `-v` operational info, `-vv` detailed tracing
 
-### dl-driver Integration
-- s3-bench included as GitHub dependency in dl-driver's Cargo.toml
-- **COMPLETE**: Replay functionality supports `file://` and `direct://` URI schemes
-- Maintains S3 performance optimizations while supporting new backends
-
-### s3dlio Library
-- Provides `ObjectStore` trait for unified storage access
-- Uses `store_for_uri()` pattern for multi-backend operations
-- Pinned to `cd4ee2e` revision for stable API
-
-## Current Status
-
-**Stage 2 Migration Complete** - All workload operations now use ObjectStore trait with full multi-backend support. Key achievements:
-
-1. **Multi-backend Operations**: `file://`, `direct://`, and `s3://` fully supported
-2. **Clean Migration**: Removed deprecated AWS SDK functions and imports
-3. **Comprehensive Logging**: Added tracing with `-v/-vv` CLI options
-4. **Performance Validated**: 25k+ ops/s on file backend with 1ms latency
-5. **Zero Warnings**: Clean compilation after proper code analysis
-
-## Future Development Priorities
-
-1. **S3 Credential Integration** - Add dotenvy support for .env file credentials
-2. **Distributed Mode Validation** - Test agent/controller with ObjectStore changes
-3. **Enhanced Backend Features** - Leverage backend-specific optimizations
-
-When extending functionality, maintain the ObjectStore abstraction and ensure all backends receive equal treatment in performance and feature support.
+When extending functionality, always maintain ObjectStore abstraction and ensure new features work across all backend types (`file://`, `direct://`, `s3://`).

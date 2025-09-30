@@ -41,6 +41,24 @@ pub enum OpSpec {
         path: String,
         object_size: u64,
     },
+
+    /// LIST objects under a path/prefix.
+    /// Uses 'path' relative to target, or absolute URI.
+    List {
+        path: String,
+    },
+
+    /// STAT/HEAD a single object to get metadata.
+    /// Uses 'path' relative to target, or absolute URI.
+    Stat {
+        path: String,
+    },
+
+    /// DELETE objects (single or glob pattern).
+    /// Uses 'path' relative to target, or absolute URI.
+    Delete {
+        path: String,
+    },
 }
 
 fn default_duration() -> std::time::Duration {
@@ -91,6 +109,16 @@ impl Config {
                 (base_uri, *object_size)
             }
             _ => panic!("Expected PUT operation"),
+        }
+    }
+
+    /// Get the resolved URI for a metadata operation (List, Stat, Delete)
+    pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
+        match meta_op {
+            OpSpec::List { path } | OpSpec::Stat { path } | OpSpec::Delete { path } => {
+                self.resolve_uri(path)
+            }
+            _ => panic!("Expected metadata operation"),
         }
     }
 }

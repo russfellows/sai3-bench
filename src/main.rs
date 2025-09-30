@@ -104,7 +104,7 @@ impl OpHists {
 // CLI definition
 // -----------------------------------------------------------------------------
 #[derive(Parser)]
-#[command(name = "warp-test", version, about = "Light‑weight S3 tester & utility built on s3dlio")]
+#[command(name = "io-bench", version, about = "An io-bench tool that leverages s3dlio library")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -455,14 +455,21 @@ fn run_workload(config_path: &str) -> Result<()> {
         println!("\nGET operations:");
         println!("  Ops: {}", summary.get.ops);
         println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
-        println!("  Latency p50: {}ms, p95: {}ms, p99: {}ms", summary.get.p50_ms, summary.get.p95_ms, summary.get.p99_ms);
+        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
     }
     
     if summary.put.ops > 0 {
         println!("\nPUT operations:");
         println!("  Ops: {}", summary.put.ops);
         println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
-        println!("  Latency p50: {}ms, p95: {}ms, p99: {}ms", summary.put.p50_ms, summary.put.p95_ms, summary.put.p99_ms);
+        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+    }
+    
+    if summary.meta.ops > 0 {
+        println!("\nMETA-DATA operations:");
+        println!("  Ops: {}", summary.meta.ops);
+        println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
     
     Ok(())

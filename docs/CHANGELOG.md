@@ -5,6 +5,31 @@ All notable changes to s3-bench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2025-09-30
+
+### Added
+- **Microsecond Precision Metrics**: All timing measurements now use microsecond precision instead of milliseconds
+- **Three-Category Operation Tracking**: Added META-DATA operations category alongside GET and PUT
+  - LIST operations: Directory/prefix listings with timing metrics
+  - STAT operations: Object metadata queries (HEAD requests)
+  - DELETE operations: Object removal with timing tracking
+- Enhanced configuration support for new operation types: `list`, `stat`, `delete`
+- Comprehensive per-operation reporting with separate latency percentiles for GET, PUT, and META-DATA
+- Updated reporting displays with microsecond (µs) units across all binaries
+
+### Changed
+- **BREAKING**: Changed timing precision from milliseconds to microseconds in all metrics
+- **BREAKING**: Updated histogram bounds from (1, 60_000, 3) to (1, 60_000_000, 3) for microsecond scale
+- **BREAKING**: Renamed struct fields from `p50_ms/p95_ms/p99_ms` to `p50_us/p95_us/p99_us`
+- Enhanced `OpSpec` enum with `List`, `Stat`, and `Delete` variants
+- Updated `Summary` and `OpAgg` structures to include `meta` fields for metadata operations
+- Improved help message to reflect multi-backend I/O testing capabilities
+
+### Fixed
+- Consistent microsecond reporting across main CLI and run binary
+- Proper operation category separation in metrics collection and reporting
+- Enhanced ObjectStore integration for metadata operations
+
 ## [0.2.2] - 2025-09-30
 
 ### Added

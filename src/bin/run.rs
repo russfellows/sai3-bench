@@ -28,13 +28,13 @@ async fn main() -> Result<()> {
     let mb = summary.total_bytes as f64 / (1024.0 * 1024.0);
     let mbps = mb / summary.wall_seconds.max(1e-9);
     println!(
-        "WALL {:>6.2}s  OPS {:>10}  BYTES {:>12} ({:.2} MB)  THROUGHPUT {:.2} MB/s  p50={}ms p95={}ms p99={}ms",
+        "WALL {:>6.2}s  OPS {:>10}  BYTES {:>12} ({:.2} MB)  THROUGHPUT {:.2} MB/s  p50={}µs p95={}µs p99={}µs",
         summary.wall_seconds,
         summary.total_ops,
         summary.total_bytes,
         mb,
         mbps,
-        summary.p50_ms, summary.p95_ms, summary.p99_ms
+        summary.p50_us, summary.p95_us, summary.p99_us
     );
 
     // ---- Per-op latency/throughput summaries ----
@@ -42,29 +42,41 @@ async fn main() -> Result<()> {
         let mb = summary.get.bytes as f64 / (1024.0 * 1024.0);
         let mbps = mb / summary.wall_seconds.max(1e-9);
         println!(
-            "GET   ops={:>10}  bytes={:>12} ({:>8.2} MB)  {:.2} MB/s  p50={}ms p95={}ms p99={}ms",
+            "GET   ops={:>10}  bytes={:>12} ({:>8.2} MB)  {:.2} MB/s  p50={}µs p95={}µs p99={}µs",
             summary.get.ops,
             summary.get.bytes,
             mb,
             mbps,
-            summary.get.p50_ms, summary.get.p95_ms, summary.get.p99_ms
+            summary.get.p50_us, summary.get.p95_us, summary.get.p99_us
         );
     }
     if summary.put.ops > 0 {
         let mb = summary.put.bytes as f64 / (1024.0 * 1024.0);
         let mbps = mb / summary.wall_seconds.max(1e-9);
         println!(
-            "PUT   ops={:>10}  bytes={:>12} ({:>8.2} MB)  {:.2} MB/s  p50={}ms p95={}ms p99={}ms",
+            "PUT   ops={:>10}  bytes={:>12} ({:>8.2} MB)  {:.2} MB/s  p50={}µs p95={}µs p99={}µs",
             summary.put.ops,
             summary.put.bytes,
             mb,
             mbps,
-            summary.put.p50_ms, summary.put.p95_ms, summary.put.p99_ms
+            summary.put.p50_us, summary.put.p95_us, summary.put.p99_us
+        );
+    }
+    if summary.meta.ops > 0 {
+        let mb = summary.meta.bytes as f64 / (1024.0 * 1024.0);
+        let mbps = mb / summary.wall_seconds.max(1e-9);
+        println!(
+            "META  ops={:>10}  bytes={:>12} ({:>8.2} MB)  {:.2} MB/s  p50={}µs p95={}µs p99={}µs",
+            summary.meta.ops,
+            summary.meta.bytes,
+            mb,
+            mbps,
+            summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us
         );
     }
 
     // ---- Size bins (simple display by bin index) ----
-    // We print separate tables for GET and PUT if present.
+    // We print separate tables for GET, PUT, and META if present.
     if !summary.get_bins.by_bucket.is_empty() {
         println!("Size bins (GET):");
         print_bins(&summary.get_bins);
@@ -72,6 +84,10 @@ async fn main() -> Result<()> {
     if !summary.put_bins.by_bucket.is_empty() {
         println!("Size bins (PUT):");
         print_bins(&summary.put_bins);
+    }
+    if !summary.meta_bins.by_bucket.is_empty() {
+        println!("Size bins (META-DATA):");
+        print_bins(&summary.meta_bins);
     }
 
     Ok(())
