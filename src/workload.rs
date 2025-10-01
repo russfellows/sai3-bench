@@ -2,6 +2,7 @@
 //
 use anyhow::{anyhow, Context, Result};
 use hdrhistogram::Histogram;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
@@ -11,7 +12,7 @@ use rand::{rng, Rng};
 use rand::distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use crate::config::{Config, OpSpec};
 
 use std::collections::HashMap;
@@ -277,6 +278,18 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
     // Pre-resolve any GET sources once.
     info!("Pre-resolving GET sources for {} operations", cfg.workload.len());
+    
+    // Always show GET resolution progress for user feedback
+    let mut get_count = 0;
+    for wo in &cfg.workload {
+        if matches!(&wo.spec, OpSpec::Get { .. }) {
+            get_count += 1;
+        }
+    }
+    if get_count > 0 {
+        println!("Resolving {} GET operation patterns...", get_count);
+    }
+    
     let mut pre = PreResolved::default();
     for wo in &cfg.workload {
         if let OpSpec::Get { .. } = &wo.spec {
@@ -312,6 +325,37 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
     // Spawn workers
     info!("Spawning {} worker tasks", cfg.concurrency);
+    println!("Starting execution ({}s duration, {} concurrent workers)...", cfg.duration.as_secs(), cfg.concurrency);
+    
+    // Create progress bar for time-based execution
+    let pb = ProgressBar::new(cfg.duration.as_secs());
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}s ({eta_precise}) {msg}"
+        )?
+        .progress_chars("#>-")
+    );
+    pb.set_message(format!("running with {} workers", cfg.concurrency));
+    
+    // Spawn progress monitoring task
+    let pb_clone = pb.clone();
+    let duration = cfg.duration;
+    let progress_handle = tokio::spawn(async move {
+        let progress_start = Instant::now();
+        let update_interval = Duration::from_millis(100); // Update every 100ms
+        
+        loop {
+            let elapsed = progress_start.elapsed();
+            if elapsed >= duration {
+                pb_clone.set_position(duration.as_secs());
+                break;
+            }
+            
+            pb_clone.set_position(elapsed.as_secs());
+            tokio::time::sleep(update_interval).await;
+        }
+    });
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let sem = sem.clone();
@@ -463,7 +507,14 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         meta_bins.merge_from(&ws.meta_bins);
     }
 
+    // Complete progress bar and wait for progress task
+    progress_handle.await?;
+    
     let wall = start.elapsed().as_secs_f64();
+    pb.finish_with_message(format!("completed in {:.2}s", wall));
+    
+    // Always show completion status
+    println!("Execution completed in {:.2}s", wall);
 
     let get = OpAgg {
         bytes: get_bytes,
