@@ -31,9 +31,16 @@ A comprehensive storage performance testing tool that supports multiple backends
 - **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.3.0) - Multi-Backend Transformation
+## 🎊 Latest Release (v0.3.1) - Enhanced User Experience
 
-### 🎯 Major Features
+### ✨ Progress Bars & Visual Feedback
+- **Interactive Progress Bars**: Professional real-time progress visualization for all operations
+- **Time-based Progress**: Smooth animated progress tracking for timed workloads with ETA
+- **Operation Progress**: Visual completion tracking for GET, PUT, DELETE commands  
+- **Smart Messages**: Dynamic progress context showing concurrency, data sizes, and rates
+- **Enhanced Default Output**: Better feedback without requiring verbose flags
+
+### 🎯 Core Features (v0.3.0)
 
 - **Complete Multi-Backend Support**: Unified interface across file://, direct://, s3://, and az:// protocols
 - **Microsecond Precision Metrics**: HDR histogram performance measurements with µs accuracy

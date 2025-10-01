@@ -2,6 +2,33 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.3.1] - 2025-09-30
+
+### ✨ NEW FEATURES
+- **Interactive Progress Bars**: Professional progress visualization for all operations
+  - **Time-based Progress**: Smooth animated progress bars for timed workloads with elapsed/remaining time
+  - **Operation-based Progress**: Object count progress tracking for GET, PUT, DELETE commands
+  - **Smart Contextual Messages**: Dynamic progress messages showing concurrency, data sizes, and completion status
+  - **ETA Calculations**: Estimated time remaining for all operations
+  - **Async-friendly Design**: Non-blocking progress updates every 100ms
+
+### 🚀 USER EXPERIENCE IMPROVEMENTS
+- **Enhanced Default Output**: Improved feedback without verbose flags
+  - **Preparation Status**: Clear indication of workload setup and GET pattern resolution
+  - **Execution Progress**: Real-time visual feedback during operation execution
+  - **Completion Summary**: Informative completion messages with performance data
+- **Better Visual Feedback**: Colored progress bars with professional styling
+- **Informative Progress Messages**: Context-aware messages showing worker counts and data transfer amounts
+
+### 🔧 TECHNICAL ENHANCEMENTS
+- **indicatif Integration**: Added professional progress bar library for smooth animations
+- **Concurrent Progress Tracking**: Thread-safe progress updates using `Arc<ProgressBar>`
+- **Minimal Performance Impact**: Efficient 100ms update intervals for smooth user experience
+- **Cross-terminal Compatibility**: Progress bars work across different terminal widths and configurations
+
+### 📦 DEPENDENCY UPDATES
+- Added `indicatif = "0.17"` for progress bar functionality
+
 ## [0.3.0] - 2025-09-30
 
 ### 🎉 MAJOR RELEASE: Complete Multi-Backend & Naming Transformation

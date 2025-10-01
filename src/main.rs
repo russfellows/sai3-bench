@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{stream::FuturesUnordered, StreamExt};
 use hdrhistogram::Histogram;
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
 use io_bench::config::Config;
 use io_bench::workload;
@@ -207,7 +208,7 @@ fn main() -> Result<()> {
     // Initialize tracing subscriber with the appropriate level
     use tracing_subscriber::{fmt, EnvFilter};
     fmt()
-        .with_env_filter(EnvFilter::new(format!("s3_bench={}", log_level)))
+        .with_env_filter(EnvFilter::new(format!("io_bench={}", log_level)))
         .init();
     
     match cli.command {
@@ -390,6 +391,16 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
         
         eprintln!("Fetching {} objects with {} jobs…", objects.len(), jobs);
         
+        // Create progress bar for operations
+        let pb = ProgressBar::new(objects.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({eta_precise}) {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        pb.set_message(format!("downloading with {} workers", jobs));
+        
         let hist = OpHists::new();
         let hist2 = hist.clone();
         let t0 = Instant::now();
@@ -401,6 +412,7 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
             for obj_uri in objects {
                 let sem2 = sem.clone();
                 let hist2 = hist2.clone();
+                let pb_clone = pb.clone();
                 
                 futs.push(tokio::spawn(async move {
                     let _permit = sem2.acquire_owned().await.unwrap();
@@ -409,6 +421,8 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
                     let bytes = get_object_multi_backend(&obj_uri).await?;
                     let idx = bucket_index(bytes.len());
                     hist2.record(idx, t1.elapsed());
+                    
+                    pb_clone.inc(1);
                     
                     Ok::<usize, anyhow::Error>(bytes.len())
                 }));
@@ -421,6 +435,8 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
             }
             total
         };
+        
+        pb.finish_with_message(format!("downloaded {:.2} MB", total_bytes as f64 / 1_048_576.0));
         
         let dt = t0.elapsed();
         println!(
@@ -479,6 +495,16 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
         
         eprintln!("Deleting {} objects with {} jobs…", objects.len(), jobs);
         
+        // Create progress bar for delete operations
+        let pb = ProgressBar::new(objects.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({eta_precise}) {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        pb.set_message(format!("deleting with {} workers", jobs));
+        
         let hist = OpHists::new();
         let hist2 = hist.clone();
         let t0 = Instant::now();
@@ -491,6 +517,7 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
                 let sem2 = sem.clone();
                 let hist2 = hist2.clone();
                 let obj_uri = obj_uri.clone();
+                let pb_clone = pb.clone();
                 
                 futs.push(tokio::spawn(async move {
                     let _permit = sem2.acquire_owned().await.unwrap();
@@ -498,6 +525,8 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
                     
                     delete_object_multi_backend(&obj_uri).await?;
                     hist2.record(0, t1.elapsed());
+                    
+                    pb_clone.inc(1);
                     
                     Ok::<(), anyhow::Error>(())
                 }));
@@ -507,6 +536,8 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
                 result.context("Task join error")??;
             }
         };
+        
+        pb.finish_with_message(format!("deleted {} objects", objects.len()));
         
         let dt = t0.elapsed();
         println!("Deleted {} objects in {:?}", objects.len(), dt);
@@ -556,6 +587,17 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
         eprintln!("Uploading {} objects ({} bytes each) with {} jobs…", 
                  object_uris.len(), object_size, concurrency);
         
+        // Create progress bar for upload operations
+        let pb = ProgressBar::new(object_uris.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({eta_precise}) {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        let size_mb = (object_size as f64 * object_uris.len() as f64) / 1_048_576.0;
+        pb.set_message(format!("uploading {:.1}MB with {} workers", size_mb, concurrency));
+        
         let hist = OpHists::new();
         let hist2 = hist.clone();
         let t0 = Instant::now();
@@ -569,6 +611,7 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
                 let hist2 = hist2.clone();
                 let obj_uri = obj_uri.clone();
                 let data = data.clone();
+                let pb_clone = pb.clone();
                 
                 futs.push(tokio::spawn(async move {
                     let _permit = sem2.acquire_owned().await.unwrap();
@@ -578,6 +621,8 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
                     let idx = bucket_index(data.len());
                     hist2.record(idx, t1.elapsed());
                     
+                    pb_clone.inc(1);
+                    
                     Ok::<(), anyhow::Error>(())
                 }));
             }
@@ -586,6 +631,9 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
                 result.context("Task join error")??;
             }
         };
+        
+        let total_mb = (object_size as f64 * object_uris.len() as f64) / 1_048_576.0;
+        pb.finish_with_message(format!("uploaded {:.2} MB", total_mb));
         
         let dt = t0.elapsed();
         let total_mb = (object_uris.len() * object_size) as f64 / (1024.0 * 1024.0);
@@ -624,6 +672,9 @@ fn run_workload(config_path: &str) -> Result<()> {
     println!("Operations: {}", config.workload.len());
     
     info!("Starting workload execution with {} operation types", config.workload.len());
+    
+    // Always show preparation status
+    println!("Preparing workload...");
     
     // Run the workload
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
