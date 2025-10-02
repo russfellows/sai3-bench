@@ -3,6 +3,7 @@
 use regex::escape;
 
 pub mod config;
+pub mod replay;
 pub mod workload;
 
 /// Returns the bucket index for the size (0..8+) as per your CLI logic.

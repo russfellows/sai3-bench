@@ -2,7 +2,26 @@
 
 All notable changes to io-bench will be documented in this file.
 
-## [0.3.2] - 2025-10-01
+# Changelog
+
+## [0.4.0] - 2025-10-01
+### Added
+- **Op-log Replay**: Full timing-faithful workload replay from TSV op-log files
+  - Absolute timeline scheduling for microsecond-precision timing (~10µs accuracy)
+  - Auto-detection of zstd compression (.zst extension)
+  - Speed multiplier (`--speed`) for faster/slower replay
+  - Target URI remapping (`--target`) for simple 1:1 backend retargeting
+  - Support for all 5 operation types: GET, PUT, DELETE, LIST, STAT
+  - Error handling with `--continue-on-error` flag
+  - Uses `s3dlio::data_gen::generate_controlled_data()` for PUT operations
+  - Microsecond-precision sleep via `std::thread::sleep` wrapped in `tokio::task::spawn_blocking`
+
+### Dependencies
+- Added `csv = "1.3"` for TSV parsing
+- Added `chrono = "0.4"` for timestamp handling
+- Added `zstd = "0.13"` for op-log decompression
+
+## [0.3.2] - 2025-09-30
 
 ### ✨ NEW FEATURES
 - **Universal Operation Logging (Op-Log)**: Comprehensive operation tracing across all storage backends

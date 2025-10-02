@@ -195,6 +195,29 @@ enum Commands {
         #[arg(long)]
         config: String,
     },
+    /// Replay workload from op-log file with timing-faithful execution
+    /// 
+    /// Examples:
+    ///   io-bench replay --op-log /tmp/ops.tsv.zst
+    ///   io-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
+    ///   io-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
+    Replay {
+        /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
+        #[arg(long)]
+        op_log: std::path::PathBuf,
+        
+        /// Optional target URI to retarget all operations (simple 1:1 remapping)
+        #[arg(long)]
+        target: Option<String>,
+        
+        /// Speed multiplier (e.g., 2.0 = 2x faster, 0.5 = half speed)
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        
+        /// Continue on errors instead of stopping
+        #[arg(long)]
+        continue_on_error: bool,
+    },
 }
 
 // -----------------------------------------------------------------------------
@@ -240,6 +263,9 @@ fn main() -> Result<()> {
             put_cmd(&uri, object_size, objects, concurrency)?
         }
         Commands::Run { config } => run_workload(&config)?,
+        Commands::Replay { op_log, target, speed, continue_on_error } => {
+            replay_cmd(op_log, target, speed, continue_on_error)?
+        }
     }
     
     // Finalize operation logger if enabled
@@ -732,6 +758,35 @@ fn run_workload(config_path: &str) -> Result<()> {
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
+    
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// replay_cmd: Replay workload from op-log file
+// -----------------------------------------------------------------------------
+fn replay_cmd(
+    op_log: std::path::PathBuf,
+    target: Option<String>,
+    speed: f64,
+    continue_on_error: bool,
+) -> Result<()> {
+    use io_bench::replay::{replay_workload, ReplayConfig};
+    
+    // Validate target URI if provided
+    if let Some(ref uri) = target {
+        validate_uri(uri)?;
+    }
+    
+    let config = ReplayConfig {
+        op_log_path: op_log,
+        target_uri: target,
+        speed,
+        continue_on_error,
+    };
+    
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    rt.block_on(replay_workload(config))?;
     
     Ok(())
 }
