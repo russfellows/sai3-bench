@@ -18,7 +18,8 @@ use crate::config::{Config, OpSpec};
 use std::collections::HashMap;
 use crate::bucket_index;
 
-use s3dlio::object_store::{store_for_uri, ObjectStore};
+use s3dlio::object_store::{store_for_uri, store_for_uri_with_logger, ObjectStore};
+use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 
 // -----------------------------------------------------------------------------
 // Multi-backend support infrastructure
@@ -66,6 +67,29 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
     store_for_uri(uri).context("Failed to create object store")
 }
 
+/// Create ObjectStore instance with op-logger if available
+pub fn create_store_with_logger(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    let logger = global_logger();
+    if logger.is_some() {
+        store_for_uri_with_logger(uri, logger).context("Failed to create object store with logger")
+    } else {
+        create_store_for_uri(uri)
+    }
+}
+
+/// Initialize operation logger for performance analysis and replay
+pub fn init_operation_logger(path: &std::path::Path) -> anyhow::Result<()> {
+    let path_str = path.to_str()
+        .ok_or_else(|| anyhow!("Invalid path for op-log"))?;
+    init_op_logger(path_str).context("Failed to initialize operation logger")
+}
+
+/// Finalize and flush operation logger
+pub fn finalize_operation_logger() -> anyhow::Result<()> {
+    finalize_op_logger();
+    Ok(())
+}
+
 /// Helper to build full URI from components for different backends
 pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
     match backend {
@@ -109,7 +133,7 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
 /// Multi-backend GET operation using ObjectStore trait
 pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
     debug!("GET operation starting for URI: {}", uri);
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore get method with full URI (s3dlio handles URI parsing)
@@ -123,7 +147,7 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
 /// Multi-backend PUT operation using ObjectStore trait
 pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<()> {
     debug!("PUT operation starting for URI: {}, {} bytes", uri, data.len());
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore put method with full URI (s3dlio handles URI parsing)
@@ -137,7 +161,7 @@ pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<
 /// Multi-backend LIST operation using ObjectStore trait
 pub async fn list_objects_multi_backend(uri: &str) -> anyhow::Result<Vec<String>> {
     debug!("LIST operation starting for URI: {}", uri);
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore list method with full URI and recursive=true (s3dlio handles URI parsing)
@@ -152,7 +176,7 @@ pub async fn list_objects_multi_backend(uri: &str) -> anyhow::Result<Vec<String>
 /// Since ObjectStore doesn't have a dedicated stat method, we use a minimal get operation
 pub async fn stat_object_multi_backend(uri: &str) -> anyhow::Result<u64> {
     debug!("STAT operation starting for URI: {}", uri);
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
     // For stat operation, we'll use a minimal get operation to get the size
@@ -168,7 +192,7 @@ pub async fn stat_object_multi_backend(uri: &str) -> anyhow::Result<u64> {
 /// Multi-backend DELETE operation using ObjectStore trait
 pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
     debug!("DELETE operation starting for URI: {}", uri);
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore delete method with full URI (s3dlio handles URI parsing)
@@ -594,7 +618,7 @@ impl PreResolved {
 
 /// Multi-backend version: expand URIs for GET operations using ObjectStore trait
 async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
-    let store = create_store_for_uri(base_uri)?;
+    let store = create_store_with_logger(base_uri)?;
     
     if base_uri.contains('*') {
         // Glob pattern: list and filter

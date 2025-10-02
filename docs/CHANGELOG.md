@@ -2,6 +2,57 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.3.2] - 2025-10-01
+
+### ✨ NEW FEATURES
+- **Universal Operation Logging (Op-Log)**: Comprehensive operation tracing across all storage backends
+  - **Multi-Backend Support**: Captures operations from file://, direct://, s3://, and az:// backends
+  - **Automatic Compression**: All op-logs are zstd-compressed (.tsv.zst format)
+  - **Detailed Metrics**: Records timestamps, durations, sizes, errors for every operation
+  - **CLI Integration**: New `--op-log <PATH>` global flag for all commands
+  - **Replay Ready**: TSV format designed for future workload replay functionality (planned v0.4.0)
+
+- **Enhanced Logging System**: Unified tracing framework with pass-through to s3dlio
+  - **Verbosity Levels**: 
+    - No flags: Warnings and errors only
+    - `-v`: INFO level for io-bench, minimal s3dlio output
+    - `-vv`: DEBUG level for io-bench, INFO level for s3dlio (operational details)
+    - `-vvv`: TRACE level for io-bench, DEBUG level for s3dlio (full debugging)
+  - **Cascading Levels**: io-bench verbosity automatically configures s3dlio logging (one level less)
+  - **Unified Framework**: Both crates use `tracing` crate for consistent log formatting
+
+### 🚀 DEPENDENCY UPDATES
+- **s3dlio**: Upgraded to v0.8.12 (from git tag, no local patches)
+  - Universal op-log support across all backends
+  - Migration from `log` to `tracing` crate
+  - Removed aws-smithy-http-client patch (no longer needed)
+  - Operation logger API: `init_op_logger()`, `finalize_op_logger()`, `global_logger()`
+
+### 📊 OPERATION LOGGING FORMAT
+```tsv
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+```
+- Compressed with zstd (typically 10-20x reduction)
+- Compatible with standard TSV tools after decompression
+- Design documented in `docs/OP_LOG_REPLAY_DESIGN.md` for future replay feature
+
+### 🔧 TECHNICAL IMPROVEMENTS
+- **Build System**: Simplified dependency management, removed local patches
+- **Logging Architecture**: EnvFilter configuration for per-crate log levels
+- **ObjectStore Integration**: Enhanced with logger support via `store_for_uri_with_logger()`
+- **All Operations Instrumented**: GET, PUT, DELETE, LIST, STAT operations support op-logging
+
+### 📖 DOCUMENTATION
+- Added `docs/OP_LOG_REPLAY_DESIGN.md`: Complete replay feature specification for v0.4.0
+- Updated `.github/copilot-instructions.md`: Added ripgrep (rg) usage guide and op-log examples
+- Enhanced CLI help text: Clarified compression behavior and use cases
+
+### 🧪 TESTING
+- Validated op-log capture across all backends (file://, s3://, az://)
+- Verified zstd compression and decompression workflow
+- Tested logging level pass-through with -v, -vv, -vvv flags
+- Confirmed 59K+ operations captured from 5-second workload (9MB compressed)
+
 ## [0.3.1] - 2025-09-30
 
 ### ✨ NEW FEATURES
