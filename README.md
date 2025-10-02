@@ -27,18 +27,27 @@ A comprehensive storage performance testing tool that supports multiple backends
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with io-bench
-- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
+- **[Release Notes v0.4.0](docs/RELEASE_NOTES_v0.4.0.md)** - Replay feature details and examples
+- **[Future Work](docs/REPLAY_FUTURE_WORK.md)** - Planned enhancements for v0.4.1+
 - **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
+- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.3.1) - Enhanced User Experience
+## 🎊 Latest Release (v0.4.0) - Workload Replay
 
-### ✨ Progress Bars & Visual Feedback
+### 🎬 Timing-Faithful Replay
+- **Op-Log Replay**: Replay captured workloads with microsecond-precision timing (~10µs accuracy)
+- **Absolute Timeline Scheduling**: Prevents timing drift for faithful workload reproduction
+- **Backend Retargeting**: Simple 1:1 URI remapping to replay on different storage backends
+- **Speed Control**: Adjustable replay speed (e.g., 2x faster, 0.5x slower)
+- **Universal Support**: Works across all 5 operation types (GET, PUT, DELETE, LIST, STAT)
+- **Smart Compression**: Auto-detects zstd compression for space-efficient op-logs
+
+### ✨ Enhanced Capabilities (v0.3.x)
 - **Interactive Progress Bars**: Professional real-time progress visualization for all operations
 - **Time-based Progress**: Smooth animated progress tracking for timed workloads with ETA
 - **Operation Progress**: Visual completion tracking for GET, PUT, DELETE commands  
 - **Smart Messages**: Dynamic progress context showing concurrency, data sizes, and rates
-- **Enhanced Default Output**: Better feedback without requiring verbose flags
 
 ### 🎯 Core Features (v0.3.0)
 
@@ -59,7 +68,15 @@ cargo build --release
 
 # Test local filesystem
 ./target/release/io-bench health --uri "file:///tmp/test/"
-./target/release/io-bench put --uri "file:///tmp/test/data.txt" --object-size 1024
+./target/release/io-bench put --uri "file:///tmp/test/data*.txt" --object-size 1024 --objects 100
+
+# Capture workload with op-log
+./target/release/io-bench --op-log /tmp/workload.tsv.zst \
+  run --config my-workload.yaml
+
+# Replay workload to different backend
+./target/release/io-bench replay --op-log /tmp/workload.tsv.zst \
+  --target "s3://mybucket/prefix/" --speed 2.0
 
 # Test Azure Blob Storage (requires setup)
 export AZURE_STORAGE_ACCOUNT="your-storage-account"
@@ -85,12 +102,37 @@ export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
 - **Storage Credentials**: Backend-specific authentication (AWS, Azure)
 
 See the [Usage Guide](docs/USAGE.md) for detailed setup instructions.
-- **Microsecond Precision**: Sub-millisecond timing accuracy for detailed performance analysis
+
+### 🎬 Workload Replay Examples
+
+```bash
+# Capture a workload to op-log
+io-bench -v --op-log /tmp/production.tsv.zst run --config prod-workload.yaml
+
+# Replay with exact timing
+io-bench replay --op-log /tmp/production.tsv.zst
+
+# Replay to different backend (migration testing)
+io-bench replay --op-log /tmp/s3-workload.tsv.zst \
+  --target "az://newstorage/container/"
+
+# Replay at 10x speed for quick testing
+io-bench replay --op-log /tmp/workload.tsv.zst --speed 10.0
+
+# Replay with error tolerance
+io-bench replay --op-log /tmp/workload.tsv.zst --continue-on-error
+```
+
+**Key Features:**
+- **Microsecond Precision**: ~10µs timing accuracy using absolute timeline scheduling
 - **Verbose Logging**: `-v` for operational info, `-vv` for detailed debug tracing
 - **Pattern Matching**: Glob patterns (`*`) and directory listings supported across backends
 - **Concurrent Execution**: Semaphore-controlled concurrency with configurable worker counts
 
 ### Technical Notes
-**Stage 2 Migration Complete** - Successfully migrated all operations from direct AWS SDK calls to ObjectStore trait. Multi-backend file:// and direct:// URIs now fully operational alongside S3, with comprehensive logging and performance validation. Ready for production testing across all supported backends.
+
+**v0.4.0 Release** - Added timing-faithful workload replay with microsecond-precision scheduling. All operations use ObjectStore trait abstraction via s3dlio library for unified multi-backend support (file://, direct://, s3://, az://). Production-ready with comprehensive testing and logging.
+
+**Migration History** - Successfully migrated from direct AWS SDK calls to ObjectStore trait. Multi-backend URIs fully operational with comprehensive logging and performance validation.
 
 
