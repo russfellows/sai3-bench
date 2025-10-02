@@ -500,7 +500,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-http-client"
-version = "1.1.1"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "734b4282fbb7372923ac339cc2222530f8180d9d4745e582de19a18cee409fd8"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
@@ -1432,29 +1434,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "env_filter"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186e05a59d4c50738528153b83b0b0194d3a29507dfec16eccd4b342903397d0"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c863f0904021b108aa8b2f55046443e6b1ebde8fd4a15c399893aae4fa069f"
-dependencies = [
- "anstream",
- "anstyle",
- "env_filter",
- "jiff",
- "log",
 ]
 
 [[package]]
@@ -2480,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "io-bench"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2584,30 +2563,6 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
-
-[[package]]
-name = "jiff"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be1f93b8b1eb69c77f24bbb0afdf66f54b632ee39af40ca21c4365a1d7347e49"
-dependencies = [
- "jiff-static",
- "log",
- "portable-atomic",
- "portable-atomic-util",
- "serde",
-]
-
-[[package]]
-name = "jiff-static"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03343451ff899767262ec32146f6d559dd759fdadf42ff0e227c7c48f72594b4"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "jobserver"
@@ -4011,8 +3966,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "s3dlio"
-version = "0.8.7"
-source = "git+https://github.com/russfellows/s3dlio.git?rev=cd4ee2e#cd4ee2ef3214ae8b2d7af662176b6ce1a92365ca"
+version = "0.8.12"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.12#e58f9dc95fbc0fdda8dcdec4e83e8200d2f80842"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4031,7 +3986,6 @@ dependencies = [
  "clap",
  "crc32fast",
  "dotenvy",
- "env_logger",
  "futures 0.3.31",
  "futures-core",
  "futures-util",
@@ -4046,7 +4000,6 @@ dependencies = [
  "indicatif",
  "io",
  "libc",
- "log",
  "metrics",
  "ndarray 0.15.6",
  "ndarray-npy",
@@ -4068,6 +4021,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-sync",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
  "webpki-roots 0.26.11",
  "zip 2.4.2",
  "zstd",

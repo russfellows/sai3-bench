@@ -111,9 +111,14 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
     
-    /// Verbose output (-v for info, -vv for debug)
+    /// Verbose output (-v for info, -vv for debug, -vvv for trace with s3dlio debug)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbose: u8,
+    
+    /// Enable operation logging to specified file (always zstd compressed, use .tsv.zst extension)
+    /// Records all storage operations across all backends for performance analysis and replay
+    #[arg(long = "op-log", value_name = "PATH")]
+    op_log: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -199,31 +204,51 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // Initialize logging based on verbosity level
-    let log_level = match cli.verbose {
-        0 => "warn",  // Default: only warnings and errors
-        1 => "info",  // -v: info level and above
-        _ => "debug", // -vv or more: debug level and above
+    // Map io-bench verbosity to appropriate levels for both io_bench and s3dlio:
+    // -v (1): io_bench=info, s3dlio=warn (default passthrough)
+    // -vv (2): io_bench=debug, s3dlio=info (detailed io_bench, operational s3dlio)
+    // -vvv (3+): io_bench=trace, s3dlio=debug (full debugging both crates)
+    let (io_bench_level, s3dlio_level) = match cli.verbose {
+        0 => ("warn", "warn"),   // Default: only warnings and errors
+        1 => ("info", "warn"),   // -v: info level for io_bench, minimal s3dlio
+        2 => ("debug", "info"),  // -vv: debug io_bench, info s3dlio
+        _ => ("trace", "debug"), // -vvv+: trace io_bench, debug s3dlio
     };
     
-    // Initialize tracing subscriber with the appropriate level
+    // Initialize tracing subscriber with levels for both crates
     use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::new(format!("io_bench={},s3dlio={}", io_bench_level, s3dlio_level));
     fmt()
-        .with_env_filter(EnvFilter::new(format!("io_bench={}", log_level)))
+        .with_env_filter(filter)
         .init();
     
+    // Initialize operation logger if requested
+    if let Some(ref op_log_path) = cli.op_log {
+        info!("Initializing operation logger: {}", op_log_path.display());
+        workload::init_operation_logger(op_log_path)
+            .context("Failed to initialize operation logger")?;
+    }
+    
+    // Execute command
     match cli.command {
-        Commands::Health { uri } => {
-            health_cmd(&uri)?;
-        }
+        Commands::Health { uri } => health_cmd(&uri)?,
         Commands::List { uri } => list_cmd(&uri)?,
         Commands::Stat { uri } => stat_cmd(&uri)?,
         Commands::Get { uri, jobs } => get_cmd(&uri, jobs)?,
         Commands::Delete { uri, jobs } => delete_cmd(&uri, jobs)?,
         Commands::Put { uri, object_size, objects, concurrency } => {
-            put_cmd(&uri, object_size, objects, concurrency)?;
+            put_cmd(&uri, object_size, objects, concurrency)?
         }
         Commands::Run { config } => run_workload(&config)?,
     }
+    
+    // Finalize operation logger if enabled
+    if cli.op_log.is_some() {
+        info!("Finalizing operation logger");
+        workload::finalize_operation_logger()
+            .context("Failed to finalize operation logger")?;
+    }
+    
     Ok(())
 }
 

@@ -1,14 +1,17 @@
-# s3-bench AI Agent Guide
+# io-bench AI Agent Guide
 
 ## Project Overview
-s3-bench is a Rust-based S3 performance testing tool with unified multi-backend support (`file://`, `direct://`, `s3://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics.
+io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-## Architecture: Three Binary Strategy
-- **`s3-bench`** (`src/main.rs`) - Single-node CLI for immediate testing
-- **`s3bench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
-- **`s3bench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
+**Current Version**: v0.3.1 (October 2025)
 
-Generated from `proto/s3bench.proto` via `tonic-build` in `build.rs`.
+## Architecture: Four Binary Strategy
+- **`io-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars
+- **`iobench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
+- **`iobench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
+- **`iobench-run`** (`src/bin/run.rs`) - Legacy workload runner (being integrated)
+
+Generated from `proto/iobench.proto` via `tonic-build` in `build.rs`.
 
 ## Critical Dependencies & Patterns
 
@@ -21,6 +24,22 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
 }
 ```
 **Key**: s3dlio pinned to `rev = "cd4ee2e"` for API stability.
+
+### Progress Bars (v0.3.1)
+Professional progress visualization using `indicatif = "0.17"`:
+```rust
+// Time-based progress for workloads
+let pb = ProgressBar::new(duration.as_secs());
+pb.set_style(ProgressStyle::with_template(
+    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}s ({eta_precise}) {msg}"
+)?);
+
+// Operation-based progress for GET/PUT/DELETE
+let pb = ProgressBar::new(objects.len() as u64);
+pb.set_message(format!("downloading with {} workers", jobs));
+// ... async operations with pb.inc(1) ...
+pb.finish_with_message(format!("downloaded {:.2} MB", total_mb));
+```
 
 ### Config System (`src/config.rs`)
 - YAML parsing with `target` base URI + relative `path` resolution
@@ -50,22 +69,73 @@ Use `bucket_index(nbytes)` function for consistent bucketing.
 cargo build --release  # Requires protoc installed for gRPC
 ```
 
+### Code Search Tools
+**Primary tool**: `rg` (ripgrep) - Fast, project-aware recursive search
+```bash
+# Search for function definitions across all Rust files
+rg "fn create_store" --type rust
+
+# Find all uses of a specific import
+rg "use s3dlio::" --type rust
+
+# Search with context lines (show 3 lines before/after match)
+rg "ObjectStore" -C 3
+
+# Case-insensitive search
+rg -i "error" --type rust
+
+# Search specific files/directories
+rg "workload" src/workload.rs
+rg "gRPC" proto/
+```
+
+**When to use rg vs VS Code tools**:
+- Use `rg` for: Fast pattern searches, checking imports/usage counts, finding string literals
+- Use `grep_search` tool for: Regex patterns with VS Code context integration
+- Use `semantic_search` tool for: Conceptual searches when exact string is unknown
+
 ### Test Multi-Backend Operations
 ```bash
 # File backend (no credentials needed)
-./target/release/s3-bench -v run --config tests/configs/file_test.yaml
+./target/release/io-bench -v run --config tests/configs/file_test.yaml
 
 # S3 backend (requires .env with AWS_*)
-./target/release/s3-bench -vv run --config tests/configs/mixed.yaml
+./target/release/io-bench -vv run --config tests/configs/mixed.yaml
+
+# Azure backend (requires AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_ACCOUNT_KEY)
+./target/release/io-bench health --uri "az://storage-account/container/"
 ```
 
 ### Distributed Mode Testing
 ```bash
 # Terminal 1: Start agent
-./target/release/s3bench-agent --listen 127.0.0.1:7761
+./target/release/iobench-agent --listen 127.0.0.1:7761
 
 # Terminal 2: Test connectivity
-./target/release/s3bench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+```
+
+### Progress Bar Examples
+```bash
+# Timed workload with progress bar
+./target/release/io-bench run --config tests/configs/file_test.yaml
+
+# Operation-based progress (GET/PUT/DELETE)
+./target/release/io-bench get --uri file:///tmp/test/data/* --jobs 4
+./target/release/io-bench put --uri file:///tmp/test/ --object-size 1024 --objects 50 --concurrency 5
+```
+
+### Operation Logging (op-log)
+```bash
+# Create operation log during workload (always zstd compressed)
+./target/release/io-bench -vv --op-log /tmp/operations.tsv.zst run --config tests/configs/file_test.yaml
+
+# Decompress to view
+zstd -d /tmp/operations.tsv.zst -o /tmp/operations.tsv
+head -20 /tmp/operations.tsv
+
+# Op-log format: TSV with columns
+# idx, thread, op, client_id, n_objects, bytes, endpoint, file, error, start, first_byte, end, duration_ns
 ```
 
 ## Code Conventions & Gotchas
@@ -78,12 +148,12 @@ cargo build --release  # Requires protoc installed for gRPC
 ### Backend Detection Logic
 `BackendType::from_uri()` in `src/workload.rs` determines storage backend:
 ```rust
-// "s3://" -> S3, "file://" -> File, "direct://" -> DirectIO
+// "s3://" -> S3, "file://" -> File, "direct://" -> DirectIO, "az://" -> Azure
 // Default fallback is File for unrecognized schemes
 ```
 
 ### gRPC Protocol Buffer Build
-- `build.rs` generates `src/pb/s3bench.rs` from `proto/s3bench.proto`
+- `build.rs` generates `src/pb/iobench.rs` from `proto/iobench.proto`
 - **Requires**: `protoc` compiler installed system-wide
 - Output goes to tracked `src/pb/` directory (not target/)
 
@@ -104,7 +174,8 @@ Look for `TODO: Remove legacy s3_utils imports` - these indicate partial migrati
 
 ## Performance Characteristics
 - **File backend**: 25k+ ops/s with 1ms latency validated
+- **Azure backend**: 2-3 ops/s with ~700ms latency validated
 - **Concurrency**: Configurable via YAML `concurrency` field
 - **Logging**: `-v` operational info, `-vv` detailed tracing
 
-When extending functionality, always maintain ObjectStore abstraction and ensure new features work across all backend types (`file://`, `direct://`, `s3://`).
+When extending functionality, always maintain ObjectStore abstraction and ensure new features work across all backend types (`file://`, `direct://`, `s3://`, `az://`).

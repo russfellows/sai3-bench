@@ -1,6 +1,6 @@
 [package]
 name    = "io-bench"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 build   = "build.rs"
 
@@ -18,8 +18,8 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 
-# s3dlio (pinned to v0.8.7 for stable API)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", rev = "cd4ee2e" }
+# s3dlio (v0.8.12+ with universal op-log and tracing support)
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.8.12" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
@@ -64,14 +64,3 @@ path = "src/bin/run.rs"
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "2.1"
-
-# TEMPORARY: AWS Smithy HTTP Client Patch
-# 
-# This patch is required because s3dlio v0.8.7 uses private AWS SDK APIs.
-# The s3dlio team is considering removing this dependency since performance
-# improvements have not materialized and it creates build fragility.
-# 
-# TODO: Remove this patch once s3dlio no longer requires it
-[patch.crates-io]
-aws-smithy-http-client = { path = "../s3dlio/fork-patches/aws-smithy-http-client" }
-
