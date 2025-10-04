@@ -1,5 +1,6 @@
 // src/config.rs
 use serde::Deserialize;
+use crate::size_generator::SizeSpec;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -26,6 +27,11 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WeightedOp {
     pub weight: u32,
+    
+    /// Optional per-operation concurrency override (v0.5.3+)
+    #[serde(default)]
+    pub concurrency: Option<usize>,
+    
     #[serde(flatten)]
     pub spec: OpSpec,
 }
@@ -39,11 +45,25 @@ pub enum OpSpec {
         path: String 
     },
 
-    /// PUT objects of a fixed size.
+    /// PUT objects with configurable sizes.
     /// Uses 'path' relative to target, or absolute URI.
+    /// 
+    /// Supports two syntaxes:
+    /// 1. Fixed size (backward compatible):
+    ///    Put { path: "data/", object_size: 1048576 }
+    /// 
+    /// 2. Size distribution (v0.5.3+):
+    ///    Put { path: "data/", size_distribution: { type: "lognormal", mean: 1048576, ... } }
     Put {
         path: String,
-        object_size: u64,
+        
+        /// Fixed object size in bytes (backward compatible)
+        #[serde(default)]
+        object_size: Option<u64>,
+        
+        /// Size distribution specification (v0.5.3+)
+        #[serde(default, alias = "size_distribution")]
+        size_spec: Option<SizeSpec>,
     },
 
     /// LIST objects under a path/prefix.
@@ -94,17 +114,53 @@ pub struct EnsureSpec {
     /// Target number of objects to ensure exist
     pub count: u64,
     
-    /// Minimum object size in bytes
-    #[serde(default = "default_min_size")]
-    pub min_size: u64,
+    /// Minimum object size in bytes (deprecated - use size_distribution)
+    #[serde(default)]
+    pub min_size: Option<u64>,
     
-    /// Maximum object size in bytes  
-    #[serde(default = "default_max_size")]
-    pub max_size: u64,
+    /// Maximum object size in bytes (deprecated - use size_distribution)
+    #[serde(default)]
+    pub max_size: Option<u64>,
+    
+    /// Size distribution specification (v0.5.3+, preferred)
+    #[serde(default, alias = "size_distribution")]
+    pub size_spec: Option<SizeSpec>,
     
     /// Fill pattern: "zero" or "random"
     #[serde(default = "default_fill")]
     pub fill: FillPattern,
+}
+
+impl EnsureSpec {
+    /// Get the size specification, converting legacy min/max_size if needed
+    pub fn get_size_spec(&self) -> SizeSpec {
+        use crate::size_generator::{SizeDistribution, DistributionType, DistributionParams};
+        
+        if let Some(ref spec) = self.size_spec {
+            // New syntax
+            spec.clone()
+        } else {
+            // Backward compatibility: convert min_size/max_size to uniform distribution
+            let min = self.min_size.unwrap_or(default_min_size());
+            let max = self.max_size.unwrap_or(default_max_size());
+            
+            if min == max {
+                // Fixed size
+                SizeSpec::Fixed(min)
+            } else {
+                // Uniform distribution
+                SizeSpec::Distribution(SizeDistribution {
+                    dist_type: DistributionType::Uniform,
+                    min: Some(min),
+                    max: Some(max),
+                    params: DistributionParams {
+                        mean: None,
+                        std_dev: None,
+                    },
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -158,12 +214,51 @@ impl Config {
         }
     }
 
-    /// Get the resolved PUT target information
+    /// Get the resolved PUT target information (legacy method - returns fixed size)
+    /// For backward compatibility with code expecting a fixed size
     pub fn get_put_info(&self, put_op: &OpSpec) -> (String, u64) {
         match put_op {
-            OpSpec::Put { path, object_size } => {
+            OpSpec::Put { path, object_size, size_spec } => {
                 let base_uri = self.resolve_uri(path);
-                (base_uri, *object_size)
+                
+                // Backward compatibility: prefer object_size if specified
+                let size = if let Some(sz) = object_size {
+                    *sz
+                } else if let Some(spec) = size_spec {
+                    // If it's a fixed size spec, return that
+                    if let Some(fixed) = spec.as_fixed() {
+                        fixed
+                    } else {
+                        // Distribution - can't return a single size, panic with helpful message
+                        panic!("get_put_info called on PUT with distribution; use get_put_size_spec instead");
+                    }
+                } else {
+                    panic!("PUT operation must specify either object_size or size_spec");
+                };
+                
+                (base_uri, size)
+            }
+            _ => panic!("Expected PUT operation"),
+        }
+    }
+    
+    /// Get the resolved PUT target and size specification (v0.5.3+)
+    /// Returns (base_uri, SizeSpec) for use with SizeGenerator
+    pub fn get_put_size_spec(&self, put_op: &OpSpec) -> (String, SizeSpec) {
+        match put_op {
+            OpSpec::Put { path, object_size, size_spec } => {
+                let base_uri = self.resolve_uri(path);
+                
+                // Backward compatibility: convert object_size to SizeSpec::Fixed
+                let spec = if let Some(spec) = size_spec {
+                    spec.clone()
+                } else if let Some(sz) = object_size {
+                    SizeSpec::Fixed(*sz)
+                } else {
+                    panic!("PUT operation must specify either object_size or size_spec");
+                };
+                
+                (base_uri, spec)
             }
             _ => panic!("Expected PUT operation"),
         }

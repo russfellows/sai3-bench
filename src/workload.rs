@@ -109,6 +109,7 @@ pub struct PreparedObject {
 /// Execute prepare step: ensure objects exist for testing
 pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<Vec<PreparedObject>> {
     use crate::config::FillPattern;
+    use crate::size_generator::SizeGenerator;
     use rand::RngCore;
     
     let mut all_prepared = Vec::new();
@@ -135,8 +136,13 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
         
         // 3. Create missing objects
         if to_create > 0 {
-            info!("  Creating {} additional objects (size: {}-{} bytes, fill: {:?})", 
-                to_create, spec.min_size, spec.max_size, spec.fill);
+            // Create size generator from spec
+            let size_spec = spec.get_size_spec();
+            let size_generator = SizeGenerator::new(&size_spec)
+                .context("Failed to create size generator")?;
+            
+            info!("  Creating {} additional objects (sizes: {}, fill: {:?})", 
+                to_create, size_generator.description(), spec.fill);
             
             // Create progress bar for preparation
             let pb = ProgressBar::new(to_create);
@@ -153,12 +159,8 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
                     format!("{}/{}", spec.base_uri, key)
                 };
                 
-                // Generate data based on fill pattern
-                let size = if spec.min_size == spec.max_size {
-                    spec.min_size
-                } else {
-                    rand::rng().random_range(spec.min_size..=spec.max_size)
-                };
+                // Generate object size using size generator
+                let size = size_generator.generate();
                 
                 let data = match spec.fill {
                     FillPattern::Zero => vec![0u8; size as usize],
