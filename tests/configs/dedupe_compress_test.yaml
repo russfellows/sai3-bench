@@ -1,7 +1,7 @@
 # Test configuration for deduplication and compression settings
 # This tests s3dlio's controlled data generation capabilities
 
-target: "file:///tmp/s3bench-dedupe-test/"
+target: "file:///tmp/sai3bench-dedupe-test/"
 duration: 5s
 concurrency: 8
 
@@ -9,7 +9,7 @@ concurrency: 8
 prepare:
   ensure_objects:
     # Fully unique, uncompressible (random) data
-    - base_uri: "file:///tmp/s3bench-dedupe-test/unique/"
+    - base_uri: "file:///tmp/sai3bench-dedupe-test/unique/"
       count: 50
       size_distribution: 131072  # 128 KiB (Fixed size)
       fill: random
@@ -17,7 +17,7 @@ prepare:
       compress_factor: 1   # Uncompressible (random)
     
     # 3:1 deduplication, 2:1 compression
-    - base_uri: "file:///tmp/s3bench-dedupe-test/dedupe/"
+    - base_uri: "file:///tmp/sai3bench-dedupe-test/dedupe/"
       count: 50
       size_distribution: 131072  # 128 KiB (Fixed size)
       fill: random
@@ -25,7 +25,7 @@ prepare:
       compress_factor: 2   # 50% zeros (2:1 compression)
     
     # Extreme: 5:1 deduplication, 4:1 compression
-    - base_uri: "file:///tmp/s3bench-dedupe-test/extreme/"
+    - base_uri: "file:///tmp/sai3bench-dedupe-test/extreme/"
       count: 50
       size_distribution: 131072  # 128 KiB (Fixed size)
       fill: random

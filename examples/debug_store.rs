@@ -3,7 +3,7 @@ use s3dlio::store_for_uri;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let uri = "file:///tmp/s3bench-test/";
+    let uri = "file:///tmp/sai3bench-test/";
     let store = store_for_uri(uri)?;
     
     println!("Store created successfully for URI: {}", uri);

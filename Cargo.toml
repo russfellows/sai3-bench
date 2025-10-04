@@ -1,6 +1,6 @@
 [package]
-name = "io-bench"
-version = "0.5.3"
+name = "sai3-bench"
+version = "0.5.4"
 edition = "2024"
 build   = "build.rs"
 
@@ -49,22 +49,22 @@ prost-build = "^0.13"
 
 # existing main (single-node CLI) remains:
 [[bin]]
-name = "io-bench"
+name = "sai3-bench"
 path = "src/main.rs"
 
 # new agent (runs on each load-generator host)
 [[bin]]
-name = "iobench-agent"
+name = "sai3bench-agent"
 path = "src/bin/agent.rs"
 
 # new controller (coordinates benchmark across agents)
 [[bin]]
-name = "iobench-ctl"
+name = "sai3bench-ctl"
 path = "src/bin/controller.rs"
 
-#New iobench-run cli, separate for now, plan to integrate into main
+#New sai3bench-run cli, separate for now, plan to integrate into main
 [[bin]]
-name = "iobench-run"
+name = "sai3bench-run"
 path = "src/bin/run.rs"
 
 [dev-dependencies]

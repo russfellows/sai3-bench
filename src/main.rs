@@ -1,5 +1,5 @@
 //
-// Copyright, 2025: Suse io_bench::workload::{gnal65/Futurum
+// Copyright, 2025: Suse sai3_bench::workload::{gnal65/Futurum
 //
 
 // -----------------------------------------------------------------------------
@@ -11,9 +11,9 @@ use clap::{Parser, Subcommand};
 use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
-use io_bench::config::Config;
-use io_bench::metrics::{OpHists, bucket_index};
-use io_bench::workload;
+use sai3_bench::config::Config;
+use sai3_bench::metrics::{OpHists, bucket_index};
+use sai3_bench::workload;
 use serde_yaml;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,7 +23,7 @@ use tracing::info;
 use url::Url;
 
 // Multi-backend ObjectStore operations
-use io_bench::workload::{
+use sai3_bench::workload::{
     get_object_multi_backend, put_object_multi_backend, list_objects_multi_backend, 
     stat_object_multi_backend, delete_object_multi_backend,
 };
@@ -32,7 +32,7 @@ use io_bench::workload::{
 // CLI definition
 // -----------------------------------------------------------------------------
 #[derive(Parser)]
-#[command(name = "io-bench", version, about = "An io-bench tool that leverages s3dlio library")]
+#[command(name = "sai3-bench", version, about = "A sai3-bench tool that leverages s3dlio library")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -52,10 +52,10 @@ enum Commands {
     /// Verify storage backend reachability across all supported backends
     /// 
     /// Examples:
-    ///   io-bench health --uri "file:///tmp/test/"
-    ///   io-bench health --uri "s3://bucket/prefix/"
-    ///   io-bench health --uri "direct:///mnt/fast/"
-    ///   io-bench health --uri "az://storageaccount/container/"
+    ///   sai3-bench health --uri "file:///tmp/test/"
+    ///   sai3-bench health --uri "s3://bucket/prefix/"
+    ///   sai3-bench health --uri "direct:///mnt/fast/"
+    ///   sai3-bench health --uri "az://storageaccount/container/"
     Health {
         #[arg(long)]
         uri: String,
@@ -63,9 +63,9 @@ enum Commands {
     /// List objects (supports basename glob across all backends)
     /// 
     /// Examples:
-    ///   io-bench list --uri "file:///tmp/data/"
-    ///   io-bench list --uri "s3://bucket/prefix/"
-    ///   io-bench list --uri "direct:///mnt/data/*.txt"
+    ///   sai3-bench list --uri "file:///tmp/data/"
+    ///   sai3-bench list --uri "s3://bucket/prefix/"
+    ///   sai3-bench list --uri "direct:///mnt/data/*.txt"
     List {
         #[arg(long)]
         uri: String,
@@ -73,8 +73,8 @@ enum Commands {
     /// Stat (HEAD) one object across all backends
     /// 
     /// Examples:
-    ///   io-bench stat --uri "file:///tmp/data/file.txt"
-    ///   io-bench stat --uri "s3://bucket/object.txt"
+    ///   sai3-bench stat --uri "file:///tmp/data/file.txt"
+    ///   sai3-bench stat --uri "s3://bucket/object.txt"
     Stat {
         #[arg(long)]
         uri: String,
@@ -82,8 +82,8 @@ enum Commands {
     /// Get objects (prefix, glob, or single) from any backend
     /// 
     /// Examples:
-    ///   io-bench get --uri "file:///tmp/data/*" --jobs 8
-    ///   io-bench get --uri "s3://bucket/prefix/" --jobs 4
+    ///   sai3-bench get --uri "file:///tmp/data/*" --jobs 8
+    ///   sai3-bench get --uri "s3://bucket/prefix/" --jobs 4
     Get {
         #[arg(long)]
         uri: String,
@@ -93,8 +93,8 @@ enum Commands {
     /// Delete objects (prefix, glob, or single) from any backend
     /// 
     /// Examples:
-    ///   io-bench delete --uri "file:///tmp/old/*" --jobs 8
-    ///   io-bench delete --uri "s3://bucket/prefix/"
+    ///   sai3-bench delete --uri "file:///tmp/old/*" --jobs 8
+    ///   sai3-bench delete --uri "s3://bucket/prefix/"
     Delete {
         #[arg(long)]
         uri: String,
@@ -185,20 +185,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // Initialize logging based on verbosity level
-    // Map io-bench verbosity to appropriate levels for both io_bench and s3dlio:
-    // -v (1): io_bench=info, s3dlio=warn (default passthrough)
-    // -vv (2): io_bench=debug, s3dlio=info (detailed io_bench, operational s3dlio)
-    // -vvv (3+): io_bench=trace, s3dlio=debug (full debugging both crates)
-    let (io_bench_level, s3dlio_level) = match cli.verbose {
+    // Map io-bench verbosity to appropriate levels for both sai3_bench and s3dlio:
+    // -v (1): sai3_bench=info, s3dlio=warn (default passthrough)
+    // -vv (2): sai3_bench=debug, s3dlio=info (detailed sai3_bench, operational s3dlio)
+    // -vvv (3+): sai3_bench=trace, s3dlio=debug (full debugging both crates)
+    let (sai3_bench_level, s3dlio_level) = match cli.verbose {
         0 => ("warn", "warn"),   // Default: only warnings and errors
-        1 => ("info", "warn"),   // -v: info level for io_bench, minimal s3dlio
-        2 => ("debug", "info"),  // -vv: debug io_bench, info s3dlio
-        _ => ("trace", "debug"), // -vvv+: trace io_bench, debug s3dlio
+        1 => ("info", "warn"),   // -v: info level for sai3_bench, minimal s3dlio
+        2 => ("debug", "info"),  // -vv: debug sai3_bench, info s3dlio
+        _ => ("trace", "debug"), // -vvv+: trace sai3_bench, debug s3dlio
     };
     
     // Initialize tracing subscriber with levels for both crates
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::new(format!("io_bench={},s3dlio={}", io_bench_level, s3dlio_level));
+    let filter = EnvFilter::new(format!("sai3_bench={},s3dlio={}", sai3_bench_level, s3dlio_level));
     fmt()
         .with_env_filter(filter)
         .init();
@@ -750,7 +750,7 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results
     
     // Export TSV results if requested
     if let Some(tsv_path) = results_tsv {
-        use io_bench::tsv_export::TsvExporter;
+        use sai3_bench::tsv_export::TsvExporter;
         let exporter = TsvExporter::new(tsv_path);
         exporter.export_results(
             &summary.get_hists,
@@ -786,8 +786,8 @@ fn replay_cmd(
     speed: f64,
     continue_on_error: bool,
 ) -> Result<()> {
-    use io_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
-    use io_bench::remap::RemapConfig;
+    use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
+    use sai3_bench::remap::RemapConfig;
     
     // Validate target URI if provided
     if let Some(ref uri) = target {

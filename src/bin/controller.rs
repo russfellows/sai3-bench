@@ -18,7 +18,7 @@ use pb::iobench::agent_client::AgentClient;
 use pb::iobench::{Empty, RunGetRequest, RunPutRequest};
 
 #[derive(Parser)]
-#[command(name = "iobench-ctl", version, about = "IO Benchmark Controller (gRPC)")]
+#[command(name = "sai3bench-ctl", version, about = "SAI3 Benchmark Controller (gRPC)")]
 struct Cli {
     /// Comma-separated agent addresses (host:port)
     #[arg(long)]

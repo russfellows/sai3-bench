@@ -25,7 +25,7 @@
 - Removed 11 obsolete files (old release notes, completed plans, and design docs)
 - Consolidated version history into CHANGELOG.md
 - Kept recent implementation summaries (v0.5.x) for reference
-- Updated USAGE.md with correct binary names (io-bench, iobench-agent, iobench-ctl)
+- Updated USAGE.md with correct binary names (io-bench, sai3bench-agent, sai3bench-ctl)
 
 **Cleanup Policy**:
 - All release information goes into CHANGELOG.md (single source of truth)

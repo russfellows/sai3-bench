@@ -1,7 +1,7 @@
 # Azure Blob Storage Configuration Guide
 
 ## Overview
-This guide covers proper setup and configuration for Azure Blob Storage backend support in s3-bench using the `az://` URI scheme.
+This guide covers proper setup and configuration for Azure Blob Storage backend support in sai3-bench using the `az://` URI scheme.
 
 ## Prerequisites
 - Azure CLI installed and authenticated
@@ -71,32 +71,32 @@ az://mycontainer/path/to/object.txt
 export AZURE_STORAGE_ACCOUNT="mystorageaccount"
 export AZURE_STORAGE_ACCOUNT_KEY="$(az storage account keys list --account-name mystorageaccount --query [0].value -o tsv)"
 
-s3-bench health --uri "az://mystorageaccount/mycontainer/"
+sai3-bench health --uri "az://mystorageaccount/mycontainer/"
 ```
 
 ### List Objects
 ```bash
-s3-bench list --uri "az://mystorageaccount/mycontainer/"
+sai3-bench list --uri "az://mystorageaccount/mycontainer/"
 ```
 
 ### Upload Objects
 ```bash
-s3-bench put --uri "az://mystorageaccount/mycontainer/test.dat" --object-size 1048576 --objects 1
+sai3-bench put --uri "az://mystorageaccount/mycontainer/test.dat" --object-size 1048576 --objects 1
 ```
 
 ### Download Objects
 ```bash
-s3-bench get --uri "az://mystorageaccount/mycontainer/test.dat"
+sai3-bench get --uri "az://mystorageaccount/mycontainer/test.dat"
 ```
 
 ### Get Object Statistics
 ```bash
-s3-bench stat --uri "az://mystorageaccount/mycontainer/test.dat"
+sai3-bench stat --uri "az://mystorageaccount/mycontainer/test.dat"
 ```
 
 ### Delete Objects
 ```bash
-s3-bench delete --uri "az://mystorageaccount/mycontainer/test.dat"
+sai3-bench delete --uri "az://mystorageaccount/mycontainer/test.dat"
 ```
 
 ## Workload Configuration
@@ -127,7 +127,7 @@ export AZURE_STORAGE_ACCOUNT="mystorageaccount"
 export AZURE_STORAGE_ACCOUNT_KEY="$(az storage account keys list --account-name mystorageaccount --query [0].value -o tsv)"
 
 # Run workload
-s3-bench run --config azure_test.yaml
+sai3-bench run --config azure_test.yaml
 ```
 
 ## Performance Characteristics
@@ -161,7 +161,7 @@ az storage blob list --account-name mystorageaccount --container-name mycontaine
 ../s3dlio/target/release/s3-cli -vv ls az://mystorageaccount/mycontainer/
 
 # Test with verbose logging
-s3-bench -vv health --uri "az://mystorageaccount/mycontainer/"
+sai3-bench -vv health --uri "az://mystorageaccount/mycontainer/"
 ```
 
 ## Security Notes

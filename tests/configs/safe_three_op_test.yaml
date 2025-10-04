@@ -1,5 +1,5 @@
 # Safer test configuration with GET, PUT, LIST, STAT operations
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 duration: "10s"
 concurrency: 2
 

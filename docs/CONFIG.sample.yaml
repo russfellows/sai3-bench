@@ -35,7 +35,7 @@ workload:
 
 ---
 # Example 3: File Backend (Local Testing)
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 duration: "30s"
 concurrency: 64  # Higher concurrency for local storage
 
@@ -51,7 +51,7 @@ workload:
 
 ---
 # Example 4: Direct I/O Backend (High Performance Local)
-target: "direct:///tmp/s3bench-direct/"
+target: "direct:///tmp/sai3bench-direct/"
 duration: "30s"
 concurrency: 32
 

@@ -3,9 +3,9 @@
 io-bench is a multi-protocol I/O benchmarking suite with optional distributed execution via gRPC. It ships four binaries:
 
 - **`io-bench`** — single-node CLI (health/list/stat/get/put/delete/run/replay) using `s3dlio`
-- **`iobench-agent`** — per-host gRPC agent that runs I/O operations on that host
-- **`iobench-ctl`** — controller that coordinates one or more agents
-- **`iobench-run`** — legacy workload runner (being integrated into io-bench)
+- **`sai3bench-agent`** — per-host gRPC agent that runs I/O operations on that host
+- **`sai3bench-ctl`** — controller that coordinates one or more agents
+- **`sai3bench-run`** — legacy workload runner (being integrated into io-bench)
 
 **Supported Backends**: `file://`, `direct://`, `s3://`, `az://`, `gs://`
 
@@ -41,9 +41,9 @@ Binaries will be in target/release/
 
 # Agent & Controller CLI Summary
 ```
-iobench-agent
+sai3bench-agent
 USAGE:
-  iobench-agent [--listen <addr>] [--tls] [--tls-domain <name>]
+  sai3bench-agent [--listen <addr>] [--tls] [--tls-domain <name>]
                 [--tls-sans <csv>] [--tls-write-ca <dir>]
 
 FLAGS/OPTIONS:
@@ -55,9 +55,9 @@ FLAGS/OPTIONS:
 ```
 
 ```
-iobench-ctl
+sai3bench-ctl
 USAGE:
-  iobench-ctl [--insecure] [--agent-ca <path>] [--agent-domain <name>] --agents <csv> <SUBCOMMAND> ...
+  sai3bench-ctl [--insecure] [--agent-ca <path>] [--agent-domain <name>] --agents <csv> <SUBCOMMAND> ...
 
 GLOBAL FLAGS/OPTIONS:
   --agents <csv>        Comma-separated list of agent addresses (host:port)
@@ -85,25 +85,25 @@ name the controller uses, add --agent-domain.
 In one terminal:
 
 ## Run agent without TLS on port 7761
-./target/release/iobench-agent --listen 127.0.0.1:7761
+./target/release/sai3bench-agent --listen 127.0.0.1:7761
 In another terminal:
 
 ## Controller talking to that agent, explicit plaintext:
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
 
 ## Example GET workload (jobs = concurrency for downloads)
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/path/ --jobs 8
 
 # 3 Multi-Host (PLAINTEXT)
 On each agent host (e.g., node1, node2):
 
-./iobench-agent --listen 0.0.0.0:7761
+./sai3bench-agent --listen 0.0.0.0:7761
 From the controller host:
 
-./iobench-ctl --insecure --agents node1:7761,node2:7761 ping
+./sai3bench-ctl --insecure --agents node1:7761,node2:7761 ping
 
-./iobench-ctl --insecure --agents node1:7761,node2:7761 get \
+./sai3bench-ctl --insecure --agents node1:7761,node2:7761 get \
   --uri s3://my-bucket/data/ --jobs 16
 
 # 4 TLS with Self‑Signed Certificates (No CA hassles)
@@ -117,7 +117,7 @@ resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 
 ### Example: agent runs on loki-node3, reachable by name and IP
 Write cert & key into /tmp/agent-ca/  (for you to scp to controller)
-./iobench-agent \
+./sai3bench-agent \
   --listen 0.0.0.0:7761 \
   --tls \
   --tls-domain loki-node3 \
@@ -143,7 +143,7 @@ scp user@loki-node3:/tmp/agent-ca/agent_cert.pem /tmp/agent_ca.pem
 Single agent:
 
 ```
-./iobench-ctl \
+./sai3bench-ctl \
   --agents loki-node3:7761 \
   --agent-ca /tmp/agent_ca.pem \
   ping
@@ -154,7 +154,7 @@ If you connect by an alternate name or IP that’s in the SANs, you may need
 
 ## Connecting to the agent by IP, telling TLS to expect "loki-node3" (in SANs)
 ```
-./iobench-ctl \
+./sai3bench-ctl \
   --agents 10.10.0.23:7761 \
   --agent-ca /tmp/agent_ca.pem \
   --agent-domain loki-node3 \
@@ -164,13 +164,13 @@ If you connect by an alternate name or IP that’s in the SANs, you may need
 Multiple agents (all in TLS mode):
 
 ```
-./iobench-ctl \
+./sai3bench-ctl \
   --agents loki-node3:7761,loki-node4:7761 \
   --agent-ca /tmp/agent_ca.pem \
   ping
 ```
 ```
-./iobench-ctl \
+./sai3bench-ctl \
   --agents loki-node3:7761,loki-node4:7761 \
   --agent-ca /tmp/agent_ca.pem \
   get --uri s3://my-bucket/data/ --jobs 16
@@ -182,13 +182,13 @@ Multiple agents (all in TLS mode):
 GET (download) via controller
 ### PLAINTEXT
 ```
-./iobench-ctl --insecure --agents node1:7761 get \
+./sai3bench-ctl --insecure --agents node1:7761 get \
   --uri s3://my-bucket/prefix/ --jobs 16
 ```
 
 ### TLS
 ```
-./iobench-ctl --agents node1:7761 \
+./sai3bench-ctl --agents node1:7761 \
   --agent-ca /tmp/agent_ca.pem \
   get --uri s3://my-bucket/prefix/ --jobs 16
 ```
@@ -201,7 +201,7 @@ PUT (upload) via controller
 
 ### PLAINTEXT
 ```
-./iobench-ctl --insecure --agents node1:7761 put \
+./sai3bench-ctl --insecure --agents node1:7761 put \
   --bucket my-bucket \
   --prefix test/ \
   --object-size 1048576 \
@@ -211,7 +211,7 @@ PUT (upload) via controller
 
 ### TLS
 ```
-./iobench-ctl --agents node1:7761 \
+./sai3bench-ctl --agents node1:7761 \
   --agent-ca /tmp/agent_ca.pem \
   put --bucket my-bucket \
   --prefix test/ \
@@ -223,16 +223,16 @@ PUT (upload) via controller
 # 6 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
-./target/release/iobench-agent --listen 127.0.0.1:7761
+./target/release/sai3bench-agent --listen 127.0.0.1:7761
 ```
 
 ### Terminal B — controller
 ```
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
 ```
 
 ```
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/prefix/ --jobs 4
 ```
 
@@ -240,7 +240,7 @@ PUT (upload) via controller
 
 ### Terminal A — agent with TLS & SANs covering "localhost" and "127.0.0.1"
 ```
-./iobench-agent --listen 127.0.0.1:7761 --tls \
+./sai3bench-agent --listen 127.0.0.1:7761 --tls \
   --tls-domain localhost \
   --tls-sans "localhost,127.0.0.1" \
   --tls-write-ca /tmp/agent-ca
@@ -249,7 +249,7 @@ PUT (upload) via controller
 
 ### Terminal B — controller
 ```
-./iobench-ctl --agents 127.0.0.1:7761 \
+./sai3bench-ctl --agents 127.0.0.1:7761 \
   --agent-ca /tmp/agent-ca/agent_cert.pem \
   --agent-domain localhost \
   ping
@@ -298,7 +298,7 @@ Sections 3–4.
 The agent reports its version on ping:
 
 ```
-./iobench-ctl --insecure --agents node1:7761 ping
+./sai3bench-ctl --insecure --agents node1:7761 ping
 # connected to node1:7761 (agent version X.Y.Z)
 ```
 Keep controller/agent binaries from the same source build when testing.

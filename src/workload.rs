@@ -25,7 +25,7 @@ use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 // Multi-backend support infrastructure
 // -----------------------------------------------------------------------------
 
-/// Backend types supported by io-bench
+/// Backend types supported by sai3-bench
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType {
     S3,
@@ -846,7 +846,7 @@ impl PreResolved {
 /// Expand keys for a GET uri: supports exact key, prefix, or glob '*'.
 /// 
 /// NOTE: s3dlio's ObjectStore trait does not provide pattern matching in list().
-/// We implement glob pattern matching at the io-bench level by:
+/// We implement glob pattern matching at the sai3-bench level by:
 /// 1. Listing all objects in the directory
 /// 2. Applying regex-based filtering to match the pattern
 /// 

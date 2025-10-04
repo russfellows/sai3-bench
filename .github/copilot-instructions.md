@@ -1,15 +1,15 @@
-# io-bench AI Agent Guide
+# sai3-bench AI Agent Guide
 
 ## Project Overview
-io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
+sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
 **Current Version**: v0.5.3 (October 2025) - Realistic Size Distributions & Advanced Configurability
 
 ## Architecture: Four Binary Strategy
-- **`io-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars
-- **`iobench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
-- **`iobench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
-- **`iobench-run`** (`src/bin/run.rs`) - Legacy workload runner (being integrated)
+- **`sai3-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars
+- **`sai3bench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
+- **`sai3bench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
+- **`sai3bench-run`** (`src/bin/run.rs`) - Legacy workload runner (being integrated)
 
 Generated from `proto/iobench.proto` via `tonic-build` in `build.rs`.
 
@@ -47,10 +47,10 @@ pb.finish_with_message(format!("downloaded {:.2} MB", total_mb));
 - **v0.5.3+**: `WeightedOp` has optional `concurrency` field for per-operation concurrency
 - Example from `tests/configs/file_test.yaml`:
 ```yaml
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 workload:
   - op: get
-    path: "data/*"  # Resolves to file:///tmp/s3bench-test/data/*
+    path: "data/*"  # Resolves to file:///tmp/sai3bench-test/data/*
     weight: 70
     concurrency: 64  # Optional per-op override
 ```
@@ -143,38 +143,38 @@ rg "gRPC" proto/
 ### Test Multi-Backend Operations
 ```bash
 # File backend (no credentials needed)
-./target/release/io-bench -v run --config tests/configs/file_test.yaml
+./target/release/sai3-bench -v run --config tests/configs/file_test.yaml
 
 # S3 backend (requires .env with AWS_*)
-./target/release/io-bench -vv run --config tests/configs/mixed.yaml
+./target/release/sai3-bench -vv run --config tests/configs/mixed.yaml
 
 # Azure backend (requires AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_ACCOUNT_KEY)
-./target/release/io-bench health --uri "az://storage-account/container/"
+./target/release/sai3-bench health --uri "az://storage-account/container/"
 ```
 
 ### Distributed Mode Testing
 ```bash
 # Terminal 1: Start agent
-./target/release/iobench-agent --listen 127.0.0.1:7761
+./target/release/sai3bench-agent --listen 127.0.0.1:7761
 
 # Terminal 2: Test connectivity
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
 ```
 
 ### Progress Bar Examples
 ```bash
 # Timed workload with progress bar
-./target/release/io-bench run --config tests/configs/file_test.yaml
+./target/release/sai3-bench run --config tests/configs/file_test.yaml
 
 # Operation-based progress (GET/PUT/DELETE)
-./target/release/io-bench get --uri file:///tmp/test/data/* --jobs 4
-./target/release/io-bench put --uri file:///tmp/test/ --object-size 1024 --objects 50 --concurrency 5
+./target/release/sai3-bench get --uri file:///tmp/test/data/* --jobs 4
+./target/release/sai3-bench put --uri file:///tmp/test/ --object-size 1024 --objects 50 --concurrency 5
 ```
 
 ### Operation Logging (op-log)
 ```bash
 # Create operation log during workload (always zstd compressed)
-./target/release/io-bench -vv --op-log /tmp/operations.tsv.zst run --config tests/configs/file_test.yaml
+./target/release/sai3-bench -vv --op-log /tmp/operations.tsv.zst run --config tests/configs/file_test.yaml
 
 # Decompress to view
 zstd -d /tmp/operations.tsv.zst -o /tmp/operations.tsv

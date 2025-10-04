@@ -28,7 +28,7 @@ use pb::iobench::agent_server::{Agent, AgentServer};
 use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest};
 
 #[derive(Parser)]
-#[command(name = "iobench-agent", version, about = "IO Benchmark Agent (gRPC)")]
+#[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
 struct Cli {
     /// Listen address, e.g. 0.0.0.0:7761
     #[arg(long, default_value = "0.0.0.0:7761")]
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
 
     // Decide between plaintext and TLS
     if !args.tls {
-        println!("iobench-agent listening (PLAINTEXT) on {}", addr);
+        println!("sai3bench-agent listening (PLAINTEXT) on {}", addr);
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::default()))
             .serve_with_shutdown(addr, async {
@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new().identity(identity);
 
     println!(
-        "iobench-agent listening (TLS) on {} — SANs: {}",
+        "sai3bench-agent listening (TLS) on {} — SANs: {}",
         addr,
         if let Some(list) = &args.tls_sans {
             list

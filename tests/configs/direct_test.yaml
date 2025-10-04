@@ -1,6 +1,6 @@
 # Direct I/O backend test configuration
 # Tests direct:// URI scheme with local filesystem operations using direct I/O
-target: "direct:///tmp/s3bench-direct-test/"
+target: "direct:///tmp/sai3bench-direct-test/"
 
 workload:
   - op: put

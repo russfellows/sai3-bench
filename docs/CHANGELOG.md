@@ -1,6 +1,31 @@
 # Changelog
 
-All notable changes to io-bench will be documented in this file.
+All notable changes to sai3-bench will be documented in this file.
+
+## [0.5.4] - 2025-10-04
+
+### 💥 BREAKING CHANGES
+- **Project Renamed**: `io-bench` → `sai3-bench` (final name reflecting S3/Azure/I3 unified benchmarking)
+- **Binary Names Changed**:
+  - `io-bench` → `sai3-bench`
+  - `iobench-agent` → `sai3bench-agent`
+  - `iobench-ctl` → `sai3bench-ctl`
+  - `iobench-run` → `sai3bench-run`
+- **Module/Crate Name**: `io_bench` → `sai3_bench` in Rust code
+
+### 📝 Documentation Updates
+- Updated all documentation to reflect new project name
+- Updated all command examples with new binary names
+- Updated test configuration file paths (s3bench-test → sai3bench-test)
+
+### ℹ️ Migration Notes
+If upgrading from v0.5.3 (io-bench):
+1. Update any scripts: `io-bench` → `sai3-bench`
+2. Update agent/controller scripts: `iobench-*` → `sai3bench-*`
+3. Rebuild: `cargo build --release`
+4. All functionality remains identical—only names changed
+
+---
 
 ## [0.5.3] - 2025-10-04
 
@@ -179,7 +204,7 @@ per_op_concurrency_test.yaml:
 ```
 
 ### 🏆 Competitive Position
-With v0.5.3, **io-bench surpasses MinIO Warp** in:
+With v0.5.3, **sai3-bench surpasses MinIO Warp** in:
 1. **Realistic workload modeling** - Lognormal distributions match real-world storage patterns
 2. **Configurability** - Per-operation concurrency for advanced scenarios
 3. **Backend support** - 5 protocols vs S3-only
@@ -334,13 +359,13 @@ Advanced URI remapping system supporting multiple mapping strategies:
 #### New Replay Flag
 ```bash
 # Basic remapping
-io-bench replay --op-log production.tsv.zst --remap remap.yaml
+sai3-bench replay --op-log production.tsv.zst --remap remap.yaml
 
 # With speed control
-io-bench replay --op-log ops.tsv.zst --remap fanout.yaml --speed 2.0
+sai3-bench replay --op-log ops.tsv.zst --remap fanout.yaml --speed 2.0
 
 # Multi-target fanout
-io-bench replay --op-log prod.tsv.zst --remap remap_fanout.yaml
+sai3-bench replay --op-log prod.tsv.zst --remap remap_fanout.yaml
 ```
 
 ### 🏗️ Architecture
@@ -497,7 +522,7 @@ rules:
 ## [0.4.3] - 2025-10-04
 
 ### 🎯 Warp Parity Phase 1: Prepare/Pre-population
-MinIO Warp compatibility features enabling near-identical test workflows between io-bench and Warp.
+MinIO Warp compatibility features enabling near-identical test workflows between sai3-bench and Warp.
 
 ### ✨ New Features
 
@@ -519,12 +544,12 @@ MinIO Warp compatibility features enabling near-identical test workflows between
 - Examples:
   ```bash
   # Prepare objects once, run tests multiple times
-  io-bench run --config mixed.yaml --prepare-only
-  io-bench run --config mixed.yaml
-  io-bench run --config mixed.yaml
+  sai3-bench run --config mixed.yaml --prepare-only
+  sai3-bench run --config mixed.yaml
+  sai3-bench run --config mixed.yaml
   
   # Run with cleanup disabled
-  io-bench run --config mixed.yaml --no-cleanup
+  sai3-bench run --config mixed.yaml --no-cleanup
   ```
 
 ### 🔧 Configuration Schema Extensions
@@ -576,9 +601,9 @@ workload:
   - Benefit: More efficient, less data transfer, correct semantics
   
 #### Pattern Matching Clarification
-- **Documented Approach**: Added comments explaining io-bench's URI pattern matching
+- **Documented Approach**: Added comments explaining sai3-bench's URI pattern matching
   - s3dlio's ObjectStore doesn't provide native glob support in `list()`
-  - io-bench implements list-and-filter for `*` patterns at application level
+  - sai3-bench implements list-and-filter for `*` patterns at application level
   - This is correct: object stores don't have native glob (S3, Azure, GCS all work this way)
   - For local file operations, s3dlio has `generic_upload_files()` with glob crate
 
@@ -711,7 +736,7 @@ Successfully tested against Google Cloud Storage:
 
 ### ✅ Testing
 - **Comprehensive Integration Tests**: 6 tests validating streaming replay
-  - Round-trip test: s3dlio generates op-log → io-bench replays
+  - Round-trip test: s3dlio generates op-log → sai3-bench replays
   - Memory efficiency test: 100+ operations with constant memory
   - URI remapping test: Replay to different storage backend
   - Error handling test: Continue-on-error functionality
@@ -760,10 +785,10 @@ Successfully tested against Google Cloud Storage:
 - **Enhanced Logging System**: Unified tracing framework with pass-through to s3dlio
   - **Verbosity Levels**: 
     - No flags: Warnings and errors only
-    - `-v`: INFO level for io-bench, minimal s3dlio output
-    - `-vv`: DEBUG level for io-bench, INFO level for s3dlio (operational details)
-    - `-vvv`: TRACE level for io-bench, DEBUG level for s3dlio (full debugging)
-  - **Cascading Levels**: io-bench verbosity automatically configures s3dlio logging (one level less)
+    - `-v`: INFO level for sai3-bench, minimal s3dlio output
+    - `-vv`: DEBUG level for sai3-bench, INFO level for s3dlio (operational details)
+    - `-vvv`: TRACE level for sai3-bench, DEBUG level for s3dlio (full debugging)
+  - **Cascading Levels**: sai3-bench verbosity automatically configures s3dlio logging (one level less)
   - **Unified Framework**: Both crates use `tracing` crate for consistent log formatting
 
 ### 🚀 DEPENDENCY UPDATES
@@ -832,12 +857,12 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 This release represents a fundamental transformation from an S3-only tool to a comprehensive multi-protocol I/O benchmarking suite.
 
 ### 💥 BREAKING CHANGES
-- **Project Renamed**: `s3-bench` → `io-bench` (reflects multi-protocol nature)
+- **Project Renamed**: `s3-bench` → `sai3-bench` (reflects multi-protocol nature)
 - **Binary Names Changed**:
-  - `s3-bench` → `io-bench`
-  - `s3bench-agent` → `iobench-agent`
-  - `s3bench-ctl` → `iobench-ctl`
-  - `s3bench-run` → `iobench-run`
+  - `s3-bench` → `sai3-bench`
+  - `s3bench-agent` → `sai3bench-agent`
+  - `s3bench-ctl` → `sai3bench-ctl`
+  - `s3bench-run` → `sai3bench-run`
 - **gRPC Protocol**: Package renamed from `s3bench` to `iobench`
 
 ### ✨ NEW FEATURES

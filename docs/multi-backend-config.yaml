@@ -1,4 +1,4 @@
-# Multi-backend configuration examples for s3-bench
+# Multi-backend configuration examples for sai3-bench
 
 # Example 1: S3 backend with target base URI
 target: "s3://my-bucket/test-data/"
@@ -20,17 +20,17 @@ workload:
 ---
 
 # Example 2: Local file system backend
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 duration: "30s"
 concurrency: 8
 
 workload:
   - op: get
-    path: "data/*"           # Expands to file:///tmp/s3bench-test/data/*
+    path: "data/*"           # Expands to file:///tmp/sai3bench-test/data/*
     weight: 60
 
   - op: put
-    path: "results/"         # Puts to file:///tmp/s3bench-test/results/obj_123456
+    path: "results/"         # Puts to file:///tmp/sai3bench-test/results/obj_123456
     object_size: 65536       # 64 KiB
     weight: 40
 

@@ -1,5 +1,5 @@
 # Test configuration with delete operation
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 duration: "3s"
 concurrency: 1
 

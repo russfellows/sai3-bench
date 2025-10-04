@@ -1,5 +1,5 @@
 # Simple file backend test
-target: "file:///tmp/s3bench-test/"
+target: "file:///tmp/sai3bench-test/"
 duration: "5s"
 concurrency: 2
 

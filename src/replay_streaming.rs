@@ -1,4 +1,4 @@
-//! Op-log replay functionality for io-bench v0.5.0
+//! Op-log replay functionality for sai3-bench v0.5.0
 //!
 //! Implements timing-faithful workload replay using s3dlio-oplog streaming reader.
 //! This version uses constant memory (~1.5 MB) regardless of op-log size.
@@ -71,7 +71,7 @@ pub struct ReplayStats {
 /// # Example
 ///
 /// ```no_run
-/// use io_bench::replay::{ReplayConfig, replay_workload_streaming};
+/// use sai3_bench::replay::{ReplayConfig, replay_workload_streaming};
 /// use std::path::PathBuf;
 ///
 /// # tokio_test::block_on(async {

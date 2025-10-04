@@ -1,6 +1,6 @@
-# io-bench: Multi-Protocol I/O Benchmarking Suite
+# sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](https://github.com/russfellows/s3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](https://github.com/russfellows/s3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/s3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/s3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,9 +8,9 @@
 
 A comprehensive storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for robust multi-protocol support.
 
-## 🚀 What Makes io-bench Different?
+## 🚀 What Makes sai3-bench Different?
 
-1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, io-bench supports 5 storage backends
+1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, sai3-bench supports 5 storage backends
 2. **Unified Interface**: Consistent CLI and configuration across all storage types  
 3. **Advanced Metrics**: Microsecond-precision HDR histogram performance measurements with size-bucketed analysis
 4. **Machine-Readable Results**: TSV export for automated analysis and performance tracking
@@ -28,13 +28,13 @@ A comprehensive storage performance testing tool that supports multiple backends
 
 ## 📦 Architecture & Binaries
 
-- **`io-bench`** - Single-node CLI for immediate testing across all backends
-- **`iobench-agent`** - Distributed gRPC agent for multi-node load generation  
-- **`iobench-ctl`** - Controller for coordinating distributed agents
-- **`iobench-run`** - Dedicated workload runner (legacy, being integrated)
+- **`sai3-bench`** - Single-node CLI for immediate testing across all backends
+- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
+- **`sai3bench-ctl`** - Controller for coordinating distributed agents
+- **`sai3bench-run`** - Dedicated workload runner (legacy, being integrated)
 
 ## 📖 Documentation
-- **[Usage Guide](docs/USAGE.md)** - Getting started with io-bench
+- **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
 - **[Warp Parity Plan](docs/WARP_PARITY_PLAN.md)** - Warp/warp-replay compatibility roadmap
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
@@ -155,7 +155,7 @@ remap:
 
 ### 🏆 Competitive Advantage vs Warp
 
-| Feature | Warp | io-bench v0.5.3 |
+| Feature | Warp | sai3-bench v0.5.3 |
 |---------|------|-----------------|
 | **Size distributions** | Random only | **Uniform + Lognormal** (realistic) |
 | **Concurrency control** | Global only | **Per-operation** override |
@@ -210,33 +210,33 @@ remap:
 cargo build --release
 
 # Test local filesystem
-./target/release/io-bench health --uri "file:///tmp/test/"
-./target/release/io-bench put --uri "file:///tmp/test/data*.txt" --object-size 1024 --objects 100
+./target/release/sai3-bench health --uri "file:///tmp/test/"
+./target/release/sai3-bench put --uri "file:///tmp/test/data*.txt" --object-size 1024 --objects 100
 
 # Capture workload with op-log
-./target/release/io-bench --op-log /tmp/workload.tsv.zst \
+./target/release/sai3-bench --op-log /tmp/workload.tsv.zst \
   run --config my-workload.yaml
 
 # Run workload with TSV export for machine-readable results
-./target/release/io-bench run --config my-workload.yaml \
+./target/release/sai3-bench run --config my-workload.yaml \
   --results-tsv /tmp/benchmark-results
 
 # Replay workload to different backend
-./target/release/io-bench replay --op-log /tmp/workload.tsv.zst \
+./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst \
   --target "s3://mybucket/prefix/" --speed 2.0
 
 # Advanced: Replay with 1→N fanout remapping
-./target/release/io-bench replay --op-log /tmp/workload.tsv.zst \
+./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst \
   --remap fanout-config.yaml
 
 # Test Azure Blob Storage (requires setup)
 export AZURE_STORAGE_ACCOUNT="your-storage-account"
 export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
-./target/release/io-bench health --uri "az://your-storage-account/container/"
+./target/release/sai3-bench health --uri "az://your-storage-account/container/"
 
 # Test Google Cloud Storage (requires gcloud auth)
 gcloud auth application-default login
-./target/release/io-bench health --uri "gs://my-bucket/prefix/"
+./target/release/sai3-bench health --uri "gs://my-bucket/prefix/"
 ```
 
 ### 📊 Performance Characteristics
@@ -260,17 +260,17 @@ See the [Usage Guide](docs/USAGE.md) for detailed setup instructions.
 
 ```bash
 # Capture a workload to op-log
-io-bench -v --op-log /tmp/production.tsv.zst run --config prod-workload.yaml
+sai3-bench -v --op-log /tmp/production.tsv.zst run --config prod-workload.yaml
 
 # Replay with exact timing
-io-bench replay --op-log /tmp/production.tsv.zst
+sai3-bench replay --op-log /tmp/production.tsv.zst
 
 # Replay to different backend (migration testing)
-io-bench replay --op-log /tmp/s3-workload.tsv.zst \
+sai3-bench replay --op-log /tmp/s3-workload.tsv.zst \
   --target "az://newstorage/container/"
 
 # Replay at 10x speed for quick testing
-io-bench replay --op-log /tmp/workload.tsv.zst --speed 10.0
+sai3-bench replay --op-log /tmp/workload.tsv.zst --speed 10.0
 
 # Advanced: 1→N fanout with round-robin strategy
 cat > fanout.yaml <<EOF
@@ -283,17 +283,17 @@ rules:
         - {bucket: "dest3", prefix: ""}
       strategy: "round_robin"
 EOF
-io-bench replay --op-log /tmp/workload.tsv.zst --remap fanout.yaml
+sai3-bench replay --op-log /tmp/workload.tsv.zst --remap fanout.yaml
 
 # Replay with error tolerance
-io-bench replay --op-log /tmp/workload.tsv.zst --continue-on-error
+sai3-bench replay --op-log /tmp/workload.tsv.zst --continue-on-error
 ```
 
 ### 📈 TSV Export for Analysis
 
 ```bash
 # Run workload with machine-readable results export
-io-bench run --config workload.yaml --results-tsv /tmp/results
+sai3-bench run --config workload.yaml --results-tsv /tmp/results
 
 # Generated file: /tmp/results-results.tsv with 13 columns:
 # operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, 
