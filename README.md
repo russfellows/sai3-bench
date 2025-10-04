@@ -1,7 +1,46 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
 [![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
-[![Build Status](https://img.shi### 🏆 sai3-bench Capabilities Overview
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
+
+## 🚀 What Makes sai3-bench Unique?
+
+1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
+2. **Configurable Data Patterns**: Deduplication and compression testing with configurable data characteristics
+3. **Workload Replay**: Timing-faithful replay with flexible remapping capabilities (1→1, 1→N, N→1, regex)
+4. **Statistical Size Distributions**: Lognormal, uniform, and fixed distributions for realistic object size modeling
+5. **Production-Grade Metrics**: Microsecond-precision HDR histograms with size-bucketed analysis
+6. **Machine-Readable Output**: TSV export for automated analysis and CI/CD integration
+7. **Distributed Architecture**: gRPC-based agent/controller system for large-scale load generation
+8. **Storage Efficiency Testing**: Built-in support for testing deduplication engines and compression algorithms
+
+## 🎯 Supported Storage Backends
+
+- **File System** (`file://`) - Local filesystem testing with standard POSIX operations
+- **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
+- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.)
+- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with full authentication support
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API support
+
+## 📦 Architecture & Binaries
+
+- **`sai3-bench`** - Single-node CLI for immediate testing across all backends
+- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
+- **`sai3bench-ctl`** - Controller for coordinating distributed agents
+- **`sai3bench-run`** - Dedicated workload runner (legacy, being integrated)
+
+## 📖 Documentation
+- **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
+- **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
+- **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
+- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
+
+## 🏆 sai3-bench Capabilities Overview
 
 | Capability | Implementation | Use Cases |
 |------------|----------------|----------|
