@@ -1,9 +1,9 @@
 # io-bench AI Agent Guide
 
 ## Project Overview
-io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
+io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.3.1 (October 2025)
+**Current Version**: v0.4.3-dev (October 2025) - Warp Parity Phase 1: Prepare/Pre-population
 
 ## Architecture: Four Binary Strategy
 - **`io-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars

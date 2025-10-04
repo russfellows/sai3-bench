@@ -2,6 +2,133 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.4.3] - 2025-10-04
+
+### 🎯 Warp Parity Phase 1: Prepare/Pre-population
+MinIO Warp compatibility features enabling near-identical test workflows between io-bench and Warp.
+
+### ✨ New Features
+
+#### Prepare Step (Pre-population)
+- **ensure_objects**: Guarantee test objects exist before timed workload execution
+  - Configurable count, size range (min_size/max_size), and fill pattern (zero/random)
+  - Skips creation if sufficient objects already exist (idempotent)
+  - Progress bar with ops/sec tracking during preparation
+  - Example: Create 50K objects @ 1 MiB each before 5-minute mixed workload
+  
+- **cleanup**: Optional automatic cleanup after test completion
+  - Only deletes objects created during prepare step
+  - Preserves objects created during actual workload
+  - CLI override via `--no-cleanup` flag
+
+#### CLI Enhancements
+- `--prepare-only`: Execute prepare step then exit (for pre-populating test data)
+- `--no-cleanup`: Override config cleanup setting (keep all objects)
+- Examples:
+  ```bash
+  # Prepare objects once, run tests multiple times
+  io-bench run --config mixed.yaml --prepare-only
+  io-bench run --config mixed.yaml
+  io-bench run --config mixed.yaml
+  
+  # Run with cleanup disabled
+  io-bench run --config mixed.yaml --no-cleanup
+  ```
+
+### 🔧 Configuration Schema Extensions
+
+#### New PrepareConfig Structure
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/prefix/"
+      count: 50000
+      min_size: 1048576  # 1 MiB (default)
+      max_size: 1048576  # 1 MiB (default)
+      fill: zero         # "zero" or "random" (default: zero)
+  cleanup: false         # Auto-cleanup after test (default: false)
+```
+
+### 🎯 Warp Compatibility Examples
+```yaml
+# Warp-style mixed workload
+duration: 300s      # 5 minutes
+concurrency: 20     # Match Warp default (changed from 16)
+
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bench/test/"
+      count: 50000
+      min_size: 1048576
+  cleanup: false
+
+workload:
+  - {weight: 50, op: get, path: "test/*"}
+  - {weight: 30, op: put, path: "test/*", object_size: 1048576}
+  - {weight: 10, op: list, path: "test/"}
+```
+
+### � Bug Fixes & Improvements
+
+#### Progress Bar Consistency
+- **Unified Visual Style**: All progress bars now use consistent block characters (`████`)
+  - Prepare phase: `[████████████] 1000/1000 objects`
+  - Test phase: `[████████████] 10/10s`
+  - Cleanup phase: `[████████████] 100/100 objects`
+  - Previously: Test phase used ugly `###>---` style
+
+#### s3dlio Native Methods
+- **STAT Operations**: Now use s3dlio's native `stat()` method (v0.8.8+)
+  - Previously: Used workaround with `get()` to measure size
+  - Now: Proper HEAD-like metadata operations
+  - Benefit: More efficient, less data transfer, correct semantics
+  
+#### Pattern Matching Clarification
+- **Documented Approach**: Added comments explaining io-bench's URI pattern matching
+  - s3dlio's ObjectStore doesn't provide native glob support in `list()`
+  - io-bench implements list-and-filter for `*` patterns at application level
+  - This is correct: object stores don't have native glob (S3, Azure, GCS all work this way)
+  - For local file operations, s3dlio has `generic_upload_files()` with glob crate
+
+### �🔨 Implementation Details
+- **src/config.rs**: Added `PrepareConfig`, `EnsureSpec`, `FillPattern` types
+  - `default_concurrency()` changed from 16 → 20 (match Warp)
+  - All new fields are optional (backward compatible)
+  
+- **src/workload.rs**: New prepare infrastructure + improvements
+  - `prepare_objects()`: Create/verify test objects with progress tracking
+  - `cleanup_prepared_objects()`: Delete only created objects
+  - `PreparedObject`: Tracks URI, size, and created flag
+  - `stat_object_multi_backend()`: Updated to use s3dlio's `stat()` method
+  - Progress bar style unified across all phases
+  - Uses s3dlio ObjectStore for all operations (consistent with existing code)
+
+- **src/main.rs**: Updated `run_workload()` command handler
+  - Three-phase execution: Prepare → Test → Cleanup
+  - CLI flag processing for `--prepare-only` and `--no-cleanup`
+  - Conditional phase execution with clear console output
+
+### ✅ Validation & Testing
+- **Performance**: 500+ objects/sec prepare speed (1 MiB objects on local file backend)
+- **Idempotency**: Repeated prepare-only calls skip existing objects
+- **Cleanup**: Verified only prepared-*.dat removed, test-* preserved
+- **CLI Flags**: All combinations tested (prepare-only, no-cleanup, default)
+- **Progress Bars**: Visual consistency verified across all phases
+- **STAT Operations**: Confirmed using native s3dlio method
+- **Example Configs**: `tests/configs/warp_parity_mixed.yaml`, `tests/configs/warp_cleanup_test.yaml`
+
+### 📦 Dependencies
+- **rand**: Updated API usage (deprecated `thread_rng()` → `rng()`, `gen_range()` → `random_range()`)
+- **indicatif**: Progress bars for prepare and cleanup phases
+- **s3dlio v0.8.8+**: Leveraging native `stat()` method
+
+### 🚀 Roadmap
+- **v0.5.0**: Phase 2 - Advanced replay remapping (1→N, N→1, N↔N)
+- **v0.5.1**: Phase 3 - UX polish and documentation
+- **v0.5.2**: Phase 4 - Comprehensive testing and Warp comparison validation
+
+---
+
 ## [0.4.2] - 2025-10-03
 
 ### 🌐 Google Cloud Storage Backend Support

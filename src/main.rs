@@ -191,9 +191,22 @@ enum Commands {
         concurrency: usize,
     },
     /// Run workload from config file
+    /// 
+    /// Examples:
+    ///   io-bench run --config mixed.yaml
+    ///   io-bench run --config mixed.yaml --prepare-only
+    ///   io-bench run --config mixed.yaml --no-cleanup
     Run {
         #[arg(long)]
         config: String,
+        
+        /// Only execute prepare step, then exit (for pre-populating test data)
+        #[arg(long)]
+        prepare_only: bool,
+        
+        /// Skip cleanup of prepared objects (keep them for repeated runs)
+        #[arg(long)]
+        no_cleanup: bool,
     },
     /// Replay workload from op-log file with timing-faithful execution
     /// 
@@ -262,7 +275,9 @@ fn main() -> Result<()> {
         Commands::Put { uri, object_size, objects, concurrency } => {
             put_cmd(&uri, object_size, objects, concurrency)?
         }
-        Commands::Run { config } => run_workload(&config)?,
+        Commands::Run { config, prepare_only, no_cleanup } => {
+            run_workload(&config, prepare_only, no_cleanup)?
+        }
         Commands::Replay { op_log, target, speed, continue_on_error } => {
             replay_cmd(op_log, target, speed, continue_on_error)?
         }
@@ -703,13 +718,20 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
 // -----------------------------------------------------------------------------
 // Workload execution
 // -----------------------------------------------------------------------------
-fn run_workload(config_path: &str) -> Result<()> {
+fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
     
-    let config: Config = serde_yaml::from_str(&config_content)
+    let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+    
+    // Override cleanup from CLI flag
+    if no_cleanup {
+        if let Some(ref mut prepare) = config.prepare {
+            prepare.cleanup = false;
+        }
+    }
     
     info!("Configuration loaded successfully");
     
@@ -724,11 +746,33 @@ fn run_workload(config_path: &str) -> Result<()> {
     
     info!("Starting workload execution with {} operation types", config.workload.len());
     
+    // Execute prepare step if configured
+    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+    let prepared_objects = if let Some(ref prepare_config) = config.prepare {
+        println!("\n=== Prepare Phase ===");
+        info!("Executing prepare step");
+        let prepared = rt.block_on(workload::prepare_objects(prepare_config))?;
+        println!("Prepared {} objects", prepared.len());
+        prepared
+    } else {
+        Vec::new()
+    };
+    
+    // If prepare-only mode, exit after preparation
+    if prepare_only {
+        if config.prepare.is_none() {
+            bail!("--prepare-only requires 'prepare' section in config");
+        }
+        info!("Prepare-only mode: objects created, exiting");
+        println!("\nPrepare-only mode: {} objects created, exiting", prepared_objects.len());
+        return Ok(());
+    }
+    
     // Always show preparation status
+    println!("\n=== Test Phase ===");
     println!("Preparing workload...");
     
     // Run the workload
-    let rt = RtBuilder::new_multi_thread().enable_all().build()?;
     let summary = rt.block_on(workload::run(&config))?;
     
     // Print results
@@ -757,6 +801,16 @@ fn run_workload(config_path: &str) -> Result<()> {
         println!("  Ops: {}", summary.meta.ops);
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+    }
+    
+    // Cleanup prepared objects if configured
+    if let Some(ref prepare_config) = config.prepare {
+        if prepare_config.cleanup && !prepared_objects.is_empty() {
+            println!("\n=== Cleanup Phase ===");
+            info!("Cleaning up prepared objects");
+            rt.block_on(workload::cleanup_prepared_objects(&prepared_objects))?;
+            println!("Cleanup complete");
+        }
     }
     
     Ok(())
