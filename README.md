@@ -4,7 +4,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/s3-bench)
 [![Tests](https://img.shields.io/badge/tests-13%20passing-success.svg)](https://github.com/russfellows/s3-bench)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for robust multi-protocol support.
 
@@ -40,7 +40,7 @@ A comprehensive storage performance testing tool that supports multiple backends
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.5.1) - Machine-Readable Results & Enhanced Metrics
+## 🎊 Latest Release (v0.5.2) - Machine-Readable Results & Enhanced Metrics
 
 ### 📊 TSV Export for Automated Analysis
 - **Machine-readable results**: Export detailed benchmark data in tab-separated format
