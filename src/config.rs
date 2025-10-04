@@ -17,6 +17,10 @@ pub struct Config {
 
     /// Weighted list of operations to pick from.
     pub workload: Vec<WeightedOp>,
+
+    /// Optional prepare step to ensure objects exist before testing (Warp parity)
+    #[serde(default)]
+    pub prepare: Option<PrepareConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -66,7 +70,60 @@ fn default_duration() -> std::time::Duration {
 }
 
 fn default_concurrency() -> usize {
-    16
+    20  // Match Warp's default
+}
+
+/// Prepare configuration for pre-populating objects before testing
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PrepareConfig {
+    /// Objects to ensure exist before test
+    #[serde(default)]
+    pub ensure_objects: Vec<EnsureSpec>,
+    
+    /// Whether to cleanup prepared objects after test
+    #[serde(default)]
+    pub cleanup: bool,
+}
+
+/// Specification for ensuring objects exist
+#[derive(Debug, Deserialize, Clone)]
+pub struct EnsureSpec {
+    /// Base URI for object creation (e.g., "s3://bucket/prefix/")
+    pub base_uri: String,
+    
+    /// Target number of objects to ensure exist
+    pub count: u64,
+    
+    /// Minimum object size in bytes
+    #[serde(default = "default_min_size")]
+    pub min_size: u64,
+    
+    /// Maximum object size in bytes  
+    #[serde(default = "default_max_size")]
+    pub max_size: u64,
+    
+    /// Fill pattern: "zero" or "random"
+    #[serde(default = "default_fill")]
+    pub fill: FillPattern,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FillPattern {
+    Zero,
+    Random,
+}
+
+fn default_min_size() -> u64 { 
+    1024 * 1024  // 1 MiB
+}
+
+fn default_max_size() -> u64 { 
+    1024 * 1024  // 1 MiB
+}
+
+fn default_fill() -> FillPattern { 
+    FillPattern::Zero 
 }
 
 impl Config {

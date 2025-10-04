@@ -94,6 +94,140 @@ pub fn finalize_operation_logger() -> anyhow::Result<()> {
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Prepare/Pre-population Support (Warp Parity - Phase 1)
+// -----------------------------------------------------------------------------
+
+/// Information about a prepared object
+#[derive(Debug, Clone)]
+pub struct PreparedObject {
+    pub uri: String,
+    pub size: u64,
+    pub created: bool,  // True if we created it, false if it already existed
+}
+
+/// Execute prepare step: ensure objects exist for testing
+pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<Vec<PreparedObject>> {
+    use crate::config::FillPattern;
+    use rand::RngCore;
+    
+    let mut all_prepared = Vec::new();
+    
+    for spec in &config.ensure_objects {
+        info!("Preparing objects: {} at {}", spec.count, spec.base_uri);
+        
+        let store = create_store_for_uri(&spec.base_uri)?;
+        
+        // 1. List existing objects
+        let existing = store.list(&spec.base_uri, true).await
+            .context("Failed to list existing objects")?;
+        
+        let existing_count = existing.len() as u64;
+        info!("  Found {} existing objects", existing_count);
+        
+        // 2. Calculate how many to create
+        let to_create = if existing_count >= spec.count {
+            info!("  Sufficient objects already exist");
+            0
+        } else {
+            spec.count - existing_count
+        };
+        
+        // 3. Create missing objects
+        if to_create > 0 {
+            info!("  Creating {} additional objects (size: {}-{} bytes, fill: {:?})", 
+                to_create, spec.min_size, spec.max_size, spec.fill);
+            
+            // Create progress bar for preparation
+            let pb = ProgressBar::new(to_create);
+            pb.set_style(ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+            )?);
+            pb.set_message("preparing");
+            
+            for i in 0..to_create {
+                let key = format!("prepared-{:08}.dat", existing_count + i);
+                let uri = if spec.base_uri.ends_with('/') {
+                    format!("{}{}", spec.base_uri, key)
+                } else {
+                    format!("{}/{}", spec.base_uri, key)
+                };
+                
+                // Generate data based on fill pattern
+                let size = if spec.min_size == spec.max_size {
+                    spec.min_size
+                } else {
+                    rand::rng().random_range(spec.min_size..=spec.max_size)
+                };
+                
+                let data = match spec.fill {
+                    FillPattern::Zero => vec![0u8; size as usize],
+                    FillPattern::Random => {
+                        let mut data = vec![0u8; size as usize];
+                        rand::rng().fill_bytes(&mut data);
+                        data
+                    }
+                };
+                
+                // PUT object
+                store.put(&uri, &data).await
+                    .with_context(|| format!("Failed to PUT {}", uri))?;
+                
+                all_prepared.push(PreparedObject {
+                    uri,
+                    size,
+                    created: true,
+                });
+                
+                pb.inc(1);
+                
+                if (i + 1) % 1000 == 0 {
+                    pb.set_message(format!("{}/{} objects", i + 1, to_create));
+                }
+            }
+            
+            pb.finish_with_message(format!("created {} objects", to_create));
+        }
+    }
+    
+    info!("Prepare complete: {} objects ready", all_prepared.len());
+    Ok(all_prepared)
+}
+
+/// Cleanup prepared objects
+pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Result<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    
+    info!("Cleaning up {} prepared objects", objects.len());
+    
+    // Create progress bar for cleanup
+    let pb = ProgressBar::new(objects.len() as u64);
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+    )?);
+    pb.set_message("cleaning up");
+    
+    for (i, obj) in objects.iter().enumerate() {
+        if obj.created {
+            let store = create_store_for_uri(&obj.uri)?;
+            if let Err(e) = store.delete(&obj.uri).await {
+                tracing::warn!("Failed to delete {}: {}", obj.uri, e);
+            }
+        }
+        
+        pb.inc(1);
+        
+        if (i + 1) % 1000 == 0 {
+            pb.set_message(format!("{}/{} objects", i + 1, objects.len()));
+        }
+    }
+    
+    pb.finish_with_message(format!("deleted {} objects", objects.len()));
+    Ok(())
+}
+
 /// Helper to build full URI from components for different backends
 pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
     match backend {
@@ -177,18 +311,17 @@ pub async fn list_objects_multi_backend(uri: &str) -> anyhow::Result<Vec<String>
 }
 
 /// Multi-backend STAT operation using ObjectStore trait
-/// Since ObjectStore doesn't have a dedicated stat method, we use a minimal get operation
+/// Uses s3dlio's native stat() method (v0.8.8+)
 pub async fn stat_object_multi_backend(uri: &str) -> anyhow::Result<u64> {
     debug!("STAT operation starting for URI: {}", uri);
     let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
-    // For stat operation, we'll use a minimal get operation to get the size
-    // This simulates HEAD/stat behavior by getting the data and measuring size
-    let bytes = store.get(uri).await
+    // Use s3dlio's native stat() method for proper HEAD/metadata operations
+    let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
     
-    let size = bytes.len() as u64;
+    let size = metadata.size;
     debug!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
     Ok(size)
 }
@@ -397,12 +530,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     
     // Create progress bar for time-based execution
     let pb = ProgressBar::new(cfg.duration.as_secs());
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}s ({eta_precise}) {msg}"
-        )?
-        .progress_chars("#>-")
-    );
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}s ({eta_precise}) {msg}"
+    )?);
     pb.set_message(format!("running with {} workers", cfg.concurrency));
     
     // Spawn progress monitoring task
@@ -658,14 +788,20 @@ impl PreResolved {
 
 
 /// Expand keys for a GET uri: supports exact key, prefix, or glob '*'.
-
-
-/// Multi-backend version: expand URIs for GET operations using ObjectStore trait
+/// 
+/// NOTE: s3dlio's ObjectStore trait does not provide pattern matching in list().
+/// We implement glob pattern matching at the io-bench level by:
+/// 1. Listing all objects in the directory
+/// 2. Applying regex-based filtering to match the pattern
+/// 
+/// This is consistent with how object stores work - they don't have native glob support.
+/// For local file operations, s3dlio has generic_upload_files() with glob crate support,
+/// but ObjectStore operations work with URIs, not file paths.
 async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
     let store = create_store_with_logger(base_uri)?;
     
     if base_uri.contains('*') {
-        // Glob pattern: list and filter
+        // Glob pattern: list directory and filter with regex
         let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
         let list_prefix = &base_uri[..base_end];
         
@@ -694,6 +830,8 @@ async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
 }
 
 
+/// Convert glob pattern to regex
+/// Escapes all special regex chars except *, which becomes .*
 fn glob_to_regex(glob: &str) -> Result<regex::Regex> {
     let s = regex::escape(glob).replace(r"\*", ".*");
     let re = format!("^{}$", s);
