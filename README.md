@@ -4,7 +4,7 @@ A comprehensive storage performance testing tool that supports multiple backends
 
 ## 🚀 What Makes io-bench Different?
 
-1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, io-bench supports 4 storage backends
+1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, io-bench supports 5 storage backends
 2. **Unified Interface**: Consistent CLI and configuration across all storage types  
 3. **Advanced Metrics**: Microsecond-precision HDR histogram performance measurements
 4. **Distributed Execution**: gRPC-based agent/controller architecture for scale testing
@@ -17,6 +17,7 @@ A comprehensive storage performance testing tool that supports multiple backends
 - **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
 - **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.)
 - **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with full authentication support
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API support
 
 ## 📦 Architecture & Binaries
 
@@ -28,14 +29,21 @@ A comprehensive storage performance testing tool that supports multiple backends
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with io-bench
 - **[Release Notes v0.4.0](docs/RELEASE_NOTES_v0.4.0.md)** - Replay feature details and examples
-- **[Future Work](docs/REPLAY_FUTURE_WORK.md)** - Planned enhancements for v0.4.1+
+- **[Future Work](docs/REPLAY_FUTURE_WORK.md)** - Planned enhancements
 - **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.4.1) - Streaming Op-log Replay
+## 🎊 Latest Release (v0.4.2) - Google Cloud Storage Support
 
-### 🌊 Streaming Replay with Memory Efficiency
+### � Google Cloud Storage Backend
+- **5th Storage Backend**: Full GCS integration with `gs://` and `gcs://` URI schemes
+- **Application Default Credentials**: Seamless authentication via gcloud CLI, service accounts, or GCE metadata
+- **Complete Operation Support**: GET, PUT, DELETE, LIST, STAT operations validated against real GCS buckets
+- **Performance Validated**: 9-11 MB/s for large objects, ~400-600ms latency for small operations
+- **Comprehensive Testing**: 8 integration tests + shell test suite, all passing with real GCS credentials
+
+### 🌊 Streaming Replay (v0.4.1)
 - **Constant Memory Usage**: Stream replay with ~1.5 MB memory footprint (vs. full file in memory)
 - **s3dlio-oplog Integration**: Dedicated streaming reader with background decompression
 - **Non-Logging Replay**: Prevents circular logging during replay operations

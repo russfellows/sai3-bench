@@ -30,6 +30,7 @@ use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 pub enum BackendType {
     S3,
     Azure,
+    Gcs,
     File,
     DirectIO,
 }
@@ -41,6 +42,8 @@ impl BackendType {
             BackendType::S3
         } else if uri.starts_with("az://") || uri.starts_with("azure://") {
             BackendType::Azure
+        } else if uri.starts_with("gs://") || uri.starts_with("gcs://") {
+            BackendType::Gcs
         } else if uri.starts_with("file://") {
             BackendType::File
         } else if uri.starts_with("direct://") {
@@ -56,6 +59,7 @@ impl BackendType {
         match self {
             BackendType::S3 => "S3",
             BackendType::Azure => "Azure Blob",
+            BackendType::Gcs => "Google Cloud Storage",
             BackendType::File => "Local File",
             BackendType::DirectIO => "Direct I/O",
         }
@@ -93,7 +97,7 @@ pub fn finalize_operation_logger() -> anyhow::Result<()> {
 /// Helper to build full URI from components for different backends
 pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
     match backend {
-        BackendType::S3 => {
+        BackendType::S3 | BackendType::Gcs => {
             if base_uri.ends_with('/') {
                 format!("{}{}", base_uri, key)
             } else {
