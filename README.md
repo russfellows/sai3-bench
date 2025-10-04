@@ -316,4 +316,43 @@ awk -F'\t' 'NR>1 {print $1, $2, $4, $5, $12}' /tmp/results-results.tsv
 
 **Migration History** - Successfully migrated from direct AWS SDK calls to ObjectStore trait. Multi-backend URIs fully operational with comprehensive logging and performance validation.
 
+## 🛠️ Development
+
+### Running Tests
+
+Most tests can be run in parallel:
+```bash
+cargo test
+```
+
+However, `streaming_replay_tests` must run sequentially due to shared state:
+```bash
+cargo test --test streaming_replay_tests -- --test-threads=1
+```
+
+Or run all tests properly:
+```bash
+# Unit tests
+cargo test --lib
+
+# Integration tests (run individually)
+cargo test --test utils
+cargo test --test gcs_tests  
+cargo test --test grpc_integration
+cargo test --test streaming_replay_tests -- --test-threads=1
+```
+
+### Building
+
+```bash
+# Development build
+cargo build
+
+# Release build (optimized)
+cargo build --release
+```
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) for details.
 
