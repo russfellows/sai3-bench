@@ -130,10 +130,7 @@ prepare:
 - **Storage Vendor Claims**: Verify "up to 10:1 dedup ratio" promises
 - **Migration Planning**: Predict space requirements after dedup/compression
 - **Tier Optimization**: Model hot vs. cold data characteristics
-- **Cost Modeling**: Calculate true storage costs with efficiency featuresge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+- **Cost Modeling**: Calculate true storage costs with efficiency features
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
