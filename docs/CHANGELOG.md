@@ -2,6 +2,242 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.5.0] - 2025-10-04
+
+### 🎯 Warp Parity Phase 2: Advanced Replay Remapping
+Complete warp-replay compatibility with flexible URI remapping for multi-target testing and migration.
+
+### ✨ New Features
+
+#### Remap Engine (`src/remap.rs`)
+Advanced URI remapping system supporting multiple mapping strategies:
+
+1. **Simple 1→1 Remapping**
+   - Direct bucket/prefix replacement
+   - Use case: Migrate workloads between environments
+   ```yaml
+   rules:
+     - match: {bucket: "prod"}
+       map_to: {bucket: "staging", prefix: "test/"}
+   ```
+
+2. **1→N Fanout**
+   - Distribute operations across multiple targets
+   - Three strategies: `round_robin`, `random`, `sticky_key`
+   - Use case: Load testing, multi-region replication, chaos engineering
+   ```yaml
+   rules:
+     - match: {bucket: "source"}
+       map_to_many:
+         targets:
+           - {bucket: "dest1", prefix: ""}
+           - {bucket: "dest2", prefix: ""}
+           - {bucket: "dest3", prefix: ""}
+         strategy: "round_robin"
+   ```
+
+3. **N→1 Consolidation**
+   - Merge multiple sources to single target
+   - Use case: Data consolidation, backup aggregation
+   ```yaml
+   rules:
+     - match_any:
+         - {bucket: "temp-1"}
+         - {bucket: "temp-2"}
+       map_to: {bucket: "consolidated", prefix: "merged/"}
+   ```
+
+4. **N↔N Regex-based Remapping**
+   - Pattern matching with capture groups
+   - Use case: Complex transformations, dynamic routing
+   ```yaml
+   rules:
+     - regex: "^s3://prod-([^/]+)/(.*)$"
+       replace: "s3://staging-$1/$2"
+   ```
+
+#### Fanout Strategies
+
+**round_robin**: Sequential distribution for even load balancing
+- Operation 1 → Target A
+- Operation 2 → Target B
+- Operation 3 → Target C
+- Operation 4 → Target A (cycles)
+
+**random**: Random selection for chaos testing
+- Each operation randomly assigned to a target
+- Useful for testing eventual consistency
+
+**sticky_key**: Consistent hashing for session affinity
+- Same object always goes to same target
+- Deterministic based on object key hash
+- Maintains data locality across runs
+
+### 🔧 CLI Enhancements
+
+#### New Replay Flag
+```bash
+# Basic remapping
+io-bench replay --op-log production.tsv.zst --remap remap.yaml
+
+# With speed control
+io-bench replay --op-log ops.tsv.zst --remap fanout.yaml --speed 2.0
+
+# Multi-target fanout
+io-bench replay --op-log prod.tsv.zst --remap remap_fanout.yaml
+```
+
+### 🏗️ Architecture
+
+#### Core Components
+- **`RemapConfig`**: YAML-driven configuration with ordered rules
+- **`RemapRule`**: Enum supporting 4 rule types (Simple, Fanout, Consolidate, Regex)
+- **`RemapEngine`**: Rule execution engine with state management
+- **`ParsedUri`**: S3/file URI parser extracting scheme/bucket/prefix/key
+
+#### Integration
+- Extended `ReplayConfig` with optional `remap_config` field
+- Remap applied before each operation execution in replay loop
+- Zero overhead when remapping not used
+
+### 📝 Configuration Schema
+
+#### MatchSpec (for matching source URIs)
+```yaml
+match:
+  host: "optional-host"      # Match specific host (rarely used)
+  bucket: "bucket-name"      # Match specific bucket
+  prefix: "path/prefix/"     # Match objects under prefix
+```
+
+#### TargetSpec (for destination URIs)
+```yaml
+map_to:
+  bucket: "dest-bucket"
+  prefix: "dest/path/"       # Empty = preserve original path
+```
+
+#### Path Preservation Logic
+- **Empty target prefix**: Preserve original path structure
+  - `s3://src/data/file.dat` → `s3://dest/data/file.dat`
+- **Non-empty target prefix**: Replace original prefix
+  - `s3://src/old/file.dat` + `new/` → `s3://dest/new/file.dat`
+
+### ✅ Testing & Validation
+
+#### Unit Tests (10 tests, all passing)
+- **`test_parse_uri_s3`**: S3 URI parsing (`s3://bucket/prefix/key`)
+- **`test_parse_uri_file`**: File URI parsing (`file:///path/to/file`)
+- **`test_simple_remap`**: 1→1 bucket/prefix replacement
+- **`test_fanout_round_robin`**: Sequential distribution across 3 targets
+- **`test_regex_remap`**: Pattern-based prod→staging transformation
+- **`test_no_match_returns_original`**: Fallback to original URI
+- Existing replay tests continue to pass
+
+#### Build Verification
+```bash
+cargo test --lib
+test result: ok. 10 passed; 0 failed
+
+cargo build --release
+Finished `release` profile [optimized] in 13.20s
+```
+
+### 🔨 Implementation Details
+
+#### State Management
+- **Round-robin**: `HashMap<rule_idx, counter>` per rule
+- **Sticky-key**: `HashMap<key, target_idx>` for consistent hashing
+- Thread-safe with `Arc<Mutex<>>`
+- Per-rule state prevents interference
+
+#### Ordered Rule Matching
+- Rules evaluated sequentially; first match wins
+- Allows specific rules before general rules
+- Override patterns via ordering
+
+#### URI Parsing
+```rust
+// S3 URI structure
+s3://bucket/prefix/path/to/key.dat
+  ├── scheme: "s3"
+  ├── bucket: "bucket"
+  ├── prefix: "prefix/path/to/"
+  └── key: "key.dat"
+```
+
+### 📦 Files Modified
+
+**New Files**:
+- `src/remap.rs` (488 lines): Complete remap engine
+- `tests/configs/remap_examples.yaml`: Comprehensive configuration examples
+- `tests/configs/remap_fanout_test.yaml`: Simple fanout test
+
+**Modified Files**:
+- `Cargo.toml`: Version 0.4.3 → 0.5.0
+- `src/lib.rs`: Added `pub mod remap;`
+- `src/replay_streaming.rs`: Extended `ReplayConfig`, integrated remap engine
+- `src/main.rs`: Added `--remap` CLI flag, config loading
+- `.github/copilot-instructions.md`: Updated to v0.5.0-dev
+
+### 🎓 Example Configurations
+
+#### Complete Multi-Rule Configuration
+```yaml
+rules:
+  # Rule 1: Simple bucket rename
+  - match: {bucket: "old-bucket", prefix: "logs/"}
+    map_to: {bucket: "new-bucket", prefix: "archived/"}
+  
+  # Rule 2: Fanout for load testing
+  - match: {bucket: "source"}
+    map_to_many:
+      targets:
+        - {bucket: "replica1", prefix: ""}
+        - {bucket: "replica2", prefix: ""}
+        - {bucket: "replica3", prefix: ""}
+      strategy: "round_robin"
+  
+  # Rule 3: Consolidation
+  - match_any:
+      - {bucket: "temp-1"}
+      - {bucket: "temp-2"}
+    map_to: {bucket: "consolidated", prefix: "merged/"}
+  
+  # Rule 4: Regex transformation
+  - regex: "^s3://prod-([^/]+)/(.*)$"
+    replace: "s3://staging-$1/$2"
+```
+
+### 🐛 Bug Fixes
+
+#### Path Structure Preservation
+**Fixed**: URI remapping now correctly handles:
+- Empty target prefix → preserve original path structure
+- Non-empty target prefix → replace prefix, keep key
+- Prevents both "lost path" and "double path" issues
+
+#### S3 URI Parsing
+**Fixed**: S3 URIs correctly parsed without "host" component
+- `s3://bucket/path` → bucket="bucket", not host="bucket"
+- Consistent with S3 URL structure
+
+### 🚀 Roadmap
+
+#### v0.5.1 (Phase 3): UX Polish
+- Enhanced documentation with examples
+- Variable substitution in configs
+- Improved CLI help text
+- Warp-compatible defaults
+
+#### v0.5.2 (Phase 4): Testing & Validation
+- Integration tests with real backends
+- Performance benchmarking
+- Warp comparison validation
+- Production-ready hardening
+
+---
+
 ## [0.4.3] - 2025-10-04
 
 ### 🎯 Warp Parity Phase 1: Prepare/Pre-population

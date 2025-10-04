@@ -214,6 +214,7 @@ enum Commands {
     ///   io-bench replay --op-log /tmp/ops.tsv.zst
     ///   io-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
     ///   io-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
+    ///   io-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
     Replay {
         /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
         #[arg(long)]
@@ -222,6 +223,10 @@ enum Commands {
         /// Optional target URI to retarget all operations (simple 1:1 remapping)
         #[arg(long)]
         target: Option<String>,
+        
+        /// Advanced remap configuration file (YAML) - takes priority over --target
+        #[arg(long)]
+        remap: Option<std::path::PathBuf>,
         
         /// Speed multiplier (e.g., 2.0 = 2x faster, 0.5 = half speed)
         #[arg(long, default_value_t = 1.0)]
@@ -278,8 +283,8 @@ fn main() -> Result<()> {
         Commands::Run { config, prepare_only, no_cleanup } => {
             run_workload(&config, prepare_only, no_cleanup)?
         }
-        Commands::Replay { op_log, target, speed, continue_on_error } => {
-            replay_cmd(op_log, target, speed, continue_on_error)?
+        Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
+            replay_cmd(op_log, target, remap, speed, continue_on_error)?
         }
     }
     
@@ -822,14 +827,35 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool) -> Resu
 fn replay_cmd(
     op_log: std::path::PathBuf,
     target: Option<String>,
+    remap: Option<std::path::PathBuf>,
     speed: f64,
     continue_on_error: bool,
 ) -> Result<()> {
     use io_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
+    use io_bench::remap::RemapConfig;
     
     // Validate target URI if provided
     if let Some(ref uri) = target {
         validate_uri(uri)?;
+    }
+    
+    // Load remap configuration if provided
+    let remap_config = if let Some(remap_path) = remap {
+        println!("Loading remap configuration from: {}", remap_path.display());
+        let file = std::fs::File::open(&remap_path)
+            .with_context(|| format!("Failed to open remap config: {}", remap_path.display()))?;
+        let config: RemapConfig = serde_yaml::from_reader(file)
+            .with_context(|| format!("Failed to parse remap config: {}", remap_path.display()))?;
+        info!("Loaded remap config with {} rules", config.rules.len());
+        println!("  Loaded {} remap rules", config.rules.len());
+        Some(config)
+    } else {
+        None
+    };
+    
+    // Warn if both target and remap are provided
+    if target.is_some() && remap_config.is_some() {
+        println!("WARNING: Both --target and --remap provided. Using --remap (--target ignored).");
     }
     
     let config = ReplayConfig {
@@ -838,6 +864,7 @@ fn replay_cmd(
         speed,
         continue_on_error,
         max_concurrent: Some(1000), // Default max concurrent operations
+        remap_config,
     };
     
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
