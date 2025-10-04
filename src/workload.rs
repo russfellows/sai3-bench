@@ -612,8 +612,13 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.get_bins.add(bytes.len() as u64);
                     }
                     OpSpec::Put { .. } => {
-                        // Get base URI from config  
-                        let (base_uri, sz) = cfg.get_put_info(op);
+                        // Get base URI and size spec from config
+                        let (base_uri, size_spec) = cfg.get_put_size_spec(op);
+                        
+                        // Generate object size using size generator
+                        use crate::size_generator::SizeGenerator;
+                        let size_generator = SizeGenerator::new(&size_spec)?;
+                        let sz = size_generator.generate();
                         
                         let key = {
                             let mut r = rng();
