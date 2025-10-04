@@ -23,7 +23,7 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
     store_for_uri(uri).context("Failed to create object store")
 }
 ```
-**Key**: s3dlio pinned to `rev = "cd4ee2e"` for API stability.
+**Key**: s3dlio should use the latest version in head or main for API stability.
 
 ### Progress Bars (v0.3.1)
 Professional progress visualization using `indicatif = "0.17"`:

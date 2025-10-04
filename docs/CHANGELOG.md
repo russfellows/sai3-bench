@@ -2,6 +2,48 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.5.1] - 2025-10-04
+
+### 🎯 Machine-Readable Results & Enhanced Metrics
+Phase 2.5 of Warp Parity: Add TSV export for automated analysis and complete size-bucketed histogram collection.
+
+### ✨ New Features
+
+#### TSV Export (`src/tsv_export.rs`)
+- **Machine-readable results**: Export benchmark data in tab-separated format for automated analysis
+- **CLI flag**: `--results-tsv <path>` for run command (creates `<path>-results.tsv`)
+- **Format**: 13-column TSV with operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
+- **Per-bucket metrics**: Detailed statistics for each of 9 size buckets (zero, 1B-8KiB, 8KiB-64KiB, etc.)
+- **Accurate throughput**: Uses actual bytes from SizeBins (not estimated), reported in MiB/s
+- **Automated parsing**: Compatible with pandas, polars, and standard TSV tools
+
+#### Enhanced Metrics Collection
+- **Shared metrics module** (`src/metrics.rs`): Unified histogram infrastructure
+- **Mean (average) latency**: Added alongside median (p50) for better statistical analysis
+- **Size-bucketed histograms**: Now consistent across all execution modes (CLI commands and workload runs)
+- **9 size buckets**: Tracks performance characteristics by object size from 0 bytes to >2GiB
+- **Histogram exposure**: Summary struct now includes OpHists for TSV export
+- **Actual byte tracking**: SizeBins.by_bucket provides real ops/bytes per size bucket
+
+### 🐛 Fixes
+- **Workload histogram consistency**: Fixed missing size-bucketed collection in `workload::run()`
+- **Code deduplication**: Removed 90+ lines of duplicate histogram code from main.rs
+
+### 🔧 Changes
+- **Default concurrency**: Increased from 20 to 32 workers
+- **Cargo.toml**: Version bump to 0.5.1, added chrono dependency
+
+### 📚 Documentation
+- **POLARWARP_ANALYSIS.md**: Reference analysis of polarWarp TSV format
+- **V0.5.1_PLAN.md**: Complete implementation plan for TSV export
+- **V0.5.1_PROGRESS.md**: Progress tracking and validation results
+
+### ✅ Validation
+- **Multi-size test**: 4 size ranges (1KB, 128KB, 2MB, 16MB) showing 65x latency scaling
+- **Mean vs median**: Demonstrated mean significantly higher than p50 for small objects (up to 934% difference)
+- **TSV parsing**: Verified machine-readability with 13 properly formatted columns
+- **Performance**: Maintained 19.6k ops/s on file backend with bucketed collection
+
 ## [0.5.0] - 2025-10-04
 
 ### 🎯 Warp Parity Phase 2: Advanced Replay Remapping

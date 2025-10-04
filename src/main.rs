@@ -9,14 +9,14 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{stream::FuturesUnordered, StreamExt};
-use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
 use io_bench::config::Config;
+use io_bench::metrics::{OpHists, bucket_index};
 use io_bench::workload;
 use serde_yaml;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::runtime::Builder as RtBuilder;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -27,80 +27,6 @@ use io_bench::workload::{
     get_object_multi_backend, put_object_multi_backend, list_objects_multi_backend, 
     stat_object_multi_backend, delete_object_multi_backend,
 };
-
-// -----------------------------------------------------------------------------
-// Histogram / metrics support
-// -----------------------------------------------------------------------------
-const NUM_BUCKETS: usize = 9;
-const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
-    "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB",
-    "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", ">2GiB",
-];
-
-fn bucket_index(nbytes: usize) -> usize {
-    if nbytes == 0 {
-        0
-    } else if nbytes <= 8 * 1024 {
-        1
-    } else if nbytes <= 64 * 1024 {
-        2
-    } else if nbytes <= 512 * 1024 {
-        3
-    } else if nbytes <= 4 * 1024 * 1024 {
-        4
-    } else if nbytes <= 32 * 1024 * 1024 {
-        5
-    } else if nbytes <= 256 * 1024 * 1024 {
-        6
-    } else if nbytes <= 2 * 1024 * 1024 * 1024 {
-        7
-    } else {
-        8
-    }
-}
-
-#[derive(Clone)]
-struct OpHists {
-    buckets: Arc<Vec<Mutex<Histogram<u64>>>>,
-}
-
-impl OpHists {
-    fn new() -> Self {
-        let mut v = Vec::with_capacity(NUM_BUCKETS);
-        for _ in 0..NUM_BUCKETS {
-            v.push(Mutex::new(
-                Histogram::<u64>::new_with_bounds(1, 3_600_000_000, 3)
-                    .expect("failed to allocate histogram"),
-            ));
-        }
-        OpHists { buckets: Arc::new(v) }
-    }
-
-    fn record(&self, bucket: usize, duration: Duration) {
-        let micros = duration.as_micros() as u64;
-        let mut hist = self.buckets[bucket].lock().unwrap();
-        let _ = hist.record(micros);
-    }
-
-    fn print_summary(&self, op: &str) {
-        println!("\n{} latency (µs):", op);
-        for (i, m) in self.buckets.iter().enumerate() {
-            let hist = m.lock().unwrap();
-            let count = hist.len();
-            if count == 0 {
-                continue;
-            }
-            let p50 = hist.value_at_quantile(0.50);
-            let p95 = hist.value_at_quantile(0.95);
-            let p99 = hist.value_at_quantile(0.99);
-            let max = hist.max();
-            println!(
-                "  [{:>10}] count={:<6} p50={:<8} p95={:<8} p99={:<8} max={:<8}",
-                BUCKET_LABELS[i], count, p50, p95, p99, max
-            );
-        }
-    }
-}
 
 // -----------------------------------------------------------------------------
 // CLI definition
@@ -196,6 +122,7 @@ enum Commands {
     ///   io-bench run --config mixed.yaml
     ///   io-bench run --config mixed.yaml --prepare-only
     ///   io-bench run --config mixed.yaml --no-cleanup
+    ///   io-bench run --config mixed.yaml --results-tsv /tmp/results
     Run {
         #[arg(long)]
         config: String,
@@ -207,6 +134,10 @@ enum Commands {
         /// Skip cleanup of prepared objects (keep them for repeated runs)
         #[arg(long)]
         no_cleanup: bool,
+        
+        /// Export machine-readable results to TSV file (adds -results.tsv suffix)
+        #[arg(long)]
+        results_tsv: Option<String>,
     },
     /// Replay workload from op-log file with timing-faithful execution
     /// 
@@ -280,8 +211,8 @@ fn main() -> Result<()> {
         Commands::Put { uri, object_size, objects, concurrency } => {
             put_cmd(&uri, object_size, objects, concurrency)?
         }
-        Commands::Run { config, prepare_only, no_cleanup } => {
-            run_workload(&config, prepare_only, no_cleanup)?
+        Commands::Run { config, prepare_only, no_cleanup, results_tsv } => {
+            run_workload(&config, prepare_only, no_cleanup, results_tsv.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error)?
@@ -723,7 +654,7 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
 // -----------------------------------------------------------------------------
 // Workload execution
 // -----------------------------------------------------------------------------
-fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool) -> Result<()> {
+fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results_tsv: Option<&str>) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
@@ -806,6 +737,21 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool) -> Resu
         println!("  Ops: {}", summary.meta.ops);
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+    }
+    
+    // Export TSV results if requested
+    if let Some(tsv_path) = results_tsv {
+        use io_bench::tsv_export::TsvExporter;
+        let exporter = TsvExporter::new(tsv_path);
+        exporter.export_results(
+            &summary.get_hists,
+            &summary.put_hists,
+            &summary.meta_hists,
+            &summary.get_bins,
+            &summary.put_bins,
+            &summary.meta_bins,
+            summary.wall_seconds,
+        )?;
     }
     
     // Cleanup prepared objects if configured
