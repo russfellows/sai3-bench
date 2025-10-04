@@ -109,7 +109,7 @@ pub struct PreparedObject {
 /// Execute prepare step: ensure objects exist for testing
 pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<Vec<PreparedObject>> {
     use crate::config::FillPattern;
-    use rand::RngCore;
+    use crate::size_generator::SizeGenerator;
     
     let mut all_prepared = Vec::new();
     
@@ -135,8 +135,14 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
         
         // 3. Create missing objects
         if to_create > 0 {
-            info!("  Creating {} additional objects (size: {}-{} bytes, fill: {:?})", 
-                to_create, spec.min_size, spec.max_size, spec.fill);
+            // Create size generator from spec
+            let size_spec = spec.get_size_spec();
+            let size_generator = SizeGenerator::new(&size_spec)
+                .context("Failed to create size generator")?;
+            
+            info!("  Creating {} additional objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
+                to_create, size_generator.description(), spec.fill, 
+                spec.dedup_factor, spec.compress_factor);
             
             // Create progress bar for preparation
             let pb = ProgressBar::new(to_create);
@@ -153,19 +159,19 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
                     format!("{}/{}", spec.base_uri, key)
                 };
                 
-                // Generate data based on fill pattern
-                let size = if spec.min_size == spec.max_size {
-                    spec.min_size
-                } else {
-                    rand::rng().random_range(spec.min_size..=spec.max_size)
-                };
+                // Generate object size using size generator
+                let size = size_generator.generate();
                 
+                // Generate data using s3dlio's controlled data generation
                 let data = match spec.fill {
                     FillPattern::Zero => vec![0u8; size as usize],
                     FillPattern::Random => {
-                        let mut data = vec![0u8; size as usize];
-                        rand::rng().fill_bytes(&mut data);
-                        data
+                        // Use s3dlio's generate_controlled_data for realistic dedupe/compression
+                        s3dlio::generate_controlled_data(
+                            size as usize,
+                            spec.dedup_factor,
+                            spec.compress_factor
+                        )
                     }
                 };
                 
@@ -526,8 +532,20 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let weights: Vec<u32> = cfg.workload.iter().map(|w| w.weight).collect();
     let chooser = WeightedIndex::new(weights).context("invalid weights")?;
 
-    // concurrency
-    let sem = Arc::new(Semaphore::new(cfg.concurrency));
+    // Concurrency: Create per-operation semaphores
+    // If an operation has a concurrency override, use that; otherwise use global
+    let mut op_semaphores: Vec<Arc<Semaphore>> = Vec::new();
+    for wo in &cfg.workload {
+        let concurrency = wo.concurrency.unwrap_or(cfg.concurrency);
+        op_semaphores.push(Arc::new(Semaphore::new(concurrency)));
+    }
+    
+    // Log per-op concurrency settings
+    for (idx, wo) in cfg.workload.iter().enumerate() {
+        if let Some(conc) = wo.concurrency {
+            info!("Operation {} has custom concurrency: {}", idx, conc);
+        }
+    }
 
     // Spawn workers
     info!("Spawning {} worker tasks", cfg.concurrency);
@@ -561,7 +579,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
-        let sem = sem.clone();
+        let op_sems = op_semaphores.clone();
         let workload = cfg.workload.clone();
         let chooser = chooser.clone();
         let pre = pre.clone();
@@ -576,14 +594,15 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                     break;
                 }
 
-                // Acquire permit first (await happens before we create RNGs)
-                let _p = sem.acquire().await.unwrap();
-
-                // Sample op index
+                // Sample op index FIRST (before acquiring permit)
                 let idx = {
                     let mut r = rng();
                     chooser.sample(&mut r)
                 };
+
+                // Acquire permit for this specific operation
+                let _p = op_sems[idx].acquire().await.unwrap();
+                
                 let op = &workload[idx].spec;
 
                 match op {
@@ -609,15 +628,26 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
                     }
-                    OpSpec::Put { .. } => {
-                        // Get base URI from config  
-                        let (base_uri, sz) = cfg.get_put_info(op);
+                    OpSpec::Put { dedup_factor, compress_factor, .. } => {
+                        // Get base URI and size spec from config
+                        let (base_uri, size_spec) = cfg.get_put_size_spec(op);
+                        
+                        // Generate object size using size generator
+                        use crate::size_generator::SizeGenerator;
+                        let size_generator = SizeGenerator::new(&size_spec)?;
+                        let sz = size_generator.generate();
                         
                         let key = {
                             let mut r = rng();
                             format!("obj_{}", r.random::<u64>())
                         };
-                        let buf = vec![0u8; sz as usize];
+                        
+                        // Generate data using s3dlio's controlled data generation
+                        let buf = s3dlio::generate_controlled_data(
+                            sz as usize,
+                            *dedup_factor,
+                            *compress_factor
+                        );
 
                         // Build full URI for the specific object
                         let full_uri = if base_uri.ends_with('/') {

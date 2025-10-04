@@ -122,10 +122,11 @@ async fn test_02_replay_basic() -> Result<()> {
     println!("Replaying at 100x speed...");
     let replay_config = ReplayConfig {
         op_log_path: oplog_path,
-        target_uri: None, // Use original URIs
+        target_uri: None, // Use original URIs from op-log
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(200),
+        remap_config: None,
     };
     
     replay_workload_streaming(replay_config).await?;
@@ -188,6 +189,7 @@ async fn test_04_uri_remapping() -> Result<()> {
         speed: 100.0,
         continue_on_error: true, // Expect failures for GET/DELETE of non-existent files
         max_concurrent: Some(100),
+        remap_config: None,
     };
     
     replay_workload_streaming(replay_config).await?;
@@ -218,6 +220,7 @@ async fn test_05_continue_on_error() -> Result<()> {
         speed: 100.0,
         continue_on_error: true, // Should not panic on errors
         max_concurrent: Some(50),
+        remap_config: None,
     };
     
     // Should complete despite errors
@@ -245,6 +248,7 @@ async fn test_06_concurrent_limits() -> Result<()> {
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(5),
+        remap_config: None,
     };
     replay_workload_streaming(replay_config).await?;
     
@@ -256,6 +260,7 @@ async fn test_06_concurrent_limits() -> Result<()> {
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(100),
+        remap_config: None,
     };
     replay_workload_streaming(replay_config).await?;
     

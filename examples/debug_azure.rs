@@ -1,5 +1,5 @@
-// Debugging script to test ObjectStore Azure Blob Storage
-use s3dlio::{store_for_uri, ObjectStore};
+// Debugging script to test Azure Blob Storage via s3dlio
+use s3dlio::store_for_uri;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

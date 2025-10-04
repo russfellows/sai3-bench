@@ -1,0 +1,65 @@
+# Test config for size distributions (v0.5.3)
+duration: 5s
+concurrency: 4
+target: "file:///tmp/io-bench-sizetest/"
+
+prepare:
+  ensure_objects:
+    # Small files with lognormal distribution
+    - base_uri: "file:///tmp/io-bench-sizetest/small/"
+      count: 50
+      size_distribution:
+        type: lognormal
+        mean: 4096
+        std_dev: 2048
+        min: 1024
+        max: 16384
+      fill: zero
+    
+    # Medium files with uniform distribution
+    - base_uri: "file:///tmp/io-bench-sizetest/medium/"
+      count: 30
+      size_distribution:
+        type: uniform
+        min: 65536
+        max: 1048576
+      fill: zero
+  
+  cleanup: true
+
+workload:
+  # GET from small lognormal files
+  - weight: 30
+    op: get
+    path: "small/*"
+  
+  # GET from medium uniform files
+  - weight: 20
+    op: get
+    path: "medium/*"
+  
+  # PUT with fixed size (old syntax)
+  - weight: 20
+    op: put
+    path: "fixed/"
+    object_size: 524288  # 512 KB
+  
+  # PUT with lognormal distribution
+  - weight: 20
+    op: put
+    path: "lognormal/"
+    size_distribution:
+      type: lognormal
+      mean: 1048576      # 1 MB
+      std_dev: 524288    # 512 KB
+      min: 102400        # 100 KB
+      max: 5242880       # 5 MB
+  
+  # PUT with uniform distribution
+  - weight: 10
+    op: put
+    path: "uniform/"
+    size_distribution:
+      type: uniform
+      min: 1024
+      max: 102400

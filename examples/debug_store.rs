@@ -1,5 +1,5 @@
 // Debugging script to test ObjectStore usage with file system
-use s3dlio::{store_for_uri, ObjectStore};
+use s3dlio::store_for_uri;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("Attempting to put object at path: {}", path);
     
-    match store.put(path, test_data.to_vec()).await {
+    match store.put(path, test_data).await {
         Ok(_) => println!("Put successful!"),
         Err(e) => println!("Put failed: {}", e),
     }

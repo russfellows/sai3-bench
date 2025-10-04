@@ -3,7 +3,7 @@
 ## Project Overview
 io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.5.2 (October 2025) - Documentation Cleanup & Polish
+**Current Version**: v0.5.3 (October 2025) - Realistic Size Distributions & Advanced Configurability
 
 ## Architecture: Four Binary Strategy
 - **`io-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars
@@ -43,7 +43,8 @@ pb.finish_with_message(format!("downloaded {:.2} MB", total_mb));
 
 ### Config System (`src/config.rs`)
 - YAML parsing with `target` base URI + relative `path` resolution
-- `OpSpec` enum: `Get { path }` and `Put { path, object_size }`
+- `OpSpec` enum: `Get { path }`, `Put { path, size_spec }`, `List`, `Stat`, `Delete`
+- **v0.5.3+**: `WeightedOp` has optional `concurrency` field for per-operation concurrency
 - Example from `tests/configs/file_test.yaml`:
 ```yaml
 target: "file:///tmp/s3bench-test/"
@@ -51,7 +52,52 @@ workload:
   - op: get
     path: "data/*"  # Resolves to file:///tmp/s3bench-test/data/*
     weight: 70
+    concurrency: 64  # Optional per-op override
 ```
+
+### Size Generator System (`src/size_generator.rs`) - v0.5.3+
+**Purpose**: Realistic object size distributions for PUT operations and prepare steps.
+
+Three distribution types:
+1. **Fixed**: `SizeSpec::Fixed(u64)` - Backward compatible with old `object_size` field
+2. **Uniform**: Evenly distributed sizes between min and max
+3. **Lognormal**: Realistic distribution (many small, few large) - recommended
+
+Usage pattern:
+```rust
+use crate::size_generator::{SizeGenerator, SizeSpec};
+
+// Create generator from config
+let (base_uri, size_spec) = cfg.get_put_size_spec(op);
+let size_generator = SizeGenerator::new(&size_spec)?;
+
+// Generate object size
+let size = size_generator.generate();  // Returns u64
+```
+
+YAML syntax:
+```yaml
+# Old syntax (still supported)
+- op: put
+  path: "data/"
+  object_size: 1048576
+
+# New syntax (v0.5.3+)
+- op: put
+  path: "data/"
+  size_distribution:
+    type: lognormal
+    mean: 1048576
+    std_dev: 524288
+    min: 1024
+    max: 10485760
+```
+
+**Key implementation details**:
+- Uses `rand_distr` crate for statistical distributions
+- Lognormal uses rejection sampling to respect min/max bounds
+- `SizeGenerator::description()` provides human-readable description for logging
+- Comprehensive unit tests in module cover all distribution types
 
 ### Metrics Architecture (HDR Histograms)
 9 size buckets per operation type in `src/main.rs`:

@@ -7,6 +7,7 @@ pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod replay; // Legacy in-memory replay (v0.4.0)
 pub mod replay_streaming; // New streaming replay (v0.5.0+)
 pub mod remap; // Advanced remapping for replay (v0.5.0+)
+pub mod size_generator; // Size distributions for realistic workloads (v0.5.3+)
 pub mod tsv_export; // TSV export for machine-readable results (v0.5.1+)
 pub mod workload;
 

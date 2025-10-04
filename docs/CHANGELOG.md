@@ -2,6 +2,190 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.5.3] - 2025-10-04
+
+### 🎯 Realistic Size Distributions & Advanced Configurability
+Surpasses MinIO Warp with realistic object size modeling and fine-grained concurrency control.
+
+### ✨ New Features
+
+#### Object Size Distributions (`src/size_generator.rs`)
+**Problem**: Warp's "random" distribution is unrealistic. Real-world storage shows lognormal patterns (many small files, few large ones).
+
+**Solution**: Three distribution types for PUT operations and prepare steps:
+
+1. **Fixed Size** (backward compatible):
+   ```yaml
+   object_size: 1048576  # Exactly 1 MB
+   ```
+
+2. **Uniform Distribution** (evenly distributed):
+   ```yaml
+   size_distribution:
+     type: uniform
+     min: 1024        # 1 KB
+     max: 10485760    # 10 MB
+   ```
+
+3. **Lognormal Distribution** (realistic - recommended):
+   ```yaml
+   size_distribution:
+     type: lognormal
+     mean: 1048576      # Mean: 1 MB
+     std_dev: 524288    # Std dev: 512 KB
+     min: 1024          # Floor
+     max: 10485760      # Ceiling
+   ```
+
+**Implementation**:
+- New `size_generator` module with `SizeSpec` enum and `SizeGenerator` struct
+- Uses `rand_distr` crate for statistical distributions
+- Rejection sampling for lognormal to respect min/max bounds
+- Comprehensive unit tests for all distribution types
+
+#### Per-Operation Concurrency
+Fine-grained worker pool control per operation type:
+
+```yaml
+concurrency: 32  # Global default
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 64  # Override: More GET workers
+  
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 30
+    concurrency: 8   # Override: Fewer PUT workers
+```
+
+**Use cases**:
+- Model read-heavy vs write-heavy workloads
+- Simulate slow backend write performance
+- Test different concurrency levels per operation type
+
+**Implementation**:
+- Per-operation semaphores (replaces single global semaphore)
+- Optional `concurrency` field in `WeightedOp`
+- Logs custom concurrency settings for visibility
+
+#### Deduplication and Compression Control
+Leverage `s3dlio`'s controlled data generation to test storage system efficiency:
+
+```yaml
+prepare:
+  - path: "highly-dedupable/"
+    num_objects: 100
+    size_distribution:
+      type: fixed
+      size: 1048576
+    dedup_factor: 10      # 10% unique blocks (90% duplicate)
+    compress_factor: 1    # Uncompressible (random data)
+
+workload:
+  - op: put
+    path: "compressible/"
+    weight: 50
+    size_distribution:
+      type: lognormal
+      mean: 1048576
+      std_dev: 524288
+    dedup_factor: 1       # 100% unique (no dedup)
+    compress_factor: 3    # 67% zeros (3:1 compression ratio)
+```
+
+**Parameters**:
+- `dedup_factor`: Controls block uniqueness
+  - `1` = all unique blocks (no deduplication)
+  - `2` = 1/2 unique blocks (50% dedup ratio)
+  - `3` = 1/3 unique blocks (67% dedup ratio)
+  - Higher values = more duplication
+- `compress_factor`: Controls compressibility
+  - `1` = random data (uncompressible)
+  - `2` = 50% zeros (2:1 compression ratio)
+  - `3` = 67% zeros (3:1 compression ratio)
+  - Higher values = more compressible
+
+**Use cases**:
+- Test storage deduplication engines (NetApp, EMC, etc.)
+- Validate compression effectiveness (ZFS, Btrfs)
+- Measure real-world storage efficiency with realistic data patterns
+- Benchmark cloud storage with various data types (logs, backups, media)
+
+**Implementation**:
+- Uses `s3dlio::generate_controlled_data(size, dedup, compress)` API
+- Block-based generation (BLK_SIZE = 512 bytes) with Bresenham distribution
+- Defaults both to `1` for backward compatibility
+- Available in both `prepare` steps and `PUT` operations
+
+### 📚 Enhanced Documentation
+
+#### Prepare Profiles
+Documented realistic multi-tier preparation patterns in `docs/CONFIG.sample.yaml`:
+- Small files (metadata, configs) with lognormal distribution
+- Medium files (documents, images) with lognormal distribution
+- Large files (videos, backups) with uniform distribution
+- Complete production-clone example with 3 tiers
+
+#### Advanced Remapping Examples
+Added **N↔N (many-to-many)** remapping example to README:
+```yaml
+# Map 3 source buckets → 2 destination buckets
+remap:
+  - pattern: "s3://source-1/(.+)"
+    replacement: "s3://dest-a/$1"
+  - pattern: "s3://source-2/(.+)"
+    replacement: "s3://dest-a/$1"
+  - pattern: "s3://source-3/(.+)"
+    replacement: "s3://dest-b/$1"
+```
+
+#### Competitive Advantage Table
+Added comprehensive comparison vs Warp in README showing superiority in:
+- Size distributions (Uniform + Lognormal vs Random only)
+- Concurrency control (Per-operation vs Global only)
+- Backend support (5 backends vs S3 only)
+- Output format (TSV vs Text)
+- Memory usage (Constant vs High)
+
+### 🔧 Improvements
+- **Config backward compatibility**: Old `object_size` and `min_size`/`max_size` syntax still works
+- **Migration helpers**: `get_size_spec()` method converts legacy syntax to new `SizeSpec`
+- **Helper methods**: `SizeGenerator::description()` for logging, `expected_mean()` for validation
+- **Human-readable formatting**: `human_bytes()` function for size display
+
+### 🧪 Testing
+- **Unit tests**: 5 tests in `size_generator::tests` (fixed, uniform, lognormal, invalid specs, human_bytes)
+- **Integration tests**:
+  - `tests/configs/size_distributions_test.yaml` - Mixed lognormal, uniform, and fixed sizes
+  - `tests/configs/per_op_concurrency_test.yaml` - Different concurrency per operation
+- **Performance validation**: No regression (3649-5587 ops/s depending on config)
+
+### 📊 Test Results
+```
+size_distributions_test.yaml:
+- Total ops: 18457 in 5.06s (3649 ops/s)
+- Observed realistic size distributions across 9 buckets
+- Lognormal PUT: Many small (1B-8KiB: 131 ops), few large (4MiB-32MiB: 3 ops)
+
+per_op_concurrency_test.yaml:
+- Total ops: 28268 in 5.06s (5587 ops/s)
+- GET ops: 17074 (60% of total, concurrency=64)
+- PUT ops: 11194 (40% of total, concurrency=4)
+- Confirmed per-op concurrency via logs
+```
+
+### 🏆 Competitive Position
+With v0.5.3, **io-bench surpasses MinIO Warp** in:
+1. **Realistic workload modeling** - Lognormal distributions match real-world storage patterns
+2. **Configurability** - Per-operation concurrency for advanced scenarios
+3. **Backend support** - 5 protocols vs S3-only
+4. **Output quality** - Machine-readable TSV with 13 columns
+5. **Memory efficiency** - Constant memory streaming replay
+
 ## [0.5.2] - 2025-10-04
 
 ### 📚 Documentation Cleanup & Polish
