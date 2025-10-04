@@ -763,7 +763,7 @@ fn run_workload(config_path: &str) -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// replay_cmd: Replay workload from op-log file
+// replay_cmd: Replay workload from op-log file (STREAMING v0.5.0+)
 // -----------------------------------------------------------------------------
 fn replay_cmd(
     op_log: std::path::PathBuf,
@@ -771,7 +771,7 @@ fn replay_cmd(
     speed: f64,
     continue_on_error: bool,
 ) -> Result<()> {
-    use io_bench::replay::{replay_workload, ReplayConfig};
+    use io_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
     
     // Validate target URI if provided
     if let Some(ref uri) = target {
@@ -783,10 +783,18 @@ fn replay_cmd(
         target_uri: target,
         speed,
         continue_on_error,
+        max_concurrent: Some(1000), // Default max concurrent operations
     };
     
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
-    rt.block_on(replay_workload(config))?;
+    let stats = rt.block_on(replay_workload_streaming(config))?;
+    
+    // Print summary statistics
+    println!("\nReplay Summary:");
+    println!("  Total operations: {}", stats.total_operations);
+    println!("  Completed: {}", stats.completed_operations);
+    println!("  Failed: {}", stats.failed_operations);
+    println!("  Skipped: {}", stats.skipped_operations);
     
     Ok(())
 }
