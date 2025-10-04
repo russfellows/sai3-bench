@@ -72,6 +72,55 @@ workload:
 - Optional `concurrency` field in `WeightedOp`
 - Logs custom concurrency settings for visibility
 
+#### Deduplication and Compression Control
+Leverage `s3dlio`'s controlled data generation to test storage system efficiency:
+
+```yaml
+prepare:
+  - path: "highly-dedupable/"
+    num_objects: 100
+    size_distribution:
+      type: fixed
+      size: 1048576
+    dedup_factor: 10      # 10% unique blocks (90% duplicate)
+    compress_factor: 1    # Uncompressible (random data)
+
+workload:
+  - op: put
+    path: "compressible/"
+    weight: 50
+    size_distribution:
+      type: lognormal
+      mean: 1048576
+      std_dev: 524288
+    dedup_factor: 1       # 100% unique (no dedup)
+    compress_factor: 3    # 67% zeros (3:1 compression ratio)
+```
+
+**Parameters**:
+- `dedup_factor`: Controls block uniqueness
+  - `1` = all unique blocks (no deduplication)
+  - `2` = 1/2 unique blocks (50% dedup ratio)
+  - `3` = 1/3 unique blocks (67% dedup ratio)
+  - Higher values = more duplication
+- `compress_factor`: Controls compressibility
+  - `1` = random data (uncompressible)
+  - `2` = 50% zeros (2:1 compression ratio)
+  - `3` = 67% zeros (3:1 compression ratio)
+  - Higher values = more compressible
+
+**Use cases**:
+- Test storage deduplication engines (NetApp, EMC, etc.)
+- Validate compression effectiveness (ZFS, Btrfs)
+- Measure real-world storage efficiency with realistic data patterns
+- Benchmark cloud storage with various data types (logs, backups, media)
+
+**Implementation**:
+- Uses `s3dlio::generate_controlled_data(size, dedup, compress)` API
+- Block-based generation (BLK_SIZE = 512 bytes) with Bresenham distribution
+- Defaults both to `1` for backward compatibility
+- Available in both `prepare` steps and `PUT` operations
+
 ### 📚 Enhanced Documentation
 
 #### Prepare Profiles

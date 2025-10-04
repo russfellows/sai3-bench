@@ -294,3 +294,95 @@ workload:
     path: "output/"
     object_size: 524288  # Fixed 512 KB
     weight: 30
+
+---
+# Example 9: Deduplication and Compression Testing
+# Test storage system efficiency with controlled data patterns (v0.5.3+)
+
+target: "file:///tmp/storage-test/"
+duration: "60s"
+concurrency: 32
+
+prepare:
+  ensure_objects:
+    # Tier 1: Highly dedupable data (database blocks, VM snapshots)
+    - base_uri: "file:///tmp/storage-test/dedupable/"
+      count: 200
+      size_spec:
+        type: fixed
+        size: 1048576  # 1 MB blocks
+      dedup_factor: 10    # 10% unique (90% dedup ratio) - simulates repetitive data
+      compress_factor: 1  # Uncompressible (random data)
+      fill: random
+    
+    # Tier 2: Compressible logs and text files
+    - base_uri: "file:///tmp/storage-test/logs/"
+      count: 500
+      size_spec:
+        type: lognormal
+        mean: 524288      # Mean: 512 KB
+        std_dev: 262144   # Std dev: 256 KB
+        min: 10240        # Min: 10 KB
+        max: 5242880      # Max: 5 MB
+      dedup_factor: 1     # 100% unique (no dedup)
+      compress_factor: 4  # 75% zeros (4:1 compression) - simulates text/logs
+      fill: random
+    
+    # Tier 3: Media files (minimal dedup/compression)
+    - base_uri: "file:///tmp/storage-test/media/"
+      count: 100
+      size_spec:
+        type: uniform
+        min: 10485760     # Min: 10 MB
+        max: 104857600    # Max: 100 MB
+      dedup_factor: 1     # No deduplication
+      compress_factor: 1  # Uncompressible (already compressed media)
+      fill: random
+
+workload:
+  # Read operations (no dedup/compress parameters)
+  - op: get
+    path: "dedupable/*"
+    weight: 30
+    concurrency: 48  # High concurrency for reads
+  
+  - op: get
+    path: "logs/*"
+    weight: 40
+    concurrency: 48
+  
+  - op: get
+    path: "media/*"
+    weight: 10
+  
+  # Write operations with varying dedup/compress characteristics
+  - op: put
+    path: "new-dedupable/"
+    weight: 10
+    size_distribution:
+      type: fixed
+      size: 1048576
+    dedup_factor: 5      # 20% unique (80% dedup ratio)
+    compress_factor: 1   # Uncompressible
+    concurrency: 8       # Lower concurrency for writes
+  
+  - op: put
+    path: "new-logs/"
+    weight: 10
+    size_distribution:
+      type: lognormal
+      mean: 524288
+      std_dev: 262144
+    dedup_factor: 1      # 100% unique
+    compress_factor: 3   # 67% zeros (3:1 compression)
+    concurrency: 8
+
+# Use Cases:
+# - Test NetApp/EMC deduplication effectiveness
+# - Validate ZFS/Btrfs compression ratios
+# - Measure cloud storage efficiency (S3 Intelligent-Tiering)
+# - Benchmark backup systems with realistic data patterns
+# - Compare storage systems under various data characteristics
+
+# Reference: tests/configs/dedupe_compress_test.yaml for working example
+
