@@ -1,10 +1,7 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
 [![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
-[![Build Status](https://img.shields.io/badge/build-passi      fill: zero
-```
-
-### 🏆 sai3-bench Capabilities Overview
+[![Build Status](https://img.shi### 🏆 sai3-bench Capabilities Overview
 
 | Capability | Implementation | Use Cases |
 |------------|----------------|----------|
@@ -18,23 +15,99 @@
 | **Memory Efficiency** | Constant ~1.5MB (streaming) | Large-scale workload replay |
 | **Distributed Testing** | gRPC agent/controller | Multi-node load generation |
 
-## 🔬 Why Workload Replay is Revolutionaryrightgreen.svg)](https://github.com/russfellows/sai3-bench)
+## 🔬 Workload Replay Capabilities
+
+Most benchmarking tools generate synthetic workloads that may not represent real-world usage patterns. sai3-bench's workload replay capability addresses this by allowing you to record and replay actual production workloads:
+
+**The Problem**: Most tools create artificial load patterns that don't match production behavior:
+- Fixed operation ratios that never vary
+- Regular timing patterns unlike bursty real workloads  
+- Simple object access patterns vs. complex real-world sequences
+
+**sai3-bench's Solution**: Record actual production workloads and replay them with microsecond fidelity:
+
+```bash
+# Step 1: Capture your real production workload (transparent logging)
+sai3-bench --op-log /tmp/production.tsv.zst run --config production.yaml
+
+# Step 2: Analyze the captured workload patterns
+zstd -d /tmp/production.tsv.zst -c | head -10
+# Shows: operation_type, object_path, timing, sizes, access_patterns
+
+# Step 3: Replay against test environment with exact timing
+sai3-bench replay --op-log /tmp/production.tsv.zst --target "az://test-storage/"
+
+# Step 4: Migration testing - replay S3 workload against other backends
+sai3-bench replay --op-log /tmp/s3-prod.tsv.zst --target "gs://migration-test/"
+
+# Step 5: Load testing - replay at higher speeds
+sai3-bench replay --op-log /tmp/prod.tsv.zst --speed 5.0  # 5x faster
+```
+
+**Real-World Applications**:
+- **Pre-Migration Validation**: Test new storage backend with exact production load
+- **Performance Regression Testing**: Detect changes using historical workload patterns
+- **Capacity Planning**: Model peak load behavior with recorded traffic spikes
+- **Cross-Cloud Comparison**: Run identical workloads across AWS, Azure, GCS
+- **Cost Analysis**: Measure actual vs. synthetic workload costs
+
+## 💾 Storage Efficiency Testing
+
+Many benchmarking tools generate random data, which provides limited insight into storage system efficiency. sai3-bench includes controlled data generation for more realistic storage testing:
+
+**Why This Matters**: Modern storage systems use deduplication and compression:
+- **Enterprise Storage**: NetApp, EMC, Dell systems claim 2-10x space savings
+- **Cloud Storage**: AWS, Azure, GCS offer transparent compression
+- **Filesystems**: ZFS, Btrfs, NTFS provide built-in compression
+- **Backup Systems**: Veeam, CommVault depend on dedup effectiveness
+
+**Testing Strategy**:
+```yaml
+# Simulate typical enterprise data mix
+prepare:
+  # Highly dedupable data (VM templates, OS images)
+  - path: "templates/"
+    num_objects: 100
+    size_distribution: {type: fixed, size: 10485760}  # 10MB each
+    dedup_factor: 20     # 95% duplicate blocks
+    compress_factor: 2   # 2:1 compression ratio
+  
+  # Document storage (moderate compression)
+  - path: "documents/"
+    num_objects: 5000
+    size_distribution: {type: lognormal, mean: 524288, std_dev: 262144}
+    dedup_factor: 3      # 67% unique blocks
+    compress_factor: 4   # 4:1 compression ratio
+  
+  # Media files (minimal compression)
+  - path: "media/"
+    num_objects: 500
+    size_distribution: {type: uniform, min: 5242880, max: 52428800}
+    dedup_factor: 1      # 100% unique (no dedup)
+    compress_factor: 1   # Uncompressible (encrypted/compressed)
+```
+
+**Validation Scenarios**:
+- **Storage Vendor Claims**: Verify "up to 10:1 dedup ratio" promises
+- **Migration Planning**: Predict space requirements after dedup/compression
+- **Tier Optimization**: Model hot vs. cold data characteristics
+- **Cost Modeling**: Calculate true storage costs with efficiency featuresge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-A comprehensive storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for robust multi-protocol support.
+A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
-2. **Realistic Data Patterns**: Advanced deduplication and compression testing with configurable data characteristics
-3. **Intelligent Workload Replay**: Timing-faithful replay with sophisticated remapping capabilities (1→1, 1→N, N→1, regex)
+2. **Configurable Data Patterns**: Deduplication and compression testing with configurable data characteristics
+3. **Workload Replay**: Timing-faithful replay with flexible remapping capabilities (1→1, 1→N, N→1, regex)
 4. **Statistical Size Distributions**: Lognormal, uniform, and fixed distributions for realistic object size modeling
 5. **Production-Grade Metrics**: Microsecond-precision HDR histograms with size-bucketed analysis
-6. **Machine-Readable Output**: Comprehensive TSV export for automated analysis and CI/CD integration
+6. **Machine-Readable Output**: TSV export for automated analysis and CI/CD integration
 7. **Distributed Architecture**: gRPC-based agent/controller system for large-scale load generation
-8. **Storage Efficiency Testing**: First-class support for testing deduplication engines and compression algorithms
+8. **Storage Efficiency Testing**: Built-in support for testing deduplication engines and compression algorithms
 
 ## 🎯 Supported Storage Backends
 
@@ -60,7 +133,7 @@ A comprehensive storage performance testing tool that supports multiple backends
 ## 🎊 Latest Release (v0.5.4) - Storage Efficiency Testing & Advanced Data Patterns
 
 ### 🧪 Deduplication & Compression Testing
-**Novel Feature**: Test storage system efficiency with controlled data patterns - a capability rarely found in benchmarking tools.
+Test storage system efficiency with controlled data patterns - useful for evaluating deduplication and compression capabilities.
 
 ```yaml
 prepare:
@@ -111,8 +184,6 @@ workload:
 ### 📐 Realistic Object Size Distributions
 **Research-Based Modeling**: Object storage workloads naturally follow statistical distributions.
 
-**Three distribution types for PUT operations and prepare steps:**
-
 1. **Fixed Size** (backward compatible):
    ```yaml
    - op: put
@@ -142,7 +213,7 @@ workload:
        max: 10485760      # Ceiling (10 MB)
    ```
 
-**Why lognormal?** Research shows object storage workloads naturally follow lognormal distributions - users create many small files (configs, thumbnails, metadata) and few large files (videos, backups). This is far more realistic than a simple random distribution.
+**Why lognormal?** Research shows object storage workloads naturally follow lognormal distributions - users create many small files (configs, thumbnails, metadata) and few large files (videos, backups). This is far more realistic than simple random distributions.
 
 ### ⚙️ Per-Operation Concurrency
 Fine-grained control over worker pools per operation type:
@@ -164,49 +235,6 @@ workload:
 ```
 
 **Use case**: Simulate real-world scenarios where reads far outnumber writes, or model slow backend write performance.
-
-### 🔄 Intelligent Workload Replay
-**Industry-Leading Capability**: Capture, analyze, and replay real production workloads with microsecond timing precision.
-
-```bash
-# Capture production workload
-sai3-bench --op-log production.tsv.zst run --config prod-workload.yaml
-
-# Replay with exact timing (±10µs accuracy)
-sai3-bench replay --op-log production.tsv.zst
-
-# Migration testing: replay S3 workload against Azure
-sai3-bench replay --op-log s3-workload.tsv.zst \
-  --target "az://newstorage/container/"
-
-# Load testing: replay at 10x speed
-sai3-bench replay --op-log workload.tsv.zst --speed 10.0
-
-# Complex remapping: distribute single-bucket workload across multiple targets
-cat > fanout.yaml <<EOF
-rules:
-  - match: {bucket: "source"}
-    map_to_many:
-      targets:
-        - {bucket: "dest1", prefix: "shard1/"}
-        - {bucket: "dest2", prefix: "shard2/"}
-        - {bucket: "dest3", prefix: "shard3/"}
-      strategy: "round_robin"
-EOF
-sai3-bench replay --op-log workload.tsv.zst --remap fanout.yaml
-```
-
-**Advanced Remapping Patterns**:
-- **1→1**: Simple backend migration (S3 to Azure, etc.)
-- **1→N**: Fanout distribution across multiple targets
-- **N→1**: Consolidation from multiple sources to single target
-- **N↔N**: Complex many-to-many redistribution with regex patterns
-
-**Key Advantages**:
-- **Constant Memory**: ~1.5MB footprint regardless of op-log size
-- **Timing Fidelity**: Microsecond-precision scheduling maintains realistic load patterns
-- **Cross-Protocol**: Replay workloads across different storage backends
-- **Production Safe**: Built-in error handling and continue-on-error options
 
 ### 🎯 Prepare Profiles
 Documented patterns for realistic test data preparation:
@@ -246,85 +274,36 @@ prepare:
       fill: zero
 ```
 
-## � Why Workload Replay is Revolutionary
+### 🔄 Advanced Remapping Examples
+**N↔N (Many-to-Many) Remapping** with regex:
 
-Traditional benchmarking tools generate synthetic workloads that poorly represent real-world usage patterns. sai3-bench's **workload replay** capability changes this paradigm:
-
-**The Problem**: Most tools create artificial load patterns that don't match production behavior:
-- Fixed operation ratios that never vary
-- Regular timing patterns unlike bursty real workloads  
-- Simple object access patterns vs. complex real-world sequences
-
-**sai3-bench's Solution**: Record actual production workloads and replay them with microsecond fidelity:
-
-```bash
-# Step 1: Capture your real production workload (transparent logging)
-sai3-bench --op-log /tmp/production.tsv.zst run --config production.yaml
-
-# Step 2: Analyze the captured workload patterns
-zstd -d /tmp/production.tsv.zst -c | head -10
-# Shows: operation_type, object_path, timing, sizes, access_patterns
-
-# Step 3: Replay against test environment with exact timing
-sai3-bench replay --op-log /tmp/production.tsv.zst --target "az://test-storage/"
-
-# Step 4: Migration testing - replay S3 workload against other backends
-sai3-bench replay --op-log /tmp/s3-prod.tsv.zst --target "gs://migration-test/"
-
-# Step 5: Load testing - replay at higher speeds
-sai3-bench replay --op-log /tmp/prod.tsv.zst --speed 5.0  # 5x faster
-```
-
-**Real-World Applications**:
-- **Pre-Migration Validation**: Test new storage backend with exact production load
-- **Performance Regression Testing**: Detect changes using historical workload patterns
-- **Capacity Planning**: Model peak load behavior with recorded traffic spikes
-- **Cross-Cloud Comparison**: Run identical workloads across AWS, Azure, GCS
-- **Cost Analysis**: Measure actual vs. synthetic workload costs
-
-## 💾 Storage Efficiency Testing - An Industry First
-
-Most benchmarking tools generate random data, providing no insight into storage system efficiency. sai3-bench pioneers **controlled data generation** for realistic storage testing:
-
-**Why This Matters**: Modern storage systems use deduplication and compression:
-- **Enterprise Storage**: NetApp, EMC, Dell systems claim 2-10x space savings
-- **Cloud Storage**: AWS, Azure, GCS offer transparent compression
-- **Filesystems**: ZFS, Btrfs, NTFS provide built-in compression
-- **Backup Systems**: Veeam, CommVault depend on dedup effectiveness
-
-**Testing Strategy**:
 ```yaml
-# Simulate typical enterprise data mix
-prepare:
-  # Highly dedupable data (VM templates, OS images)
-  - path: "templates/"
-    num_objects: 100
-    size_distribution: {type: fixed, size: 10485760}  # 10MB each
-    dedup_factor: 20     # 95% duplicate blocks
-    compress_factor: 2   # 2:1 compression ratio
+# Map 3 source buckets → 2 destination buckets
+remap:
+  # Source bucket 1 & 2 → Destination bucket A
+  - pattern: "s3://source-1/(.+)"
+    replacement: "s3://dest-a/$1"
+  - pattern: "s3://source-2/(.+)"
+    replacement: "s3://dest-a/$1"
   
-  # Document storage (moderate compression)
-  - path: "documents/"
-    num_objects: 5000
-    size_distribution: {type: lognormal, mean: 524288, std_dev: 262144}
-    dedup_factor: 3      # 67% unique blocks
-    compress_factor: 4   # 4:1 compression ratio
-  
-  # Media files (minimal compression)
-  - path: "media/"
-    num_objects: 500
-    size_distribution: {type: uniform, min: 5242880, max: 52428800}
-    dedup_factor: 1      # 100% unique (no dedup)
-    compress_factor: 1   # Uncompressible (encrypted/compressed)
+  # Source bucket 3 → Destination bucket B
+  - pattern: "s3://source-3/(.+)"
+    replacement: "s3://dest-b/$1"
 ```
 
-**Validation Scenarios**:
-- **Storage Vendor Claims**: Verify "up to 10:1 dedup ratio" promises
-- **Migration Planning**: Predict space requirements after dedup/compression
-- **Tier Optimization**: Model hot vs. cold data characteristics
-- **Cost Modeling**: Calculate true storage costs with efficiency features
+### 🏆 Competitive Advantage vs Warp
 
-## 🌟 Release History
+| Feature | Warp | sai3-bench v0.5.3 |
+|---------|------|-----------------|
+| **Size distributions** | Random only | **Uniform + Lognormal** (realistic) |
+| **Concurrency control** | Global only | **Per-operation** override |
+| **Prepare profiles** | Basic | **Documented patterns** with realistic distributions |
+| **Backend support** | S3 only | **5 backends** (S3, Azure, GCS, File, Direct I/O) |
+| **Remapping** | 1:1 only | **1:1, 1→N, N→1, N↔N** (regex) |
+| **Output format** | Text analysis | **TSV** (13 columns, machine-readable) |
+| **Memory usage** | High (replay) | **Constant** (streaming replay ~1.5 MB) |
+
+## 🌟 Previous Releases
 
 ### v0.5.2 - Machine-Readable Results & Enhanced Metrics
 - **TSV export**: 13-column format for automated analysis
@@ -368,40 +347,34 @@ prepare:
 # Install and build
 cargo build --release
 
-# 1. Basic health check across backends
+# Test local filesystem
 ./target/release/sai3-bench health --uri "file:///tmp/test/"
-./target/release/sai3-bench health --uri "s3://my-bucket/"
-./target/release/sai3-bench health --uri "az://account/container/"
+./target/release/sai3-bench put --uri "file:///tmp/test/data*.txt" --object-size 1024 --objects 100
 
-# 2. Generate realistic test data with deduplication
-./target/release/sai3-bench put --uri "file:///tmp/test/data/" \
-  --objects 1000 --size-distribution lognormal:1048576:524288:1024:10485760 \
-  --dedup-factor 5 --compress-factor 3
+# Capture workload with op-log
+./target/release/sai3-bench --op-log /tmp/workload.tsv.zst \
+  run --config my-workload.yaml
 
-# 3. Run comprehensive workload with machine-readable results
-./target/release/sai3-bench run --config workload.yaml \
+# Run workload with TSV export for machine-readable results
+./target/release/sai3-bench run --config my-workload.yaml \
   --results-tsv /tmp/benchmark-results
 
-# 4. Capture production workload for analysis
-./target/release/sai3-bench --op-log /tmp/production.tsv.zst \
-  run --config production-workload.yaml
+# Replay workload to different backend
+./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst \
+  --target "s3://mybucket/prefix/" --speed 2.0
 
-# 5. Replay workload for migration testing
-./target/release/sai3-bench replay --op-log /tmp/production.tsv.zst \
-  --target "az://newstorage/container/" --speed 2.0
-
-# 6. Advanced: Multi-target fanout testing
+# Advanced: Replay with 1→N fanout remapping
 ./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst \
   --remap fanout-config.yaml
 
-# 7. Cross-protocol performance comparison
-./target/release/sai3-bench run --config comparison.yaml \
-  --results-tsv /tmp/protocol-comparison
+# Test Azure Blob Storage (requires setup)
+export AZURE_STORAGE_ACCOUNT="your-storage-account"
+export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
+./target/release/sai3-bench health --uri "az://your-storage-account/container/"
 
-# Setup cloud backends (one-time)
-export AZURE_STORAGE_ACCOUNT="your-account"
-export AZURE_STORAGE_ACCOUNT_KEY="your-key"
-gcloud auth application-default login  # For GCS
+# Test Google Cloud Storage (requires gcloud auth)
+gcloud auth application-default login
+./target/release/sai3-bench health --uri "gs://my-bucket/prefix/"
 ```
 
 ### 📊 Performance Characteristics
