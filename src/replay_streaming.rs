@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 pub use s3dlio_oplog::{OpLogEntry, OpType, OpLogStreamReader};
 
 use crate::workload;
+use crate::remap::{RemapConfig, RemapEngine};
 
 /// Replay configuration
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct ReplayConfig {
     pub continue_on_error: bool,
     /// Maximum concurrent operations (to prevent unbounded task growth)
     pub max_concurrent: Option<usize>,
+    /// Optional remap configuration for advanced URI transformations
+    pub remap_config: Option<RemapConfig>,
 }
 
 impl Default for ReplayConfig {
@@ -34,6 +37,7 @@ impl Default for ReplayConfig {
             speed: 1.0,
             continue_on_error: false,
             max_concurrent: Some(1000), // Reasonable default to prevent memory issues
+            remap_config: None,
         }
     }
 }
@@ -214,10 +218,18 @@ fn spawn_operation(
             .await?;
         }
 
-        // Translate URI if target provided
-        let uri = if let Some(ref target) = config.target_uri {
+        // Apply URI transformation (priority: remap > simple retargeting)
+        let uri = if let Some(ref remap_config) = config.remap_config {
+            // Advanced remapping with rules
+            let engine = RemapEngine::new(remap_config.clone());
+            let original_uri = format!("{}{}", entry.endpoint, entry.file);
+            engine.remap(&original_uri)
+                .context("Failed to apply remap rules")?
+        } else if let Some(ref target) = config.target_uri {
+            // Simple 1→1 retargeting (legacy behavior)
             translate_uri(&entry.file, &entry.endpoint, target)?
         } else {
+            // No transformation
             format!("{}{}", entry.endpoint, entry.file)
         };
 

@@ -1,0 +1,15 @@
+# Simple fanout remap for testing
+# Maps file:///tmp/source/* to two destinations
+
+rules:
+  # 1→N: Fanout to two local directories (round-robin)
+  - match:
+      bucket: "tmp"
+      prefix: "source/"
+    map_to_many:
+      targets:
+        - bucket: "tmp"
+          prefix: "dest1/"
+        - bucket: "tmp"
+          prefix: "dest2/"
+      strategy: "round_robin"
