@@ -1,0 +1,27 @@
+# Google Cloud Storage test configuration
+# Tests gs:// URI scheme with Google Cloud Storage backend
+# Requires environment variables:
+#   GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+#   Or GCS_BUCKET="your-gcs-bucket-name" for simpler configuration
+target: "gs://GCS_BUCKET/io-bench-test/"
+
+workload:
+  - op: put
+    path: "test-data/object-*"
+    object_size: 524288  # 512KB objects
+    weight: 30
+  
+  - op: get
+    path: "test-data/object-*"
+    weight: 50
+  
+  - op: list
+    path: "test-data/"
+    weight: 10
+  
+  - op: stat
+    path: "test-data/object-*"
+    weight: 10
+
+concurrency: 4
+duration: 15s

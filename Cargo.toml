@@ -1,6 +1,6 @@
 [package]
 name    = "io-bench"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 build   = "build.rs"
 
@@ -72,3 +72,4 @@ assert_cmd = "2.0"
 predicates = "2.1"
 tempfile = "3"
 bytes = "1"
+tokio = { version = "1", features = ["full"] }

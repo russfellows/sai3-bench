@@ -285,12 +285,12 @@ fn validate_uri(uri: &str) -> Result<String> {
     let parsed = Url::parse(uri).context("Invalid URI format")?;
     
     match parsed.scheme() {
-        "file" | "direct" | "s3" | "az" => {
+        "file" | "direct" | "s3" | "az" | "gs" | "gcs" => {
             // URI is valid for supported backends
             Ok(uri.to_string())
         }
         scheme => {
-            bail!("Unsupported backend scheme '{}'. Supported schemes: file://, direct://, s3://, az://", scheme)
+            bail!("Unsupported backend scheme '{}'. Supported schemes: file://, direct://, s3://, az://, gs://", scheme)
         }
     }
 }

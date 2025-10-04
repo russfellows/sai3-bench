@@ -2,6 +2,64 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.4.2] - 2025-10-03
+
+### 🌐 Google Cloud Storage Backend Support
+- **New Backend**: Added comprehensive GCS support as the 5th storage backend
+  - **URI Schemes**: Both `gs://bucket/prefix/` and `gcs://bucket/prefix/` supported
+  - **Authentication**: Google Application Default Credentials (ADC) integration
+    - Service account JSON via `GOOGLE_APPLICATION_CREDENTIALS`
+    - GCE/GKE metadata server (automatic on Google Cloud)
+    - gcloud CLI credentials
+  - **Full Operation Support**: GET, PUT, DELETE, LIST, STAT operations
+  - **Performance**: 9-11 MB/s for large objects (5MB), ~400-600ms latency for small objects
+
+### 🔧 Implementation Details
+- **src/workload.rs**: Added `Gcs` variant to `BackendType` enum
+  - URI scheme detection for `gs://` and `gcs://`
+  - Backend name: "Google Cloud Storage"
+  - URI path building compatible with S3-style paths
+- **src/main.rs**: Updated URI validation to accept GCS schemes
+  - Added `gs` and `gcs` to supported schemes list
+  - Updated error messages to include `gs://`
+
+### ✅ Testing & Validation
+- **8 Comprehensive Integration Tests** (tests/gcs_tests.rs)
+  - Backend detection and ObjectStore creation
+  - PUT/GET/DELETE cycle with content verification
+  - LIST operations (5 objects)
+  - STAT metadata retrieval
+  - Concurrent operations (10 objects with tokio::spawn)
+  - Large object handling (5MB at 9.48/11.29 MB/s)
+  - Alternate URI scheme testing (gs:// and gcs://)
+  - **All tests passed** against real GCS bucket (signal65-russ-b1)
+  
+- **Shell Test Suite** (tests/gcs_backend_test.sh)
+  - 9 comprehensive tests covering health check, operations, concurrency
+  - Professional output with colors and progress tracking
+  - Op-log generation and workload testing
+
+- **YAML Configuration** (tests/configs/gcs_test.yaml)
+  - Mixed workload template (PUT 30%, GET 50%, LIST 10%, STAT 10%)
+  - Environment variable support for `GCS_BUCKET`
+
+### 📦 Dependencies
+- **tokio**: Added to dev-dependencies with "full" features for async tests
+
+### 📝 Documentation
+- **README.md**: Updated from "4 storage backends" to "5 storage backends"
+- **GCS_INTEGRATION_COMPLETE.md**: Comprehensive integration documentation
+  - Authentication setup instructions
+  - Usage examples and performance characteristics
+  - Test results and verification checklist
+
+### 🎯 Real-World Testing
+Successfully tested against Google Cloud Storage:
+- Bucket: gs://signal65-russ-b1/
+- Project: signal65-testing
+- All 8 Rust integration tests passed in 14.76s
+- CLI operations verified (health, put, get, delete, list)
+
 ## [0.4.1] - 2025-10-03
 
 ### 🚀 Major Updates
