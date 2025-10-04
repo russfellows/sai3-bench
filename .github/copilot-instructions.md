@@ -3,7 +3,7 @@
 ## Project Overview
 io-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.5.1 (October 2025) - Machine-Readable Results & Enhanced Metrics
+**Current Version**: v0.5.2 (October 2025) - Documentation Cleanup & Polish
 
 ## Architecture: Four Binary Strategy
 - **`io-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars

@@ -122,7 +122,7 @@ enum Commands {
     ///   io-bench run --config mixed.yaml
     ///   io-bench run --config mixed.yaml --prepare-only
     ///   io-bench run --config mixed.yaml --no-cleanup
-    ///   io-bench run --config mixed.yaml --results-tsv /tmp/results
+    ///   io-bench run --config mixed.yaml --results-tsv /tmp/benchmark
     Run {
         #[arg(long)]
         config: String,
@@ -135,8 +135,17 @@ enum Commands {
         #[arg(long)]
         no_cleanup: bool,
         
-        /// Export machine-readable results to TSV file (adds -results.tsv suffix)
-        #[arg(long)]
+        /// Export machine-readable results to TSV file.
+        /// 
+        /// Output file will be <path>-results.tsv with 13 columns:
+        /// operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us,
+        /// p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
+        /// 
+        /// Size buckets: zero, 1B-8KiB, 8KiB-64KiB, 64KiB-512KiB, 512KiB-4MiB,
+        /// 4MiB-32MiB, 32MiB-256MiB, 256MiB-2GiB, >2GiB
+        /// 
+        /// Example: --results-tsv /tmp/test creates /tmp/test-results.tsv
+        #[arg(long, value_name = "PATH")]
         results_tsv: Option<String>,
     },
     /// Replay workload from op-log file with timing-faithful execution

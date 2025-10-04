@@ -1,6 +1,6 @@
 # io-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/russfellows/s3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](https://github.com/russfellows/s3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/s3-bench)
 [![Tests](https://img.shields.io/badge/tests-13%20passing-success.svg)](https://github.com/russfellows/s3-bench)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

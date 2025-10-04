@@ -2,6 +2,36 @@
 
 All notable changes to io-bench will be documented in this file.
 
+## [0.5.2] - 2025-10-04
+
+### 📚 Documentation Cleanup & Polish
+Streamlined documentation for clarity and removed obsolete files.
+
+### 🗑️ Removed Files
+- **Old release notes**: Removed 4 version-specific release note files (v0.3.0, v0.3.2, v0.4.0, v0.4.3)
+  - All release information consolidated into CHANGELOG.md
+- **Completed design docs**: Removed 4 completed implementation documents
+  - MIGRATION_PLAN.md (multi-backend migration complete)
+  - OP_LOG_REPLAY_DESIGN.md (replay feature implemented)
+  - REPLAY_FUTURE_WORK.md (features completed in v0.5.0)
+  - DEVELOPMENT_NOTES.md (old v0.3.0 technical notes)
+
+### ✨ Improvements
+- **README.md**: Updated to v0.5.2 with comprehensive badges and modern examples
+  - Added version, build, tests, license, and Rust version badges
+  - Updated Quick Start with TSV export and advanced remapping examples
+  - Added dedicated TSV Export section
+  - Updated performance characteristics for all 5 backends
+- **Documentation index**: Created docs/README.md for easy navigation
+- **Warp parity tracking**: Added WARP_PARITY_STATUS.md showing 95% completion
+- **Kept recent work**: Preserved v0.5.x implementation summaries and reference materials
+
+### 📂 Documentation Structure (40% reduction)
+From 20 files to 12 essential documents:
+- 4 user guides (USAGE, AZURE_SETUP, CONFIG samples)
+- 4 reference docs (CHANGELOG, INTEGRATION_CONTEXT, Warp parity docs)
+- 4 recent implementation records (v0.5.0/v0.5.1 summaries, POLARWARP analysis)
+
 ## [0.5.1] - 2025-10-04
 
 ### 🎯 Machine-Readable Results & Enhanced Metrics
