@@ -1,15 +1,22 @@
 # io-bench: Multi-Protocol I/O Benchmarking Suite
 
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/russfellows/s3-bench/releases)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/s3-bench)
+[![Tests](https://img.shields.io/badge/tests-13%20passing-success.svg)](https://github.com/russfellows/s3-bench)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+
 A comprehensive storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for robust multi-protocol support.
 
 ## 🚀 What Makes io-bench Different?
 
 1. **Multi-Protocol Support**: Unlike tools that focus on a single protocol, io-bench supports 5 storage backends
 2. **Unified Interface**: Consistent CLI and configuration across all storage types  
-3. **Advanced Metrics**: Microsecond-precision HDR histogram performance measurements
-4. **Distributed Execution**: gRPC-based agent/controller architecture for scale testing
-5. **Workload Replay**: Support for captured workload replay and analysis
-6. **Real-World Patterns**: Glob patterns, concurrent operations, and mixed workloads
+3. **Advanced Metrics**: Microsecond-precision HDR histogram performance measurements with size-bucketed analysis
+4. **Machine-Readable Results**: TSV export for automated analysis and performance tracking
+5. **Distributed Execution**: gRPC-based agent/controller architecture for scale testing
+6. **Workload Replay**: Timing-faithful replay with advanced remapping (1→1, 1→N, N→1, regex)
+7. **Warp Compatibility**: Near-identical testing capabilities to MinIO Warp/warp-replay
 
 ## 🎯 Supported Storage Backends
 
@@ -28,52 +35,63 @@ A comprehensive storage performance testing tool that supports multiple backends
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with io-bench
-- **[Release Notes v0.4.0](docs/RELEASE_NOTES_v0.4.0.md)** - Replay feature details and examples
-- **[Future Work](docs/REPLAY_FUTURE_WORK.md)** - Planned enhancements
-- **[Changelog](docs/CHANGELOG.md)** - Version history and release notes
+- **[Warp Parity Plan](docs/WARP_PARITY_PLAN.md)** - Warp/warp-replay compatibility roadmap
+- **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.4.2) - Google Cloud Storage Support
+## 🎊 Latest Release (v0.5.1) - Machine-Readable Results & Enhanced Metrics
 
-### � Google Cloud Storage Backend
-- **5th Storage Backend**: Full GCS integration with `gs://` and `gcs://` URI schemes
-- **Application Default Credentials**: Seamless authentication via gcloud CLI, service accounts, or GCE metadata
-- **Complete Operation Support**: GET, PUT, DELETE, LIST, STAT operations validated against real GCS buckets
-- **Performance Validated**: 9-11 MB/s for large objects, ~400-600ms latency for small operations
-- **Comprehensive Testing**: 8 integration tests + shell test suite, all passing with real GCS credentials
+### 📊 TSV Export for Automated Analysis
+- **Machine-readable results**: Export detailed benchmark data in tab-separated format
+- **13-column format**: operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
+- **Per-bucket metrics**: Detailed statistics for each of 9 size buckets (zero, 1B-8KiB, 8KiB-64KiB, ..., >2GiB)
+- **Accurate throughput**: Uses actual bytes transferred (not estimated), reported in MiB/s
+- **CLI flag**: `--results-tsv <path>` for run command
 
-### 🌊 Streaming Replay (v0.4.1)
-- **Constant Memory Usage**: Stream replay with ~1.5 MB memory footprint (vs. full file in memory)
-- **s3dlio-oplog Integration**: Dedicated streaming reader with background decompression
-- **Non-Logging Replay**: Prevents circular logging during replay operations
-- **Comprehensive Tests**: 6 integration tests covering streaming, remapping, error handling, concurrency
-- **s3dlio v0.8.19+**: Updated to latest s3dlio with bug fixes and GCS backend support
+### 📈 Enhanced Metrics Collection
+- **Shared metrics module**: Unified histogram infrastructure across all commands
+- **Mean + Median**: Both average and p50 latency tracking for comprehensive analysis
+- **Size-bucketed histograms**: Consistent 9-bucket collection across all execution modes
+- **Actual byte tracking**: Real ops/bytes per size bucket from SizeBins
+- **Performance validated**: 19.6k ops/s on file backend with full bucketing
 
-### 🎬 Timing-Faithful Replay (v0.4.0)
-- **Op-Log Replay**: Replay captured workloads with microsecond-precision timing (~10µs accuracy)
-- **Absolute Timeline Scheduling**: Prevents timing drift for faithful workload reproduction
-- **Backend Retargeting**: Simple 1:1 URI remapping to replay on different storage backends
-- **Speed Control**: Adjustable replay speed (e.g., 2x faster, 0.5x slower)
-- **Universal Support**: Works across all 5 operation types (GET, PUT, DELETE, LIST, STAT)
-- **Smart Compression**: Auto-detects zstd compression for space-efficient op-logs
+### 🔧 Improvements
+- **Default concurrency**: Increased from 20 to 32 workers for better throughput
+- **Code deduplication**: Removed 90+ lines of duplicate histogram code
+- **Histogram consistency**: Fixed missing size-bucketed collection in workload runs
 
-### ✨ Enhanced Capabilities (v0.3.x)
-- **Interactive Progress Bars**: Professional real-time progress visualization for all operations
-- **Time-based Progress**: Smooth animated progress tracking for timed workloads with ETA
-- **Operation Progress**: Visual completion tracking for GET, PUT, DELETE commands  
-- **Smart Messages**: Dynamic progress context showing concurrency, data sizes, and rates
+## 🌟 Previous Releases
 
-### 🎯 Core Features (v0.3.0)
+### v0.5.0 - Advanced Replay Remapping
+- **1→N Fanout**: Distribute operations across multiple targets (round_robin, random, sticky_key)
+- **N→1 Consolidation**: Merge multiple sources to single target
+- **Regex Remapping**: Pattern-based URI transformation for complex migrations
+- **Streaming replay**: Constant ~1.5 MB memory via s3dlio-oplog integration
 
-- **Complete Multi-Backend Support**: Unified interface across file://, direct://, s3://, and az:// protocols
-- **Microsecond Precision Metrics**: HDR histogram performance measurements with µs accuracy
-- **Four Operation Categories**: GET, PUT, LIST, STAT, DELETE with dedicated latency tracking
-- **Advanced Glob Patterns**: Cross-backend wildcard support for flexible object selection
-- **Azure Blob Storage**: Full Azure authentication and proper URI format support
-- **Enhanced Configuration**: Target-based YAML configs with environment variable support
-- **Distributed Architecture**: gRPC agent/controller for multi-node load generation
-- **Real-Time Performance**: Validated 25k+ ops/s file operations, network-dependent cloud performance
+### v0.4.3 - Prepare/Pre-population
+- **Prepare step**: Ensure objects exist before testing (Warp parity)
+- **Cleanup support**: Optional deletion of prepared objects after tests
+- **CLI flags**: `--prepare-only` and `--no-cleanup` for flexible workflows
+
+### v0.4.2 - Google Cloud Storage Support
+- **GCS backend**: Full integration with `gs://` and `gcs://` URI schemes
+- **Application Default Credentials**: Seamless gcloud CLI authentication
+- **Performance validated**: 9-11 MB/s for large objects, ~400-600ms latency
+
+### v0.4.1 - Streaming Replay
+- **Constant memory**: Stream replay with ~1.5 MB footprint (vs. full file in memory)
+- **Background decompression**: Efficient handling of zstd-compressed op-logs
+
+### v0.4.0 - Timing-Faithful Replay
+- **Microsecond precision**: Replay with ~10µs accuracy
+- **Backend retargeting**: Simple 1:1 URI remapping
+- **Speed control**: Adjustable replay speed (e.g., 2x, 0.5x)
+
+### v0.3.x - Enhanced UX
+- **Interactive progress bars**: Professional real-time visualization
+- **Time-based progress**: Smooth animated tracking with ETA
+- **Smart messages**: Dynamic context showing concurrency, sizes, rates
 
 ### 🚀 Quick Start
 
@@ -89,32 +107,42 @@ cargo build --release
 ./target/release/io-bench --op-log /tmp/workload.tsv.zst \
   run --config my-workload.yaml
 
+# Run workload with TSV export for machine-readable results
+./target/release/io-bench run --config my-workload.yaml \
+  --results-tsv /tmp/benchmark-results
+
 # Replay workload to different backend
 ./target/release/io-bench replay --op-log /tmp/workload.tsv.zst \
   --target "s3://mybucket/prefix/" --speed 2.0
+
+# Advanced: Replay with 1→N fanout remapping
+./target/release/io-bench replay --op-log /tmp/workload.tsv.zst \
+  --remap fanout-config.yaml
 
 # Test Azure Blob Storage (requires setup)
 export AZURE_STORAGE_ACCOUNT="your-storage-account"
 export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
 ./target/release/io-bench health --uri "az://your-storage-account/container/"
 
-# Run distributed workload
-./target/release/iobench-agent --listen 127.0.0.1:7761 &
-./target/release/iobench-ctl --insecure --agents 127.0.0.1:7761 ping
+# Test Google Cloud Storage (requires gcloud auth)
+gcloud auth application-default login
+./target/release/io-bench health --uri "gs://my-bucket/prefix/"
 ```
 
 ### 📊 Performance Characteristics
 
-- **File Backend**: 25k+ ops/s, sub-millisecond latencies
+- **File Backend**: 25k+ ops/s, sub-millisecond latencies, 19.6k ops/s with full metrics
 - **Direct I/O Backend**: 10+ MB/s throughput, ~100ms latencies  
+- **S3 Backend**: Network-dependent, validated with real buckets
 - **Azure Blob Storage**: 2-3 ops/s, ~700ms latencies (network dependent)
+- **GCS Backend**: 9-11 MB/s for large objects, ~400-600ms for small operations
 - **Cross-Backend Workloads**: Mixed protocol operations in single configuration
 
 ### 🔧 Requirements
 
 - **Rust**: Stable toolchain (2024 edition)
 - **Protobuf**: `protoc` compiler for gRPC (distributed mode)
-- **Storage Credentials**: Backend-specific authentication (AWS, Azure)
+- **Storage Credentials**: Backend-specific authentication (AWS, Azure, GCS)
 
 See the [Usage Guide](docs/USAGE.md) for detailed setup instructions.
 
@@ -134,8 +162,36 @@ io-bench replay --op-log /tmp/s3-workload.tsv.zst \
 # Replay at 10x speed for quick testing
 io-bench replay --op-log /tmp/workload.tsv.zst --speed 10.0
 
+# Advanced: 1→N fanout with round-robin strategy
+cat > fanout.yaml <<EOF
+rules:
+  - match: {bucket: "source"}
+    map_to_many:
+      targets:
+        - {bucket: "dest1", prefix: ""}
+        - {bucket: "dest2", prefix: ""}
+        - {bucket: "dest3", prefix: ""}
+      strategy: "round_robin"
+EOF
+io-bench replay --op-log /tmp/workload.tsv.zst --remap fanout.yaml
+
 # Replay with error tolerance
 io-bench replay --op-log /tmp/workload.tsv.zst --continue-on-error
+```
+
+### 📈 TSV Export for Analysis
+
+```bash
+# Run workload with machine-readable results export
+io-bench run --config workload.yaml --results-tsv /tmp/results
+
+# Generated file: /tmp/results-results.tsv with 13 columns:
+# operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, 
+# p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
+
+# Parse with any TSV tool (awk, pandas, polars, etc.)
+awk -F'\t' 'NR>1 {print $1, $2, $4, $5, $12}' /tmp/results-results.tsv
+# Shows: operation, size_bucket, mean_us, p50_us, throughput_mibps
 ```
 
 **Key Features:**
