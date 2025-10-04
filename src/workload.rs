@@ -431,15 +431,20 @@ pub struct Summary {
     pub get_bins: SizeBins,
     pub put_bins: SizeBins,
     pub meta_bins: SizeBins,
+    
+    // v0.5.1: Expose histograms for TSV export
+    pub get_hists: crate::metrics::OpHists,
+    pub put_hists: crate::metrics::OpHists,
+    pub meta_hists: crate::metrics::OpHists,
 }
 
 // -----------------------------------------------------------------------------
 // Worker stats merged at the end
 // -----------------------------------------------------------------------------
 struct WorkerStats {
-    hist_get: Histogram<u64>,
-    hist_put: Histogram<u64>,
-    hist_meta: Histogram<u64>,
+    hist_get: crate::metrics::OpHists,
+    hist_put: crate::metrics::OpHists,
+    hist_meta: crate::metrics::OpHists,
     get_bytes: u64,
     get_ops: u64,
     put_bytes: u64,
@@ -454,9 +459,9 @@ struct WorkerStats {
 impl Default for WorkerStats {
     fn default() -> Self {
         Self {
-            hist_get: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
-            hist_put: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
-            hist_meta: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
+            hist_get: crate::metrics::OpHists::new(),
+            hist_put: crate::metrics::OpHists::new(),
+            hist_meta: crate::metrics::OpHists::new(),
             get_bytes: 0,
             get_ops: 0,
             put_bytes: 0,
@@ -596,9 +601,10 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         let bytes = get_object_multi_backend(&full_uri).await?;
-                        let micros = t0.elapsed().as_micros() as u64;
+                        let duration = t0.elapsed();
 
-                        ws.hist_get.record(micros.max(1)).ok();
+                        let bucket = crate::metrics::bucket_index(bytes.len());
+                        ws.hist_get.record(bucket, duration);
                         ws.get_ops += 1;
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
@@ -622,9 +628,10 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         put_object_multi_backend(&full_uri, &buf).await?;
-                        let micros = t0.elapsed().as_micros() as u64;
+                        let duration = t0.elapsed();
 
-                        ws.hist_put.record(micros.max(1)).ok();
+                        let bucket = crate::metrics::bucket_index(buf.len());
+                        ws.hist_put.record(bucket, duration);
                         ws.put_ops += 1;
                         ws.put_bytes += sz;
                         ws.put_bins.add(sz);
@@ -635,9 +642,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         let _keys = list_objects_multi_backend(&uri).await?;
-                        let micros = t0.elapsed().as_micros() as u64;
+                        let duration = t0.elapsed();
 
-                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
                         ws.meta_ops += 1;
                         // List operations don't transfer data, just metadata
                         ws.meta_bins.add(0);
@@ -648,9 +655,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         let _size = stat_object_multi_backend(&uri).await?;
-                        let micros = t0.elapsed().as_micros() as u64;
+                        let duration = t0.elapsed();
 
-                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
                         ws.meta_ops += 1;
                         // Stat operations don't transfer data, just metadata about the size
                         ws.meta_bins.add(0);
@@ -661,9 +668,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                         let t0 = Instant::now();
                         delete_object_multi_backend(&uri).await?;
-                        let micros = t0.elapsed().as_micros() as u64;
+                        let duration = t0.elapsed();
 
-                        ws.hist_meta.record(micros.max(1)).ok();
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
                         ws.meta_ops += 1;
                         // Delete operations don't transfer data
                         ws.meta_bins.add(0);
@@ -675,10 +682,10 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         }));
     }
 
-    // Merge results
-    let mut merged_get = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
-    let mut merged_put = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
-    let mut merged_meta = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+    // Merge results from all workers
+    let mut merged_get = crate::metrics::OpHists::new();
+    let mut merged_put = crate::metrics::OpHists::new();
+    let mut merged_meta = crate::metrics::OpHists::new();
     let mut get_bytes = 0u64;
     let mut get_ops = 0u64;
     let mut put_bytes = 0u64;
@@ -691,9 +698,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
     for h in handles {
         let ws = h.await??;
-        merged_get.add(&ws.hist_get).ok();
-        merged_put.add(&ws.hist_put).ok();
-        merged_meta.add(&ws.hist_meta).ok();
+        merged_get.merge(&ws.hist_get);
+        merged_put.merge(&ws.hist_put);
+        merged_meta.merge(&ws.hist_meta);
         get_bytes += ws.get_bytes;
         get_ops += ws.get_ops;
         put_bytes += ws.put_bytes;
@@ -714,37 +721,42 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     // Always show completion status
     println!("Execution completed in {:.2}s", wall);
 
+    // Get combined percentiles for OpAgg structures
+    let get_combined = merged_get.combined_histogram();
+    let put_combined = merged_put.combined_histogram();
+    let meta_combined = merged_meta.combined_histogram();
+
     let get = OpAgg {
         bytes: get_bytes,
         ops: get_ops,
-        p50_us: merged_get.value_at_quantile(0.50),
-        p95_us: merged_get.value_at_quantile(0.95),
-        p99_us: merged_get.value_at_quantile(0.99),
+        p50_us: get_combined.value_at_quantile(0.50),
+        p95_us: get_combined.value_at_quantile(0.95),
+        p99_us: get_combined.value_at_quantile(0.99),
     };
     let put = OpAgg {
         bytes: put_bytes,
         ops: put_ops,
-        p50_us: merged_put.value_at_quantile(0.50),
-        p95_us: merged_put.value_at_quantile(0.95),
-        p99_us: merged_put.value_at_quantile(0.99),
+        p50_us: put_combined.value_at_quantile(0.50),
+        p95_us: put_combined.value_at_quantile(0.95),
+        p99_us: put_combined.value_at_quantile(0.99),
     };
     let meta = OpAgg {
         bytes: meta_bytes,
         ops: meta_ops,
-        p50_us: merged_meta.value_at_quantile(0.50),
-        p95_us: merged_meta.value_at_quantile(0.95),
-        p99_us: merged_meta.value_at_quantile(0.99),
+        p50_us: meta_combined.value_at_quantile(0.50),
+        p95_us: meta_combined.value_at_quantile(0.95),
+        p99_us: meta_combined.value_at_quantile(0.99),
     };
 
     // Preserve combined line for compatibility
     let total_bytes = get_bytes + put_bytes + meta_bytes;
     let total_ops = get_ops + put_ops + meta_ops;
 
-    // Build a combined histogram just for the old p50/95/99
+    // Build a combined histogram across all operations for overall p50/95/99
     let mut combined = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
-    combined.add(&merged_get).ok();
-    combined.add(&merged_put).ok();
-    combined.add(&merged_meta).ok();
+    combined.add(&get_combined).ok();
+    combined.add(&put_combined).ok();
+    combined.add(&meta_combined).ok();
 
     info!("Workload execution completed: {:.2}s wall time, {} total ops ({} GET, {} PUT, {} META), {:.2} MB total ({:.2} MB GET, {:.2} MB PUT, {:.2} MB META)", 
           wall, 
@@ -753,6 +765,17 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
           get_bytes as f64 / 1_048_576.0,
           put_bytes as f64 / 1_048_576.0,
           meta_bytes as f64 / 1_048_576.0);
+
+    // Print detailed size-bucketed histograms
+    if get_ops > 0 {
+        merged_get.print_summary("GET");
+    }
+    if put_ops > 0 {
+        merged_put.print_summary("PUT");
+    }
+    if meta_ops > 0 {
+        merged_meta.print_summary("META");
+    }
 
     Ok(Summary {
         wall_seconds: wall,
@@ -767,6 +790,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         get_bins,
         put_bins,
         meta_bins,
+        get_hists: merged_get,
+        put_hists: merged_put,
+        meta_hists: merged_meta,
     })
 }
 

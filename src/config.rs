@@ -70,7 +70,7 @@ fn default_duration() -> std::time::Duration {
 }
 
 fn default_concurrency() -> usize {
-    20  // Match Warp's default
+    32  // Higher default for better throughput
 }
 
 /// Prepare configuration for pre-populating objects before testing
