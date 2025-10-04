@@ -1,6 +1,6 @@
 [package]
-name    = "io-bench"
-version = "0.5.2"
+name = "io-bench"
+version = "0.5.3"
 edition = "2024"
 build   = "build.rs"
 

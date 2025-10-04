@@ -1,8 +1,8 @@
 # io-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](https://github.com/russfellows/s3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](https://github.com/russfellows/s3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/s3-bench)
-[![Tests](https://img.shields.io/badge/tests-13%20passing-success.svg)](https://github.com/russfellows/s3-bench)
+[![Tests](https://img.shields.io/badge/tests-18%20passing-success.svg)](https://github.com/russfellows/s3-bench)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
@@ -38,30 +38,140 @@ A comprehensive storage performance testing tool that supports multiple backends
 - **[Warp Parity Plan](docs/WARP_PARITY_PLAN.md)** - Warp/warp-replay compatibility roadmap
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
-- **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.5.2) - Machine-Readable Results & Enhanced Metrics
+## 🎊 Latest Release (v0.5.3) - Realistic Size Distributions & Advanced Configurability
 
-### 📊 TSV Export for Automated Analysis
-- **Machine-readable results**: Export detailed benchmark data in tab-separated format
-- **13-column format**: operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
-- **Per-bucket metrics**: Detailed statistics for each of 9 size buckets (zero, 1B-8KiB, 8KiB-64KiB, ..., >2GiB)
-- **Accurate throughput**: Uses actual bytes transferred (not estimated), reported in MiB/s
-- **CLI flag**: `--results-tsv <path>` for run command
+### 📐 Object Size Distributions (Surpasses Warp!)
+**Problem**: Warp's "random" distribution is unrealistic. Real-world object storage shows lognormal patterns (many small files, few large ones).
 
-### 📈 Enhanced Metrics Collection
-- **Shared metrics module**: Unified histogram infrastructure across all commands
-- **Mean + Median**: Both average and p50 latency tracking for comprehensive analysis
-- **Size-bucketed histograms**: Consistent 9-bucket collection across all execution modes
-- **Actual byte tracking**: Real ops/bytes per size bucket from SizeBins
-- **Performance validated**: 19.6k ops/s on file backend with full bucketing
+**Solution**: Three distribution types for PUT operations and prepare steps:
 
-### 🔧 Improvements
-- **Default concurrency**: Increased from 20 to 32 workers for better throughput
-- **Code deduplication**: Removed 90+ lines of duplicate histogram code
-- **Histogram consistency**: Fixed missing size-bucketed collection in workload runs
+1. **Fixed Size** (backward compatible):
+   ```yaml
+   - op: put
+     path: "data/"
+     object_size: 1048576  # Exactly 1 MB
+   ```
+
+2. **Uniform Distribution** (evenly distributed):
+   ```yaml
+   - op: put
+     path: "data/"
+     size_distribution:
+       type: uniform
+       min: 1024        # 1 KB
+       max: 10485760    # 10 MB
+   ```
+
+3. **Lognormal Distribution** (realistic - recommended):
+   ```yaml
+   - op: put
+     path: "data/"
+     size_distribution:
+       type: lognormal
+       mean: 1048576      # Mean size: 1 MB
+       std_dev: 524288    # Std deviation: 512 KB
+       min: 1024          # Floor
+       max: 10485760      # Ceiling (10 MB)
+   ```
+
+**Why lognormal?** Research shows object storage workloads naturally follow lognormal distributions - users create many small files (configs, thumbnails, metadata) and few large files (videos, backups). This is far more realistic than warp's simple random distribution.
+
+### ⚙️ Per-Operation Concurrency
+Fine-grained control over worker pools per operation type:
+
+```yaml
+concurrency: 32  # Global default
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 64  # Override: More GET workers
+  
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 30
+    concurrency: 8   # Override: Fewer PUT workers
+```
+
+**Use case**: Simulate real-world scenarios where reads far outnumber writes, or model slow backend write performance.
+
+### 🎯 Prepare Profiles
+Documented patterns for realistic test data preparation:
+
+```yaml
+prepare:
+  ensure_objects:
+    # Small objects (thumbnails, metadata) - lognormal
+    - base_uri: "s3://bucket/small/"
+      count: 10000
+      size_distribution:
+        type: lognormal
+        mean: 4096
+        std_dev: 2048
+        min: 1024
+        max: 65536
+      fill: random
+    
+    # Medium objects (documents, images) - lognormal
+    - base_uri: "s3://bucket/medium/"
+      count: 1000
+      size_distribution:
+        type: lognormal
+        mean: 1048576
+        std_dev: 524288
+        min: 65536
+        max: 10485760
+      fill: zero
+    
+    # Large objects (videos, backups) - uniform
+    - base_uri: "s3://bucket/large/"
+      count: 100
+      size_distribution:
+        type: uniform
+        min: 10485760
+        max: 104857600
+      fill: zero
+```
+
+### 🔄 Advanced Remapping Examples
+**N↔N (Many-to-Many) Remapping** with regex:
+
+```yaml
+# Map 3 source buckets → 2 destination buckets
+remap:
+  # Source bucket 1 & 2 → Destination bucket A
+  - pattern: "s3://source-1/(.+)"
+    replacement: "s3://dest-a/$1"
+  - pattern: "s3://source-2/(.+)"
+    replacement: "s3://dest-a/$1"
+  
+  # Source bucket 3 → Destination bucket B
+  - pattern: "s3://source-3/(.+)"
+    replacement: "s3://dest-b/$1"
+```
+
+### 🏆 Competitive Advantage vs Warp
+
+| Feature | Warp | io-bench v0.5.3 |
+|---------|------|-----------------|
+| **Size distributions** | Random only | **Uniform + Lognormal** (realistic) |
+| **Concurrency control** | Global only | **Per-operation** override |
+| **Prepare profiles** | Basic | **Documented patterns** with realistic distributions |
+| **Backend support** | S3 only | **5 backends** (S3, Azure, GCS, File, Direct I/O) |
+| **Remapping** | 1:1 only | **1:1, 1→N, N→1, N↔N** (regex) |
+| **Output format** | Text analysis | **TSV** (13 columns, machine-readable) |
+| **Memory usage** | High (replay) | **Constant** (streaming replay ~1.5 MB) |
 
 ## 🌟 Previous Releases
+
+### v0.5.2 - Machine-Readable Results & Enhanced Metrics
+- **TSV export**: 13-column format for automated analysis
+- **Enhanced metrics**: Mean + median, size-bucketed histograms
+- **Performance validated**: 19.6k ops/s on file backend
+- **Default concurrency**: Increased to 32 workers
 
 ### v0.5.0 - Advanced Replay Remapping
 - **1→N Fanout**: Distribute operations across multiple targets (round_robin, random, sticky_key)

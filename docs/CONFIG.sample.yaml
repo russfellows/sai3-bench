@@ -65,3 +65,232 @@ workload:
     object_size: 1048576
     weight: 30
 
+---
+# Example 5: Size Distributions (v0.5.3) - Realistic Object Sizes
+# This example demonstrates the three size distribution types
+
+target: "s3://bucket/"
+duration: "60s"
+concurrency: 32
+
+prepare:
+  ensure_objects:
+    # Small files with lognormal distribution (realistic!)
+    - base_uri: "s3://bucket/small/"
+      count: 10000
+      size_distribution:
+        type: lognormal
+        mean: 4096          # 4 KB average
+        std_dev: 2048       # 2 KB std dev
+        min: 1024           # Floor: 1 KB
+        max: 65536          # Ceiling: 64 KB
+      fill: random
+    
+    # Medium files with lognormal distribution
+    - base_uri: "s3://bucket/medium/"
+      count: 1000
+      size_distribution:
+        type: lognormal
+        mean: 1048576       # 1 MB average
+        std_dev: 524288     # 512 KB std dev
+        min: 65536          # 64 KB
+        max: 10485760       # 10 MB
+      fill: zero
+    
+    # Large files with uniform distribution
+    - base_uri: "s3://bucket/large/"
+      count: 100
+      size_distribution:
+        type: uniform
+        min: 10485760       # 10 MB
+        max: 104857600      # 100 MB
+      fill: zero
+  
+  cleanup: false  # Keep for repeated testing
+
+workload:
+  # GET operations from prepared data
+  - op: get
+    path: "small/*"
+    weight: 50
+  
+  - op: get
+    path: "medium/*"
+    weight: 30
+  
+  - op: get
+    path: "large/*"
+    weight: 5
+  
+  # PUT with lognormal distribution (realistic)
+  - op: put
+    path: "output/lognormal/"
+    size_distribution:
+      type: lognormal
+      mean: 1048576
+      std_dev: 524288
+      min: 102400      # 100 KB
+      max: 5242880     # 5 MB
+    weight: 10
+  
+  # PUT with uniform distribution
+  - op: put
+    path: "output/uniform/"
+    size_distribution:
+      type: uniform
+      min: 1024
+      max: 102400
+    weight: 5
+
+---
+# Example 6: Per-Operation Concurrency (v0.5.3)
+# Different concurrency levels per operation type
+
+target: "s3://bucket/"
+duration: "60s"
+concurrency: 32  # Global default (fallback)
+
+workload:
+  # High concurrency for GET operations (simulate many readers)
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 128  # Override: Many GET workers
+  
+  # Low concurrency for PUT operations (simulate slow writes)
+  - op: put
+    path: "output/"
+    object_size: 1048576
+    weight: 25
+    concurrency: 8    # Override: Few PUT workers
+  
+  # Default concurrency for metadata operations
+  - op: list
+    path: "data/"
+    weight: 5
+    # No override: uses global concurrency (32)
+
+---
+# Example 7: Complete Realistic Workload (v0.5.3)
+# Combines size distributions, per-op concurrency, and prepare profiles
+
+target: "s3://production-clone/"
+duration: "300s"  # 5 minutes
+concurrency: 64   # Global default
+
+prepare:
+  # Realistic multi-tier object preparation
+  ensure_objects:
+    # Tier 1: Metadata and config files (lognormal, many small)
+    - base_uri: "s3://production-clone/config/"
+      count: 50000
+      size_distribution:
+        type: lognormal
+        mean: 2048
+        std_dev: 1024
+        min: 512
+        max: 16384
+      fill: random
+    
+    # Tier 2: Application data (lognormal, medium size)
+    - base_uri: "s3://production-clone/app-data/"
+      count: 10000
+      size_distribution:
+        type: lognormal
+        mean: 262144       # 256 KB
+        std_dev: 131072    # 128 KB
+        min: 16384         # 16 KB
+        max: 2097152       # 2 MB
+      fill: zero
+    
+    # Tier 3: Media files (uniform, large)
+    - base_uri: "s3://production-clone/media/"
+      count: 500
+      size_distribution:
+        type: uniform
+        min: 5242880       # 5 MB
+        max: 52428800      # 50 MB
+      fill: zero
+  
+  cleanup: false
+
+workload:
+  # Heavy read traffic on small config files
+  - op: get
+    path: "config/*"
+    weight: 50
+    concurrency: 256  # Very high concurrency for small reads
+  
+  # Moderate read traffic on app data
+  - op: get
+    path: "app-data/*"
+    weight: 30
+    concurrency: 64   # Medium concurrency
+  
+  # Light read traffic on large media
+  - op: get
+    path: "media/*"
+    weight: 5
+    concurrency: 16   # Lower concurrency for large objects
+  
+  # Write new config files (lognormal)
+  - op: put
+    path: "config/new-"
+    size_distribution:
+      type: lognormal
+      mean: 2048
+      std_dev: 1024
+      min: 512
+      max: 16384
+    weight: 10
+    concurrency: 32
+  
+  # Write new app data (lognormal)
+  - op: put
+    path: "app-data/upload-"
+    size_distribution:
+      type: lognormal
+      mean: 262144
+      std_dev: 131072
+      min: 16384
+      max: 2097152
+    weight: 4
+    concurrency: 16
+  
+  # Occasional large media uploads (uniform)
+  - op: put
+    path: "media/video-"
+    size_distribution:
+      type: uniform
+      min: 5242880
+      max: 52428800
+    weight: 1
+    concurrency: 4    # Very low concurrency for large uploads
+
+---
+# Example 8: Backward Compatibility
+# Old syntax still works (v0.5.2 and earlier)
+
+target: "file:///tmp/test/"
+duration: "30s"
+concurrency: 16
+
+prepare:
+  ensure_objects:
+    # Old min_size/max_size syntax (deprecated but supported)
+    - base_uri: "file:///tmp/test/data/"
+      count: 100
+      min_size: 1048576
+      max_size: 1048576  # Fixed size via old syntax
+      fill: zero
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  
+  # Old object_size syntax (still supported)
+  - op: put
+    path: "output/"
+    object_size: 524288  # Fixed 512 KB
+    weight: 30
