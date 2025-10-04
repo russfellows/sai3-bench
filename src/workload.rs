@@ -528,8 +528,20 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let weights: Vec<u32> = cfg.workload.iter().map(|w| w.weight).collect();
     let chooser = WeightedIndex::new(weights).context("invalid weights")?;
 
-    // concurrency
-    let sem = Arc::new(Semaphore::new(cfg.concurrency));
+    // Concurrency: Create per-operation semaphores
+    // If an operation has a concurrency override, use that; otherwise use global
+    let mut op_semaphores: Vec<Arc<Semaphore>> = Vec::new();
+    for wo in &cfg.workload {
+        let concurrency = wo.concurrency.unwrap_or(cfg.concurrency);
+        op_semaphores.push(Arc::new(Semaphore::new(concurrency)));
+    }
+    
+    // Log per-op concurrency settings
+    for (idx, wo) in cfg.workload.iter().enumerate() {
+        if let Some(conc) = wo.concurrency {
+            info!("Operation {} has custom concurrency: {}", idx, conc);
+        }
+    }
 
     // Spawn workers
     info!("Spawning {} worker tasks", cfg.concurrency);
@@ -563,7 +575,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
-        let sem = sem.clone();
+        let op_sems = op_semaphores.clone();
         let workload = cfg.workload.clone();
         let chooser = chooser.clone();
         let pre = pre.clone();
@@ -578,14 +590,15 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                     break;
                 }
 
-                // Acquire permit first (await happens before we create RNGs)
-                let _p = sem.acquire().await.unwrap();
-
-                // Sample op index
+                // Sample op index FIRST (before acquiring permit)
                 let idx = {
                     let mut r = rng();
                     chooser.sample(&mut r)
                 };
+
+                // Acquire permit for this specific operation
+                let _p = op_sems[idx].acquire().await.unwrap();
+                
                 let op = &workload[idx].spec;
 
                 match op {

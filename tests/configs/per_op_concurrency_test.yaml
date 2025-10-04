@@ -1,0 +1,30 @@
+# Test config for per-operation concurrency (v0.5.3)
+duration: 5s
+concurrency: 16  # Global default
+
+target: "file:///tmp/io-bench-concurrency-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/io-bench-concurrency-test/data/"
+      count: 100
+      size_distribution:
+        type: uniform
+        min: 65536
+        max: 1048576
+      fill: zero
+  cleanup: true
+
+workload:
+  # GET operations with HIGH concurrency (64 workers)
+  - weight: 60
+    op: get
+    path: "data/*"
+    concurrency: 64  # Override: more GET workers
+  
+  # PUT operations with LOW concurrency (4 workers)  
+  - weight: 40
+    op: put
+    path: "output/"
+    object_size: 524288
+    concurrency: 4   # Override: fewer PUT workers (simulate slower writes)
