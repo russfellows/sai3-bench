@@ -1,0 +1,86 @@
+# Test configuration for deduplication and compression settings
+# This tests s3dlio's controlled data generation capabilities
+
+target: "file:///tmp/s3bench-dedupe-test/"
+duration: 5s
+concurrency: 8
+
+# Prepare objects with different dedupe/compress settings
+prepare:
+  ensure_objects:
+    # Fully unique, uncompressible (random) data
+    - base_uri: "file:///tmp/s3bench-dedupe-test/unique/"
+      count: 50
+      size_distribution: 131072  # 128 KiB (Fixed size)
+      fill: random
+      dedup_factor: 1      # All unique blocks
+      compress_factor: 1   # Uncompressible (random)
+    
+    # 3:1 deduplication, 2:1 compression
+    - base_uri: "file:///tmp/s3bench-dedupe-test/dedupe/"
+      count: 50
+      size_distribution: 131072  # 128 KiB (Fixed size)
+      fill: random
+      dedup_factor: 3      # 1/3 blocks are unique
+      compress_factor: 2   # 50% zeros (2:1 compression)
+    
+    # Extreme: 5:1 deduplication, 4:1 compression
+    - base_uri: "file:///tmp/s3bench-dedupe-test/extreme/"
+      count: 50
+      size_distribution: 131072  # 128 KiB (Fixed size)
+      fill: random
+      dedup_factor: 5      # 1/5 blocks are unique
+      compress_factor: 4   # 75% zeros (4:1 compression)
+  
+  cleanup: true
+
+# Run a mixed workload with different dedupe/compress settings on PUT operations
+workload:
+  # GET from prepared objects (70% of operations)
+  - op: get
+    path: "unique/*"
+    weight: 35
+  
+  - op: get
+    path: "dedupe/*"
+    weight: 20
+  
+  - op: get
+    path: "extreme/*"
+    weight: 15
+  
+  # PUT with various dedupe/compress settings (30% of operations)
+  - op: put
+    path: "unique/"
+    size_distribution:
+      type: uniform
+      min: 8192
+      max: 262144  # 8 KiB to 256 KiB
+    weight: 10
+    dedup_factor: 1      # Fully unique
+    compress_factor: 1   # Uncompressible
+  
+  - op: put
+    path: "dedupe/"
+    size_distribution:
+      type: lognormal
+      mean: 65536
+      std_dev: 32768
+      min: 4096
+      max: 524288
+    weight: 10
+    dedup_factor: 3      # 1/3 unique
+    compress_factor: 2   # 2:1 compression
+  
+  - op: put
+    path: "extreme/"
+    size_distribution:
+      type: lognormal
+      mean: 32768
+      std_dev: 16384
+      min: 1024
+      max: 262144
+    weight: 10
+    dedup_factor: 5      # 1/5 unique
+    compress_factor: 4   # 4:1 compression
+

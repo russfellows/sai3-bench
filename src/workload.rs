@@ -110,7 +110,6 @@ pub struct PreparedObject {
 pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<Vec<PreparedObject>> {
     use crate::config::FillPattern;
     use crate::size_generator::SizeGenerator;
-    use rand::RngCore;
     
     let mut all_prepared = Vec::new();
     
@@ -141,8 +140,9 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
             let size_generator = SizeGenerator::new(&size_spec)
                 .context("Failed to create size generator")?;
             
-            info!("  Creating {} additional objects (sizes: {}, fill: {:?})", 
-                to_create, size_generator.description(), spec.fill);
+            info!("  Creating {} additional objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
+                to_create, size_generator.description(), spec.fill, 
+                spec.dedup_factor, spec.compress_factor);
             
             // Create progress bar for preparation
             let pb = ProgressBar::new(to_create);
@@ -162,12 +162,16 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
                 // Generate object size using size generator
                 let size = size_generator.generate();
                 
+                // Generate data using s3dlio's controlled data generation
                 let data = match spec.fill {
                     FillPattern::Zero => vec![0u8; size as usize],
                     FillPattern::Random => {
-                        let mut data = vec![0u8; size as usize];
-                        rand::rng().fill_bytes(&mut data);
-                        data
+                        // Use s3dlio's generate_controlled_data for realistic dedupe/compression
+                        s3dlio::generate_controlled_data(
+                            size as usize,
+                            spec.dedup_factor,
+                            spec.compress_factor
+                        )
                     }
                 };
                 
@@ -624,7 +628,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
                     }
-                    OpSpec::Put { .. } => {
+                    OpSpec::Put { dedup_factor, compress_factor, .. } => {
                         // Get base URI and size spec from config
                         let (base_uri, size_spec) = cfg.get_put_size_spec(op);
                         
@@ -637,7 +641,13 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                             let mut r = rng();
                             format!("obj_{}", r.random::<u64>())
                         };
-                        let buf = vec![0u8; sz as usize];
+                        
+                        // Generate data using s3dlio's controlled data generation
+                        let buf = s3dlio::generate_controlled_data(
+                            sz as usize,
+                            *dedup_factor,
+                            *compress_factor
+                        );
 
                         // Build full URI for the specific object
                         let full_uri = if base_uri.ends_with('/') {

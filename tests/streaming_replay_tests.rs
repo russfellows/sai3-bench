@@ -120,12 +120,14 @@ async fn test_02_replay_basic() -> Result<()> {
     
     // Replay at high speed
     println!("Replaying at 100x speed...");
-    let replay_config = ReplayConfig {
-        op_log_path: oplog_path,
-        target_uri: None, // Use original URIs
-        speed: 100.0,
+        let replay_config = ReplayConfig {
+        op_log_path: oplog_path.clone(),
+        target_uri: Some(replay_target.clone()),
+        speed: 1.0,
         continue_on_error: false,
-        max_concurrent: Some(200),
+        max_concurrent: Some(100),
+        remap_config: None,
+        remap_config: None,
     };
     
     replay_workload_streaming(replay_config).await?;

@@ -64,6 +64,16 @@ pub enum OpSpec {
         /// Size distribution specification (v0.5.3+)
         #[serde(default, alias = "size_distribution")]
         size_spec: Option<SizeSpec>,
+        
+        /// Deduplication factor: 1 = all unique blocks, 2 = 1/2 unique, 3 = 1/3 unique, etc.
+        /// Controls block-level deduplication ratio for generated data (v0.5.3+)
+        #[serde(default = "default_dedup_factor")]
+        dedup_factor: usize,
+        
+        /// Compression factor: 1 = random (uncompressible), 2 = 2:1 ratio, 3 = 3:1 ratio, etc.
+        /// Controls compressibility of generated data (v0.5.3+)
+        #[serde(default = "default_compress_factor")]
+        compress_factor: usize,
     },
 
     /// LIST objects under a path/prefix.
@@ -129,6 +139,16 @@ pub struct EnsureSpec {
     /// Fill pattern: "zero" or "random"
     #[serde(default = "default_fill")]
     pub fill: FillPattern,
+    
+    /// Deduplication factor (v0.5.3+): 1 = all unique, 2 = 1/2 unique, 3 = 1/3 unique, etc.
+    /// Only applies when using s3dlio-controlled data generation
+    #[serde(default = "default_dedup_factor")]
+    pub dedup_factor: usize,
+    
+    /// Compression factor (v0.5.3+): 1 = uncompressible (random), 2 = 2:1, 3 = 3:1, etc.
+    /// Controls the ratio of constant (zero) bytes to random bytes
+    #[serde(default = "default_compress_factor")]
+    pub compress_factor: usize,
 }
 
 impl EnsureSpec {
@@ -182,6 +202,14 @@ fn default_fill() -> FillPattern {
     FillPattern::Zero 
 }
 
+fn default_dedup_factor() -> usize {
+    1  // All unique blocks by default
+}
+
+fn default_compress_factor() -> usize {
+    1  // Uncompressible (random) by default
+}
+
 impl Config {
     /// Resolve a path to a full URI using the target base URI
     pub fn resolve_uri(&self, path: &str) -> String {
@@ -218,7 +246,7 @@ impl Config {
     /// For backward compatibility with code expecting a fixed size
     pub fn get_put_info(&self, put_op: &OpSpec) -> (String, u64) {
         match put_op {
-            OpSpec::Put { path, object_size, size_spec } => {
+            OpSpec::Put { path, object_size, size_spec, .. } => {
                 let base_uri = self.resolve_uri(path);
                 
                 // Backward compatibility: prefer object_size if specified
@@ -246,7 +274,7 @@ impl Config {
     /// Returns (base_uri, SizeSpec) for use with SizeGenerator
     pub fn get_put_size_spec(&self, put_op: &OpSpec) -> (String, SizeSpec) {
         match put_op {
-            OpSpec::Put { path, object_size, size_spec } => {
+            OpSpec::Put { path, object_size, size_spec, .. } => {
                 let base_uri = self.resolve_uri(path);
                 
                 // Backward compatibility: convert object_size to SizeSpec::Fixed

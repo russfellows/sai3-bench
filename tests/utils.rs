@@ -3,7 +3,7 @@
 // Integration tests for io-bench helpers
 
 use regex::Regex;
-use s3_bench::{bucket_index, glob_to_regex};
+use io_bench::{bucket_index, glob_to_regex};
 
 /// All your bucket-index cutoffs should match exactly.
 #[test]
