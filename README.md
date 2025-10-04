@@ -33,9 +33,16 @@ A comprehensive storage performance testing tool that supports multiple backends
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
 - **[Integration Context](docs/INTEGRATION_CONTEXT.md)** - Technical integration details
 
-## 🎊 Latest Release (v0.4.0) - Workload Replay
+## 🎊 Latest Release (v0.4.1) - Streaming Op-log Replay
 
-### 🎬 Timing-Faithful Replay
+### 🌊 Streaming Replay with Memory Efficiency
+- **Constant Memory Usage**: Stream replay with ~1.5 MB memory footprint (vs. full file in memory)
+- **s3dlio-oplog Integration**: Dedicated streaming reader with background decompression
+- **Non-Logging Replay**: Prevents circular logging during replay operations
+- **Comprehensive Tests**: 6 integration tests covering streaming, remapping, error handling, concurrency
+- **s3dlio v0.8.19+**: Updated to latest s3dlio with bug fixes and GCS backend support
+
+### 🎬 Timing-Faithful Replay (v0.4.0)
 - **Op-Log Replay**: Replay captured workloads with microsecond-precision timing (~10µs accuracy)
 - **Absolute Timeline Scheduling**: Prevents timing drift for faithful workload reproduction
 - **Backend Retargeting**: Simple 1:1 URI remapping to replay on different storage backends

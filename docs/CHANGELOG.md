@@ -2,7 +2,56 @@
 
 All notable changes to io-bench will be documented in this file.
 
-# Changelog
+## [0.4.1] - 2025-10-03
+
+### 🚀 Major Updates
+- **Streaming Op-log Replay**: Memory-efficient replay using s3dlio-oplog streaming reader
+  - **Constant Memory Usage**: ~1.5 MB regardless of op-log size (vs. unbounded Vec-based approach)
+  - **Background Decompression**: Parallel zstd decompression in dedicated thread
+  - **Tunable Performance**: Environment variables for buffer size and chunk size
+    - `S3DLIO_OPLOG_READ_BUF`: Channel buffer size (default: 1024 entries)
+    - `S3DLIO_OPLOG_CHUNK_SIZE`: Decompression chunk size (default: 1 MB)
+  - **Shared Types**: Uses `s3dlio_oplog::{OpLogEntry, OpType, OpLogStreamReader}` for consistency
+
+### 🔧 Technical Improvements
+- **Non-logging Replay Operations**: Added `*_no_log()` variants in workload.rs
+  - Prevents circular logging during replay (replay operations are not logged)
+  - Eliminates "sending on a closed channel" errors when global logger is finalized
+  - Functions: `get_object_no_log()`, `put_object_no_log()`, `list_objects_no_log()`, `stat_object_no_log()`, `delete_object_no_log()`
+
+- **Deprecated Legacy Replay**: Old `src/replay.rs` marked deprecated with warnings
+  - Backup preserved in `src/replay_v040_backup.rs`
+  - New streaming implementation in `src/replay_streaming.rs`
+  - Updated `src/main.rs` to use streaming replay by default
+
+### 📦 Dependencies
+- **s3dlio**: Updated from tag v0.8.12 to branch "main" (v0.8.19+)
+  - Includes 10+ releases with bug fixes and performance improvements
+  - GCS backend support (gs:// and gcs:// URIs) - ready for future integration
+- **s3dlio-oplog**: New dependency for streaming op-log parsing
+  - Separate workspace member in s3dlio repository
+  - Provides `OpLogStreamReader` for memory-efficient iteration
+
+### ✅ Testing
+- **Comprehensive Integration Tests**: 6 tests validating streaming replay
+  - Round-trip test: s3dlio generates op-log → io-bench replays
+  - Memory efficiency test: 100+ operations with constant memory
+  - URI remapping test: Replay to different storage backend
+  - Error handling test: Continue-on-error functionality
+  - Concurrent limits test: Configurable concurrency controls
+  - Streaming reader test: Iterator-based processing
+- **Global Logger Workaround**: Tests structured to work with s3dlio's singleton logger
+  - One generation test creates op-log (calls finalize once)
+  - Other tests read and replay existing op-logs (no logging)
+
+### 📝 Documentation
+- **docs/S3DLIO_UPDATE_PLAN.md**: Comprehensive update strategy for s3dlio v0.8.19+
+- **STREAMING_REPLAY_COMPLETE.md**: Implementation summary and validation results
+
+### 🔮 Future Work
+- GCS backend integration (Phase 2 - ready in s3dlio)
+- Advanced URI remapping (M:N, sticky sessions)
+- Op-log filtering and transformation
 
 ## [0.4.0] - 2025-10-01
 ### Added

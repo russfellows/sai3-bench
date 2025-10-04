@@ -204,6 +204,46 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 }
 
 // -----------------------------------------------------------------------------
+// NON-LOGGING variants for replay (avoid logging replay operations)
+// -----------------------------------------------------------------------------
+
+/// GET operation WITHOUT logging (for replay)
+pub async fn get_object_no_log(uri: &str) -> anyhow::Result<Vec<u8>> {
+    let store = create_store_for_uri(uri)?;
+    store.get(uri).await
+        .with_context(|| format!("Failed to get object from URI: {}", uri))
+}
+
+/// PUT operation WITHOUT logging (for replay)
+pub async fn put_object_no_log(uri: &str, data: &[u8]) -> anyhow::Result<()> {
+    let store = create_store_for_uri(uri)?;
+    store.put(uri, data).await
+        .with_context(|| format!("Failed to put object to URI: {}", uri))
+}
+
+/// LIST operation WITHOUT logging (for replay)
+pub async fn list_objects_no_log(uri: &str) -> anyhow::Result<Vec<String>> {
+    let store = create_store_for_uri(uri)?;
+    store.list(uri, true).await
+        .with_context(|| format!("Failed to list objects from URI: {}", uri))
+}
+
+/// STAT operation WITHOUT logging (for replay)
+pub async fn stat_object_no_log(uri: &str) -> anyhow::Result<u64> {
+    let store = create_store_for_uri(uri)?;
+    let metadata = store.stat(uri).await
+        .with_context(|| format!("Failed to stat object at URI: {}", uri))?;
+    Ok(metadata.size)
+}
+
+/// DELETE operation WITHOUT logging (for replay)
+pub async fn delete_object_no_log(uri: &str) -> anyhow::Result<()> {
+    let store = create_store_for_uri(uri)?;
+    store.delete(uri).await
+        .with_context(|| format!("Failed to delete object from URI: {}", uri))
+}
+
+// -----------------------------------------------------------------------------
 // New summary/aggregation types
 // -----------------------------------------------------------------------------
 #[derive(Debug, Clone, Default)]

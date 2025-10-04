@@ -3,7 +3,8 @@
 use regex::escape;
 
 pub mod config;
-pub mod replay;
+pub mod replay; // Legacy in-memory replay (v0.4.0)
+pub mod replay_streaming; // New streaming replay (v0.5.0+)
 pub mod workload;
 
 /// Returns the bucket index for the size (0..8+) as per your CLI logic.

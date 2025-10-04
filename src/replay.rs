@@ -1,6 +1,15 @@
-//! Op-log replay functionality for io-bench v0.4.0
+//! Op-log replay functionality for io-bench v0.4.0 (LEGACY)
 //!
-//! Implements timing-faithful workload replay from TSV op-log files.
+//! **DEPRECATED**: This module uses in-memory Vec-based replay.
+//! Use `replay_streaming` module for memory-efficient streaming replay.
+//!
+//! This implementation is kept for backward compatibility and as a fallback.
+//! It loads the entire op-log into memory, which can consume significant RAM
+//! for large workloads (e.g., 1M operations ≈ 100 MB).
+//!
+//! For new code, use: `crate::replay_streaming::replay_workload_streaming()`
+
+#![allow(dead_code)] // Keep legacy code available but unused
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
