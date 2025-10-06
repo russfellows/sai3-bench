@@ -1573,9 +1573,9 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flate2"
-version = "1.1.2"
+version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a3d7db9596fecd151c5f638c0ee5d5bd487b6e0ea232e5dc96d5250f6f94b1d"
+checksum = "dc5a4e564e38c699f2880d3fda590bedc2e69f3f84cd48b457bd892ce61d0aa9"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -2878,6 +2878,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+ "simd-adler32",
 ]
 
 [[package]]
@@ -3855,9 +3856,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.17"
+version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5407465600fb0548f1442edf71dd20683c6ed326200ace4b1ef0763521bb3b77"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
 ]
@@ -4126,8 +4127,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "s3dlio"
-version = "0.8.19"
-source = "git+https://github.com/russfellows/s3dlio.git?branch=main#0a578c3c876d51caa311740fa8cd47c88d122fb1"
+version = "0.8.20"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.20#56f1e6caf9463d41b5398f2a85322b2b6f8450e4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4192,8 +4193,8 @@ dependencies = [
 
 [[package]]
 name = "s3dlio-oplog"
-version = "0.8.19"
-source = "git+https://github.com/russfellows/s3dlio.git?branch=main#0a578c3c876d51caa311740fa8cd47c88d122fb1"
+version = "0.8.20"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.20#56f1e6caf9463d41b5398f2a85322b2b6f8450e4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4476,6 +4477,12 @@ dependencies = [
  "digest",
  "rand_core 0.6.4",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
 
 [[package]]
 name = "simple_asn1"
