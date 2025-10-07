@@ -25,7 +25,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest};
+use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
@@ -147,6 +147,79 @@ impl Agent for AgentSvc {
             total_bytes: object_size * objects as u64,
             seconds: secs,
             notes: String::new(),
+        }))
+    }
+
+    async fn run_workload(
+        &self,
+        req: Request<RunWorkloadRequest>,
+    ) -> Result<Response<WorkloadSummary>, Status> {
+        let RunWorkloadRequest {
+            config_yaml,
+            agent_id,
+            path_prefix,
+            start_timestamp_ns,
+        } = req.into_inner();
+
+        // Parse the YAML configuration
+        let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            .map_err(|e| Status::invalid_argument(format!("Invalid YAML config: {}", e)))?;
+
+        // Apply agent-specific path prefix for isolation
+        config
+            .apply_agent_prefix(&agent_id, &path_prefix)
+            .map_err(|e| Status::internal(format!("Failed to apply path prefix: {}", e)))?;
+
+        // Wait until coordinated start time
+        let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
+        if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
+            if wait_duration > std::time::Duration::from_secs(60) {
+                return Err(Status::invalid_argument(
+                    "Start time is too far in the future (>60s)",
+                ));
+            }
+            tokio::time::sleep(wait_duration).await;
+        }
+        // If start_time is in the past, start immediately
+
+        // Execute the workload using existing workload::run function
+        let summary = sai3_bench::workload::run(&config)
+            .await
+            .map_err(|e| Status::internal(format!("Workload execution failed: {}", e)))?;
+
+        // Convert Summary to WorkloadSummary protobuf message
+        Ok(Response::new(WorkloadSummary {
+            agent_id,
+            wall_seconds: summary.wall_seconds,
+            total_ops: summary.total_ops,
+            total_bytes: summary.total_bytes,
+            get: Some(OpAggregateMetrics {
+                bytes: summary.get.bytes,
+                ops: summary.get.ops,
+                mean_us: summary.get.mean_us,
+                p50_us: summary.get.p50_us,
+                p95_us: summary.get.p95_us,
+                p99_us: summary.get.p99_us,
+            }),
+            put: Some(OpAggregateMetrics {
+                bytes: summary.put.bytes,
+                ops: summary.put.ops,
+                mean_us: summary.put.mean_us,
+                p50_us: summary.put.p50_us,
+                p95_us: summary.put.p95_us,
+                p99_us: summary.put.p99_us,
+            }),
+            meta: Some(OpAggregateMetrics {
+                bytes: summary.meta.bytes,
+                ops: summary.meta.ops,
+                mean_us: summary.meta.mean_us,
+                p50_us: summary.meta.p50_us,
+                p95_us: summary.meta.p95_us,
+                p99_us: summary.meta.p99_us,
+            }),
+            p50_us: summary.p50_us,
+            p95_us: summary.p95_us,
+            p99_us: summary.p99_us,
         }))
     }
 }

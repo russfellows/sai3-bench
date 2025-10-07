@@ -306,5 +306,95 @@ impl Config {
             _ => panic!("Expected metadata operation"),
         }
     }
+
+    /// Apply agent-specific path prefix to all operations for distributed execution.
+    /// This enables per-agent path isolation to prevent conflicts between agents.
+    /// 
+    /// # Arguments
+    /// * `agent_id` - Unique identifier for this agent (e.g., "agent-1")
+    /// * `prefix` - Path prefix to apply (e.g., "agent-1/")
+    /// 
+    /// # Example
+    /// ```
+    /// // Original: target = "s3://bucket/bench/"
+    /// config.apply_agent_prefix("agent-1", "agent-1/")?;
+    /// // Result: target = "s3://bucket/bench/agent-1/"
+    /// ```
+    pub fn apply_agent_prefix(&mut self, _agent_id: &str, prefix: &str) -> anyhow::Result<()> {
+        // Apply prefix to base target if set
+        if let Some(ref target) = self.target {
+            self.target = Some(join_uri_path(target, prefix)?);
+        }
+
+        // Apply prefix to all operation paths
+        for weighted_op in &mut self.workload {
+            match &mut weighted_op.spec {
+                OpSpec::Get { path } => {
+                    *path = join_uri_path(path, prefix)?;
+                }
+                OpSpec::Put { path, .. } => {
+                    *path = join_uri_path(path, prefix)?;
+                }
+                OpSpec::List { path } => {
+                    *path = join_uri_path(path, prefix)?;
+                }
+                OpSpec::Stat { path } => {
+                    *path = join_uri_path(path, prefix)?;
+                }
+                OpSpec::Delete { path } => {
+                    *path = join_uri_path(path, prefix)?;
+                }
+            }
+        }
+
+        // Apply prefix to prepare config if present
+        if let Some(ref mut prepare) = self.prepare {
+            for ensure_spec in &mut prepare.ensure_objects {
+                ensure_spec.base_uri = join_uri_path(&ensure_spec.base_uri, prefix)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Join a base URI with a path suffix, handling different URI schemes properly.
+/// 
+/// # Examples
+/// - `join_uri_path("s3://bucket/base/", "agent-1/")` → `"s3://bucket/base/agent-1/"`
+/// - `join_uri_path("file:///tmp/test/", "agent-1/")` → `"file:///tmp/test/agent-1/"`
+/// - `join_uri_path("data/", "agent-1/")` → `"data/agent-1/"` (relative path)
+fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
+    if suffix.is_empty() {
+        return Ok(base.to_string());
+    }
+
+    // Handle URIs with schemes (s3://, file://, direct://, az://, gs://)
+    if let Some(scheme_end) = base.find("://") {
+        let scheme = &base[..scheme_end + 3]; // Include "://"
+        let path = &base[scheme_end + 3..];
+        
+        // Ensure path ends with / before appending suffix
+        let normalized_path = if path.is_empty() || path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{}/", path)
+        };
+        
+        // Ensure suffix doesn't start with / (would create double slash)
+        let normalized_suffix = suffix.trim_start_matches('/');
+        
+        Ok(format!("{}{}{}", scheme, normalized_path, normalized_suffix))
+    } else {
+        // Relative path (no scheme)
+        let normalized_base = if base.is_empty() || base.ends_with('/') {
+            base.to_string()
+        } else {
+            format!("{}/", base)
+        };
+        
+        let normalized_suffix = suffix.trim_start_matches('/');
+        Ok(format!("{}{}", normalized_base, normalized_suffix))
+    }
 }
 

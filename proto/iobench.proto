@@ -26,9 +26,44 @@ message OpSummary {
   string notes       = 3;
 }
 
+// v0.6.0: Distributed workload execution
+message RunWorkloadRequest {
+  string config_yaml = 1;          // Full YAML configuration as string
+  string agent_id = 2;             // Unique agent identifier (e.g., "agent-1")
+  string path_prefix = 3;          // Per-agent path isolation prefix (e.g., "agent-1/")
+  int64 start_timestamp_ns = 4;    // Coordinated start time (nanoseconds since UNIX epoch)
+}
+
+message OpAggregateMetrics {
+  uint64 bytes = 1;
+  uint64 ops = 2;
+  uint64 mean_us = 3;
+  uint64 p50_us = 4;
+  uint64 p95_us = 5;
+  uint64 p99_us = 6;
+}
+
+message WorkloadSummary {
+  string agent_id = 1;
+  double wall_seconds = 2;
+  uint64 total_ops = 3;
+  uint64 total_bytes = 4;
+  
+  // Per-operation aggregates
+  OpAggregateMetrics get = 5;
+  OpAggregateMetrics put = 6;
+  OpAggregateMetrics meta = 7;
+  
+  // Overall percentiles (from combined histogram)
+  uint64 p50_us = 8;
+  uint64 p95_us = 9;
+  uint64 p99_us = 10;
+}
+
 service Agent {
   rpc Ping(Empty) returns (PingReply);
   rpc RunGet(RunGetRequest) returns (OpSummary);
   rpc RunPut(RunPutRequest) returns (OpSummary);
+  rpc RunWorkload(RunWorkloadRequest) returns (WorkloadSummary);  // v0.6.0
 }
 
