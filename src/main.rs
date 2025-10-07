@@ -779,7 +779,7 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         println!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
         println!("  Throughput: {:.2} MiB/s", get_mib_s);
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
     }
     
     if summary.put.ops > 0 {
@@ -788,14 +788,14 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         println!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
         println!("  Throughput: {:.2} MiB/s", put_mib_s);
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
     }
     
     if summary.meta.ops > 0 {
         println!("\nMETA-DATA operations:");
         println!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
     
     // Generate TSV filename: use custom name if provided, otherwise auto-generate
@@ -825,7 +825,7 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
             &summary.meta_bins,
             summary.wall_seconds,
         )?;
-        println!("\nResults exported to: {}-results.tsv", tsv_basename);
+        // Note: Export message is printed by TsvExporter
     }
     
     // Cleanup prepared objects if configured
