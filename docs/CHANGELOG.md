@@ -2,6 +2,106 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.0] - 2025-10-07
+
+### 🚀 Major Features
+
+#### Distributed Multi-Host Workload Execution
+**New Capability**: Run coordinated benchmarks across multiple agent nodes using gRPC.
+
+**Problem**: Previous versions could only run single-node benchmarks. Testing distributed systems at scale required manual coordination.
+
+**Solution**: Added complete distributed workload infrastructure:
+- **New gRPC RPC**: `RunWorkload` - Controller sends config to agents for execution
+- **Per-Agent Path Isolation**: Each agent operates in isolated subdirectory (e.g., `agent-1/`, `agent-2/`)
+- **Coordinated Start Time**: All agents begin workload simultaneously (configurable delay)
+- **Result Aggregation**: Controller collects and displays per-agent and aggregate statistics
+- **Shared vs Local Storage Detection**: Automatic handling based on URI scheme
+  - **Shared storage** (S3/GCS/Azure): All agents use same prepared dataset
+  - **Local storage** (file://): Each agent prepares own isolated dataset
+
+**New Components**:
+- `sai3bench-ctl run` subcommand - Distributed workload orchestration
+- `RunWorkloadRequest` protobuf message - Config distribution with agent metadata
+- `WorkloadSummary` protobuf message - Per-agent execution results
+- `Config::apply_agent_prefix()` - Path isolation with storage-aware prepare handling
+
+**Usage**:
+```bash
+# Start agents on multiple hosts
+sai3bench-agent --listen 0.0.0.0:7761  # On host 1
+sai3bench-agent --listen 0.0.0.0:7761  # On host 2
+
+# Run distributed workload from controller
+sai3bench-ctl --insecure --agents host1:7761,host2:7761 \
+    run --config workload.yaml --start-delay 2
+
+# Output shows per-agent and aggregate results
+=== Distributed Results ===
+Total agents: 2
+
+--- Agent: agent-1 ---
+  Wall time: 3.03s
+  Total ops: 30966 (10215.21 ops/s)
+  Total bytes: 25.67 MB (8.47 MiB/s)
+  GET: 21602 ops, 21.10 MB, mean: 225µs, p95: 315µs
+  PUT: 9364 ops, 4.57 MB, mean: 109µs, p95: 155µs
+
+--- Agent: agent-2 ---
+  Wall time: 3.03s
+  Total ops: 30868 (10179.66 ops/s)
+  Total bytes: 25.63 MB (8.45 MiB/s)
+  GET: 21630 ops, 21.12 MB, mean: 225µs, p95: 319µs
+  PUT: 9238 ops, 4.51 MB, mean: 108µs, p95: 153µs
+
+--- Aggregate ---
+  Total ops: 61834
+  Total bytes: 51.30 MB
+  Combined throughput: 20394.87 ops/s
+```
+
+**Controller Flags**:
+- `--config <file>` - YAML workload configuration file
+- `--path-template <template>` - Agent path prefix template (default: `agent-{id}/`)
+- `--agent-ids <list>` - Custom agent identifiers (default: `agent-1`, `agent-2`, ...)
+- `--start-delay <seconds>` - Coordinated start delay (default: 2)
+- `--shared-prepare` - Override auto-detected storage mode
+
+**Technical Details**:
+- Auto-detection based on URI scheme:
+  - Shared: `s3://`, `az://`, `gs://`
+  - Local: `file://`, `direct://`
+- Prepare config modification only for local storage
+- Target URI always gets agent prefix for workload isolation
+- Operation paths remain relative (resolve against modified target)
+- Each agent executes prepare phase independently if needed
+- Coordinated start time uses nanosecond-precision timestamp
+
+**Testing**:
+- `tests/distributed_local_test.sh` - Integration test with file:// backend
+- Verified with 2 agents creating isolated datasets (10 prepare objects each)
+- Confirmed path isolation (agent-1/ and agent-2/ subdirectories)
+- Validated result aggregation and throughput calculations
+
+**Documentation**:
+- `docs/V0.6.0_DISTRIBUTED_DESIGN.md` - Complete design document
+- `docs/USAGE.md` - Updated with distributed examples (TBD)
+
+### 🔧 Technical Changes
+- Extended `proto/iobench.proto` with `RunWorkload` RPC
+- Added `shared_storage` field to `RunWorkloadRequest`
+- Implemented `Agent::run_workload()` handler with prepare phase
+- Added storage detection helpers in controller
+- Enhanced logging with `-v`/`-vv` flags in controller and agent
+- Fixed prepare `base_uri` rewriting for path isolation
+
+### 📊 Performance Characteristics
+- Tested with 2 agents on localhost (file:// backend)
+- Each agent: ~10,000 ops/s, ~25 MB in 3 seconds
+- Combined throughput: ~20,000 ops/s
+- No synchronization overhead (agents run independently)
+- Coordinated start ensures fair comparison
+
 ## [0.5.9] - 2025-10-07
 
 ### ✨ Improvements

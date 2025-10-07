@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.5.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-> **Latest (v0.5.8)**: GCS pagination fix for >1,000 objects via s3dlio v0.8.22. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.0)**: Distributed multi-host workload execution with gRPC coordination and automatic shared/local storage detection. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
@@ -167,11 +167,80 @@ A storage performance testing tool that supports multiple backends through a uni
 - **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
+- **[Distributed Design](docs/V0.6.0_DISTRIBUTED_DESIGN.md)** - v0.6.0 distributed workload architecture
 
-## 🎊 Latest Release (v0.5.4) - Storage Efficiency Testing & Advanced Data Patterns
+## 🎊 Latest Release (v0.6.0) - Distributed Multi-Host Workload Execution
 
-### 🧪 Deduplication & Compression Testing
-Test storage system efficiency with controlled data patterns - useful for evaluating deduplication and compression capabilities.
+### 🌐 Distributed Benchmarking
+Run coordinated workloads across multiple agent nodes with automatic shared/local storage detection.
+
+```bash
+# Start agents on multiple hosts
+sai3bench-agent --listen 0.0.0.0:7761  # On host 1
+sai3bench-agent --listen 0.0.0.0:7761  # On host 2
+sai3bench-agent --listen 0.0.0.0:7761  # On host 3
+
+# Run distributed workload from controller
+sai3bench-ctl --insecure --agents host1:7761,host2:7761,host3:7761 \
+    run --config production-workload.yaml --start-delay 2
+
+# Output shows per-agent and aggregate results
+=== Distributed Results ===
+Total agents: 3
+
+--- Agent: agent-1 ---
+  Wall time: 10.02s
+  Total ops: 102156 (10195.21 ops/s)
+  Total bytes: 85.23 MB (8.51 MiB/s)
+  GET: 71509 ops, 59.66 MB, mean: 225µs, p95: 315µs
+  PUT: 30647 ops, 25.57 MB, mean: 109µs, p95: 155µs
+
+--- Agent: agent-2 ---
+  Wall time: 10.01s
+  Total ops: 101834 (10173.13 ops/s)
+  Total bytes: 84.98 MB (8.49 MiB/s)
+  GET: 71324 ops, 59.48 MB, mean: 228µs, p95: 318µs
+  PUT: 30510 ops, 25.50 MB, mean: 111µs, p95: 157µs
+
+--- Agent: agent-3 ---
+  Wall time: 10.03s
+  Total ops: 102089 (10181.45 ops/s)
+  Total bytes: 85.18 MB (8.49 MiB/s)
+  GET: 71463 ops, 59.62 MB, mean: 226µs, p95: 316µs
+  PUT: 30626 ops, 25.56 MB, mean: 110µs, p95: 156µs
+
+--- Aggregate ---
+  Total ops: 306079
+  Total bytes: 255.39 MB
+  Combined throughput: 30549.79 ops/s
+```
+
+**Key Features**:
+- **Coordinated Start**: All agents begin workload simultaneously with nanosecond-precision synchronization
+- **Per-Agent Path Isolation**: Each agent operates in isolated subdirectory (e.g., `agent-1/`, `agent-2/`)
+- **Smart Storage Detection**: Automatic handling based on URI scheme:
+  - **Shared storage** (S3/GCS/Azure): All agents use same prepared dataset
+  - **Local storage** (file://): Each agent prepares own isolated dataset
+- **Result Aggregation**: Per-agent statistics plus combined throughput metrics
+- **Flexible Configuration**: Override agent IDs, path templates, and storage mode
+
+**Controller Flags**:
+```bash
+--config <file>           # YAML workload configuration
+--path-template <template> # Agent path prefix (default: "agent-{id}/")
+--agent-ids <list>        # Custom agent identifiers
+--start-delay <seconds>   # Coordinated start delay (default: 2)
+--shared-prepare          # Override auto-detected storage mode
+```
+
+**Use Cases**:
+- **Large-Scale Load Testing**: Generate 100k+ ops/s across multiple nodes
+- **Distributed System Validation**: Test storage backend under multi-client load
+- **Cloud Migration Testing**: Parallel workload execution from multiple regions
+- **Performance Baselines**: Measure aggregate throughput across infrastructure
+
+### 🧪 Storage Efficiency Testing (v0.5.4)
+Deduplication & compression testing with controlled data patterns.
 
 ```yaml
 prepare:
@@ -331,8 +400,10 @@ remap:
 
 ### 🏆 Competitive Advantage vs Warp
 
-| Feature | Warp | sai3-bench v0.5.3 |
+| Feature | Warp | sai3-bench v0.6.0 |
 |---------|------|-----------------|
+| **Distributed execution** | No | **gRPC-based multi-host** coordination |
+| **Storage detection** | N/A | **Auto-detect shared vs local** |
 | **Size distributions** | Random only | **Uniform + Lognormal** (realistic) |
 | **Concurrency control** | Global only | **Per-operation** override |
 | **Prepare profiles** | Basic | **Documented patterns** with realistic distributions |
@@ -342,6 +413,18 @@ remap:
 | **Memory usage** | High (replay) | **Constant** (streaming replay ~1.5 MB) |
 
 ## 🌟 Previous Releases
+
+### v0.5.9 - Output Clarity & Branding Consistency
+- **Enhanced metrics display**: Added mean latency to Results output
+- **Cleaner console output**: Removed duplicate histogram display
+- **Branding updates**: Consistent "sai3-bench" terminology throughout
+- **Documentation**: Updated CLI help examples and code comments
+
+### v0.5.4 - Storage Efficiency Testing
+- **Deduplication testing**: Configurable block-level duplication patterns
+- **Compression testing**: Adjustable data compressibility (zero-fill ratios)
+- **Size distributions**: Lognormal, uniform, and fixed distributions
+- **Per-operation concurrency**: Fine-grained worker pool control
 
 ### v0.5.2 - Machine-Readable Results & Enhanced Metrics
 - **TSV export**: 13-column format for automated analysis
