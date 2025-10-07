@@ -196,6 +196,11 @@ The prepare stage creates baseline objects before the workload begins.
 
 ```yaml
 prepare:
+  # Delay after prepare completes (seconds) - for cloud storage eventual consistency
+  # Default: 0 (no delay)
+  # Recommended: 2-5 for cloud storage (S3, GCS, Azure)
+  post_prepare_delay: 5
+  
   ensure_objects:
     - base_uri: "gs://bucket/data/"
       count: 2000            # Create 2000 objects
@@ -208,6 +213,7 @@ prepare:
 
 # You can prepare multiple object sets:
 prepare:
+  post_prepare_delay: 3      # Wait 3 seconds after creating objects
   ensure_objects:
     - base_uri: "gs://bucket/small/"
       count: 10000
@@ -219,6 +225,13 @@ prepare:
       max_size: 1073741824   # 1 GiB
 ```
 
+**Post-Prepare Delay**: The `post_prepare_delay` field controls how long to wait after creating objects before starting the workload. This is essential for cloud storage backends that have eventual consistency:
+- **Local storage** (`file://`, `direct://`): 0 seconds (no delay needed)
+- **Cloud storage** (S3, GCS, Azure): 2-5 seconds recommended
+- **Large object counts** (>1000 objects): 5-10 seconds recommended
+
+The delay only applies if new objects were created. If all objects already existed, no delay occurs.
+
 **Object naming**: Prepare creates objects named `prepared-NNNNNNNN.dat` where N is zero-padded 8-digit number.
 
 Examples:
@@ -229,6 +242,7 @@ Examples:
 **Match your workload patterns accordingly**:
 ```yaml
 prepare:
+  post_prepare_delay: 3
   ensure_objects:
     - base_uri: "gs://bucket/data/"
       count: 1000

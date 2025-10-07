@@ -1,0 +1,31 @@
+# Test v0.5.7: Automatic separate object pools for mixed DELETE + GET/STAT workloads
+# This config tests that DELETE operations don't corrupt the readonly pool
+
+target: "file:///tmp/sai3bench-v057-test/"
+
+duration: 10s
+concurrency: 8
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-v057-test/"
+      count: 50
+      size_spec: 10240  # Fixed size: 10 KiB
+      fill: random
+  post_prepare_delay: 0  # No delay needed for local file backend
+
+workload:
+  # GET operations - should use readonly pool (prepared-*.dat)
+  - op: get
+    path: "prepared-*.dat"
+    weight: 60
+    
+  # DELETE operations - should use deletable pool (deletable-*.dat)
+  - op: delete
+    path: "prepared-*.dat"  # Will be auto-rewritten to deletable-*.dat
+    weight: 20
+    
+  # STAT operations - should use readonly pool (prepared-*.dat)
+  - op: stat
+    path: "prepared-*.dat"
+    weight: 20

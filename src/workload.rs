@@ -1,6 +1,6 @@
 // src/workload.rs
 //
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
@@ -106,125 +106,211 @@ pub struct PreparedObject {
     pub created: bool,  // True if we created it, false if it already existed
 }
 
+/// Detect if workload requires separate readonly and deletable object pools
+/// Returns (has_delete, has_readonly) where readonly = GET or STAT operations
+pub fn detect_pool_requirements(workload: &[crate::config::WeightedOp]) -> (bool, bool) {
+    let mut has_delete = false;
+    let mut has_readonly = false;
+    
+    for wo in workload {
+        match &wo.spec {
+            OpSpec::Delete { .. } => has_delete = true,
+            OpSpec::Get { .. } | OpSpec::Stat { .. } => has_readonly = true,
+            _ => {}
+        }
+    }
+    
+    (has_delete, has_readonly)
+}
+
+/// Rewrite pattern to use the correct object pool for mixed workloads
+/// 
+/// When mixed workload is detected (DELETE + GET/STAT), automatically rewrites patterns:
+/// - GET/STAT: prepared-*.dat → prepared-*.dat (readonly pool)
+/// - DELETE: prepared-*.dat → deletable-*.dat (consumable pool)
+pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_pools: bool) -> String {
+    if !needs_separate_pools {
+        // Not a mixed workload, use pattern as-is
+        return pattern.to_string();
+    }
+    
+    // For mixed workloads: rewrite "prepared-" to appropriate pool prefix
+    if pattern.contains("prepared-") {
+        if is_delete {
+            // DELETE operations use deletable pool
+            pattern.replace("prepared-", "deletable-")
+        } else {
+            // GET/STAT keep readonly pool (prepared-)
+            pattern.to_string()
+        }
+    } else {
+        // Pattern doesn't use prepared- prefix, use as-is
+        // (user may be using custom prefixes)
+        pattern.to_string()
+    }
+}
+
 /// Execute prepare step: ensure objects exist for testing
-pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<Vec<PreparedObject>> {
+/// 
+/// v0.5.7+: Automatically creates separate object pools when workload contains
+/// both DELETE and (GET|STAT) operations to prevent race conditions:
+/// - prepared-NNNN.dat: Readonly pool for GET/STAT operations (never deleted)
+/// - deletable-NNNN.dat: Consumable pool for DELETE operations
+pub async fn prepare_objects(
+    config: &crate::config::PrepareConfig,
+    workload: Option<&[crate::config::WeightedOp]>
+) -> anyhow::Result<Vec<PreparedObject>> {
     use crate::config::FillPattern;
     use crate::size_generator::SizeGenerator;
+    
+    // Detect if we need separate readonly and deletable pools
+    let (has_delete, has_readonly) = if let Some(wl) = workload {
+        detect_pool_requirements(wl)
+    } else {
+        (false, false)
+    };
+    
+    let needs_separate_pools = has_delete && has_readonly;
+    
+    if needs_separate_pools {
+        info!("Mixed workload detected with DELETE + (GET|STAT): Creating separate readonly and deletable object pools");
+    }
     
     let mut all_prepared = Vec::new();
     
     for spec in &config.ensure_objects {
-        info!("Preparing objects: {} at {}", spec.count, spec.base_uri);
-        
-        let store = create_store_for_uri(&spec.base_uri)?;
-        
-        // 1. List existing objects
-        let existing = store.list(&spec.base_uri, true).await
-            .context("Failed to list existing objects")?;
-        
-        let existing_count = existing.len() as u64;
-        info!("  Found {} existing objects", existing_count);
-        
-        // 2. Calculate how many to create
-        let to_create = if existing_count >= spec.count {
-            info!("  Sufficient objects already exist");
-            0
+        // Determine which pool(s) to create based on workload requirements
+        let pools_to_create = if needs_separate_pools {
+            vec![("prepared", true), ("deletable", false)]  // (prefix, is_readonly)
         } else {
-            spec.count - existing_count
+            vec![("prepared", false)]  // Single pool (backward compatible)
         };
         
-        // 3. Create missing objects
-        if to_create > 0 {
-            use tokio::sync::Semaphore;
-            use futures::stream::{FuturesUnordered, StreamExt};
-            use std::sync::Arc;
+        for (prefix, is_readonly) in pools_to_create {
+            let pool_desc = if needs_separate_pools {
+                if is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
+            } else {
+                ""
+            };
             
-            // Create size generator from spec
-            let size_spec = spec.get_size_spec();
-            let size_generator = SizeGenerator::new(&size_spec)
-                .context("Failed to create size generator")?;
+            info!("Preparing objects{}: {} at {}", pool_desc, spec.count, spec.base_uri);
             
-            // Determine concurrency for prepare (use 32 like default workload concurrency)
-            let concurrency = 32;
+            let store = create_store_for_uri(&spec.base_uri)?;
             
-            info!("  Creating {} additional objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
-                to_create, concurrency, size_generator.description(), spec.fill, 
-                spec.dedup_factor, spec.compress_factor);
+            // 1. List existing objects with this prefix
+            let list_pattern = if spec.base_uri.ends_with('/') {
+                format!("{}{}-", spec.base_uri, prefix)
+            } else {
+                format!("{}/{}-", spec.base_uri, prefix)
+            };
             
-            // Create progress bar for preparation
-            let pb = ProgressBar::new(to_create);
-            pb.set_style(ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
-            )?);
-            pb.set_message(format!("preparing with {} workers", concurrency));
+            let existing = store.list(&list_pattern, true).await
+                .context("Failed to list existing objects")?;
             
-            // Pre-generate all URIs and sizes for parallel execution
-            let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
-            for i in 0..to_create {
-                let key = format!("prepared-{:08}.dat", existing_count + i);
-                let uri = if spec.base_uri.ends_with('/') {
-                    format!("{}{}", spec.base_uri, key)
-                } else {
-                    format!("{}/{}", spec.base_uri, key)
-                };
-                let size = size_generator.generate();
-                tasks.push((uri, size));
-            }
+            let existing_count = existing.len() as u64;
+            info!("  Found {} existing {} objects", existing_count, prefix);
             
-            // Execute PUT operations in parallel with semaphore-controlled concurrency
-            let sem = Arc::new(Semaphore::new(concurrency));
-            let mut futs = FuturesUnordered::new();
-            let pb_clone = pb.clone();
+            // 2. Calculate how many to create
+            let to_create = if existing_count >= spec.count {
+                info!("  Sufficient {} objects already exist", prefix);
+                0
+            } else {
+                spec.count - existing_count
+            };
             
-            for (uri, size) in tasks {
-                let sem2 = sem.clone();
-                let store_uri = spec.base_uri.clone();
-                let fill = spec.fill;
-                let dedup = spec.dedup_factor;
-                let compress = spec.compress_factor;
-                let pb2 = pb_clone.clone();
+            // 3. Create missing objects
+            if to_create > 0 {
+                use tokio::sync::Semaphore;
+                use futures::stream::{FuturesUnordered, StreamExt};
+                use std::sync::Arc;
                 
-                futs.push(tokio::spawn(async move {
-                    let _permit = sem2.acquire_owned().await.unwrap();
-                    
-                    // Generate data using s3dlio's controlled data generation
-                    let data = match fill {
-                        FillPattern::Zero => vec![0u8; size as usize],
-                        FillPattern::Random => {
-                            s3dlio::generate_controlled_data(size as usize, dedup, compress)
-                        }
+                // Create size generator from spec
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                // Determine concurrency for prepare (use 32 like default workload concurrency)
+                let concurrency = 32;
+                
+                info!("  Creating {} additional {} objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
+                    to_create, prefix, concurrency, size_generator.description(), spec.fill, 
+                    spec.dedup_factor, spec.compress_factor);
+                
+                // Create progress bar for preparation
+                let pb = ProgressBar::new(to_create);
+                pb.set_style(ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+                )?);
+                pb.set_message(format!("preparing {} with {} workers", prefix, concurrency));
+                
+                // Pre-generate all URIs and sizes for parallel execution
+                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
+                for i in 0..to_create {
+                    let key = format!("{}-{:08}.dat", prefix, existing_count + i);
+                    let uri = if spec.base_uri.ends_with('/') {
+                        format!("{}{}", spec.base_uri, key)
+                    } else {
+                        format!("{}/{}", spec.base_uri, key)
                     };
-                    
-                    // Create store instance for this task
-                    let store = create_store_for_uri(&store_uri)?;
-                    
-                    // PUT object
-                    store.put(&uri, &data).await
-                        .with_context(|| format!("Failed to PUT {}", uri))?;
-                    
-                    pb2.inc(1);
-                    
-                    Ok::<(String, u64), anyhow::Error>((uri, size))
-                }));
-            }
-            
-            // Collect results as they complete
-            let mut created_objects = Vec::with_capacity(to_create as usize);
-            while let Some(result) = futs.next().await {
-                let (uri, size) = result
-                    .context("Task join error")??;
+                    let size = size_generator.generate();
+                    tasks.push((uri, size));
+                }
                 
-                created_objects.push(PreparedObject {
-                    uri,
-                    size,
-                    created: true,
-                });
+                // Execute PUT operations in parallel with semaphore-controlled concurrency
+                let sem = Arc::new(Semaphore::new(concurrency));
+                let mut futs = FuturesUnordered::new();
+                let pb_clone = pb.clone();
+                
+                for (uri, size) in tasks {
+                    let sem2 = sem.clone();
+                    let store_uri = spec.base_uri.clone();
+                    let fill = spec.fill;
+                    let dedup = spec.dedup_factor;
+                    let compress = spec.compress_factor;
+                    let pb2 = pb_clone.clone();
+                    
+                    futs.push(tokio::spawn(async move {
+                        let _permit = sem2.acquire_owned().await.unwrap();
+                        
+                        // Generate data using s3dlio's controlled data generation
+                        let data = match fill {
+                            FillPattern::Zero => vec![0u8; size as usize],
+                            FillPattern::Random => {
+                                s3dlio::generate_controlled_data(size as usize, dedup, compress)
+                            }
+                        };
+                        
+                        // Create store instance for this task
+                        let store = create_store_for_uri(&store_uri)?;
+                        
+                        // PUT object
+                        store.put(&uri, &data).await
+                            .with_context(|| format!("Failed to PUT {}", uri))?;
+                        
+                        pb2.inc(1);
+                        
+                        Ok::<(String, u64), anyhow::Error>((uri, size))
+                    }));
+                }
+                
+                // Collect results as they complete
+                let mut created_objects = Vec::with_capacity(to_create as usize);
+                while let Some(result) = futs.next().await {
+                    let (uri, size) = result
+                        .context("Task join error")??;
+                    
+                    created_objects.push(PreparedObject {
+                        uri,
+                        size,
+                        created: true,
+                    });
+                }
+                
+                pb.finish_with_message(format!("created {} {} objects", to_create, prefix));
+                
+                // Add created objects to all_prepared
+                all_prepared.extend(created_objects);
             }
-            
-            pb.finish_with_message(format!("created {} objects", to_create));
-            
-            // Add created objects to all_prepared
-            all_prepared.extend(created_objects);
         }
     }
     
@@ -305,6 +391,71 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Res
     }
     
     pb.finish_with_message(format!("deleted {} objects", delete_count));
+    Ok(())
+}
+
+/// Verify that prepared objects exist and are accessible
+pub async fn verify_prepared_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    
+    info!("Starting verification of prepared objects");
+    
+    for spec in &config.ensure_objects {
+        let store = create_store_for_uri(&spec.base_uri)?;
+        
+        // List existing objects
+        info!("Verifying objects at {}", spec.base_uri);
+        let existing = store.list(&spec.base_uri, true).await
+            .context("Failed to list objects during verification")?;
+        
+        let found_count = existing.len();
+        let expected_count = spec.count as usize;
+        
+        if found_count < expected_count {
+            bail!("Verification failed: Found {} objects but expected {} at {}",
+                  found_count, expected_count, spec.base_uri);
+        }
+        
+        info!("Found {}/{} objects, verifying accessibility...", found_count, expected_count);
+        
+        // Verify accessibility by attempting to stat each object
+        let pb = ProgressBar::new(expected_count as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} verified {msg}"
+        )?);
+        
+        let mut accessible_count = 0;
+        let mut inaccessible = Vec::new();
+        
+        for uri in existing.iter().take(expected_count) {
+            match stat_object_multi_backend(uri).await {
+                Ok(_metadata) => {
+                    accessible_count += 1;
+                    pb.inc(1);
+                }
+                Err(e) => {
+                    inaccessible.push(format!("{}: {}", uri, e));
+                    pb.inc(1);
+                }
+            }
+        }
+        
+        pb.finish_and_clear();
+        
+        if !inaccessible.is_empty() {
+            eprintln!("\nInaccessible objects:");
+            for issue in &inaccessible {
+                eprintln!("  ✗ {}", issue);
+            }
+            bail!("Verification failed: {}/{} objects accessible at {}",
+                  accessible_count, expected_count, spec.base_uri);
+        }
+        
+        println!("✓ {}/{} objects verified and accessible at {}", 
+                 accessible_count, expected_count, spec.base_uri);
+        info!("Verification successful: {}/{} objects", accessible_count, expected_count);
+    }
+    
     Ok(())
 }
 
@@ -562,6 +713,15 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let start = Instant::now();
     let deadline = start + cfg.duration;
 
+    // Detect if we need separate object pools for mixed DELETE + (GET|STAT) workloads
+    let (has_delete, has_readonly) = detect_pool_requirements(&cfg.workload);
+    let needs_separate_pools = has_delete && has_readonly;
+    
+    if needs_separate_pools {
+        info!("Mixed workload detected: Using separate readonly and deletable object pools");
+        println!("Mixed workload: Using separate object pools (readonly for GET/STAT, deletable for DELETE)");
+    }
+
     // Pre-resolve GET, DELETE, and STAT sources once
     info!("Pre-resolving operation patterns for {} operations", cfg.workload.len());
     
@@ -588,7 +748,12 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     for wo in &cfg.workload {
         match &wo.spec {
             OpSpec::Get { .. } => {
-                let uri = cfg.get_uri(&wo.spec);
+                let original_uri = cfg.get_uri(&wo.spec);
+                let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
+                
+                if needs_separate_pools && uri != original_uri {
+                    info!("Rewriting GET pattern for readonly pool: {} -> {}", original_uri, uri);
+                }
                 info!("Resolving GET pattern: {}", uri);
                 
                 match prefetch_uris_multi_backend(&uri).await {
@@ -608,7 +773,12 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                 }
             }
             OpSpec::Delete { .. } => {
-                let uri = cfg.get_meta_uri(&wo.spec);
+                let original_uri = cfg.get_meta_uri(&wo.spec);
+                let uri = rewrite_pattern_for_pool(&original_uri, true, needs_separate_pools);
+                
+                if needs_separate_pools && uri != original_uri {
+                    info!("Rewriting DELETE pattern for deletable pool: {} -> {}", original_uri, uri);
+                }
                 info!("Resolving DELETE pattern: {}", uri);
                 
                 match prefetch_uris_multi_backend(&uri).await {
@@ -628,7 +798,12 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                 }
             }
             OpSpec::Stat { .. } => {
-                let uri = cfg.get_meta_uri(&wo.spec);
+                let original_uri = cfg.get_meta_uri(&wo.spec);
+                let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
+                
+                if needs_separate_pools && uri != original_uri {
+                    info!("Rewriting STAT pattern for readonly pool: {} -> {}", original_uri, uri);
+                }
                 info!("Resolving STAT pattern: {}", uri);
                 
                 match prefetch_uris_multi_backend(&uri).await {
@@ -707,6 +882,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         let chooser = chooser.clone();
         let pre = pre.clone();
         let cfg = cfg.clone();
+        let separate_pools = needs_separate_pools;  // Clone flag for workers
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -730,8 +906,9 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                 match op {
                     OpSpec::Get { .. } => {
-                        // Get resolved URI from config
-                        let uri = cfg.get_uri(op);
+                        // Get resolved URI from config - rewrite for mixed workloads if needed
+                        let original_uri = cfg.get_uri(op);
+                        let uri = rewrite_pattern_for_pool(&original_uri, false, separate_pools);
                         
                         // Pick full URI from pre-resolved list
                         let full_uri = {
@@ -803,8 +980,10 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Stat { .. } => {
-                        // Get pattern URI and pick random resolved URI
-                        let pattern = cfg.get_meta_uri(op);
+                        // Get pattern URI - rewrite for mixed workloads if needed
+                        let original_pattern = cfg.get_meta_uri(op);
+                        let pattern = rewrite_pattern_for_pool(&original_pattern, false, separate_pools);
+                        
                         let full_uri = {
                             let src = pre.stat_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for STAT pattern: {}", pattern))?;
@@ -823,8 +1002,10 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Delete { .. } => {
-                        // Get pattern URI and pick random resolved URI
-                        let pattern = cfg.get_meta_uri(op);
+                        // Get pattern URI - rewrite for mixed workloads if needed
+                        let original_pattern = cfg.get_meta_uri(op);
+                        let pattern = rewrite_pattern_for_pool(&original_pattern, true, separate_pools);
+                        
                         let full_uri = {
                             let src = pre.delete_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for DELETE pattern: {}", pattern))?;

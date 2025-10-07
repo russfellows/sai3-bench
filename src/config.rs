@@ -113,6 +113,11 @@ pub struct PrepareConfig {
     /// Whether to cleanup prepared objects after test
     #[serde(default)]
     pub cleanup: bool,
+    
+    /// Delay in seconds after prepare phase completes (for cloud storage eventual consistency)
+    /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
+    #[serde(default)]
+    pub post_prepare_delay: u64,
 }
 
 /// Specification for ensuring objects exist

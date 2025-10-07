@@ -16,3 +16,6 @@ Thumbs.db # Windows
 
 /target
 local-env
+
+# Test result files (auto-generated)
+sai3bench-*.tsv
