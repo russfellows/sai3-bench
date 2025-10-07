@@ -1,0 +1,56 @@
+# Mixed Workload Example - Cloud Storage Compatible
+# Demonstrates all operation types with glob pattern support
+#
+# This example shows:
+# - Prepare stage creating baseline objects
+# - GET operations reading existing objects (60%)
+# - PUT operations creating new objects (25%)
+# - DELETE operations removing objects (10%)
+# - STAT operations querying metadata (5%)
+#
+# Note: PUT weight >= DELETE weight ensures object pool doesn't deplete
+# This follows the same pattern as MinIO Warp benchmarks
+
+duration: "3m"
+concurrency: 32
+target: "gs://your-bucket-name/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "gs://your-bucket-name/bench/mixed/"
+      count: 2000
+      min_size: 1048576  # 1 MiB
+      max_size: 1048576  # Fixed size for consistent testing
+      fill: random
+
+workload:
+  # GET: Read existing prepared objects using glob pattern
+  # Pattern: prepared-*.dat matches prepared-00000000.dat, prepared-00000001.dat, etc.
+  - op: get
+    path: "bench/mixed/prepared-*.dat"
+    weight: 60
+  
+  # PUT: Create new objects with random names
+  # The base path will be extended with obj_<random_u64>
+  - op: put
+    path: "bench/mixed/new-"
+    object_size: 1048576
+    weight: 25
+  
+  # DELETE: Remove existing prepared objects
+  # Randomly picks from the same pool as GET
+  - op: delete
+    path: "bench/mixed/prepared-*.dat"
+    weight: 10
+  
+  # STAT: Query metadata for existing objects
+  # Randomly picks from the same pool as GET
+  - op: stat
+    path: "bench/mixed/prepared-*.dat"
+    weight: 5
+
+# Optional: Clean up prepared objects after workload
+# Note: Does not remove objects created by PUT operations during the workload
+# cleanup:
+#   paths:
+#     - "bench/mixed/"

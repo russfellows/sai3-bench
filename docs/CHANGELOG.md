@@ -2,6 +2,173 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.5.5] - 2025-10-06
+
+### 🚀 Critical Performance & Correctness Fixes
+
+This release fixes **critical bugs** that prevented DELETE and STAT operations from working with glob patterns, and adds **parallel execution** to prepare and cleanup stages for 30x performance improvement.
+
+### 🐛 Critical Bug Fixes
+
+#### Pattern Resolution for DELETE and STAT Operations
+**Problem**: DELETE and STAT operations were completely broken when using glob patterns. They attempted to delete/stat the pattern string itself (e.g., `prepared-*.dat`) instead of resolving it to actual object URIs.
+
+**Impact**: 
+- DELETE operations always failed with "No such object" errors
+- STAT operations always failed with "No such object" errors
+- Mixed workloads (similar to MinIO Warp benchmarks) were impossible to run
+- Cloud storage benchmarking was severely limited
+
+**Fix**: Extended pre-resolution logic to handle DELETE and STAT operations:
+- All three operations (GET, DELETE, STAT) now pre-resolve glob patterns at startup
+- Workers randomly sample from pre-resolved URI lists during execution
+- Added `UriSource` tracking for each operation type
+- User sees: `Resolving 3 operation patterns (1 GET, 1 DELETE, 1 STAT)...`
+
+**Files Changed**: `src/workload.rs` (lines 903-927, 563-650, 810-850)
+
+**Example**:
+```yaml
+workload:
+  - op: delete
+    path: "bench/mixed/prepared-*.dat"  # ✅ Now works - resolves to actual objects
+```
+
+See: `docs/PATTERN_RESOLUTION_FIX.md` for complete details
+
+### ⚡ Performance Improvements
+
+#### Parallel Prepare Stage (30x faster)
+**Problem**: Prepare stage created objects sequentially (one at a time), making cloud storage preparation extremely slow.
+
+**Impact Before**:
+- 20,000 objects took ~35-50 seconds
+- Throughput: ~400-600 objects/sec
+- Cloud benchmarking required long waits before tests could begin
+
+**Fix**: Implemented parallel execution with 32 workers using semaphore-controlled concurrency:
+- Uses same pattern as main workload execution
+- Pre-generates URIs and sizes, then executes in parallel with `FuturesUnordered`
+- Semaphore limits concurrent tasks to prevent resource exhaustion
+
+**Impact After**:
+- Small objects (100 KiB): **13,179-18,677 objects/sec** (30x improvement)
+- Large objects (1 MiB): **788 objects/sec at 788 MB/sec throughput**
+- 20,000 objects (1 MiB): **25.4 seconds** vs 50+ seconds
+
+**Files Changed**: `src/workload.rs` (lines 135-197)
+
+#### Parallel Cleanup Stage (30x faster)
+**Problem**: Cleanup stage deleted objects sequentially (one at a time), causing slow cleanup after benchmarks.
+
+**Fix**: Applied same parallel execution pattern as prepare stage:
+- 32 parallel workers with semaphore control
+- Graceful error handling (logs warnings but continues on single delete failures)
+- Best-effort deletion approach
+
+**Impact**:
+- 2,000 objects: **< 0.2 seconds** (was ~3-5 seconds)
+- 5,000 objects: **< 0.3 seconds** (was ~7-12 seconds)
+- Throughput: **>10,000 objects/sec** for small objects
+
+**Files Changed**: `src/workload.rs` (lines 236-310)
+
+See: `docs/PREPARE_PERFORMANCE_FIX.md` for complete benchmarking results
+
+### 📝 Configuration Syntax Updates
+
+#### Glob Patterns (Not Brace Expansions)
+sai3-bench uses **glob patterns with wildcards**, not bash-style brace expansions:
+
+**Correct** ✅:
+```yaml
+workload:
+  - op: get
+    path: "bench/mixed/prepared-*.dat"  # Glob pattern with wildcard
+```
+
+**Incorrect** ❌:
+```yaml
+workload:
+  - op: get
+    path: "bench/mixed/obj_{00000..19999}"  # Brace expansion NOT supported
+```
+
+#### Object Naming in Prepare Stage
+Prepare stage creates objects with this naming pattern:
+- Format: `prepared-NNNNNNNN.dat` (8-digit zero-padded with `.dat` extension)
+- Example: `prepared-00000000.dat`, `prepared-00000001.dat`, etc.
+
+Match your workload patterns accordingly:
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "gs://bucket/data/"
+      count: 1000
+
+workload:
+  - op: get
+    path: "data/prepared-*.dat"  # ✅ Matches prepare naming
+```
+
+### 📚 Documentation Improvements
+
+#### New Documentation
+- `docs/PATTERN_RESOLUTION_FIX.md` - Complete guide to pattern resolution fix
+- `docs/PREPARE_PERFORMANCE_FIX.md` - Performance improvements with benchmarks (updated for cleanup)
+- `examples/README.md` - Comprehensive guide to all operation types
+- `examples/mixed-workload-cloud.yaml` - Production-ready cloud benchmark example
+- `examples/all-operations.yaml` - Demonstrates all 5 operation types
+
+#### Updated Examples
+- Moved YAML examples from `docs/` to `examples/` directory
+- All examples now use correct glob pattern syntax
+- Added detailed comments explaining each operation type
+- Included weight balancing best practices
+
+### 🧪 Testing
+- Added regression tests in `tests/configs/prepare-performance/`
+- Added regression tests in `tests/configs/cleanup-performance/`
+- Added pattern resolution test: `tests/configs/pattern-resolution-test.yaml`
+- Validated all operation types work correctly with glob patterns
+
+### 🔧 Technical Details
+
+**Concurrency Model**:
+- Prepare: 32 parallel workers (configurable in future release)
+- Workload: 32 parallel workers (configurable per-operation)
+- Cleanup: 32 parallel workers (matches prepare/workload)
+
+**Pattern Resolution**:
+- GET, DELETE, STAT: Pre-resolve patterns → sample random URIs during execution
+- PUT: Generate unique names dynamically (no pre-resolution needed)
+- LIST: Operates on directories (no pre-resolution needed)
+
+**Error Handling**:
+- Prepare: Fails immediately on any PUT error (strict)
+- Cleanup: Best-effort deletion (logs warnings, continues on errors)
+- Workload: Propagates errors to maintain benchmark integrity
+
+### 🎯 Migration from v0.5.4
+
+**Update your configs** to use glob patterns:
+
+Old (broken):
+```yaml
+- op: delete
+  path: "data/obj_{00000..19999}"
+```
+
+New (working):
+```yaml
+- op: delete
+  path: "data/prepared-*.dat"
+```
+
+**No code changes needed** - just update YAML configs to use wildcard patterns.
+
+---
+
 ## [0.5.4] - 2025-10-04
 
 ### 💥 BREAKING CHANGES

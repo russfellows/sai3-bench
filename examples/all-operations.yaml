@@ -1,0 +1,55 @@
+# Comprehensive Operation Example - All Operation Types
+# Demonstrates GET, PUT, DELETE, STAT, and LIST operations
+#
+# This example shows how to use all available operation types in sai3-bench
+#
+# IMPORTANT: When mixing DELETE with GET/STAT operations, use a low DELETE weight
+# to avoid race conditions where DELETE removes objects that GET/STAT are trying to access.
+# Best practice: Ensure PUT weight > DELETE weight to maintain object pool size.
+
+duration: "10s"
+concurrency: 32
+target: "file:///tmp/sai3bench-all-ops/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-all-ops/data/"
+      count: 200
+      min_size: 102400  # 100 KiB
+      max_size: 102400
+      fill: random
+
+workload:
+  # GET: Read existing objects using glob pattern
+  # Randomly selects from pre-resolved list of prepared-*.dat files
+  - op: get
+    path: "data/prepared-*.dat"
+    weight: 40
+  
+  # PUT: Create new objects with random names
+  # Names will be like: obj_<random_u64>
+  - op: put
+    path: "data/new-"
+    object_size: 51200  # 50 KiB
+    weight: 30
+  
+  # LIST: List directory contents
+  # Lists all objects under data/ directory (no pattern resolution needed)
+  # This operation gets slower as more objects are created by PUT operations
+  - op: list
+    path: "data/"
+    weight: 15
+  
+  # STAT: Query object metadata (size, etc.)
+  # Randomly selects from pre-resolved list of prepared-*.dat files
+  - op: stat
+    path: "data/prepared-*.dat"
+    weight: 10
+  
+  # DELETE: Remove objects
+  # Randomly selects from pre-resolved list of prepared-*.dat files
+  # Keep weight low to avoid exhausting the object pool during testing
+  # Note: PUT weight (30) > DELETE weight (5) ensures pool grows over time
+  - op: delete
+    path: "data/prepared-*.dat"
+    weight: 5

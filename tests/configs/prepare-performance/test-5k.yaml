@@ -1,0 +1,18 @@
+# Test parallel prepare performance with 5,000 objects
+# Expected: ~18K objects/sec throughput
+duration: "5s"
+concurrency: 32
+target: "file:///tmp/sai3bench-prepare-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-prepare-test/data/"
+      count: 5000
+      min_size: 102400   # 100 KiB
+      max_size: 102400   # Fixed size for consistent testing
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100

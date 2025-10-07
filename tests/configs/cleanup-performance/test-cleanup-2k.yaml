@@ -1,0 +1,20 @@
+# Test parallel cleanup performance with 2,000 objects
+# Validates that cleanup stage uses parallel execution
+duration: "1s"
+concurrency: 32
+target: "file:///tmp/sai3bench-cleanup-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-cleanup-test/data/"
+      count: 2000
+      min_size: 102400   # 100 KiB
+      max_size: 102400
+      fill: random
+  cleanup: true  # Enable cleanup to test performance
+
+workload:
+  # Minimal workload - we're testing cleanup performance
+  - op: get
+    path: "data/*"
+    weight: 100

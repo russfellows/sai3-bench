@@ -135,13 +135,20 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
         
         // 3. Create missing objects
         if to_create > 0 {
+            use tokio::sync::Semaphore;
+            use futures::stream::{FuturesUnordered, StreamExt};
+            use std::sync::Arc;
+            
             // Create size generator from spec
             let size_spec = spec.get_size_spec();
             let size_generator = SizeGenerator::new(&size_spec)
                 .context("Failed to create size generator")?;
             
-            info!("  Creating {} additional objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
-                to_create, size_generator.description(), spec.fill, 
+            // Determine concurrency for prepare (use 32 like default workload concurrency)
+            let concurrency = 32;
+            
+            info!("  Creating {} additional objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
+                to_create, concurrency, size_generator.description(), spec.fill, 
                 spec.dedup_factor, spec.compress_factor);
             
             // Create progress bar for preparation
@@ -149,8 +156,10 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
             pb.set_style(ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
             )?);
-            pb.set_message("preparing");
+            pb.set_message(format!("preparing with {} workers", concurrency));
             
+            // Pre-generate all URIs and sizes for parallel execution
+            let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
             for i in 0..to_create {
                 let key = format!("prepared-{:08}.dat", existing_count + i);
                 let uri = if spec.base_uri.ends_with('/') {
@@ -158,41 +167,64 @@ pub async fn prepare_objects(config: &crate::config::PrepareConfig) -> anyhow::R
                 } else {
                     format!("{}/{}", spec.base_uri, key)
                 };
-                
-                // Generate object size using size generator
                 let size = size_generator.generate();
+                tasks.push((uri, size));
+            }
+            
+            // Execute PUT operations in parallel with semaphore-controlled concurrency
+            let sem = Arc::new(Semaphore::new(concurrency));
+            let mut futs = FuturesUnordered::new();
+            let pb_clone = pb.clone();
+            
+            for (uri, size) in tasks {
+                let sem2 = sem.clone();
+                let store_uri = spec.base_uri.clone();
+                let fill = spec.fill;
+                let dedup = spec.dedup_factor;
+                let compress = spec.compress_factor;
+                let pb2 = pb_clone.clone();
                 
-                // Generate data using s3dlio's controlled data generation
-                let data = match spec.fill {
-                    FillPattern::Zero => vec![0u8; size as usize],
-                    FillPattern::Random => {
-                        // Use s3dlio's generate_controlled_data for realistic dedupe/compression
-                        s3dlio::generate_controlled_data(
-                            size as usize,
-                            spec.dedup_factor,
-                            spec.compress_factor
-                        )
-                    }
-                };
+                futs.push(tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await.unwrap();
+                    
+                    // Generate data using s3dlio's controlled data generation
+                    let data = match fill {
+                        FillPattern::Zero => vec![0u8; size as usize],
+                        FillPattern::Random => {
+                            s3dlio::generate_controlled_data(size as usize, dedup, compress)
+                        }
+                    };
+                    
+                    // Create store instance for this task
+                    let store = create_store_for_uri(&store_uri)?;
+                    
+                    // PUT object
+                    store.put(&uri, &data).await
+                        .with_context(|| format!("Failed to PUT {}", uri))?;
+                    
+                    pb2.inc(1);
+                    
+                    Ok::<(String, u64), anyhow::Error>((uri, size))
+                }));
+            }
+            
+            // Collect results as they complete
+            let mut created_objects = Vec::with_capacity(to_create as usize);
+            while let Some(result) = futs.next().await {
+                let (uri, size) = result
+                    .context("Task join error")??;
                 
-                // PUT object
-                store.put(&uri, &data).await
-                    .with_context(|| format!("Failed to PUT {}", uri))?;
-                
-                all_prepared.push(PreparedObject {
+                created_objects.push(PreparedObject {
                     uri,
                     size,
                     created: true,
                 });
-                
-                pb.inc(1);
-                
-                if (i + 1) % 1000 == 0 {
-                    pb.set_message(format!("{}/{} objects", i + 1, to_create));
-                }
             }
             
             pb.finish_with_message(format!("created {} objects", to_create));
+            
+            // Add created objects to all_prepared
+            all_prepared.extend(created_objects);
         }
     }
     
@@ -206,31 +238,73 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Res
         return Ok(());
     }
     
-    info!("Cleaning up {} prepared objects", objects.len());
+    use tokio::sync::Semaphore;
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use std::sync::Arc;
+    
+    let to_delete: Vec<_> = objects.iter()
+        .filter(|obj| obj.created)
+        .collect();
+    
+    if to_delete.is_empty() {
+        info!("No objects to clean up");
+        return Ok(());
+    }
+    
+    let delete_count = to_delete.len();
+    
+    // Use same concurrency as prepare stage (32 workers)
+    let concurrency = 32;
+    info!("Cleaning up {} prepared objects with {} workers", delete_count, concurrency);
     
     // Create progress bar for cleanup
-    let pb = ProgressBar::new(objects.len() as u64);
+    let pb = ProgressBar::new(delete_count as u64);
     pb.set_style(ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
     )?);
-    pb.set_message("cleaning up");
+    pb.set_message(format!("cleaning up with {} workers", concurrency));
     
-    for (i, obj) in objects.iter().enumerate() {
-        if obj.created {
-            let store = create_store_for_uri(&obj.uri)?;
-            if let Err(e) = store.delete(&obj.uri).await {
-                tracing::warn!("Failed to delete {}: {}", obj.uri, e);
+    // Execute DELETE operations in parallel with semaphore-controlled concurrency
+    let sem = Arc::new(Semaphore::new(concurrency));
+    let mut futs = FuturesUnordered::new();
+    let pb_clone = pb.clone();
+    
+    for obj in to_delete {
+        let sem2 = sem.clone();
+        let pb2 = pb_clone.clone();
+        let uri = obj.uri.clone();
+        
+        futs.push(tokio::spawn(async move {
+            let _permit = sem2.acquire_owned().await.unwrap();
+            
+            // Create store and delete object
+            // Note: We intentionally don't fail the entire cleanup if a single delete fails
+            // Instead, we log warnings and continue with remaining deletions
+            match create_store_for_uri(&uri) {
+                Ok(store) => {
+                    if let Err(e) = store.delete(&uri).await {
+                        tracing::warn!("Failed to delete {}: {}", uri, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create store for {}: {}", uri, e);
+                }
             }
-        }
-        
-        pb.inc(1);
-        
-        if (i + 1) % 1000 == 0 {
-            pb.set_message(format!("{}/{} objects", i + 1, objects.len()));
+            
+            pb2.inc(1);
+        }));
+    }
+    
+    // Wait for all deletion tasks to complete
+    // Tasks don't return errors (they log warnings instead), so we just need to detect panics
+    while let Some(res) = futs.next().await {
+        if let Err(e) = res {
+            tracing::error!("Cleanup task panicked: {}", e);
+            // Continue with remaining tasks even if one panicked
         }
     }
     
-    pb.finish_with_message(format!("deleted {} objects", objects.len()));
+    pb.finish_with_message(format!("deleted {} objects", delete_count));
     Ok(())
 }
 
@@ -488,43 +562,92 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let start = Instant::now();
     let deadline = start + cfg.duration;
 
-    // Pre-resolve any GET sources once.
-    info!("Pre-resolving GET sources for {} operations", cfg.workload.len());
+    // Pre-resolve GET, DELETE, and STAT sources once
+    info!("Pre-resolving operation patterns for {} operations", cfg.workload.len());
     
-    // Always show GET resolution progress for user feedback
+    // Count operations that need resolution
     let mut get_count = 0;
+    let mut delete_count = 0;
+    let mut stat_count = 0;
     for wo in &cfg.workload {
-        if matches!(&wo.spec, OpSpec::Get { .. }) {
-            get_count += 1;
+        match &wo.spec {
+            OpSpec::Get { .. } => get_count += 1,
+            OpSpec::Delete { .. } => delete_count += 1,
+            OpSpec::Stat { .. } => stat_count += 1,
+            _ => {}
         }
     }
-    if get_count > 0 {
-        println!("Resolving {} GET operation patterns...", get_count);
+    
+    let total_patterns = get_count + delete_count + stat_count;
+    if total_patterns > 0 {
+        println!("Resolving {} operation patterns ({} GET, {} DELETE, {} STAT)...", 
+                 total_patterns, get_count, delete_count, stat_count);
     }
     
     let mut pre = PreResolved::default();
     for wo in &cfg.workload {
-        if let OpSpec::Get { .. } = &wo.spec {
-            let uri = cfg.get_uri(&wo.spec);
-            
-            info!("Resolving GET source for URI: {}", uri);
-            
-            // Try new multi-backend approach first
-            match prefetch_uris_multi_backend(&uri).await {
-                Ok(full_uris) if !full_uris.is_empty() => {
-                    info!("Found {} objects for GET pattern: {}", full_uris.len(), uri);
-                    pre.get_lists.push(GetSource {
-                        full_uris: full_uris.clone(),
-                        uri: uri.clone(),
-                    });
-                }
-                Ok(_) => {
-                    return Err(anyhow!("No URIs found for GET uri: {}", uri));
-                }
-                Err(e) => {
-                    return Err(anyhow!("Failed to prefetch URIs for {}: {}", uri, e));
+        match &wo.spec {
+            OpSpec::Get { .. } => {
+                let uri = cfg.get_uri(&wo.spec);
+                info!("Resolving GET pattern: {}", uri);
+                
+                match prefetch_uris_multi_backend(&uri).await {
+                    Ok(full_uris) if !full_uris.is_empty() => {
+                        info!("Found {} objects for GET pattern: {}", full_uris.len(), uri);
+                        pre.get_lists.push(UriSource {
+                            full_uris: full_uris.clone(),
+                            uri: uri.clone(),
+                        });
+                    }
+                    Ok(_) => {
+                        return Err(anyhow!("No URIs found for GET pattern: {}", uri));
+                    }
+                    Err(e) => {
+                        return Err(anyhow!("Failed to resolve GET pattern {}: {}", uri, e));
+                    }
                 }
             }
+            OpSpec::Delete { .. } => {
+                let uri = cfg.get_meta_uri(&wo.spec);
+                info!("Resolving DELETE pattern: {}", uri);
+                
+                match prefetch_uris_multi_backend(&uri).await {
+                    Ok(full_uris) if !full_uris.is_empty() => {
+                        info!("Found {} objects for DELETE pattern: {}", full_uris.len(), uri);
+                        pre.delete_lists.push(UriSource {
+                            full_uris: full_uris.clone(),
+                            uri: uri.clone(),
+                        });
+                    }
+                    Ok(_) => {
+                        return Err(anyhow!("No URIs found for DELETE pattern: {}", uri));
+                    }
+                    Err(e) => {
+                        return Err(anyhow!("Failed to resolve DELETE pattern {}: {}", uri, e));
+                    }
+                }
+            }
+            OpSpec::Stat { .. } => {
+                let uri = cfg.get_meta_uri(&wo.spec);
+                info!("Resolving STAT pattern: {}", uri);
+                
+                match prefetch_uris_multi_backend(&uri).await {
+                    Ok(full_uris) if !full_uris.is_empty() => {
+                        info!("Found {} objects for STAT pattern: {}", full_uris.len(), uri);
+                        pre.stat_lists.push(UriSource {
+                            full_uris: full_uris.clone(),
+                            uri: uri.clone(),
+                        });
+                    }
+                    Ok(_) => {
+                        return Err(anyhow!("No URIs found for STAT pattern: {}", uri));
+                    }
+                    Err(e) => {
+                        return Err(anyhow!("Failed to resolve STAT pattern {}: {}", uri, e));
+                    }
+                }
+            }
+            _ => {} // PUT and LIST don't need pre-resolution
         }
     }
 
@@ -680,11 +803,18 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Stat { .. } => {
-                        // Get resolved URI from config
-                        let uri = cfg.get_meta_uri(op);
+                        // Get pattern URI and pick random resolved URI
+                        let pattern = cfg.get_meta_uri(op);
+                        let full_uri = {
+                            let src = pre.stat_for_uri(&pattern)
+                                .ok_or_else(|| anyhow!("No pre-resolved URIs for STAT pattern: {}", pattern))?;
+                            let mut r = rng();
+                            let uri_idx = r.random_range(0..src.full_uris.len());
+                            src.full_uris[uri_idx].clone()
+                        };
 
                         let t0 = Instant::now();
-                        let _size = stat_object_multi_backend(&uri).await?;
+                        let _size = stat_object_multi_backend(&full_uri).await?;
                         let duration = t0.elapsed();
 
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
@@ -693,11 +823,18 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Delete { .. } => {
-                        // Get resolved URI from config
-                        let uri = cfg.get_meta_uri(op);
+                        // Get pattern URI and pick random resolved URI
+                        let pattern = cfg.get_meta_uri(op);
+                        let full_uri = {
+                            let src = pre.delete_for_uri(&pattern)
+                                .ok_or_else(|| anyhow!("No pre-resolved URIs for DELETE pattern: {}", pattern))?;
+                            let mut r = rng();
+                            let uri_idx = r.random_range(0..src.full_uris.len());
+                            src.full_uris[uri_idx].clone()
+                        };
 
                         let t0 = Instant::now();
-                        delete_object_multi_backend(&uri).await?;
+                        delete_object_multi_backend(&full_uri).await?;
                         let duration = t0.elapsed();
 
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
@@ -826,19 +963,28 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     })
 }
 
-/// Pre-resolved GET lists so workers can sample keys cheaply.
+/// Pre-resolved URI lists so workers can sample keys cheaply.
+/// Handles GET, DELETE, and STAT operations with glob patterns.
 #[derive(Default, Clone)]
 struct PreResolved {
-    get_lists: Vec<GetSource>,
+    get_lists: Vec<UriSource>,
+    delete_lists: Vec<UriSource>,
+    stat_lists: Vec<UriSource>,
 }
 #[derive(Clone)]
-struct GetSource {
+struct UriSource {
     full_uris: Vec<String>,     // Pre-resolved full URIs for random selection
-    uri: String,                // For lookup compatibility
+    uri: String,                // Original pattern for lookup compatibility
 }
 impl PreResolved {
-    fn get_for_uri(&self, uri: &str) -> Option<&GetSource> {
+    fn get_for_uri(&self, uri: &str) -> Option<&UriSource> {
         self.get_lists.iter().find(|g| g.uri == uri)
+    }
+    fn delete_for_uri(&self, uri: &str) -> Option<&UriSource> {
+        self.delete_lists.iter().find(|d| d.uri == uri)
+    }
+    fn stat_for_uri(&self, uri: &str) -> Option<&UriSource> {
+        self.stat_lists.iter().find(|s| s.uri == uri)
     }
 }
 
