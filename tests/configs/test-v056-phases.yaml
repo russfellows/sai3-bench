@@ -1,0 +1,47 @@
+# Test configuration for v0.5.6 - Manual phase execution demo
+# This config is designed for local testing of the new features
+
+target: "file:///tmp/sai3bench-v056-test/"
+
+duration: 10s  # Short test
+concurrency: 8
+
+prepare:
+  # For local file:// storage, delay is not needed, but we set it to 1 for demo
+  post_prepare_delay: 1
+  
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-v056-test/data/"
+      count: 50
+      object_size: 10240  # 10 KB for fast testing
+      fill: random
+  
+  cleanup: true
+
+workload:
+  - op: get
+    path: "data/prepared-*.dat"
+    weight: 70
+
+  - op: put
+    path: "data/"
+    object_size: 10240
+    weight: 20
+
+  - op: stat
+    path: "data/prepared-*.dat"
+    weight: 10
+
+# Test sequence:
+#
+# 1. Prepare only:
+#    sai3-bench run --config test-v056-phases.yaml --prepare-only
+#
+# 2. Verify:
+#    sai3-bench run --config test-v056-phases.yaml --verify
+#
+# 3. Run with skip-prepare:
+#    sai3-bench run --config test-v056-phases.yaml --skip-prepare
+#
+# 4. Full run (all phases):
+#    sai3-bench run --config test-v056-phases.yaml

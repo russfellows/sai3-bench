@@ -1,0 +1,21 @@
+# Test v0.5.7: DELETE-only workload (no GET/STAT)
+# Should create single pool with prepared-* prefix (backward compatible)
+
+target: "file:///tmp/sai3bench-v057-delete/"
+
+duration: 3s
+concurrency: 4
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-v057-delete/"
+      count: 30
+      size_spec: 1024  # Fixed size: 1 KiB
+      fill: zero
+  post_prepare_delay: 0
+
+workload:
+  # Only DELETE - no GET/STAT means single pool
+  - op: delete
+    path: "prepared-*.dat"
+    weight: 100

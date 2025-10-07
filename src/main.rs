@@ -118,11 +118,16 @@ enum Commands {
     },
     /// Run workload from config file
     /// 
+    /// Results are automatically exported to TSV file. Default filename:
+    ///   sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv
+    /// 
     /// Examples:
     ///   io-bench run --config mixed.yaml
     ///   io-bench run --config mixed.yaml --prepare-only
+    ///   io-bench run --config mixed.yaml --verify
+    ///   io-bench run --config mixed.yaml --skip-prepare
     ///   io-bench run --config mixed.yaml --no-cleanup
-    ///   io-bench run --config mixed.yaml --results-tsv /tmp/benchmark
+    ///   io-bench run --config mixed.yaml --tsv-name my-benchmark
     Run {
         #[arg(long)]
         config: String,
@@ -131,22 +136,24 @@ enum Commands {
         #[arg(long)]
         prepare_only: bool,
         
+        /// Verify that prepared objects exist and are accessible, then exit
+        #[arg(long)]
+        verify: bool,
+        
+        /// Skip prepare phase (assume objects already exist from previous run)
+        #[arg(long)]
+        skip_prepare: bool,
+        
         /// Skip cleanup of prepared objects (keep them for repeated runs)
         #[arg(long)]
         no_cleanup: bool,
         
-        /// Export machine-readable results to TSV file.
+        /// Custom basename for TSV results file (default: auto-generated with timestamp)
         /// 
-        /// Output file will be <path>-results.tsv with 13 columns:
-        /// operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us,
-        /// p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
-        /// 
-        /// Size buckets: zero, 1B-8KiB, 8KiB-64KiB, 64KiB-512KiB, 512KiB-4MiB,
-        /// 4MiB-32MiB, 32MiB-256MiB, 256MiB-2GiB, >2GiB
-        /// 
-        /// Example: --results-tsv /tmp/test creates /tmp/test-results.tsv
-        #[arg(long, value_name = "PATH")]
-        results_tsv: Option<String>,
+        /// The TsvExporter will append "-results.tsv" to this name.
+        /// Example: --tsv-name my-test creates my-test-results.tsv
+        #[arg(long, value_name = "BASENAME")]
+        tsv_name: Option<String>,
     },
     /// Replay workload from op-log file with timing-faithful execution
     /// 
@@ -220,8 +227,8 @@ fn main() -> Result<()> {
         Commands::Put { uri, object_size, objects, concurrency } => {
             put_cmd(&uri, object_size, objects, concurrency)?
         }
-        Commands::Run { config, prepare_only, no_cleanup, results_tsv } => {
-            run_workload(&config, prepare_only, no_cleanup, results_tsv.as_deref())?
+        Commands::Run { config, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
+            run_workload(&config, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error)?
@@ -663,13 +670,24 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
 // -----------------------------------------------------------------------------
 // Workload execution
 // -----------------------------------------------------------------------------
-fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results_tsv: Option<&str>) -> Result<()> {
+fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepare: bool, no_cleanup: bool, tsv_name: Option<&str>) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
     
     let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+    
+    // Validate flag combinations
+    if prepare_only && verify {
+        bail!("Cannot use both --prepare-only and --verify");
+    }
+    if prepare_only && skip_prepare {
+        bail!("Cannot use both --prepare-only and --skip-prepare");
+    }
+    if verify && skip_prepare {
+        bail!("Cannot use both --verify and --skip-prepare");
+    }
     
     // Override cleanup from CLI flag
     if no_cleanup {
@@ -691,15 +709,43 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results
     
     info!("Starting workload execution with {} operation types", config.workload.len());
     
-    // Execute prepare step if configured
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
-    let prepared_objects = if let Some(ref prepare_config) = config.prepare {
-        println!("\n=== Prepare Phase ===");
-        info!("Executing prepare step");
-        let prepared = rt.block_on(workload::prepare_objects(prepare_config))?;
-        println!("Prepared {} objects", prepared.len());
-        prepared
+    
+    // Verify-only mode: check that prepared objects exist and are accessible
+    if verify {
+        if let Some(ref prepare_config) = config.prepare {
+            println!("\n=== Verification Phase ===");
+            info!("Verifying prepared objects");
+            rt.block_on(workload::verify_prepared_objects(prepare_config))?;
+            println!("\nVerification complete: all prepared objects are accessible");
+            return Ok(());
+        } else {
+            bail!("--verify requires 'prepare' section in config");
+        }
+    }
+    
+    // Execute prepare step if configured and not skipped
+    let prepared_objects = if !skip_prepare {
+        if let Some(ref prepare_config) = config.prepare {
+            println!("\n=== Prepare Phase ===");
+            info!("Executing prepare step");
+            let prepared = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
+            println!("Prepared {} objects", prepared.len());
+            
+            // Use configurable delay from YAML (only if objects were created)
+            if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                let delay_secs = prepare_config.post_prepare_delay;
+                println!("Waiting {}s for object propagation (configured delay)...", delay_secs);
+                info!("Delaying {}s for eventual consistency (post_prepare_delay from config)", delay_secs);
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            }
+            
+            prepared
+        } else {
+            Vec::new()
+        }
     } else {
+        info!("Skipping prepare phase (--skip-prepare flag)");
         Vec::new()
     };
     
@@ -728,30 +774,48 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results
     println!("Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
     
     if summary.get.ops > 0 {
+        let get_mib_s = (summary.get.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
         println!("\nGET operations:");
-        println!("  Ops: {}", summary.get.ops);
+        println!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Throughput: {:.2} MiB/s", get_mib_s);
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
     }
     
     if summary.put.ops > 0 {
+        let put_mib_s = (summary.put.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
         println!("\nPUT operations:");
-        println!("  Ops: {}", summary.put.ops);
+        println!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Throughput: {:.2} MiB/s", put_mib_s);
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
     }
     
     if summary.meta.ops > 0 {
         println!("\nMETA-DATA operations:");
-        println!("  Ops: {}", summary.meta.ops);
+        println!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
         println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
     
-    // Export TSV results if requested
-    if let Some(tsv_path) = results_tsv {
+    // Generate TSV filename: use custom name if provided, otherwise auto-generate
+    // (TsvExporter will add -results.tsv suffix)
+    let tsv_basename = if let Some(custom_name) = tsv_name {
+        custom_name.to_string()
+    } else {
+        use chrono::Local;
+        let timestamp = Local::now().format("%Y-%m-%d-%H%M%S");
+        let config_basename = std::path::Path::new(config_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        format!("sai3bench-{}-{}", timestamp, config_basename)
+    };
+    
+    // Export TSV results automatically
+    {
         use sai3_bench::tsv_export::TsvExporter;
-        let exporter = TsvExporter::new(tsv_path);
+        let exporter = TsvExporter::new(&tsv_basename);
         exporter.export_results(
             &summary.get_hists,
             &summary.put_hists,
@@ -761,6 +825,7 @@ fn run_workload(config_path: &str, prepare_only: bool, no_cleanup: bool, results
             &summary.meta_bins,
             summary.wall_seconds,
         )?;
+        println!("\nResults exported to: {}-results.tsv", tsv_basename);
     }
     
     // Cleanup prepared objects if configured

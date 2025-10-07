@@ -2,6 +2,247 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.5.7] - 2025-10-07
+
+### 🔥 Critical Bug Fix
+
+#### DELETE Pool Corruption Fixed
+**Problem**: In v0.5.6 and earlier, all operations (GET, STAT, DELETE) shared a single object pool. DELETE operations removed objects during execution, causing GET/STAT to fail with 404 errors in mixed workloads.
+
+**Solution**: Implemented automatic separate object pools (MinIO Warp approach):
+- **Readonly pool** (`prepared-*.dat`): Used by GET and STAT operations, never deleted
+- **Deletable pool** (`deletable-*.dat`): Used by DELETE operations, consumed during test
+- **Automatic detection**: Detects mixed workloads (DELETE + GET/STAT) and creates separate pools
+- **Pattern rewriting**: Transparently rewrites patterns to route operations to correct pools
+- **100% backward compatible**: Single pool created when no DELETE or no GET/STAT operations
+
+Example:
+```yaml
+workload:
+  - op: get
+    path: "prepared-*.dat"
+    weight: 60
+  - op: delete
+    path: "prepared-*.dat"  # Auto-rewritten to deletable-*.dat
+    weight: 20
+  - op: stat
+    path: "prepared-*.dat"
+    weight: 20
+```
+
+Console output:
+```
+Mixed workload: Using separate object pools (readonly for GET/STAT, deletable for DELETE)
+Prepared 100 objects
+  50 prepared-*.dat (readonly pool)
+  50 deletable-*.dat (consumable pool)
+```
+
+**Impact**: Eliminates 404 errors in mixed workloads. All users running DELETE operations should upgrade immediately.
+
+### ✨ New Features
+
+#### Automatic TSV Export with Smart Naming
+**Previous behavior**: TSV export required `--results-tsv` flag (easy to forget)
+
+**New behavior**: TSV export is automatic and mandatory with intelligent naming:
+
+```bash
+# Automatic timestamp-based naming
+sai3-bench run --config test.yaml
+  → Creates: sai3bench-2025-10-07-143052-test-results.tsv
+
+# Custom naming
+sai3-bench run --config test.yaml --tsv-name my-benchmark
+  → Creates: my-benchmark-results.tsv
+```
+
+**Filename format**: `sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv`
+- Ensures unique files for repeated runs
+- Easy identification of which config was used
+- Auto-ignored via `.gitignore` pattern
+
+**Breaking change**: `--results-tsv` flag removed (use `--tsv-name` for custom naming)
+
+#### Comprehensive Throughput Reporting
+Added MiB/s throughput and per-operation ops/s to console output:
+
+```
+=== Results ===
+Wall time: 10.10s
+Total ops: 313303
+Total bytes: 1933875200 (1844.29 MB)
+Throughput: 31011.97 ops/s
+
+GET operations:
+  Ops: 188855 (18693.61 ops/s)          # NEW: Per-operation ops/s
+  Bytes: 1933875200 (1844.29 MB)
+  Throughput: 182.55 MiB/s              # NEW: Actual data throughput!
+  Latency p50: 390µs, p95: 597µs, p99: 717µs
+
+PUT operations:
+  Ops: 7371 (488.29 ops/s)
+  Bytes: 481286288 (458.99 MB)
+  Throughput: 30.41 MiB/s               # NEW: Write throughput!
+  Latency p50: 369µs, p95: 1887µs, p99: 5215µs
+```
+
+Formula: `MiB/s = (bytes / 1,048,576) / wall_seconds`
+
+Matches TSV export `throughput_mibps` column for consistency.
+
+### 📝 Configuration Examples
+
+#### New Test Configurations
+- `tests/configs/v057_mixed_workload_test.yaml` - Tests automatic pool separation
+- `tests/configs/v057_readonly_only_test.yaml` - Tests backward compatibility (single pool)
+- `tests/configs/v057_delete_only_test.yaml` - Tests DELETE-only workload
+- `tests/configs/comprehensive_test.yaml` - All operations with varied sizes
+
+### 🔧 Technical Changes
+
+**Modified Files**:
+- `src/workload.rs`: Pool separation logic, pattern rewriting, prepare enhancement
+- `src/main.rs`: TSV auto-export, `--tsv-name` flag, throughput reporting
+- `.gitignore`: Added `sai3bench-*.tsv` pattern
+- `Cargo.toml`: Version 0.5.6 → 0.5.7
+
+**New Functions**:
+- `detect_pool_requirements()`: Analyzes workload for pool needs
+- `rewrite_pattern_for_pool()`: Rewrites patterns for correct pool routing
+
+### 📚 Documentation
+- Added `docs/V0.5.7_RELEASE_SUMMARY.md` (comprehensive release notes)
+- Updated `docs/CHANGELOG.md` (this file)
+- Updated `README.md` (brief v0.5.7 mention)
+
+### ⚠️ Breaking Changes
+- Removed `--results-tsv` flag (use `--tsv-name` for custom naming, or rely on automatic naming)
+
+### 🎯 Migration Guide
+
+**From v0.5.6**:
+1. Remove `--results-tsv` from scripts
+2. Optionally add `--tsv-name <basename>` for custom naming
+3. Mixed workloads with DELETE now work correctly (no config changes needed!)
+
+**Backward Compatibility**:
+- All YAML configs work unchanged
+- Readonly-only workloads use single pool (no overhead)
+- DELETE-only workloads use single pool (no overhead)
+- Mixed workloads automatically get separate pools (fixes 404 errors)
+
+---
+
+## [0.5.6] - 2025-10-07
+
+### � New Features
+
+#### Configurable Post-Prepare Delay
+**Problem**: Cloud storage backends (GCS, S3, Azure) have eventual consistency. Objects created during the prepare phase might not be immediately readable, causing 404 errors when the workload starts.
+
+**Solution**: Added YAML-configurable delay between prepare and workload phases:
+```yaml
+prepare:
+  post_prepare_delay: 5  # Wait 5 seconds after creating objects
+  ensure_objects:
+    - base_uri: "gs://bucket/data/"
+      count: 200
+```
+
+**Recommendations**:
+- Local storage (`file://`, `direct://`): 0 seconds (default)
+- Cloud storage (S3, GCS, Azure): 2-5 seconds
+- Large object counts (>1000): 5-10 seconds
+
+#### Manual Phase Execution
+Added CLI flags for manual control of benchmark phases:
+
+**`--verify`**: Verify prepared objects exist and are accessible
+```bash
+# Step 1: Prepare objects
+sai3-bench run --config test.yaml --prepare-only
+
+# Step 2: Wait for propagation (manual)
+sleep 60
+
+# Step 3: Verify all objects are accessible
+sai3-bench run --config test.yaml --verify
+
+# Step 4: Run workload (skip prepare since objects exist)
+sai3-bench run --config test.yaml --skip-prepare
+```
+
+**`--skip-prepare`**: Skip prepare phase, assume objects already exist
+```bash
+# First run: prepare and run
+sai3-bench run --config test.yaml --no-cleanup
+
+# Subsequent runs: skip prepare, reuse existing objects
+sai3-bench run --config test.yaml --skip-prepare
+```
+
+**Verification Output**:
+```
+=== Verification Phase ===
+Verifying objects at gs://bucket/data/
+✓ 200/200 objects verified and accessible at gs://bucket/data/
+```
+
+### 🐛 Bug Fixes
+
+#### Cloud Storage Eventual Consistency Protection
+**Impact**: Benchmarks on cloud storage failed with "404 Not Found" errors immediately after prepare completed.
+
+**Root Cause**: When prepare created objects very quickly (>300 objects/sec), cloud storage eventual consistency meant objects weren't immediately readable in all zones.
+
+**Example Error**:
+```
+Error: Failed to get object from URI: gs://bucket/prepared-00000117.dat
+Caused by:
+    GCS GET failed: HTTP status client error (404 Not Found)
+```
+
+**Fix**: 
+- Added `post_prepare_delay` field to `PrepareConfig`
+- Delay only applies if new objects were created (not if they already existed)
+- Users have full control via YAML configuration
+- Manual workflow supported via `--verify` flag
+
+**Files Changed**: 
+- `src/config.rs` - Added `post_prepare_delay` field
+- `src/main.rs` - Added `--verify` and `--skip-prepare` flags, configurable delay
+- `src/workload.rs` - Added `verify_prepared_objects()` function
+
+### 📚 Documentation
+
+- Added `examples/cloud-storage-with-delay.yaml` - Complete example with phased execution
+- Updated `docs/CONFIG_SYNTAX.md` - Documented `post_prepare_delay` field and recommendations
+- Added detailed CLI usage examples for phased workflows
+
+### 🔄 Migration Guide
+
+**Before (v0.5.5)**:
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "gs://bucket/data/"
+      count: 200
+```
+Objects created, workload started immediately → 404 errors on cloud storage
+
+**After (v0.5.6)**:
+```yaml
+prepare:
+  post_prepare_delay: 3  # Add this line for cloud storage
+  ensure_objects:
+    - base_uri: "gs://bucket/data/"
+      count: 200
+```
+Objects created, waits 3 seconds, workload starts → no errors
+
+**No changes required for local storage** (`file://`, `direct://`) - default delay is 0.
+
 ## [0.5.5] - 2025-10-06
 
 ### 🚀 Critical Performance & Correctness Fixes

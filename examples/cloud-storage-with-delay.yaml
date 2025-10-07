@@ -1,0 +1,82 @@
+# Example: Cloud storage benchmark with eventual consistency protection
+#
+# This configuration demonstrates proper handling of cloud storage eventual consistency
+# by using post_prepare_delay to wait after object creation before starting the workload.
+#
+# Recommended delays:
+#   - Local file:// or direct://: 0 seconds (no delay needed)
+#   - S3, GCS, Azure: 2-5 seconds (allow propagation)
+#   - High object count (>1000): 5-10 seconds
+
+target: "gs://your-bucket/bench/"
+
+duration: 180s
+concurrency: 32
+
+prepare:
+  # Wait 5 seconds after creating objects before starting workload
+  # This allows cloud storage to propagate objects across regions/zones
+  post_prepare_delay: 5
+  
+  ensure_objects:
+    - base_uri: "gs://your-bucket/bench/mixed/"
+      count: 200
+      size_distribution:
+        type: lognormal
+        mean: 1048576      # 1 MB average
+        std_dev: 524288    # 512 KB stddev
+        min: 1024          # 1 KB minimum
+        max: 10485760      # 10 MB maximum
+      fill: random
+      dedup_factor: 1      # All unique data
+      compress_factor: 1   # Uncompressible (realistic)
+  
+  cleanup: true  # Clean up after test
+
+workload:
+  # GET operations (70% of workload)
+  - op: get
+    path: "mixed/prepared-*.dat"
+    weight: 70
+    concurrency: 32
+
+  # PUT operations (20% of workload)
+  - op: put
+    path: "mixed/"
+    weight: 20
+    size_distribution:
+      type: lognormal
+      mean: 1048576
+      std_dev: 524288
+      min: 1024
+      max: 10485760
+    dedup_factor: 1
+    compress_factor: 1
+
+  # STAT operations (5% of workload)
+  - op: stat
+    path: "mixed/prepared-*.dat"
+    weight: 5
+
+  # DELETE operations (5% of workload - deletes random prepared objects)
+  - op: delete
+    path: "mixed/prepared-*.dat"
+    weight: 5
+
+# Usage:
+#   1. Prepare and run in one step (normal mode):
+#      sai3-bench run --config cloud-storage-with-delay.yaml
+#
+#   2. Manual phased execution:
+#      # Step 1: Prepare objects
+#      sai3-bench run --config cloud-storage-with-delay.yaml --prepare-only
+#      
+#      # Step 2: Verify objects are accessible (wait 1 minute first)
+#      sai3-bench run --config cloud-storage-with-delay.yaml --verify
+#      
+#      # Step 3: Run workload (skips prepare since objects exist)
+#      sai3-bench run --config cloud-storage-with-delay.yaml --skip-prepare
+#
+#   3. Keep prepared objects for repeated runs:
+#      sai3-bench run --config cloud-storage-with-delay.yaml --no-cleanup
+#      sai3-bench run --config cloud-storage-with-delay.yaml --skip-prepare --no-cleanup
