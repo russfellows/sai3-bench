@@ -1,0 +1,19 @@
+# Test parallel prepare performance with 20,000 objects at 1MB each
+# Production-scale scenario for cloud storage benchmarking
+# Expected: ~800 objects/sec (~800 MB/sec throughput)
+duration: "10s"
+concurrency: 32
+target: "file:///tmp/sai3bench-prepare-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-prepare-test/data/"
+      count: 20000
+      min_size: 1048576   # 1 MiB
+      max_size: 1048576   # Fixed size for consistent testing
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100

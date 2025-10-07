@@ -1,13 +1,30 @@
-# io-bench — Usage Guide
+# sai3-bench — Usage Guide
 
-io-bench is a multi-protocol I/O benchmarking suite with optional distributed execution via gRPC. It ships four binaries:
+sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed execution via gRPC. It ships four binaries:
 
-- **`io-bench`** — single-node CLI (health/list/stat/get/put/delete/run/replay) using `s3dlio`
+- **`sai3-bench`** — single-node CLI (health/list/stat/get/put/delete/run/replay) using `s3dlio`
 - **`sai3bench-agent`** — per-host gRPC agent that runs I/O operations on that host
 - **`sai3bench-ctl`** — controller that coordinates one or more agents
-- **`sai3bench-run`** — legacy workload runner (being integrated into io-bench)
+- **`sai3bench-run`** — legacy workload runner (being integrated into sai3-bench)
 
 **Supported Backends**: `file://`, `direct://`, `s3://`, `az://`, `gs://`
+
+## Configuration Syntax
+
+For detailed YAML configuration syntax, see:
+- **[Configuration Syntax Reference](CONFIG_SYNTAX.md)** - Complete syntax guide
+- **[Example Configurations](../examples/)** - Ready-to-use example configs
+
+**Quick syntax reminder**:
+```yaml
+# Use glob patterns with wildcards (*)
+- op: get
+  path: "data/prepared-*.dat"  # ✅ Correct
+
+# NOT brace expansions
+- op: get
+  path: "data/obj_{00000..19999}"  # ❌ ERROR
+```
 
 This doc focuses on the distributed controller/agent mode, including plaintext and TLS (self‑signed) operation.
 

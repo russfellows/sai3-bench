@@ -1,0 +1,18 @@
+# Test cleanup performance with 5,000 objects
+duration: "1s"
+concurrency: 32
+target: "file:///tmp/sai3bench-cleanup-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-cleanup-test/data/"
+      count: 5000
+      min_size: 102400
+      max_size: 102400
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100

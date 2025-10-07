@@ -1,0 +1,35 @@
+# Full workflow validation: prepare → run → cleanup
+# Verifies that cleanup only removes prepared objects
+duration: "3s"
+concurrency: 32
+target: "file:///tmp/sai3bench-prepare-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-prepare-test/data/"
+      count: 1000
+      min_size: 102400   # 100 KiB
+      max_size: 102400
+      fill: random
+
+workload:
+  # Mix of operations to create new objects during workload
+  - op: get
+    path: "data/*"
+    weight: 70
+  
+  - op: put
+    path: "workload-created/"
+    weight: 20
+    size_distribution:
+      type: fixed
+      size: 51200  # 50 KiB
+  
+  - op: list
+    path: ""
+    weight: 10
+
+cleanup:
+  # Should only remove objects from prepare step
+  paths:
+    - "data/"
