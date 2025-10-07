@@ -11,6 +11,7 @@ use std::time::Instant;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tonic::{transport::Server, Request, Response, Status};
+use tracing::{debug, error, info};
 
 // Use AWS async SDK directly for listing to avoid nested runtimes
 use aws_config::{self, BehaviorVersion};
@@ -25,11 +26,15 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest};
+use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
 struct Cli {
+    /// Increase verbosity (-v = info, -vv = debug, -vvv = trace)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Listen address, e.g. 0.0.0.0:7761
     #[arg(long, default_value = "0.0.0.0:7761")]
     listen: String,
@@ -149,6 +154,132 @@ impl Agent for AgentSvc {
             notes: String::new(),
         }))
     }
+
+    async fn run_workload(
+        &self,
+        req: Request<RunWorkloadRequest>,
+    ) -> Result<Response<WorkloadSummary>, Status> {
+        info!("Received run_workload request");
+        
+        let RunWorkloadRequest {
+            config_yaml,
+            agent_id,
+            path_prefix,
+            start_timestamp_ns,
+            shared_storage,
+        } = req.into_inner();
+
+        debug!("Agent ID: {}, Path prefix: {}, Shared storage: {}", agent_id, path_prefix, shared_storage);
+        debug!("Config YAML: {} bytes", config_yaml.len());
+
+        // Parse the YAML configuration
+        let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            .map_err(|e| {
+                error!("Failed to parse YAML config: {}", e);
+                Status::invalid_argument(format!("Invalid YAML config: {}", e))
+            })?;
+
+        debug!("YAML config parsed successfully");
+
+        // Apply agent-specific path prefix for isolation
+        config
+            .apply_agent_prefix(&agent_id, &path_prefix, shared_storage)
+            .map_err(|e| {
+                error!("Failed to apply path prefix: {}", e);
+                Status::internal(format!("Failed to apply path prefix: {}", e))
+            })?;
+
+        debug!("Agent-specific path prefix applied (shared_storage={})", shared_storage);
+
+        debug!("Path prefix applied successfully");
+
+        // Wait until coordinated start time
+        let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
+        if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
+            if wait_duration > std::time::Duration::from_secs(60) {
+                error!("Start time is too far in the future: {:?}", wait_duration);
+                return Err(Status::invalid_argument(
+                    "Start time is too far in the future (>60s)",
+                ));
+            }
+            debug!("Waiting {:?} until coordinated start", wait_duration);
+            tokio::time::sleep(wait_duration).await;
+        }
+        // If start_time is in the past, start immediately
+
+        info!("Starting workload execution for agent {}", agent_id);
+
+        // Execute prepare phase if configured
+        let _prepared_objects = if let Some(ref prepare_config) = config.prepare {
+            debug!("Executing prepare phase");
+            let prepared = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+                .await
+                .map_err(|e| {
+                    error!("Prepare phase failed: {}", e);
+                    Status::internal(format!("Prepare phase failed: {}", e))
+                })?;
+            info!("Prepared {} objects", prepared.len());
+            
+            // Use configurable delay from YAML (only if objects were created)
+            if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                let delay_secs = prepare_config.post_prepare_delay;
+                info!("Waiting {}s for object propagation (configured delay)...", delay_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+            }
+            
+            prepared
+        } else {
+            debug!("No prepare phase configured");
+            Vec::new()
+        };
+
+        // Execute the workload using existing workload::run function
+        let summary = sai3_bench::workload::run(&config)
+            .await
+            .map_err(|e| {
+                error!("Workload execution failed: {}", e);
+                Status::internal(format!("Workload execution failed: {}", e))
+            })?;
+
+        info!("Workload completed successfully for agent {}", agent_id);
+        debug!("Summary: {} ops, {} bytes, {:.2}s", 
+               summary.total_ops, summary.total_bytes, summary.wall_seconds);
+
+        // Convert Summary to WorkloadSummary protobuf message
+        Ok(Response::new(WorkloadSummary {
+            agent_id,
+            wall_seconds: summary.wall_seconds,
+            total_ops: summary.total_ops,
+            total_bytes: summary.total_bytes,
+            get: Some(OpAggregateMetrics {
+                bytes: summary.get.bytes,
+                ops: summary.get.ops,
+                mean_us: summary.get.mean_us,
+                p50_us: summary.get.p50_us,
+                p95_us: summary.get.p95_us,
+                p99_us: summary.get.p99_us,
+            }),
+            put: Some(OpAggregateMetrics {
+                bytes: summary.put.bytes,
+                ops: summary.put.ops,
+                mean_us: summary.put.mean_us,
+                p50_us: summary.put.p50_us,
+                p95_us: summary.put.p95_us,
+                p99_us: summary.put.p99_us,
+            }),
+            meta: Some(OpAggregateMetrics {
+                bytes: summary.meta.bytes,
+                ops: summary.meta.ops,
+                mean_us: summary.meta.mean_us,
+                p50_us: summary.meta.p50_us,
+                p95_us: summary.meta.p95_us,
+                p99_us: summary.meta.p99_us,
+            }),
+            p50_us: summary.p50_us,
+            p95_us: summary.p95_us,
+            p99_us: summary.p99_us,
+        }))
+    }
 }
 
 fn to_status<E: std::fmt::Display>(e: E) -> Status {
@@ -198,10 +329,29 @@ async fn list_keys_async(bucket: &str, prefix: &str) -> Result<Vec<String>> {
 async fn main() -> Result<()> {
     dotenv().ok();
     let args = Cli::parse();
+    
+    // Initialize logging based on verbosity level
+    let level = match args.verbose {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    };
+    
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::new(format!("sai3bench_agent={},sai3_bench={}", level, level));
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
+    debug!("Logging initialized at level: {}", level);
+    
     let addr: SocketAddr = args.listen.parse().context("invalid listen addr")?;
 
     // Decide between plaintext and TLS
     if !args.tls {
+        info!("Agent starting in PLAINTEXT mode on {}", addr);
         println!("sai3bench-agent listening (PLAINTEXT) on {}", addr);
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::default()))

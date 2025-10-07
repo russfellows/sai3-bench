@@ -306,5 +306,107 @@ impl Config {
             _ => panic!("Expected metadata operation"),
         }
     }
+
+    /// Apply agent-specific path prefix to all operations for distributed execution.
+    /// This enables per-agent path isolation to prevent conflicts between agents.
+    /// 
+    /// For SHARED storage (S3, GCS, Azure): Only applies prefix to target, NOT to prepare config.
+    /// This allows all agents to use the same prepared dataset.
+    /// 
+    /// For LOCAL storage (file://, direct://): Applies prefix to both target AND prepare config.
+    /// Each agent prepares and uses its own isolated dataset.
+    /// 
+    /// # Arguments
+    /// * `agent_id` - Unique identifier for this agent (e.g., "agent-1")
+    /// * `prefix` - Path prefix to apply (e.g., "agent-1/")
+    /// * `shared_storage` - True if storage is shared (S3/GCS/Azure), false if local per-agent
+    /// 
+    /// # Example
+    /// ```
+    /// // Shared storage (S3):
+    /// config.apply_agent_prefix("agent-1", "agent-1/", true)?;
+    /// // Result: target = "s3://bucket/bench/agent-1/", prepare base_uri unchanged
+    /// 
+    /// // Local storage (file://):
+    /// config.apply_agent_prefix("agent-1", "agent-1/", false)?;
+    /// // Result: target = "file:///tmp/bench/agent-1/", prepare base_uri = "file:///tmp/bench/agent-1/data/"
+    /// ```
+    pub fn apply_agent_prefix(&mut self, _agent_id: &str, prefix: &str, shared_storage: bool) -> anyhow::Result<()> {
+        // Store original target for prepare base_uri rewriting
+        let original_target = self.target.clone();
+        
+        // Apply prefix to base target if set
+        if let Some(ref target) = self.target {
+            self.target = Some(join_uri_path(target, prefix)?);
+        }
+
+        // Do NOT apply prefix to operation paths - they are relative to target!
+        // The workload execution will resolve them against the modified target.
+
+        // Apply prefix to prepare config ONLY if storage is NOT shared
+        // Shared storage (S3/GCS/Azure): all agents use same prepared data
+        // Local storage (file://): each agent prepares its own data
+        if !shared_storage {
+            if let Some(ref mut prepare) = self.prepare {
+                // For local storage, we need to update prepare base_uris to match the modified target
+                // The prepare base_uri might be an absolute URI that extends the target path
+                // We need to insert the prefix at the same location where we modified the target
+                if let (Some(ref new_target), Some(ref orig_target)) = (&self.target, &original_target) {
+                    for ensure_spec in &mut prepare.ensure_objects {
+                        // If base_uri starts with the original target, replace it with the new target
+                        if ensure_spec.base_uri.starts_with(orig_target) {
+                            let relative_path = &ensure_spec.base_uri[orig_target.len()..];
+                            ensure_spec.base_uri = format!("{}{}", new_target, relative_path);
+                        } else {
+                            // Otherwise, just append the prefix (shouldn't happen in normal configs)
+                            ensure_spec.base_uri = join_uri_path(&ensure_spec.base_uri, prefix)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Join a base URI with a path suffix, handling different URI schemes properly.
+/// 
+/// # Examples
+/// - `join_uri_path("s3://bucket/base/", "agent-1/")` → `"s3://bucket/base/agent-1/"`
+/// - `join_uri_path("file:///tmp/test/", "agent-1/")` → `"file:///tmp/test/agent-1/"`
+/// - `join_uri_path("data/", "agent-1/")` → `"data/agent-1/"` (relative path)
+fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
+    if suffix.is_empty() {
+        return Ok(base.to_string());
+    }
+
+    // Handle URIs with schemes (s3://, file://, direct://, az://, gs://)
+    if let Some(scheme_end) = base.find("://") {
+        let scheme = &base[..scheme_end + 3]; // Include "://"
+        let path = &base[scheme_end + 3..];
+        
+        // Ensure path ends with / before appending suffix
+        let normalized_path = if path.is_empty() || path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{}/", path)
+        };
+        
+        // Ensure suffix doesn't start with / (would create double slash)
+        let normalized_suffix = suffix.trim_start_matches('/');
+        
+        Ok(format!("{}{}{}", scheme, normalized_path, normalized_suffix))
+    } else {
+        // Relative path (no scheme)
+        let normalized_base = if base.is_empty() || base.ends_with('/') {
+            base.to_string()
+        } else {
+            format!("{}/", base)
+        };
+        
+        let normalized_suffix = suffix.trim_start_matches('/');
+        Ok(format!("{}{}", normalized_base, normalized_suffix))
+    }
 }
 
