@@ -32,6 +32,7 @@ message RunWorkloadRequest {
   string agent_id = 2;             // Unique agent identifier (e.g., "agent-1")
   string path_prefix = 3;          // Per-agent path isolation prefix (e.g., "agent-1/")
   int64 start_timestamp_ns = 4;    // Coordinated start time (nanoseconds since UNIX epoch)
+  bool shared_storage = 5;         // True if storage is shared (S3/GCS/Azure), false if local per-agent
 }
 
 message OpAggregateMetrics {

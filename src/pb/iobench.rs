@@ -56,6 +56,9 @@ pub struct RunWorkloadRequest {
     /// Coordinated start time (nanoseconds since UNIX epoch)
     #[prost(int64, tag = "4")]
     pub start_timestamp_ns: i64,
+    /// True if storage is shared (S3/GCS/Azure), false if local per-agent
+    #[prost(bool, tag = "5")]
+    pub shared_storage: bool,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct OpAggregateMetrics {

@@ -93,6 +93,13 @@ enum Commands {
         /// Allows time for all agents to receive config and prepare
         #[arg(long, default_value_t = 2)]
         start_delay: u64,
+        
+        /// Use shared storage for prepare phase (default: auto-detect)
+        /// When true: prepare phase runs once, all agents use same data (S3, GCS, Azure, NFS)
+        /// When false: each agent prepares its own local data (file://, direct://)
+        /// If not specified, auto-detects based on URI scheme (s3://, az://, gs:// = shared)
+        #[arg(long)]
+        shared_prepare: Option<bool>,
     },
 }
 
@@ -232,6 +239,7 @@ async fn main() -> Result<()> {
             path_template,
             agent_ids,
             start_delay,
+            shared_prepare,
         } => {
             run_distributed_workload(
                 &agents,
@@ -239,6 +247,7 @@ async fn main() -> Result<()> {
                 path_template,
                 agent_ids.as_deref(),
                 *start_delay,
+                *shared_prepare,
                 cli.insecure,
                 cli.agent_ca.as_ref(),
                 &cli.agent_domain,
@@ -257,6 +266,7 @@ async fn run_distributed_workload(
     path_template: &str,
     agent_ids: Option<&str>,
     start_delay_secs: u64,
+    shared_prepare: Option<bool>,
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
@@ -272,10 +282,25 @@ async fn run_distributed_workload(
 
     debug!("Config YAML loaded, {} bytes", config_yaml.len());
 
+    // Auto-detect if storage is shared based on URI scheme
+    let is_shared_storage = if let Some(explicit) = shared_prepare {
+        debug!("Using explicit shared_prepare setting: {}", explicit);
+        explicit
+    } else {
+        // Parse config to detect storage type
+        let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            .context("Failed to parse config for storage detection")?;
+        
+        let is_shared = detect_shared_storage(&config);
+        debug!("Auto-detected shared storage: {} (based on URI scheme)", is_shared);
+        is_shared
+    };
+
     println!("=== Distributed Workload ===");
     println!("Config: {}", config_path.display());
     println!("Agents: {}", agent_addrs.len());
     println!("Start delay: {}s", start_delay_secs);
+    println!("Storage mode: {}", if is_shared_storage { "shared (S3/GCS/Azure/NFS)" } else { "local (per-agent)" });
     println!();
 
     // Generate agent IDs
@@ -315,14 +340,15 @@ async fn run_distributed_workload(
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
         
-        debug!("Agent {}: ID='{}', prefix='{}', address='{}'", 
-               idx + 1, agent_id, path_prefix, agent_addr);
+        debug!("Agent {}: ID='{}', prefix='{}', address='{}', shared_storage={}", 
+               idx + 1, agent_id, path_prefix, agent_addr, is_shared_storage);
         
         let config = config_yaml.clone();
         let addr = agent_addr.clone();
         let insecure = insecure;
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
+        let shared = is_shared_storage;
 
         let handle = tokio::spawn(async move {
             debug!("Connecting to agent at {}", addr);
@@ -341,6 +367,7 @@ async fn run_distributed_workload(
                     agent_id: agent_id.clone(),
                     path_prefix: path_prefix.clone(),
                     start_timestamp_ns: start_ns,
+                    shared_storage: shared,
                 })
                 .await
                 .with_context(|| format!("run_workload on agent {}", addr))?;
@@ -478,5 +505,36 @@ fn print_distributed_results(summaries: &[WorkloadSummary]) {
     }
 
     println!("\n✅ Distributed workload complete!");
+}
+
+/// Detect if storage is shared based on URI scheme
+/// Shared storage: s3://, az://, gs://, and potentially file:// (if NFS-mounted)
+/// Local storage: file://, direct://
+fn detect_shared_storage(config: &sai3_bench::config::Config) -> bool {
+    // Check target URI if present
+    if let Some(ref target) = config.target {
+        return is_shared_uri(target);
+    }
+    
+    // Check prepare config URIs
+    if let Some(ref prepare) = config.prepare {
+        for ensure_spec in &prepare.ensure_objects {
+            if is_shared_uri(&ensure_spec.base_uri) {
+                return true;
+            }
+        }
+    }
+    
+    // Default to local if no clear indication
+    false
+}
+
+/// Check if a URI represents shared storage
+fn is_shared_uri(uri: &str) -> bool {
+    uri.starts_with("s3://") 
+        || uri.starts_with("az://") 
+        || uri.starts_with("gs://")
+        // Note: file:// could be shared (NFS) or local - we assume local by default
+        // Users can override with --shared-prepare if using NFS
 }
 
