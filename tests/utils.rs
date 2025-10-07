@@ -1,6 +1,6 @@
 // tests/utils.rs
 
-// Integration tests for io-bench helpers
+// Integration tests for sai3-bench helpers
 
 use regex::Regex;
 use io_bench::{bucket_index, glob_to_regex};

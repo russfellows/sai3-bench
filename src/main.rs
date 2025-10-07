@@ -104,8 +104,8 @@ enum Commands {
     /// Put random-data objects to any backend
     /// 
     /// Examples:
-    ///   io-bench put --uri "file:///tmp/data/test*.dat" --objects 100
-    ///   io-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
+    ///   sai3-bench put --uri "file:///tmp/data/test*.dat" --objects 100
+    ///   sai3-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
     Put {
         #[arg(long)]
         uri: String,
@@ -122,12 +122,12 @@ enum Commands {
     ///   sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv
     /// 
     /// Examples:
-    ///   io-bench run --config mixed.yaml
-    ///   io-bench run --config mixed.yaml --prepare-only
-    ///   io-bench run --config mixed.yaml --verify
-    ///   io-bench run --config mixed.yaml --skip-prepare
-    ///   io-bench run --config mixed.yaml --no-cleanup
-    ///   io-bench run --config mixed.yaml --tsv-name my-benchmark
+    ///   sai3-bench run --config mixed.yaml
+    ///   sai3-bench run --config mixed.yaml --prepare-only
+    ///   sai3-bench run --config mixed.yaml --verify
+    ///   sai3-bench run --config mixed.yaml --skip-prepare
+    ///   sai3-bench run --config mixed.yaml --no-cleanup
+    ///   sai3-bench run --config mixed.yaml --tsv-name my-benchmark
     Run {
         #[arg(long)]
         config: String,
@@ -158,10 +158,10 @@ enum Commands {
     /// Replay workload from op-log file with timing-faithful execution
     /// 
     /// Examples:
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst
-    ///   io-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst
+    ///   sai3-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
     Replay {
         /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
         #[arg(long)]
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // Initialize logging based on verbosity level
-    // Map io-bench verbosity to appropriate levels for both sai3_bench and s3dlio:
+    // Map sai3-bench verbosity to appropriate levels for both sai3_bench and s3dlio:
     // -v (1): sai3_bench=info, s3dlio=warn (default passthrough)
     // -vv (2): sai3_bench=debug, s3dlio=info (detailed sai3_bench, operational s3dlio)
     // -vvv (3+): sai3_bench=trace, s3dlio=debug (full debugging both crates)

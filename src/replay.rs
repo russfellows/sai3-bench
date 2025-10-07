@@ -1,4 +1,4 @@
-//! Op-log replay functionality for io-bench v0.4.0 (LEGACY)
+//! Op-log replay functionality for sai3-bench v0.4.0 (LEGACY)
 //!
 //! **DEPRECATED**: This module uses in-memory Vec-based replay.
 //! Use `replay_streaming` module for memory-efficient streaming replay.
