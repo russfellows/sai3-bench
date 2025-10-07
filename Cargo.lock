@@ -4127,8 +4127,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "s3dlio"
-version = "0.8.20"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.20#56f1e6caf9463d41b5398f2a85322b2b6f8450e4"
+version = "0.8.21"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.21#a1c4436d0d8d18bf018bb71b33763d3623ef0714"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4193,8 +4193,8 @@ dependencies = [
 
 [[package]]
 name = "s3dlio-oplog"
-version = "0.8.20"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.20#56f1e6caf9463d41b5398f2a85322b2b6f8450e4"
+version = "0.8.21"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.8.21#a1c4436d0d8d18bf018bb71b33763d3623ef0714"
 dependencies = [
  "anyhow",
  "async-trait",

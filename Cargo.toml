@@ -19,9 +19,9 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 
-# s3dlio (main branch - latest version 0.8.19+)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.8.20" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.8.20" }
+# s3dlio (main branch - latest version 0.8.21+)
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.8.21" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.8.21" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
