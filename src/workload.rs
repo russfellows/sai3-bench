@@ -618,6 +618,7 @@ pub async fn delete_object_no_log(uri: &str) -> anyhow::Result<()> {
 pub struct OpAgg {
     pub bytes: u64,
     pub ops: u64,
+    pub mean_us: u64,
     pub p50_us: u64,
     pub p95_us: u64,
     pub p99_us: u64,
@@ -1077,6 +1078,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let get = OpAgg {
         bytes: get_bytes,
         ops: get_ops,
+        mean_us: get_combined.mean() as u64,
         p50_us: get_combined.value_at_quantile(0.50),
         p95_us: get_combined.value_at_quantile(0.95),
         p99_us: get_combined.value_at_quantile(0.99),
@@ -1084,6 +1086,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let put = OpAgg {
         bytes: put_bytes,
         ops: put_ops,
+        mean_us: put_combined.mean() as u64,
         p50_us: put_combined.value_at_quantile(0.50),
         p95_us: put_combined.value_at_quantile(0.95),
         p99_us: put_combined.value_at_quantile(0.99),
@@ -1091,6 +1094,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     let meta = OpAgg {
         bytes: meta_bytes,
         ops: meta_ops,
+        mean_us: meta_combined.mean() as u64,
         p50_us: meta_combined.value_at_quantile(0.50),
         p95_us: meta_combined.value_at_quantile(0.95),
         p99_us: meta_combined.value_at_quantile(0.99),
@@ -1114,16 +1118,8 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
           put_bytes as f64 / 1_048_576.0,
           meta_bytes as f64 / 1_048_576.0);
 
-    // Print detailed size-bucketed histograms
-    if get_ops > 0 {
-        merged_get.print_summary("GET");
-    }
-    if put_ops > 0 {
-        merged_put.print_summary("PUT");
-    }
-    if meta_ops > 0 {
-        merged_meta.print_summary("META");
-    }
+    // Detailed size-bucketed histograms are now shown in the consolidated Results section
+    // (removed duplicate output here - was confusing to show latency stats twice)
 
     Ok(Summary {
         wall_seconds: wall,

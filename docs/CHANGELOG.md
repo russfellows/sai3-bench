@@ -2,6 +2,61 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.5.9] - 2025-10-07
+
+### ✨ Improvements
+
+#### Output Organization & Clarity
+**Problem**: Console output had duplication and missing metrics:
+- Latency histograms shown separately, then repeated in Results section
+- TSV export message shown twice (with and without checkmark)
+- Mean/average latency was missing from Results output (only p50/p95/p99 shown)
+
+**Solution**: Consolidated and enhanced Results output:
+- **Added mean latency**: Now shows `Latency mean: Xµs, p50: Xµs, p95: Xµs, p99: Xµs` for all operations
+- **Removed duplicate histogram**: Detailed histograms removed from workload output (was redundant)
+- **Removed duplicate TSV message**: Single export confirmation with checkmark emoji
+- **Cleaner flow**: Results section now shows all key metrics in one organized place
+
+#### Branding Consistency
+**Problem**: Some references still used legacy "io-bench" terminology instead of "sai3-bench".
+
+**Solution**: Fixed all remaining references:
+- Updated CLI help examples in `sai3-bench put`, `run`, and `replay` commands
+- Updated code comments in replay.rs and test files
+- Consistent branding across all user-facing messages
+
+### 🔧 Technical Changes
+- Added `mean_us` field to `OpAgg` struct
+- Calculate mean from HDR histograms using `hist.mean()`
+- Display mean alongside percentiles in Results output
+- Code comment updates for branding consistency
+
+### 📊 Example Output
+```
+=== Results ===
+Wall time: 3.03s
+Total ops: 71317
+Total bytes: 102281216 (97.54 MB)
+Throughput: 23507.30 ops/s
+
+GET operations:
+  Ops: 42750 (14091.13 ops/s)
+  Bytes: 43776000 (41.75 MB)
+  Throughput: 13.76 MiB/s
+  Latency mean: 181µs, p50: 175µs, p95: 273µs, p99: 338µs
+
+PUT operations:
+  Ops: 28567 (9416.17 ops/s)
+  Bytes: 58505216 (55.79 MB)
+  Throughput: 18.39 MiB/s
+  Latency mean: 92µs, p50: 84µs, p95: 143µs, p99: 193µs
+
+✅ TSV results exported to: sai3bench-2025-10-07-150959-test_mean_output-results.tsv
+```
+
+---
+
 ## [0.5.8] - 2025-10-07
 
 ### 🐛 Bug Fix

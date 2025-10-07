@@ -88,7 +88,7 @@ async fn test_gcs_put_get_delete() -> Result<()> {
     
     // Test data
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from io-bench GCS test!";
+    let test_data = b"Hello from sai3-bench GCS test!";
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation

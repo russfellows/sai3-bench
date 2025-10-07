@@ -104,8 +104,8 @@ enum Commands {
     /// Put random-data objects to any backend
     /// 
     /// Examples:
-    ///   io-bench put --uri "file:///tmp/data/test*.dat" --objects 100
-    ///   io-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
+    ///   sai3-bench put --uri "file:///tmp/data/test*.dat" --objects 100
+    ///   sai3-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
     Put {
         #[arg(long)]
         uri: String,
@@ -122,12 +122,12 @@ enum Commands {
     ///   sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv
     /// 
     /// Examples:
-    ///   io-bench run --config mixed.yaml
-    ///   io-bench run --config mixed.yaml --prepare-only
-    ///   io-bench run --config mixed.yaml --verify
-    ///   io-bench run --config mixed.yaml --skip-prepare
-    ///   io-bench run --config mixed.yaml --no-cleanup
-    ///   io-bench run --config mixed.yaml --tsv-name my-benchmark
+    ///   sai3-bench run --config mixed.yaml
+    ///   sai3-bench run --config mixed.yaml --prepare-only
+    ///   sai3-bench run --config mixed.yaml --verify
+    ///   sai3-bench run --config mixed.yaml --skip-prepare
+    ///   sai3-bench run --config mixed.yaml --no-cleanup
+    ///   sai3-bench run --config mixed.yaml --tsv-name my-benchmark
     Run {
         #[arg(long)]
         config: String,
@@ -158,10 +158,10 @@ enum Commands {
     /// Replay workload from op-log file with timing-faithful execution
     /// 
     /// Examples:
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst
-    ///   io-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
-    ///   io-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst
+    ///   sai3-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
     Replay {
         /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
         #[arg(long)]
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // Initialize logging based on verbosity level
-    // Map io-bench verbosity to appropriate levels for both sai3_bench and s3dlio:
+    // Map sai3-bench verbosity to appropriate levels for both sai3_bench and s3dlio:
     // -v (1): sai3_bench=info, s3dlio=warn (default passthrough)
     // -vv (2): sai3_bench=debug, s3dlio=info (detailed sai3_bench, operational s3dlio)
     // -vvv (3+): sai3_bench=trace, s3dlio=debug (full debugging both crates)
@@ -779,7 +779,7 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         println!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
         println!("  Throughput: {:.2} MiB/s", get_mib_s);
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
     }
     
     if summary.put.ops > 0 {
@@ -788,14 +788,14 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         println!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
         println!("  Throughput: {:.2} MiB/s", put_mib_s);
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
     }
     
     if summary.meta.ops > 0 {
         println!("\nMETA-DATA operations:");
         println!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
         println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
-        println!("  Latency p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
     
     // Generate TSV filename: use custom name if provided, otherwise auto-generate
@@ -825,7 +825,7 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
             &summary.meta_bins,
             summary.wall_seconds,
         )?;
-        println!("\nResults exported to: {}-results.tsv", tsv_basename);
+        // Note: Export message is printed by TsvExporter
     }
     
     // Cleanup prepared objects if configured
