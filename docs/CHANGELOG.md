@@ -2,6 +2,36 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.5.8] - 2025-10-07
+
+### 🐛 Bug Fix
+
+#### GCS Pagination Fix (via s3dlio v0.8.22)
+**Problem**: Google Cloud Storage (GCS) list and delete operations were limited to 1,000 objects due to missing pagination handling in s3dlio v0.8.21 and earlier.
+
+**Solution**: Updated to s3dlio v0.8.22 which implements proper pagination:
+- List operations now retrieve all objects (not just first 1,000)
+- Delete operations now remove all matched objects (not just first 1,000)
+- Operations process in batches of 1,000 as per GCS API limits
+- Affects `list`, `delete`, and glob pattern operations on GCS
+
+**Impact**: 
+- **Critical for GCS users with >1,000 objects**: Previous versions silently failed to process beyond first page
+- **No impact on other backends**: S3 and Azure already had correct pagination
+- **Workload prepare**: Now correctly deletes all objects during cleanup phase
+- **DELETE operations**: Now remove all matched objects, not just first 1,000
+
+### 🔧 Technical Changes
+- Updated `s3dlio` dependency: v0.8.21 → v0.8.22 (main branch)
+- Updated `s3dlio-oplog` dependency: v0.8.21 → v0.8.22 (main branch)
+- Using `branch = "main"` until v0.8.22 tag is created in s3dlio repo
+
+### 📚 Recommendation
+- **GCS users**: Upgrade immediately if working with >1,000 objects
+- **Other users**: Optional upgrade, but recommended for latest fixes
+
+---
+
 ## [0.5.7] - 2025-10-07
 
 ### 🔥 Critical Bug Fix

@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.5.7-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.5.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-> **Latest (v0.5.7)**: Critical fix for DELETE pool corruption in mixed workloads + automatic TSV export with smart naming. See [CHANGELOG](docs/CHANGELOG.md) and [v0.5.7 Release Summary](docs/V0.5.7_RELEASE_SUMMARY.md) for details.
+> **Latest (v0.5.8)**: GCS pagination fix for >1,000 objects via s3dlio v0.8.22. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
