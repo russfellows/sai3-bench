@@ -1,5 +1,10 @@
-# Example remap configurations for io-bench replay
+# Example remap configurations for sai3-bench replay command
 # This file demonstrates all remapping strategies
+# 
+# NOTE: This is NOT a workload config file - it's for the replay command:
+#   sai3-bench replay --op-log trace.tsv.zst --remap-config remap_examples.yaml
+#
+# Remap configs transform source URIs to target URIs during replay
 
 rules:
   # 1→1: Simple bucket rename

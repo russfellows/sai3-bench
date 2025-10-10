@@ -19,6 +19,4 @@ workload:
   - op: put
     path: "data/"
     weight: 30
-    size_distribution:
-      type: fixed
-      size: 1048576  # 1 MB objects - RangeEngine would add overhead here
+    object_size: 1048576  # 1 MiB objects - RangeEngine would add overhead here
