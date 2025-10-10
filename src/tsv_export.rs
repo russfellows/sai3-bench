@@ -41,22 +41,27 @@ impl TsvExporter {
             "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount"
         )?;
 
-        // Write GET buckets
-        self.write_op_buckets(&mut f, "GET", get_hists, get_bins, wall_seconds)?;
+        // Collect all rows first
+        let mut rows = Vec::new();
+        self.collect_op_buckets(&mut rows, "GET", get_hists, get_bins, wall_seconds)?;
+        self.collect_op_buckets(&mut rows, "PUT", put_hists, put_bins, wall_seconds)?;
+        self.collect_op_buckets(&mut rows, "META", meta_hists, meta_bins, wall_seconds)?;
 
-        // Write PUT buckets
-        self.write_op_buckets(&mut f, "PUT", put_hists, put_bins, wall_seconds)?;
+        // Sort by bucket_idx (field 2)
+        rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
 
-        // Write META buckets
-        self.write_op_buckets(&mut f, "META", meta_hists, meta_bins, wall_seconds)?;
+        // Write sorted rows
+        for (_, row) in rows {
+            writeln!(f, "{}", row)?;
+        }
 
         println!("\n✅ TSV results exported to: {}", path);
         Ok(())
     }
 
-    fn write_op_buckets(
+    fn collect_op_buckets(
         &self,
-        f: &mut File,
+        rows: &mut Vec<(usize, String)>,
         op: &str,
         hists: &OpHists,
         bins: &SizeBins,
@@ -82,8 +87,7 @@ impl TsvExporter {
             let ops_per_sec = count as f64 / wall_seconds;
             let throughput_mibps = (bucket_bytes as f64 / 1_048_576.0) / wall_seconds;
 
-            writeln!(
-                f,
+            let row = format!(
                 "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
                 op,
                 bucket_label,
@@ -98,7 +102,9 @@ impl TsvExporter {
                 ops_per_sec,
                 throughput_mibps,
                 count
-            )?;
+            );
+
+            rows.push((i, row));
         }
 
         Ok(())
