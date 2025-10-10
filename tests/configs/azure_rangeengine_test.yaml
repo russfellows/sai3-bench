@@ -62,35 +62,25 @@ prepare:
   ensure_objects:
     - base_uri: "az://your-account/your-container/rangetest/4mb/"
       count: 5
-      size_distribution:
-        type: fixed
-        size: 4194304  # 4 MB
+      size: 4194304  # 4 MB
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest/8mb/"
       count: 5
-      size_distribution:
-        type: fixed
-        size: 8388608  # 8 MB
+      size: 8388608  # 8 MB
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest/64mb/"
       count: 3
-      size_distribution:
-        type: fixed
-        size: 67108864  # 64 MB
+      size: 67108864  # 64 MB
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest/128mb/"
       count: 3
-      size_distribution:
-        type: fixed
-        size: 134217728  # 128 MB - 2 ranges
+      size: 134217728  # 128 MB - 2 ranges
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest/256mb/"
       count: 2
-      size_distribution:
-        type: fixed
-        size: 268435456  # 256 MB - 4 ranges
+      size: 268435456  # 256 MB - 4 ranges
       fill: random

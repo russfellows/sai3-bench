@@ -69,23 +69,17 @@ prepare:
     # Small files (< 4 MB threshold) - Sequential downloads
     - base_uri: "file:///tmp/sai3bench-rangetest/small/"
       count: 10
-      size_distribution:
-        type: fixed
-        size: 1048576  # 1 MB - Below RangeEngine threshold
+      size: 1048576  # 1 MB - Fixed size, Below RangeEngine threshold
       fill: random
     
     # Medium files (4-64 MB) - RangeEngine with 1 range
     - base_uri: "file:///tmp/sai3bench-rangetest/medium/"
       count: 5
-      size_distribution:
-        type: fixed
-        size: 8388608  # 8 MB - 1 range (8/64 = 0.125 → rounds to 1)
+      size: 8388608  # 8 MB - Fixed size, 1 range (8/64 = 0.125 → rounds to 1)
       fill: random
     
     # Large files (> 64 MB) - RangeEngine with multiple ranges
     - base_uri: "file:///tmp/sai3bench-rangetest/large/"
       count: 3
-      size_distribution:
-        type: fixed
-        size: 134217728  # 128 MB - 2 ranges (128/64 = 2)
+      size: 134217728  # 128 MB - Fixed size, 2 ranges (128/64 = 2)
       fill: random

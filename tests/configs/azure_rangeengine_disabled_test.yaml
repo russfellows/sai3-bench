@@ -50,35 +50,25 @@ prepare:
   ensure_objects:
     - base_uri: "az://your-account/your-container/rangetest-baseline/4mb/"
       count: 5
-      size_distribution:
-        type: fixed
-        size: 4194304
+      size: 4194304
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest-baseline/8mb/"
       count: 5
-      size_distribution:
-        type: fixed
-        size: 8388608
+      size: 8388608
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest-baseline/64mb/"
       count: 3
-      size_distribution:
-        type: fixed
-        size: 67108864
+      size: 67108864
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest-baseline/128mb/"
       count: 3
-      size_distribution:
-        type: fixed
-        size: 134217728
+      size: 134217728
       fill: random
     
     - base_uri: "az://your-account/your-container/rangetest-baseline/256mb/"
       count: 2
-      size_distribution:
-        type: fixed
-        size: 268435456
+      size: 268435456
       fill: random
