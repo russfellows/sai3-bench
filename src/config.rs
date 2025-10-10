@@ -418,17 +418,25 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
 /// RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
 /// 
 /// RangeEngine splits large file downloads into concurrent HTTP range requests,
-/// hiding network latency through parallelism. This is most effective for:
-/// - Network storage backends (S3, Azure, GCS)
-/// - High-bandwidth networks (>100 Mbps)
-/// - Large files (>= 4 MB default threshold)
+/// hiding network latency through parallelism. However, it adds HEAD request
+/// overhead to check file sizes on every GET operation.
 /// 
-/// Default settings are optimized for cloud storage with typical network latency.
-/// Adjust based on your network characteristics and workload.
+/// **Performance Impact:**
+/// - Small files (<16 MB): HEAD overhead outweighs benefits - net SLOWER
+/// - Medium files (16-64 MB): Marginal benefit, often still slower
+/// - Large files (>64 MB): 30-50% faster on high-latency networks
+/// 
+/// **Default: DISABLED** (false) based on production benchmarks showing 20-25%
+/// regression on typical workloads (1 MB objects on GCS). Only enable if:
+/// - Your workload has primarily large files (>64 MB)
+/// - Network latency is high (>100ms)
+/// - High bandwidth available (>1 Gbps)
+/// 
+/// When enabled, set min_split_size to at least 64 MB to avoid overhead.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RangeEngineConfig {
     /// Enable or disable RangeEngine
-    /// Default: true (enabled)
+    /// Default: false (disabled) - avoids HEAD overhead on typical workloads
     #[serde(default = "default_range_engine_enabled")]
     pub enabled: bool,
     
@@ -449,11 +457,15 @@ pub struct RangeEngineConfig {
     pub max_concurrent_ranges: usize,
     
     /// Minimum file size to trigger RangeEngine (in bytes)
-    /// Default: 4194304 (4 MB)
+    /// Default: 67108864 (64 MB) - raised from 4 MB to avoid overhead
     /// Files smaller than this use simple sequential downloads
-    /// - Raise threshold: Reduce overhead for workloads with many small files
-    /// - Lower threshold: Enable RangeEngine for smaller files (may add overhead)
-    /// Recommended: 4-16 MB
+    /// 
+    /// **Performance Note**: Production benchmarks show HEAD overhead makes
+    /// RangeEngine slower for files <64 MB. Only lower this if you have:
+    /// - Verified performance benefit on your specific workload
+    /// - Very high network latency (>200ms) where parallelism helps
+    /// 
+    /// Recommended: 64-128 MB for typical cloud storage workloads
     #[serde(default = "default_min_split_size")]
     pub min_split_size: u64,
     
@@ -465,7 +477,7 @@ pub struct RangeEngineConfig {
 }
 
 fn default_range_engine_enabled() -> bool {
-    true
+    false  // Disabled by default - avoids 20-25% regression on typical workloads
 }
 
 fn default_chunk_size() -> u64 {
@@ -473,11 +485,11 @@ fn default_chunk_size() -> u64 {
 }
 
 fn default_max_concurrent() -> usize {
-    32
+    16  // Reduced from 32 for safer defaults
 }
 
 fn default_min_split_size() -> u64 {
-    4 * 1024 * 1024  // 4 MB
+    64 * 1024 * 1024  // 64 MB - raised from 4 MB based on production benchmarks
 }
 
 fn default_range_timeout_secs() -> u64 {

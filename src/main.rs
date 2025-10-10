@@ -702,6 +702,17 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
     if let Some(target) = &config.target {
         println!("Target: {}", target);
         info!("Target backend: {}", target);
+        
+        // Check if GCS backend and log RangeEngine status based on config
+        if target.starts_with("gs://") || target.starts_with("gcs://") {
+            let range_enabled = config.range_engine.as_ref().map(|c| c.enabled).unwrap_or(false);
+            if range_enabled {
+                let min_size_mb = config.range_engine.as_ref().map(|c| c.min_split_size / (1024 * 1024)).unwrap_or(64);
+                info!("� GCS backend - RangeEngine ENABLED for files ≥{} MB", min_size_mb);
+            } else {
+                info!("🔧 GCS backend - RangeEngine DISABLED (default for optimal performance on small/medium objects)");
+            }
+        }
     }
     println!("Duration: {:?}", config.duration);
     println!("Concurrency: {}", config.concurrency);

@@ -69,46 +69,95 @@ impl BackendType {
     }
 }
 
-/// Create ObjectStore instance for given URI
+/// Create ObjectStore instance for given URI with optional RangeEngine configuration
 /// 
-/// **PERFORMANCE HACK for GCS**: Disables RangeEngine to avoid HEAD request overhead
-/// on small objects (1 MiB files don't benefit from range parallelism)
-pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For GCS URIs, create with RangeEngine disabled
+/// If range_config is provided and enabled=true for GCS/Azure/S3 backends, creates
+/// store with custom RangeEngine settings. Otherwise uses defaults (RangeEngine disabled).
+pub fn create_store_for_uri_with_config(
+    uri: &str, 
+    range_config: Option<&crate::config::RangeEngineConfig>
+) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // For GCS URIs, apply RangeEngine configuration
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        info!("🔧 GCS detected - disabling RangeEngine to avoid HEAD overhead on small objects");
-        let config = GcsConfig {
-            enable_range_engine: false,  // Disable to avoid stat overhead
-            ..Default::default()
+        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
+        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
+        
+        let config = if let Some(cfg) = range_config {
+            GcsConfig {
+                enable_range_engine: cfg.enabled,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    chunk_size: cfg.chunk_size as usize,
+                    max_concurrent_ranges: cfg.max_concurrent_ranges,
+                    min_split_size: cfg.min_split_size,
+                    range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
+                },
+            }
+        } else {
+            // No config provided - use disabled default
+            GcsConfig {
+                enable_range_engine: false,
+                ..Default::default()
+            }
         };
+        
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
     
+    // For other backends, use standard creation
+    // TODO: Add Azure/S3 config support here when needed
     store_for_uri(uri).context("Failed to create object store")
 }
 
-/// Create ObjectStore instance with op-logger if available
-/// 
-/// **PERFORMANCE HACK for GCS**: Disables RangeEngine to avoid HEAD request overhead
-pub fn create_store_with_logger(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For GCS URIs, create with RangeEngine disabled
+/// Create ObjectStore instance for given URI (backward compatible - no config)
+/// Uses default RangeEngine settings (disabled)
+pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    create_store_for_uri_with_config(uri, None)
+}
+
+/// Create ObjectStore instance with op-logger and optional RangeEngine configuration
+pub fn create_store_with_logger_and_config(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>
+) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // For GCS URIs, apply RangeEngine configuration
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        info!("🔧 GCS detected - disabling RangeEngine to avoid HEAD overhead on small objects");
-        let config = GcsConfig {
-            enable_range_engine: false,  // Disable to avoid stat overhead
-            ..Default::default()
+        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
+        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
+        
+        let config = if let Some(cfg) = range_config {
+            GcsConfig {
+                enable_range_engine: cfg.enabled,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    chunk_size: cfg.chunk_size as usize,
+                    max_concurrent_ranges: cfg.max_concurrent_ranges,
+                    min_split_size: cfg.min_split_size,
+                    range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
+                },
+            }
+        } else {
+            GcsConfig {
+                enable_range_engine: false,
+                ..Default::default()
+            }
         };
+        
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
     
+    // For other backends, use logger if available
     let logger = global_logger();
     if logger.is_some() {
         store_for_uri_with_logger(uri, logger).context("Failed to create object store with logger")
     } else {
-        create_store_for_uri(uri)
+        create_store_for_uri_with_config(uri, range_config)
     }
+}
+
+/// Create ObjectStore instance with op-logger if available (backward compatible)
+pub fn create_store_with_logger(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    create_store_with_logger_and_config(uri, None)
 }
 
 /// Initialize operation logger for performance analysis and replay
