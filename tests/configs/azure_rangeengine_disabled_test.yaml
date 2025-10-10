@@ -1,0 +1,84 @@
+# RangeEngine Disabled - Baseline Performance
+#
+# Use this config to establish baseline performance with RangeEngine disabled.
+# Compare results against azure_rangeengine_test.yaml to measure improvement.
+#
+# Expected difference:
+# - Small files (< 4 MB): No difference (RangeEngine not used anyway)
+# - Medium files (4-64 MB): 20-40% slower without RangeEngine
+# - Large files (> 64 MB): 30-50% slower without RangeEngine
+
+target: "az://your-account/your-container/rangetest-baseline/"
+
+duration: "30s"
+concurrency: 8
+
+# RangeEngine DISABLED for baseline comparison
+range_engine:
+  enabled: false
+  # Other settings don't matter when disabled
+
+workload:
+  - op: get
+    path: "4mb/*"
+    weight: 10
+  
+  - op: get
+    path: "8mb/*"
+    weight: 20
+  
+  - op: get
+    path: "64mb/*"
+    weight: 30
+  
+  - op: get
+    path: "128mb/*"
+    weight: 25
+  
+  - op: get
+    path: "256mb/*"
+    weight: 15
+  
+  - op: stat
+    path: "*"
+    weight: 10
+
+prepare:
+  cleanup: true
+  post_prepare_delay: 5
+  
+  ensure_objects:
+    - base_uri: "az://your-account/your-container/rangetest-baseline/4mb/"
+      count: 5
+      size_distribution:
+        type: fixed
+        size: 4194304
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest-baseline/8mb/"
+      count: 5
+      size_distribution:
+        type: fixed
+        size: 8388608
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest-baseline/64mb/"
+      count: 3
+      size_distribution:
+        type: fixed
+        size: 67108864
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest-baseline/128mb/"
+      count: 3
+      size_distribution:
+        type: fixed
+        size: 134217728
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest-baseline/256mb/"
+      count: 2
+      size_distribution:
+        type: fixed
+        size: 268435456
+      fill: random

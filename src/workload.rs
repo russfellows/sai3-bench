@@ -510,7 +510,8 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
     
     debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
-    Ok(bytes)
+    // Convert Bytes to Vec<u8> for compatibility
+    Ok(bytes.to_vec())
 }
 
 /// Multi-backend PUT operation using ObjectStore trait
@@ -578,8 +579,10 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 /// GET operation WITHOUT logging (for replay)
 pub async fn get_object_no_log(uri: &str) -> anyhow::Result<Vec<u8>> {
     let store = create_store_for_uri(uri)?;
-    store.get(uri).await
-        .with_context(|| format!("Failed to get object from URI: {}", uri))
+    let bytes = store.get(uri).await
+        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+    // Convert Bytes to Vec<u8> for compatibility
+    Ok(bytes.to_vec())
 }
 
 /// PUT operation WITHOUT logging (for replay)
