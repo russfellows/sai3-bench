@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use std::env;
 
-use io_bench::workload::{
+use sai3_bench::workload::{
     create_store_for_uri, BackendType, get_object_no_log, put_object_no_log,
     list_objects_no_log, stat_object_no_log, delete_object_no_log,
 };

@@ -8,8 +8,8 @@
 /// Tests are numbered to enforce execution order with `--test-threads=1`.
 
 use anyhow::Result;
-use io_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
-use io_bench::workload::{init_operation_logger, finalize_operation_logger, create_store_with_logger};
+use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
+use sai3_bench::workload::{init_operation_logger, finalize_operation_logger, create_store_with_logger};
 use s3dlio_oplog::OpLogStreamReader;
 use std::fs;
 use std::path::{Path, PathBuf};

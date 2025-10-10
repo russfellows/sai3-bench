@@ -812,7 +812,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2633,24 +2633,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -3571,7 +3553,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -3611,7 +3593,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
@@ -4127,8 +4109,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "s3dlio"
-version = "0.9.4"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.4#79623cc183918571ca3793517bd00ba33cf3a1ed"
+version = "0.9.5"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.5#a4d57d6eafba1990a6db55f880d9fd63cbab9642"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4194,8 +4176,8 @@ dependencies = [
 
 [[package]]
 name = "s3dlio-oplog"
-version = "0.9.4"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.4#79623cc183918571ca3793517bd00ba33cf3a1ed"
+version = "0.9.5"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.5#a4d57d6eafba1990a6db55f880d9fd63cbab9642"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4214,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "assert_cmd",

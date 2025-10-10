@@ -3,7 +3,7 @@
 // Integration tests for sai3-bench helpers
 
 use regex::Regex;
-use io_bench::{bucket_index, glob_to_regex};
+use sai3_bench::{bucket_index, glob_to_regex};
 
 /// All your bucket-index cutoffs should match exactly.
 #[test]
