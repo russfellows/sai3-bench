@@ -1,5 +1,5 @@
 # GCS workload with RangeEngine enabled for large files
-# Only use this if your workload has primarily large files (>64 MB)
+# Only use this if your workload has primarily large files (>64 MiB)
 # and you have high network latency (>100ms) with good bandwidth (>1 Gbps)
 
 target: "gs://your-bucket/large-files/"
@@ -9,8 +9,8 @@ concurrency: 16
 # RangeEngine configuration - ENABLED for large file workload
 range_engine:
   enabled: true                  # Enable concurrent range downloads
-  min_split_size: 67108864       # 64 MB - only files ≥this size use RangeEngine
-  chunk_size: 67108864           # 64 MB chunks per range request
+  min_split_size: 16777216       # 16 MiB - matches s3dlio default (files ≥this size use RangeEngine)
+  chunk_size: 67108864           # 64 MiB chunks per range request
   max_concurrent_ranges: 16      # 16 parallel range requests
   range_timeout_secs: 30         # 30 second timeout per range
 

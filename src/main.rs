@@ -703,20 +703,44 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         println!("Target: {}", target);
         info!("Target backend: {}", target);
         
-        // Check if GCS backend and log RangeEngine status based on config
-        if target.starts_with("gs://") || target.starts_with("gcs://") {
-            let range_enabled = config.range_engine.as_ref().map(|c| c.enabled).unwrap_or(false);
-            if range_enabled {
-                let min_size_mb = config.range_engine.as_ref().map(|c| c.min_split_size / (1024 * 1024)).unwrap_or(64);
-                info!("� GCS backend - RangeEngine ENABLED for files ≥{} MB", min_size_mb);
-            } else {
-                info!("🔧 GCS backend - RangeEngine DISABLED (default for optimal performance on small/medium objects)");
-            }
+        // Log RangeEngine status for all backends
+        let backend = sai3_bench::workload::BackendType::from_uri(target);
+        let range_enabled = config.range_engine.as_ref().map(|c| c.enabled).unwrap_or(false);
+        
+        if range_enabled {
+            let min_size_mb = config.range_engine.as_ref()
+                .map(|c| c.min_split_size / (1024 * 1024))
+                .unwrap_or(16);
+            info!("RangeEngine ENABLED for {} backend - files >= {} MiB", backend.name(), min_size_mb);
+        } else {
+            info!("RangeEngine DISABLED for {} backend (default for optimal performance)", backend.name());
         }
     }
     println!("Duration: {:?}", config.duration);
-    println!("Concurrency: {}", config.concurrency);
-    println!("Operations: {}", config.workload.len());
+    println!("Concurrency: {} threads", config.concurrency);
+    
+    // Calculate and display operation mix with percentages
+    let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();
+    println!("\nOperation Mix ({} types):", config.workload.len());
+    for weighted_op in &config.workload {
+        let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
+        let op_name = match &weighted_op.spec {
+            sai3_bench::config::OpSpec::Get { .. } => "GET",
+            sai3_bench::config::OpSpec::Put { .. } => "PUT",
+            sai3_bench::config::OpSpec::List { .. } => "LIST",
+            sai3_bench::config::OpSpec::Stat { .. } => "STAT",
+            sai3_bench::config::OpSpec::Delete { .. } => "DELETE",
+        };
+        
+        // Show per-operation concurrency override if specified
+        if let Some(op_concurrency) = weighted_op.concurrency {
+            println!("  {} - {:.1}% (weight: {}, concurrency: {} threads)", 
+                op_name, percentage, weighted_op.weight, op_concurrency);
+        } else {
+            println!("  {} - {:.1}% (weight: {})", 
+                op_name, percentage, weighted_op.weight);
+        }
+    }
     
     info!("Starting workload execution with {} operation types", config.workload.len());
     
@@ -779,34 +803,56 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
     
     // Print results
     println!("\n=== Results ===");
-    println!("Wall time: {:.2}s", summary.wall_seconds);
-    println!("Total ops: {}", summary.total_ops);
-    println!("Total bytes: {} ({:.2} MB)", summary.total_bytes, summary.total_bytes as f64 / (1024.0 * 1024.0));
-    println!("Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
+    println!("Configuration:");
+    println!("  Duration: {:.2}s", summary.wall_seconds);
+    println!("  Concurrency: {} threads", config.concurrency);
+    
+    // Show actual operation distribution
+    println!("\nActual Operation Distribution:");
+    if summary.get.ops > 0 {
+        let get_pct = (summary.get.ops as f64 / summary.total_ops as f64) * 100.0;
+        println!("  GET: {} ops ({:.1}%)", summary.get.ops, get_pct);
+    }
+    if summary.put.ops > 0 {
+        let put_pct = (summary.put.ops as f64 / summary.total_ops as f64) * 100.0;
+        println!("  PUT: {} ops ({:.1}%)", summary.put.ops, put_pct);
+    }
+    if summary.meta.ops > 0 {
+        let meta_pct = (summary.meta.ops as f64 / summary.total_ops as f64) * 100.0;
+        println!("  META (LIST/STAT/DELETE): {} ops ({:.1}%)", summary.meta.ops, meta_pct);
+    }
+    
+    println!("\nOverall Performance:");
+    println!("  Total ops: {}", summary.total_ops);
+    println!("  Total bytes: {} ({:.2} MiB)", summary.total_bytes, summary.total_bytes as f64 / 1_048_576.0);
+    println!("  Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
     
     if summary.get.ops > 0 {
         let get_mib_s = (summary.get.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
-        println!("\nGET operations:");
+        println!("\nGET Performance:");
         println!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MB)", summary.get.bytes, summary.get.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Bytes: {} ({:.2} MiB)", summary.get.bytes, summary.get.bytes as f64 / 1_048_576.0);
         println!("  Throughput: {:.2} MiB/s", get_mib_s);
-        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
+        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+            summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
     }
     
     if summary.put.ops > 0 {
         let put_mib_s = (summary.put.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
-        println!("\nPUT operations:");
+        println!("\nPUT Performance:");
         println!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MB)", summary.put.bytes, summary.put.bytes as f64 / (1024.0 * 1024.0));
+        println!("  Bytes: {} ({:.2} MiB)", summary.put.bytes, summary.put.bytes as f64 / 1_048_576.0);
         println!("  Throughput: {:.2} MiB/s", put_mib_s);
-        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+            summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
     }
     
     if summary.meta.ops > 0 {
-        println!("\nMETA-DATA operations:");
+        println!("\nMETA-DATA Performance:");
         println!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MB)", summary.meta.bytes, summary.meta.bytes as f64 / (1024.0 * 1024.0));
-        println!("  Latency mean: {}µs, p50: {}µs, p95: {}µs, p99: {}µs", summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+        println!("  Bytes: {} ({:.2} MiB)", summary.meta.bytes, summary.meta.bytes as f64 / 1_048_576.0);
+        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+            summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
     }
     
     // Generate TSV filename: use custom name if provided, otherwise auto-generate
