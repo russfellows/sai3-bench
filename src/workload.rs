@@ -18,7 +18,10 @@ use crate::config::{Config, OpSpec};
 use std::collections::HashMap;
 use crate::bucket_index;
 
-use s3dlio::object_store::{store_for_uri, store_for_uri_with_logger, ObjectStore};
+use s3dlio::object_store::{
+    store_for_uri, store_for_uri_with_logger, ObjectStore,
+    GcsConfig, GcsObjectStore
+};
 use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 
 // -----------------------------------------------------------------------------
@@ -67,12 +70,39 @@ impl BackendType {
 }
 
 /// Create ObjectStore instance for given URI
+/// 
+/// **PERFORMANCE HACK for GCS**: Disables RangeEngine to avoid HEAD request overhead
+/// on small objects (1 MiB files don't benefit from range parallelism)
 pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // For GCS URIs, create with RangeEngine disabled
+    if uri.starts_with("gs://") || uri.starts_with("gcs://") {
+        info!("🔧 GCS detected - disabling RangeEngine to avoid HEAD overhead on small objects");
+        let config = GcsConfig {
+            enable_range_engine: false,  // Disable to avoid stat overhead
+            ..Default::default()
+        };
+        let store = GcsObjectStore::with_config(config);
+        return Ok(Box::new(store));
+    }
+    
     store_for_uri(uri).context("Failed to create object store")
 }
 
 /// Create ObjectStore instance with op-logger if available
+/// 
+/// **PERFORMANCE HACK for GCS**: Disables RangeEngine to avoid HEAD request overhead
 pub fn create_store_with_logger(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // For GCS URIs, create with RangeEngine disabled
+    if uri.starts_with("gs://") || uri.starts_with("gcs://") {
+        info!("🔧 GCS detected - disabling RangeEngine to avoid HEAD overhead on small objects");
+        let config = GcsConfig {
+            enable_range_engine: false,  // Disable to avoid stat overhead
+            ..Default::default()
+        };
+        let store = GcsObjectStore::with_config(config);
+        return Ok(Box::new(store));
+    }
+    
     let logger = global_logger();
     if logger.is_some() {
         store_for_uri_with_logger(uri, logger).context("Failed to create object store with logger")
