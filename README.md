@@ -1,14 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.2-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.3-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.5+) for multi-protocol support.
+A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.6) for multi-protocol support.
 
-> **Latest (v0.6.2)**: Upgraded to s3dlio v0.9.5 with minor performance fixes and comprehensive naming cleanup (io-bench → sai3-bench). Uses s3dlio's built-in **RangeEngine** for automatic 30-50% throughput improvements on large files. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.3)**: Upgraded to s3dlio v0.9.6 which **disables RangeEngine by default** for optimal performance on typical workloads. This resolves a 20-25% performance regression caused by HEAD request overhead. RangeEngine can still be explicitly enabled for large-file workloads (≥64 MiB). See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
@@ -26,11 +26,19 @@ A storage performance testing tool that supports multiple backends through a uni
 
 - **File System** (`file://`) - Local filesystem testing with standard POSIX operations
 - **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
-- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.) with RangeEngine
-- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with automatic RangeEngine optimization
-- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with automatic RangeEngine optimization
+- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.) with optional RangeEngine
+- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with optional RangeEngine
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with optional RangeEngine
 
-**RangeEngine Benefits** (v0.6.1+): s3dlio automatically activates RangeEngine for files ≥4MB (file://) or ≥16MB (network backends), using concurrent byte-range requests to improve download performance by 30-50%. All workloads use s3dlio's optimized default settings. Custom RangeEngine configuration is planned for a future release - see [RANGEENGINE_CONFIG_STATUS.md](docs/RANGEENGINE_CONFIG_STATUS.md).
+**RangeEngine Configuration** (v0.6.3): RangeEngine is **disabled by default** in s3dlio v0.9.6 for optimal performance on typical workloads. For large-file workloads (≥64 MiB), explicitly enable it in your config:
+```yaml
+range_engine:
+  enabled: true
+  min_split_size: 16777216  # 16 MiB threshold
+  chunk_size: 67108864      # 64 MiB chunks
+  max_concurrent_ranges: 16
+```
+**When to enable**: Only for workloads with large files where network bandwidth is NOT the bottleneck (10+ Gbps networks). See [CHANGELOG](docs/CHANGELOG.md#063) for performance analysis.
 
 ## 📦 Architecture & Binaries
 
