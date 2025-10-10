@@ -22,6 +22,11 @@ pub struct Config {
     /// Optional prepare step to ensure objects exist before testing (Warp parity)
     #[serde(default)]
     pub prepare: Option<PrepareConfig>,
+    
+    /// Optional RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
+    /// Only applies to network backends (S3, Azure, GCS) with files >= min_split_size
+    #[serde(default)]
+    pub range_engine: Option<RangeEngineConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -410,3 +415,71 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
     }
 }
 
+/// RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
+/// 
+/// RangeEngine splits large file downloads into concurrent HTTP range requests,
+/// hiding network latency through parallelism. This is most effective for:
+/// - Network storage backends (S3, Azure, GCS)
+/// - High-bandwidth networks (>100 Mbps)
+/// - Large files (>= 4 MB default threshold)
+/// 
+/// Default settings are optimized for cloud storage with typical network latency.
+/// Adjust based on your network characteristics and workload.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RangeEngineConfig {
+    /// Enable or disable RangeEngine
+    /// Default: true (enabled)
+    #[serde(default = "default_range_engine_enabled")]
+    pub enabled: bool,
+    
+    /// Size of each concurrent range request in bytes
+    /// Default: 67108864 (64 MB)
+    /// - Larger chunks: Fewer requests, less overhead, but less parallelism
+    /// - Smaller chunks: More parallelism, but more overhead
+    /// Recommended: 32-128 MB depending on network speed
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: u64,
+    
+    /// Maximum number of concurrent range requests
+    /// Default: 32
+    /// - Higher values: More parallelism for high-bandwidth networks (>1 Gbps)
+    /// - Lower values: Reduce load on slow networks (<100 Mbps)
+    /// Recommended: 8-64 depending on network capacity
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_ranges: usize,
+    
+    /// Minimum file size to trigger RangeEngine (in bytes)
+    /// Default: 4194304 (4 MB)
+    /// Files smaller than this use simple sequential downloads
+    /// - Raise threshold: Reduce overhead for workloads with many small files
+    /// - Lower threshold: Enable RangeEngine for smaller files (may add overhead)
+    /// Recommended: 4-16 MB
+    #[serde(default = "default_min_split_size")]
+    pub min_split_size: u64,
+    
+    /// Timeout for each range request in seconds
+    /// Default: 30 seconds
+    /// Increase for slow or unstable networks
+    #[serde(default = "default_range_timeout_secs")]
+    pub range_timeout_secs: u64,
+}
+
+fn default_range_engine_enabled() -> bool {
+    true
+}
+
+fn default_chunk_size() -> u64 {
+    64 * 1024 * 1024  // 64 MB
+}
+
+fn default_max_concurrent() -> usize {
+    32
+}
+
+fn default_min_split_size() -> u64 {
+    4 * 1024 * 1024  // 4 MB
+}
+
+fn default_range_timeout_secs() -> u64 {
+    30
+}

@@ -1,0 +1,85 @@
+# RangeEngine Configuration Test
+# 
+# This config demonstrates RangeEngine settings for concurrent range downloads
+# on network storage backends (S3, Azure, GCS).
+#
+# RangeEngine automatically splits large files (>= min_split_size) into concurrent
+# range requests, providing 30-50% throughput improvements on high-bandwidth networks.
+#
+# Note: RangeEngine configuration in YAML is informational/documentary.
+# The actual s3dlio library uses default settings through store_for_uri().
+# For custom RangeEngine tuning, modify constants in s3dlio or use backend-specific
+# store creation (AzureObjectStore::with_config, GcsObjectStore::with_config).
+
+target: "file:///tmp/sai3bench-rangetest/"
+duration: "10s"
+concurrency: 4
+
+# RangeEngine configuration (documentary - shows optimal settings)
+range_engine:
+  enabled: true
+  
+  # Chunk size: 64 MB (default)
+  # - Optimal for cloud storage with typical latency
+  # - Larger (128 MB): Better for very fast networks (>10 Gbps)
+  # - Smaller (32 MB): Better for moderate networks (100-500 Mbps)
+  chunk_size: 67108864  # 64 * 1024 * 1024
+  
+  # Max concurrent ranges: 32 (default)
+  # - Optimal for hiding 50-100ms cloud storage latency
+  # - Increase to 64: For very fast networks (>10 Gbps)
+  # - Decrease to 8-16: For slower networks (<100 Mbps)
+  max_concurrent_ranges: 32
+  
+  # Minimum file size: 4 MB (default)
+  # - Files >= 4 MB use RangeEngine
+  # - Files < 4 MB use simple sequential download
+  # - Raise to 8-16 MB: To reduce overhead for small file workloads
+  # - Lower to 1-2 MB: To enable for smaller files (may add overhead)
+  min_split_size: 4194304  # 4 * 1024 * 1024
+  
+  # Range timeout: 30 seconds (default)
+  # - Per-range request timeout
+  # - Increase for slow/unstable networks
+  range_timeout_secs: 30
+
+# Workload with varying object sizes to test RangeEngine activation
+workload:
+  # GET small files (< 4 MB) - Sequential downloads
+  - op: get
+    path: "small/*"
+    weight: 30
+  
+  # GET medium files (4-64 MB) - RangeEngine with 1-2 ranges
+  - op: get
+    path: "medium/*"
+    weight: 40
+  
+  # GET large files (> 64 MB) - RangeEngine with multiple ranges
+  - op: get
+    path: "large/*"
+    weight: 30
+
+# Prepare objects with different sizes to demonstrate RangeEngine behavior
+prepare:
+  cleanup: true
+  post_prepare_delay: 0  # No delay needed for local file backend
+  
+  ensure_objects:
+    # Small files (< 4 MB threshold) - Sequential downloads
+    - base_uri: "file:///tmp/sai3bench-rangetest/small/"
+      count: 10
+      size: 1048576  # 1 MB - Fixed size, Below RangeEngine threshold
+      fill: random
+    
+    # Medium files (4-64 MB) - RangeEngine with 1 range
+    - base_uri: "file:///tmp/sai3bench-rangetest/medium/"
+      count: 5
+      size: 8388608  # 8 MB - Fixed size, 1 range (8/64 = 0.125 → rounds to 1)
+      fill: random
+    
+    # Large files (> 64 MB) - RangeEngine with multiple ranges
+    - base_uri: "file:///tmp/sai3bench-rangetest/large/"
+      count: 3
+      size: 134217728  # 128 MB - Fixed size, 2 ranges (128/64 = 2)
+      fill: random

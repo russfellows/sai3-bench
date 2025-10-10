@@ -17,8 +17,8 @@ use tracing::{debug, error, info};
 use aws_config::{self, BehaviorVersion};
 use aws_sdk_s3 as s3;
 
-// TODO: Remove legacy s3_utils imports as we migrate operations
-use s3dlio::s3_utils::{get_object, parse_s3_uri, put_object_async};
+// Modern ObjectStore pattern (v0.9.4+)
+use s3dlio::object_store::store_for_uri;
 
 pub mod pb {
     pub mod iobench {
@@ -72,39 +72,60 @@ impl Agent for AgentSvc {
 
     async fn run_get(&self, req: Request<RunGetRequest>) -> Result<Response<OpSummary>, Status> {
         let RunGetRequest { uri, jobs } = req.into_inner();
-        let (bucket, pat) = parse_s3_uri(&uri).map_err(to_status)?;
-
-        // Expand keys similarly to the CLI, but use async AWS SDK for listing.
-        let keys = if pat.contains('*') {
-            let base = &pat[..pat.rfind('/').unwrap_or(0) + 1];
-            list_keys_async(&bucket, base)
-                .await
-                .map_err(to_status)?
-                .into_iter()
-                .filter(|k| glob_match(&pat, k))
-                .collect::<Vec<_>>()
-        } else if pat.ends_with('/') || pat.is_empty() {
-            list_keys_async(&bucket, &pat).await.map_err(to_status)?
+        
+        // Parse URI to extract base and pattern
+        // For S3: s3://bucket/prefix/pattern
+        // For other backends: backend://path/pattern
+        let (base_uri, pattern) = if let Some(last_slash) = uri.rfind('/') {
+            let base = &uri[..=last_slash];
+            let pat = &uri[last_slash + 1..];
+            (base, pat)
         } else {
-            vec![pat.clone()]
+            return Err(Status::invalid_argument("Invalid URI format"));
         };
 
-        if keys.is_empty() {
+        // Expand keys: supports exact key, prefix, or glob '*'
+        let full_uris = if pattern.contains('*') {
+            // Glob pattern - list directory and filter
+            let keys = list_keys_for_uri(&uri)
+                .await
+                .map_err(to_status)?;
+            keys.into_iter()
+                .filter(|k| glob_match(pattern, k))
+                .map(|k| format!("{}{}", base_uri, k))
+                .collect::<Vec<_>>()
+        } else if pattern.is_empty() {
+            // List all in directory
+            let keys = list_keys_for_uri(base_uri)
+                .await
+                .map_err(to_status)?;
+            keys.into_iter()
+                .map(|k| format!("{}{}", base_uri, k))
+                .collect::<Vec<_>>()
+        } else {
+            // Exact key
+            vec![uri.clone()]
+        };
+
+        if full_uris.is_empty() {
             return Err(Status::invalid_argument("No objects match given URI"));
         }
 
         let started = Instant::now();
         let sem = Arc::new(Semaphore::new(jobs as usize));
         let mut futs = FuturesUnordered::new();
-        for k in keys {
-            let b = bucket.clone();
+        
+        for full_uri in full_uris {
             let sem2 = sem.clone();
             futs.push(tokio::spawn(async move {
                 let _p = sem2.acquire_owned().await.unwrap();
-                let bytes = get_object(&b, &k).await?;
+                // Use ObjectStore pattern with full URI
+                let store = store_for_uri(&full_uri).map_err(|e| anyhow::anyhow!(e))?;
+                let bytes = store.get(&full_uri).await?;
                 Ok::<usize, anyhow::Error>(bytes.len())
             }));
         }
+        
         let mut total = 0usize;
         while let Some(join_res) = futs.next().await {
             let inner = join_res.map_err(to_status)?.map_err(to_status)?;
@@ -126,24 +147,36 @@ impl Agent for AgentSvc {
             objects,
             concurrency,
         } = req.into_inner();
+        
+        // Build base URI from bucket (assume s3:// for backward compatibility)
+        let base_uri = if bucket.starts_with("s3://") || bucket.starts_with("file://") || 
+                         bucket.starts_with("az://") || bucket.starts_with("gs://") {
+            bucket.clone()
+        } else {
+            format!("s3://{}", bucket)
+        };
+        
         let keys: Vec<String> = (0..objects as usize)
-            .map(|i| format!("{}obj_{}", prefix, i))
+            .map(|i| format!("{}{}obj_{}", base_uri, prefix, i))
             .collect();
         let data = vec![0u8; object_size as usize];
 
         let started = Instant::now();
         let sem = Arc::new(Semaphore::new(concurrency as usize));
         let mut futs = FuturesUnordered::new();
-        for k in keys {
-            let b = bucket.clone();
+        
+        for full_uri in keys {
             let d = data.clone();
             let sem2 = sem.clone();
             futs.push(tokio::spawn(async move {
                 let _p = sem2.acquire_owned().await.unwrap();
-                put_object_async(&b, &k, &d).await?;
+                // Use ObjectStore pattern with full URI
+                let store = store_for_uri(&full_uri).map_err(|e| anyhow::anyhow!(e))?;
+                store.put(&full_uri, &d).await?;
                 Ok::<(), anyhow::Error>(())
             }));
         }
+        
         while let Some(join_res) = futs.next().await {
             join_res.map_err(to_status)?.map_err(to_status)?;
         }
@@ -290,6 +323,51 @@ fn glob_match(pattern: &str, key: &str) -> bool {
     let escaped = regex::escape(pattern).replace(r"\*", ".*");
     let re = regex::Regex::new(&format!("^{}$", escaped)).unwrap();
     re.is_match(key)
+}
+
+/// Universal helper for listing keys from any URI backend
+/// Works with s3://, file://, az://, gs://, etc.
+async fn list_keys_for_uri(uri: &str) -> Result<Vec<String>> {
+    // Try ObjectStore first (works for most backends)
+    match store_for_uri(uri) {
+        Ok(store) => {
+            let keys = store.list(uri, false).await
+                .context("Failed to list objects")?;
+            // Extract just the key portion (filename) from full URIs
+            let base_uri = if let Some(pos) = uri.rfind('/') {
+                &uri[..=pos]
+            } else {
+                uri
+            };
+            Ok(keys.into_iter()
+                .filter_map(|k| {
+                    if let Some(stripped) = k.strip_prefix(base_uri) {
+                        Some(stripped.to_string())
+                    } else {
+                        Some(k)
+                    }
+                })
+                .collect())
+        }
+        Err(_) => {
+            // Fallback to AWS SDK for S3-specific URIs (for compatibility)
+            if uri.starts_with("s3://") {
+                let parts: Vec<&str> = uri.strip_prefix("s3://").unwrap().split('/').collect();
+                if parts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let bucket = parts[0];
+                let prefix = if parts.len() > 1 {
+                    parts[1..].join("/")
+                } else {
+                    String::new()
+                };
+                list_keys_async(bucket, &prefix).await
+            } else {
+                Err(anyhow::anyhow!("Unsupported URI scheme: {}", uri))
+            }
+        }
+    }
 }
 
 /// Async helper that lists object keys under `prefix` for `bucket` using the AWS Rust SDK.

@@ -1,0 +1,64 @@
+# Azure RangeEngine Test - Simplified Example
+#
+# This is a minimal working example that was successfully tested.
+# For full documentation, see azure_rangeengine_test.yaml
+#
+# Test Results (egiazurestore1 account, s3dlio container):
+# - Total ops: 260 in 30s (8.46 ops/s)
+# - Throughput: 8.46 MiB/s  
+# - Latency: mean=912ms, p50=883ms, p95=1,106ms
+# - RangeEngine confirmed: 1-4 ranges depending on file size
+
+target: "az://your-account/your-container/rangetest/"
+duration: "30s"
+concurrency: 8
+
+workload:
+  - op: get
+    path: "4mb/*"
+    weight: 10
+  - op: get
+    path: "8mb/*"
+    weight: 20
+  - op: get
+    path: "64mb/*"
+    weight: 30
+  - op: get
+    path: "128mb/*"
+    weight: 25
+  - op: get
+    path: "256mb/*"
+    weight: 15
+
+prepare:
+  cleanup: true
+  post_prepare_delay: 5
+  
+  ensure_objects:
+    - base_uri: "az://your-account/your-container/rangetest/4mb/"
+      count: 5
+      size: 4194304
+      fill: random
+    - base_uri: "az://your-account/your-container/rangetest/8mb/"
+      count: 5
+      size: 8388608
+      fill: random
+    - base_uri: "az://your-account/your-container/rangetest/64mb/"
+      count: 3
+      size: 67108864
+      fill: random
+    - base_uri: "az://your-account/your-container/rangetest/128mb/"
+      count: 3
+      size: 134217728
+      fill: random
+    - base_uri: "az://your-account/your-container/rangetest/256mb/"
+      count: 2
+      size: 268435456
+      fill: random
+
+# Usage:
+# 1. Set environment variables:
+#    export AZURE_STORAGE_ACCOUNT="your-account"
+#    export AZURE_STORAGE_ACCOUNT_KEY="your-key"
+# 2. Update target and base_uri fields above
+# 3. Run: sai3-bench run --config tests/configs/azure_rangeengine_simple.yaml

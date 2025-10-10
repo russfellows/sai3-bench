@@ -1,0 +1,86 @@
+# Azure RangeEngine Performance Test
+#
+# This config demonstrates RangeEngine benefits for Azure Blob Storage.
+# RangeEngine provides 30-50% throughput improvements for large files on Azure.
+#
+# Requirements:
+# - AZURE_STORAGE_ACCOUNT environment variable
+# - AZURE_STORAGE_ACCOUNT_KEY environment variable
+# - Pre-existing container in Azure
+#
+# Expected performance with RangeEngine:
+# - 4-64 MB files: 20-40% faster than sequential
+# - 64 MB - 1 GB files: 30-50% faster
+# - > 1 GB files: 40-60% faster
+
+# Update this to your Azure storage account and container
+target: "az://your-account/your-container/rangetest/"
+
+duration: "30s"
+concurrency: 8  # Higher concurrency to stress test RangeEngine
+
+# RangeEngine configuration optimized for Azure
+range_engine:
+  enabled: true
+  chunk_size: 67108864  # 64 MB - optimal for Azure latency (~50-100ms)
+  max_concurrent_ranges: 32  # Sufficient to hide Azure latency
+  min_split_size: 4194304  # 4 MB threshold
+  range_timeout_secs: 45  # Longer timeout for Azure (can have variable latency)
+
+workload:
+  # GET operations on varying file sizes
+  - op: get
+    path: "4mb/*"  # Below threshold - sequential
+    weight: 10
+  
+  - op: get
+    path: "8mb/*"  # 1 range
+    weight: 20
+  
+  - op: get
+    path: "64mb/*"  # 1 range
+    weight: 30
+  
+  - op: get
+    path: "128mb/*"  # 2 ranges - notable speedup
+    weight: 25
+  
+  - op: get
+    path: "256mb/*"  # 4 ranges - significant speedup
+    weight: 15
+  
+  # STAT operations (not affected by RangeEngine)
+  - op: stat
+    path: "*"
+    weight: 10
+
+# Prepare test objects with varying sizes
+prepare:
+  cleanup: true
+  post_prepare_delay: 5  # Azure eventual consistency delay
+  
+  ensure_objects:
+    - base_uri: "az://your-account/your-container/rangetest/4mb/"
+      count: 5
+      size: 4194304  # 4 MB
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest/8mb/"
+      count: 5
+      size: 8388608  # 8 MB
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest/64mb/"
+      count: 3
+      size: 67108864  # 64 MB
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest/128mb/"
+      count: 3
+      size: 134217728  # 128 MB - 2 ranges
+      fill: random
+    
+    - base_uri: "az://your-account/your-container/rangetest/256mb/"
+      count: 2
+      size: 268435456  # 256 MB - 4 ranges
+      fill: random
