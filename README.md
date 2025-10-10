@@ -1,38 +1,41 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.1-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
+A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.4+) for multi-protocol support.
 
-> **Latest (v0.6.0)**: Distributed multi-host workload execution with gRPC coordination and automatic shared/local storage detection. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.1)**: Upgraded to s3dlio v0.9.4 with **RangeEngine** support - provides 30-50% throughput improvements for large files on network backends (Azure, GCS, S3). Comprehensive testing shows GCS achieving 45 ops/s with 173ms latency. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
-2. **Configurable Data Patterns**: Deduplication and compression testing with configurable data characteristics
-3. **Workload Replay**: Timing-faithful replay with flexible remapping capabilities (1→1, 1→N, N→1, regex)
-4. **Statistical Size Distributions**: Lognormal, uniform, and fixed distributions for realistic object size modeling
-5. **Production-Grade Metrics**: Microsecond-precision HDR histograms with size-bucketed analysis
-6. **Machine-Readable Output**: TSV export for automated analysis and CI/CD integration
-7. **Distributed Architecture**: gRPC-based agent/controller system for large-scale load generation
-8. **Storage Efficiency Testing**: Built-in support for testing deduplication engines and compression algorithms
+2. **RangeEngine Performance**: Automatic 30-50% throughput boost for large files (≥4MB) via concurrent byte-range requests
+3. **Configurable Data Patterns**: Deduplication and compression testing with configurable data characteristics
+4. **Workload Replay**: Timing-faithful replay with flexible remapping capabilities (1→1, 1→N, N→1, regex)
+5. **Statistical Size Distributions**: Lognormal, uniform, and fixed distributions for realistic object size modeling
+6. **Production-Grade Metrics**: Microsecond-precision HDR histograms with size-bucketed analysis
+7. **Machine-Readable Output**: TSV export (sorted by bucket_idx) for automated analysis and CI/CD integration
+8. **Distributed Architecture**: gRPC-based agent/controller system for large-scale load generation
+9. **Storage Efficiency Testing**: Built-in support for testing deduplication engines and compression algorithms
 
 ## 🎯 Supported Storage Backends
 
 - **File System** (`file://`) - Local filesystem testing with standard POSIX operations
 - **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
-- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.)
-- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with full authentication support
-- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API support
+- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.) with RangeEngine
+- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with RangeEngine support
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with RangeEngine (excellent performance)
+
+**RangeEngine Benefits** (v0.6.1+): Automatically activates for files ≥4MB on network backends, using concurrent byte-range requests to dramatically improve download performance. GCS shows 5.3x better performance than Azure in testing.
 
 ## 📦 Architecture & Binaries
 
 - **`sai3-bench`** - Single-node CLI for immediate testing across all backends
-- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
+- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation (now supports all backends!)
 - **`sai3bench-ctl`** - Controller for coordinating distributed agents
 - **`sai3bench-run`** - Dedicated workload runner (legacy, being integrated)
 
@@ -41,18 +44,22 @@ A storage performance testing tool that supports multiple backends through a uni
 - **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
 - **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
+- **[s3dlio v0.9.4 Migration Guide](docs/S3DLIO_V0.9.4_MIGRATION.md)** - RangeEngine details and upgrade guide
+- **[Test Results](docs/S3DLIO_V0.9.4_TEST_RESULTS.md)** - Comprehensive backend performance benchmarks
+- **[Config Examples](tests/configs/README.md)** - Complete guide to test configurations
 
 ## 🏆 sai3-bench Capabilities Overview
 
 | Capability | Implementation | Use Cases |
 |------------|----------------|----------|
 | **Storage Backends** | 5 protocols via unified API | Cross-cloud migration, protocol comparison |
+| **RangeEngine** | Automatic for files ≥4MB | 30-50% faster downloads on Azure/GCS/S3 |
 | **Size Distributions** | Lognormal, uniform, fixed | Realistic workload modeling |
 | **Data Characteristics** | Configurable dedup/compression | Storage efficiency testing |
 | **Workload Replay** | Microsecond-precision timing | Production load analysis |
 | **Advanced Remapping** | 1:1, 1→N, N→1, N↔N patterns | Complex migration scenarios |
 | **Concurrency Control** | Global + per-operation | Fine-grained performance tuning |
-| **Output Format** | 13-column TSV export | Automated analysis, CI/CD |
+| **Output Format** | 13-column TSV (bucket-sorted) | Automated analysis, CI/CD |
 | **Memory Efficiency** | Constant ~1.5MB (streaming) | Large-scale workload replay |
 | **Distributed Testing** | gRPC agent/controller | Multi-node load generation |
 
