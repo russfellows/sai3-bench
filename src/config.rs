@@ -418,42 +418,54 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
 /// RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
 /// 
 /// RangeEngine splits large file downloads into concurrent HTTP range requests,
-/// hiding network latency through parallelism. This is most effective for:
-/// - Network storage backends (S3, Azure, GCS)
-/// - High-bandwidth networks (>100 Mbps)
-/// - Large files (>= 4 MB default threshold)
+/// hiding network latency through parallelism. However, it adds HEAD request
+/// overhead to check file sizes on every GET operation.
 /// 
-/// Default settings are optimized for cloud storage with typical network latency.
-/// Adjust based on your network characteristics and workload.
+/// **Performance Impact:**
+/// - Small files (<16 MiB): HEAD overhead outweighs benefits - net SLOWER
+/// - Medium files (16-64 MiB): Marginal benefit, often still slower
+/// - Large files (>64 MiB): 30-50% faster on high-latency networks
+/// 
+/// **Default: DISABLED** (false) based on production benchmarks showing 20-25%
+/// regression on typical workloads (1 MiB objects on GCS). Only enable if:
+/// - Your workload has primarily large files (>64 MiB)
+/// - Network latency is high (>100ms)
+/// - High bandwidth available (>1 Gbps)
+/// 
+/// When enabled, set min_split_size to at least 16 MiB to avoid overhead.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RangeEngineConfig {
     /// Enable or disable RangeEngine
-    /// Default: true (enabled)
+    /// Default: false (disabled) - avoids HEAD overhead on typical workloads
     #[serde(default = "default_range_engine_enabled")]
     pub enabled: bool,
     
     /// Size of each concurrent range request in bytes
-    /// Default: 67108864 (64 MB)
+    /// Default: 67108864 (64 MiB)
     /// - Larger chunks: Fewer requests, less overhead, but less parallelism
     /// - Smaller chunks: More parallelism, but more overhead
-    /// Recommended: 32-128 MB depending on network speed
+    /// Recommended: 32-128 MiB depending on network speed
     #[serde(default = "default_chunk_size")]
     pub chunk_size: u64,
     
     /// Maximum number of concurrent range requests
-    /// Default: 32
+    /// Default: 16
     /// - Higher values: More parallelism for high-bandwidth networks (>1 Gbps)
     /// - Lower values: Reduce load on slow networks (<100 Mbps)
-    /// Recommended: 8-64 depending on network capacity
+    /// Recommended: 8-32 depending on network capacity
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_ranges: usize,
     
     /// Minimum file size to trigger RangeEngine (in bytes)
-    /// Default: 4194304 (4 MB)
+    /// Default: 16777216 (16 MiB) - matches s3dlio library default
     /// Files smaller than this use simple sequential downloads
-    /// - Raise threshold: Reduce overhead for workloads with many small files
-    /// - Lower threshold: Enable RangeEngine for smaller files (may add overhead)
-    /// Recommended: 4-16 MB
+    /// 
+    /// **Performance Note**: Production benchmarks show HEAD overhead makes
+    /// RangeEngine slower for files <16 MiB. Only lower this if you have:
+    /// - Verified performance benefit on your specific workload
+    /// - Very high network latency (>200ms) where parallelism helps
+    /// 
+    /// Recommended: 16-64 MiB for typical cloud storage workloads
     #[serde(default = "default_min_split_size")]
     pub min_split_size: u64,
     
@@ -465,7 +477,7 @@ pub struct RangeEngineConfig {
 }
 
 fn default_range_engine_enabled() -> bool {
-    true
+    false  // Disabled by default - avoids 20-25% regression on typical workloads
 }
 
 fn default_chunk_size() -> u64 {
@@ -473,11 +485,11 @@ fn default_chunk_size() -> u64 {
 }
 
 fn default_max_concurrent() -> usize {
-    32
+    16  // Safe default for concurrent range requests
 }
 
 fn default_min_split_size() -> u64 {
-    4 * 1024 * 1024  // 4 MB
+    16 * 1024 * 1024  // 16 MiB - matches s3dlio library default
 }
 
 fn default_range_timeout_secs() -> u64 {

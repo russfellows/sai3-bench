@@ -1,8 +1,9 @@
-# get_smoke.yaml
+# get_smoke.yaml - Simple GET-only smoke test
 duration: 3s
 concurrency: 8
+target: "s3://my-bucket2/bench/"
 workload:
   - weight: 100
     op: get
-    uri: "s3://my-bucket2/bench/smoke/*"
+    path: "smoke/*"
 

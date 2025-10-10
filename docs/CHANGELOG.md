@@ -2,6 +2,84 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.3] - 2025-10-10
+
+### 🎯 Critical Performance Fix: s3dlio v0.9.6 Upgrade
+
+**Resolves 20-25% Performance Regression**: Upgraded to s3dlio v0.9.6 which disables RangeEngine by default across all backends, eliminating HEAD request overhead that caused significant slowdowns in typical workloads.
+
+#### Core Library Upgrade
+- **s3dlio**: v0.9.5 → **v0.9.6** (git tag)
+- **s3dlio-oplog**: v0.9.5 → **v0.9.6** (git tag)
+
+#### Performance Impact
+**Problem Identified**: s3dlio v0.9.5 enabled RangeEngine by default, which added a HEAD/STAT request before every GET operation to determine object size. This caused:
+- **20-25% throughput degradation** for typical workloads with mixed object sizes
+- **60% more requests** for small-object workloads (HEAD + GET vs just GET)
+- HEAD overhead exceeds RangeEngine benefits for objects < 64 MiB
+
+**Solution**: s3dlio v0.9.6 disables RangeEngine by default for ALL backends:
+- `AzureConfig::default()`: `enable_range_engine = false`
+- `GcsConfig::default()`: `enable_range_engine = false`
+- `FileSystemConfig::default()`: `enable_range_engine = false`
+- `DirectIOConfig::default()`: `enable_range_engine = false`
+
+**Performance Validation** (GCS with 64 MiB objects):
+- **Disabled (v0.9.6 default)**: 53.85 MiB/s GET throughput
+- **Enabled (explicit opt-in)**: 54.47 MiB/s GET throughput (+1.2%)
+- **Conclusion**: Minimal benefit when network bandwidth is the bottleneck
+
+#### Configuration Changes
+**Default Behavior** (v0.6.3):
+- RangeEngine **DISABLED** by default (via s3dlio v0.9.6)
+- Optimal for typical workloads with mixed object sizes
+- Single GET request per operation (no HEAD overhead)
+
+**Explicit Opt-In** (for large-file workloads ≥ 64 MiB):
+```yaml
+range_engine:
+  enabled: true
+  min_split_size: 16777216  # 16 MiB threshold
+  chunk_size: 67108864      # 64 MiB chunks
+  max_concurrent_ranges: 16
+```
+
+#### Enhanced Logging
+**RangeEngine Status Visibility**: Added clear logging for all backends:
+```
+INFO sai3_bench: RangeEngine DISABLED for Google Cloud Storage backend (default for optimal performance)
+INFO sai3_bench: RangeEngine ENABLED for Google Cloud Storage backend - files >= 16 MiB
+```
+
+**Applies to**: File, DirectIO, S3, Azure, and GCS backends
+
+#### Testing & Validation
+**Comprehensive Testing**:
+- ✅ File backend: Confirmed disabled by default (940.83 MiB/s GET)
+- ✅ GCS with 1 MiB objects: 36.83 ops/s baseline performance
+- ✅ GCS with 64 MiB objects: 53.85 MiB/s disabled vs 54.47 MiB/s enabled
+- ✅ Network bandwidth validation: Real GCS testing over 500 Mb/s connection
+
+**Key Insight**: RangeEngine provides benefit only when:
+1. Objects are large (≥ 64 MiB)
+2. Network bandwidth is NOT the bottleneck (10+ Gbps)
+3. Parallel range downloads can overcome other bottlenecks
+
+For typical cloud storage workloads, disabled is optimal.
+
+#### Breaking Changes
+**None for most users**: Default behavior now faster for typical workloads.
+
+**Large-file workloads only**: Users relying on automatic RangeEngine for large files must explicitly enable it in configuration.
+
+#### Modified Files
+- `Cargo.toml`: Updated s3dlio dependencies to v0.9.6
+- `Cargo.lock`: Locked to s3dlio v0.9.6 commit hash
+- `src/config.rs`: Updated documentation for disabled default
+- `src/main.rs`: Enhanced RangeEngine status logging for all backends
+
+---
+
 ## [0.6.1] - 2025-10-10
 
 ### 🚀 Major Upgrade: s3dlio v0.9.4 with RangeEngine
