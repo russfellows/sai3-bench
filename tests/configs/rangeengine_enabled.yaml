@@ -1,0 +1,47 @@
+# RangeEngine Configuration Test - Enabled with Defaults
+#
+# This config tests RangeEngine with default settings.
+# Purpose: Demonstrate RangeEngine working with standard configuration.
+#
+# How to use:
+# 1. Prepare test data:
+#    sai3-bench prepare --config tests/configs/rangeengine_enabled.yaml
+#
+# 2. Run workload:
+#    sai3-bench -vv run --config tests/configs/rangeengine_enabled.yaml
+#
+# 3. Check logs for "using RangeEngine" messages
+
+target: "file:///tmp/sai3bench-range-enabled/"
+duration: "5s"
+concurrency: 2
+
+# RangeEngine ENABLED with default s3dlio settings
+range_engine:
+  enabled: true
+  chunk_size: 67108864          # 64 MB chunks (default)
+  max_concurrent_ranges: 32      # Up to 32 parallel requests (default)
+  min_split_size: 4194304        # Files >= 4 MB use RangeEngine (default)
+  range_timeout_secs: 30         # 30 second timeout per range (default)
+
+workload:
+  # Small files - sequential downloads (< 4 MB threshold)
+  - op: get
+    path: "small/*"
+    weight: 30
+  
+  # Large files - RangeEngine activates (>= 4 MB)
+  - op: get
+    path: "large/*"
+    weight: 40
+  
+  # PUT operations
+  - op: put
+    path: "small/"
+    weight: 15
+    object_size: 1048576  # 1 MB
+  
+  - op: put
+    path: "large/"
+    weight: 15
+    object_size: 8388608  # 8 MB

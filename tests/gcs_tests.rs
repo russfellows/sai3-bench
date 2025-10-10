@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use std::env;
 
-use io_bench::workload::{
+use sai3_bench::workload::{
     create_store_for_uri, BackendType, get_object_no_log, put_object_no_log,
     list_objects_no_log, stat_object_no_log, delete_object_no_log,
 };
@@ -32,7 +32,7 @@ fn has_gcs_credentials() -> bool {
 /// Helper to create GCS test URI
 fn gcs_test_uri() -> Option<String> {
     get_gcs_bucket().map(|bucket| {
-        format!("gs://{}/io-bench-gcs-tests/", bucket)
+        format!("gs://{}/sai3-bench-gcs-tests/", bucket)
     })
 }
 
@@ -321,8 +321,8 @@ async fn test_gcs_alternate_scheme() -> Result<()> {
     println!("🧪 Testing GCS alternate URI schemes");
     
     // Test both gs:// and gcs:// schemes
-    let gs_uri = format!("gs://{}/io-bench-test/scheme-test.txt", bucket);
-    let gcs_uri = format!("gcs://{}/io-bench-test/scheme-test.txt", bucket);
+    let gs_uri = format!("gs://{}/sai3-bench-test/scheme-test.txt", bucket);
+    let gcs_uri = format!("gcs://{}/sai3-bench-test/scheme-test.txt", bucket);
     
     let test_data = b"testing alternate schemes";
     

@@ -6,8 +6,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="$PROJECT_DIR/target/release/io-bench"
-TEST_DIR="/tmp/io-bench-streaming-tests"
+BINARY="$PROJECT_DIR/target/release/sai3-bench"
+TEST_DIR="/tmp/sai3-bench-streaming-tests"
 RESULTS_FILE="$TEST_DIR/test_results.txt"
 
 # Colors for output
@@ -17,13 +17,13 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo "======================================================"
-echo "io-bench Streaming Replay Test Suite"
+echo "sai3-bench Streaming Replay Test Suite"
 echo "======================================================"
 echo ""
 
 # Ensure binary is built
 if [ ! -f "$BINARY" ]; then
-    echo "Building io-bench..."
+    echo "Building sai3-bench..."
     cd "$PROJECT_DIR"
     cargo build --release
 fi
