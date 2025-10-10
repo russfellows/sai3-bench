@@ -1,14 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.1-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.2-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.4+) for multi-protocol support.
+A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.5+) for multi-protocol support.
 
-> **Latest (v0.6.1)**: Upgraded to s3dlio v0.9.4 with **RangeEngine** support - provides 30-50% throughput improvements for large files on network backends (Azure, GCS, S3). Comprehensive testing shows GCS achieving 45 ops/s with 173ms latency. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.2)**: Upgraded to s3dlio v0.9.5 with minor performance fixes and comprehensive naming cleanup (io-bench → sai3-bench). Uses s3dlio's built-in **RangeEngine** for automatic 30-50% throughput improvements on large files. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
@@ -27,10 +27,10 @@ A storage performance testing tool that supports multiple backends through a uni
 - **File System** (`file://`) - Local filesystem testing with standard POSIX operations
 - **Direct I/O** (`direct://`) - High-performance direct I/O for maximum throughput
 - **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, etc.) with RangeEngine
-- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with RangeEngine support
-- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with RangeEngine (excellent performance)
+- **Azure Blob** (`az://`) - Microsoft Azure Blob Storage with automatic RangeEngine optimization
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with automatic RangeEngine optimization
 
-**RangeEngine Benefits** (v0.6.1+): Automatically activates for files ≥4MB on network backends, using concurrent byte-range requests to dramatically improve download performance. GCS shows 5.3x better performance than Azure in testing.
+**RangeEngine Benefits** (v0.6.1+): s3dlio automatically activates RangeEngine for files ≥4MB (file://) or ≥16MB (network backends), using concurrent byte-range requests to improve download performance by 30-50%. All workloads use s3dlio's optimized default settings. Custom RangeEngine configuration is planned for a future release - see [RANGEENGINE_CONFIG_STATUS.md](docs/RANGEENGINE_CONFIG_STATUS.md).
 
 ## 📦 Architecture & Binaries
 
@@ -420,6 +420,13 @@ remap:
 | **Memory usage** | High (replay) | **Constant** (streaming replay ~1.5 MB) |
 
 ## 🌟 Previous Releases
+
+### v0.6.2 - s3dlio v0.9.5 Upgrade & Naming Cleanup
+- **s3dlio v0.9.5**: Minor performance improvements and bug fixes
+- **Comprehensive cleanup**: All io-bench references updated to sai3-bench
+- **Test fixes**: Streaming replay tests now properly documented (require --test-threads=1)
+- **RangeEngine**: Uses s3dlio defaults (custom config planned for future release)
+- **Documentation**: Updated branding, test configs, and usage examples
 
 ### v0.5.9 - Output Clarity & Branding Consistency
 - **Enhanced metrics display**: Added mean latency to Results output

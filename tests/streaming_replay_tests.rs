@@ -1,5 +1,8 @@
 /// Integration tests for streaming replay functionality
 ///
+/// **IMPORTANT**: These tests MUST be run with `--test-threads=1` to ensure proper ordering.
+/// Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
+///
 /// **TEST STRUCTURE**: To work around s3dlio's global singleton op-logger limitation:
 /// 1. `test_01_generate_oplog` - Creates op-log files (calls finalize once)
 /// 2. Other tests - Read and replay existing op-logs (no logging)
@@ -16,12 +19,12 @@ use std::path::{Path, PathBuf};
 
 /// Get path to shared test op-log (created by test_01_generate_oplog)
 fn get_test_oplog_path() -> PathBuf {
-    std::env::temp_dir().join("io-bench-streaming-tests/test-operations.tsv.zst")
+    std::env::temp_dir().join("sai3-bench-streaming-tests/test-operations.tsv.zst")
 }
 
 /// Get path to shared test data directory
 fn get_test_data_dir() -> PathBuf {
-    std::env::temp_dir().join("io-bench-streaming-tests/data")
+    std::env::temp_dir().join("sai3-bench-streaming-tests/data")
 }
 
 /// Verify op-log contents using streaming reader
@@ -44,7 +47,7 @@ fn verify_oplog_contents(oplog_path: &Path) -> Result<usize> {
 #[tokio::test]
 async fn test_01_generate_oplog() -> Result<()> {
     // Create persistent test directories (not TempDir - we want them to survive)
-    let test_base = std::env::temp_dir().join("io-bench-streaming-tests");
+    let test_base = std::env::temp_dir().join("sai3-bench-streaming-tests");
     let data_dir = test_base.join("data");
     let oplog_path = test_base.join("test-operations.tsv.zst");
     
@@ -172,7 +175,7 @@ async fn test_04_uri_remapping() -> Result<()> {
     println!("=== URI REMAPPING TEST ===");
     
     // Create a different target directory
-    let target_dir = std::env::temp_dir().join("io-bench-streaming-tests/remapped");
+    let target_dir = std::env::temp_dir().join("sai3-bench-streaming-tests/remapped");
     fs::create_dir_all(&target_dir)?;
     let target_uri = format!("file://{}", target_dir.display());
     
@@ -210,7 +213,7 @@ async fn test_05_continue_on_error() -> Result<()> {
     println!("=== CONTINUE ON ERROR TEST ===");
     
     // Delete the data directory so GET operations will fail
-    let temp_dir = std::env::temp_dir().join("io-bench-streaming-tests/error-test");
+    let temp_dir = std::env::temp_dir().join("sai3-bench-streaming-tests/error-test");
     fs::create_dir_all(&temp_dir)?;
     
     println!("Replaying with continue_on_error=true (expect some failures)...");

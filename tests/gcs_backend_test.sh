@@ -1,13 +1,13 @@
 #!/bin/bash
 # Google Cloud Storage Backend Test Suite
-# Comprehensive testing of GCS integration with io-bench
+# Comprehensive testing of GCS integration with sai3-bench
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="$PROJECT_DIR/target/release/io-bench"
-TEST_DIR="/tmp/io-bench-gcs-tests"
+BINARY="$PROJECT_DIR/target/release/sai3-bench"
+TEST_DIR="/tmp/sai3-bench-gcs-tests"
 RESULTS_FILE="$TEST_DIR/gcs_test_results.txt"
 
 # Colors for output
@@ -18,7 +18,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "======================================================"
-echo "io-bench Google Cloud Storage Test Suite"
+echo "sai3-bench Google Cloud Storage Test Suite"
 echo "======================================================"
 echo ""
 
@@ -34,7 +34,7 @@ if [ -z "$GCS_BUCKET" ] && [ -z "$GOOGLE_CLOUD_BUCKET" ]; then
 fi
 
 GCS_BUCKET=${GCS_BUCKET:-$GOOGLE_CLOUD_BUCKET}
-GCS_BASE_URI="gs://${GCS_BUCKET}/io-bench-test/"
+GCS_BASE_URI="gs://${GCS_BUCKET}/sai3-bench-test/"
 
 echo "Configuration:"
 echo "  Bucket: $GCS_BUCKET"
@@ -43,7 +43,7 @@ echo ""
 
 # Ensure binary is built
 if [ ! -f "$BINARY" ]; then
-    echo "Building io-bench..."
+    echo "Building sai3-bench..."
     cd "$PROJECT_DIR"
     cargo build --release
 fi
@@ -238,7 +238,7 @@ fi
 echo ""
 echo "Test 9: Alternate URI Scheme (gcs://)"
 echo "======================================"
-GCS_ALT_URI="gcs://${GCS_BUCKET}/io-bench-test/alt-scheme-test.txt"
+GCS_ALT_URI="gcs://${GCS_BUCKET}/sai3-bench-test/alt-scheme-test.txt"
 
 $BINARY put --uri "$GCS_ALT_URI" \
     --object-size 1024 \
@@ -247,7 +247,7 @@ $BINARY put --uri "$GCS_ALT_URI" \
 
 if grep -q "completed" "$TEST_DIR/alt_scheme.log" || [ $? -eq 0 ]; then
     # Try to get with gs:// scheme
-    GS_ALT_URI="gs://${GCS_BUCKET}/io-bench-test/alt-scheme-test.txt"
+    GS_ALT_URI="gs://${GCS_BUCKET}/sai3-bench-test/alt-scheme-test.txt"
     $BINARY get --uri "$GS_ALT_URI" 2>&1 | tee -a "$TEST_DIR/alt_scheme.log"
     
     if [ $? -eq 0 ]; then
