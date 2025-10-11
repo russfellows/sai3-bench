@@ -59,6 +59,18 @@ message WorkloadSummary {
   uint64 p50_us = 8;
   uint64 p95_us = 9;
   uint64 p99_us = 10;
+  
+  // v0.6.4: Agent results collection (inline for small results)
+  string console_log = 11;       // Agent console output
+  string metadata_json = 12;     // Agent metadata JSON
+  string tsv_content = 13;       // TSV results data
+  string results_path = 14;      // Local path where agent saved results
+  string op_log_path = 15;       // Optional: path to operation log (not transferred)
+  
+  // v0.6.4: HDR histogram data for accurate aggregation
+  bytes histogram_get = 16;      // Serialized GET histograms (all size buckets)
+  bytes histogram_put = 17;      // Serialized PUT histograms (all size buckets)
+  bytes histogram_meta = 18;     // Serialized META histograms (all size buckets)
 }
 
 service Agent {

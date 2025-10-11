@@ -426,6 +426,10 @@ async fn run_distributed_workload(
                 let msg = format!("✓ Agent {} completed", ids[idx]);
                 println!("{}", msg);
                 results_dir.write_console(&msg)?;
+                
+                // Write agent results to agents/{id}/ subdirectory (v0.6.4)
+                write_agent_results(&agents_dir, &ids[idx], &summary)?;
+                
                 summaries.push(summary);
             }
             Ok(Err(e)) => {
@@ -451,6 +455,9 @@ async fn run_distributed_workload(
 
     // Display results
     print_distributed_results(&summaries, &mut results_dir)?;
+    
+    // Generate consolidated results.tsv from individual agent histograms (v0.6.4)
+    create_consolidated_tsv(&agents_dir, &results_dir, &summaries)?;
 
     // Finalize results directory with max wall time
     let max_wall = summaries
@@ -611,6 +618,249 @@ fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut Re
     let msg = "\n✅ Distributed workload complete!".to_string();
     println!("{}", msg);
     results_dir.write_console(&msg)?;
+    
+    Ok(())
+}
+
+/// Write agent results to agents/{agent-id}/ subdirectory (v0.6.4)
+fn write_agent_results(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    summary: &WorkloadSummary,
+) -> anyhow::Result<()> {
+    use std::fs;
+    
+    // Create subdirectory for this agent
+    let agent_dir = agents_dir.join(agent_id);
+    fs::create_dir_all(&agent_dir)
+        .with_context(|| format!("Failed to create agent directory: {}", agent_dir.display()))?;
+    
+    // Write metadata.json
+    if !summary.metadata_json.is_empty() {
+        let metadata_path = agent_dir.join("metadata.json");
+        fs::write(&metadata_path, &summary.metadata_json)
+            .with_context(|| format!("Failed to write agent metadata: {}", metadata_path.display()))?;
+    }
+    
+    // Write results.tsv
+    if !summary.tsv_content.is_empty() {
+        let tsv_path = agent_dir.join("results.tsv");
+        fs::write(&tsv_path, &summary.tsv_content)
+            .with_context(|| format!("Failed to write agent TSV: {}", tsv_path.display()))?;
+    }
+    
+    // Write console.log (if provided - currently agents don't generate this)
+    if !summary.console_log.is_empty() {
+        let console_path = agent_dir.join("console.log");
+        fs::write(&console_path, &summary.console_log)
+            .with_context(|| format!("Failed to write agent console log: {}", console_path.display()))?;
+    }
+    
+    // Write a note about the agent's local results path
+    if !summary.results_path.is_empty() {
+        let note_path = agent_dir.join("agent_local_path.txt");
+        fs::write(&note_path, &summary.results_path)
+            .with_context(|| format!("Failed to write agent path note: {}", note_path.display()))?;
+    }
+    
+    // Write a note about operation log (if it exists on agent)
+    if !summary.op_log_path.is_empty() {
+        let oplog_note_path = agent_dir.join("agent_op_log_path.txt");
+        let note = format!(
+            "Operation log on agent (not transferred):\n{}\n\n\
+             Note: Operation logs (.tsv.zst files) remain on the agent's local filesystem.\n\
+             They are not transferred via gRPC due to their size.",
+            summary.op_log_path
+        );
+        fs::write(&oplog_note_path, note)
+            .with_context(|| format!("Failed to write op-log path note: {}", oplog_note_path.display()))?;
+    }
+    
+    info!("Wrote agent {} results to: {}", agent_id, agent_dir.display());
+    Ok(())
+}
+
+/// Create consolidated results.tsv from agent histograms (v0.6.4)
+/// Uses HDR histogram merging for mathematically accurate percentile aggregation
+fn create_consolidated_tsv(
+    _agents_dir: &std::path::Path,
+    results_dir: &ResultsDir,
+    summaries: &[WorkloadSummary],
+) -> anyhow::Result<()> {
+    use hdrhistogram::Histogram;
+    use hdrhistogram::serialization::Deserializer;
+    use std::fs::File;
+    use std::io::Write;
+    
+    info!("Creating consolidated results.tsv from {} agent histograms", summaries.len());
+    
+    // Define histogram parameters (must match agent configuration in metrics.rs)
+    // Range: 1µs to 1 hour (3.6e9 µs), 3 significant figures
+    const MIN: u64 = 1;
+    const MAX: u64 = 3_600_000_000;  // 1 hour in microseconds
+    const SIGFIG: u8 = 3;
+    const NUM_BUCKETS: usize = 9;
+    
+    // Create accumulators for each operation type and size bucket
+    let mut get_accumulators = Vec::new();
+    let mut put_accumulators = Vec::new();
+    let mut meta_accumulators = Vec::new();
+    
+    for _ in 0..NUM_BUCKETS {
+        get_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+        put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+        meta_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+    }
+    
+    // Deserialize and merge histograms from all agents
+    let mut deserializer = Deserializer::new();
+    
+    for (agent_idx, summary) in summaries.iter().enumerate() {
+        info!("Merging histograms from agent {} ({})", agent_idx + 1, summary.agent_id);
+        
+        // Deserialize GET histograms (one per bucket)
+        let mut cursor = &summary.histogram_get[..];
+        for bucket_idx in 0..NUM_BUCKETS {
+            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
+                .with_context(|| format!("Failed to deserialize GET histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+            get_accumulators[bucket_idx].add(hist)
+                .with_context(|| format!("Failed to merge GET histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+        }
+        
+        // Deserialize PUT histograms
+        let mut cursor = &summary.histogram_put[..];
+        for bucket_idx in 0..NUM_BUCKETS {
+            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
+                .with_context(|| format!("Failed to deserialize PUT histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+            put_accumulators[bucket_idx].add(hist)
+                .with_context(|| format!("Failed to merge PUT histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+        }
+        
+        // Deserialize META histograms
+        let mut cursor = &summary.histogram_meta[..];
+        for bucket_idx in 0..NUM_BUCKETS {
+            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
+                .with_context(|| format!("Failed to deserialize META histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+            meta_accumulators[bucket_idx].add(hist)
+                .with_context(|| format!("Failed to merge META histogram bucket {} from agent {}", 
+                                        bucket_idx, summary.agent_id))?;
+        }
+    }
+    
+    // Calculate total wall time (max of all agents)
+    let wall_seconds = summaries.iter()
+        .map(|s| s.wall_seconds)
+        .fold(0.0f64, f64::max);
+    
+    // Calculate aggregate operation counts and bytes
+    let total_get_ops: u64 = summaries.iter()
+        .filter_map(|s| s.get.as_ref())
+        .map(|g| g.ops)
+        .sum();
+    let total_get_bytes: u64 = summaries.iter()
+        .filter_map(|s| s.get.as_ref())
+        .map(|g| g.bytes)
+        .sum();
+    
+    let total_put_ops: u64 = summaries.iter()
+        .filter_map(|s| s.put.as_ref())
+        .map(|p| p.ops)
+        .sum();
+    let total_put_bytes: u64 = summaries.iter()
+        .filter_map(|s| s.put.as_ref())
+        .map(|p| p.bytes)
+        .sum();
+    
+    let total_meta_ops: u64 = summaries.iter()
+        .filter_map(|s| s.meta.as_ref())
+        .map(|m| m.ops)
+        .sum();
+    let total_meta_bytes: u64 = summaries.iter()
+        .filter_map(|s| s.meta.as_ref())
+        .map(|m| m.bytes)
+        .sum();
+    
+    // Write consolidated TSV
+    let tsv_path = results_dir.path().join("results.tsv");
+    let mut f = File::create(&tsv_path)
+        .with_context(|| format!("Failed to create consolidated TSV: {}", tsv_path.display()))?;
+    
+    // Write header
+    writeln!(f, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
+    
+    // Write GET rows
+    write_op_rows(&mut f, "GET", &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
+    
+    // Write PUT rows
+    write_op_rows(&mut f, "PUT", &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
+    
+    // Write META rows
+    write_op_rows(&mut f, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
+    
+    info!("Consolidated results.tsv written to: {}", tsv_path.display());
+    Ok(())
+}
+
+/// Helper to write rows for one operation type
+fn write_op_rows(
+    f: &mut std::fs::File,
+    op_name: &str,
+    accumulators: &[hdrhistogram::Histogram<u64>],
+    total_ops: u64,
+    total_bytes: u64,
+    wall_seconds: f64,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    
+    const BUCKET_LABELS: [&str; 9] = [
+        "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB",
+        "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", "2GiB+"
+    ];
+    
+    for (bucket_idx, hist) in accumulators.iter().enumerate() {
+        let count = hist.len();
+        if count == 0 {
+            continue;
+        }
+        
+        // Calculate percentiles (histograms store microseconds directly)
+        let mean_us = hist.mean();
+        let p50_us = hist.value_at_quantile(0.50) as f64;
+        let p90_us = hist.value_at_quantile(0.90) as f64;
+        let p95_us = hist.value_at_quantile(0.95) as f64;
+        let p99_us = hist.value_at_quantile(0.99) as f64;
+        let max_us = hist.max() as f64;
+        
+        // Calculate average bytes (approximate - we don't track per-bucket bytes in distributed mode)
+        let avg_bytes = if total_ops > 0 {
+            total_bytes as f64 / total_ops as f64
+        } else {
+            0.0
+        };
+        
+        // Calculate throughput
+        let ops_per_sec = count as f64 / wall_seconds;
+        let bucket_bytes = count as f64 * avg_bytes;  // Approximation
+        let throughput_mibps = (bucket_bytes / 1_048_576.0) / wall_seconds;
+        
+        writeln!(
+            f,
+            "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
+            op_name,
+            BUCKET_LABELS[bucket_idx],
+            bucket_idx,
+            mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+            avg_bytes,
+            ops_per_sec,
+            throughput_mibps,
+            count
+        )?;
+    }
     
     Ok(())
 }

@@ -17,13 +17,10 @@ cleanup() {
     # Remove test data directories
     rm -rf /tmp/sai3bench-test/
     rm -rf /tmp/io-bench-*
-    # Remove results directories (keeping only if test failed for debugging)
-    if [ $? -eq 0 ]; then
-        echo "Test passed, removing results directories..."
-        rm -rf sai3-*
-    else
-        echo "Test failed, keeping results directories for debugging"
-    fi
+    # Keep results directories for examination
+    echo "Keeping results directories for examination"
+    # Uncomment to auto-clean:
+    # rm -rf sai3-*
 }
 
 trap cleanup EXIT
