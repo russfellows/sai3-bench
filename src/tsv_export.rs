@@ -10,14 +10,23 @@ use crate::workload::SizeBins;
 
 /// TSV exporter for benchmark results
 pub struct TsvExporter {
-    basename: String,
+    output_path: std::path::PathBuf,
 }
 
 impl TsvExporter {
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+    /// Create exporter with basename (will append -results.tsv)
+    pub fn new<P: AsRef<Path>>(basename: P) -> Self {
+        let path = format!("{}-results.tsv", basename.as_ref().to_string_lossy());
         Self {
-            basename: path.as_ref().to_string_lossy().to_string(),
+            output_path: std::path::PathBuf::from(path),
         }
+    }
+    
+    /// Create exporter with explicit output path
+    pub fn with_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Ok(Self {
+            output_path: path.as_ref().to_path_buf(),
+        })
     }
 
     /// Export complete results to TSV file
@@ -31,9 +40,8 @@ impl TsvExporter {
         meta_bins: &SizeBins,
         wall_seconds: f64,
     ) -> Result<()> {
-        let path = format!("{}-results.tsv", self.basename);
-        let mut f = File::create(&path)
-            .with_context(|| format!("Failed to create {}", path))?;
+        let mut f = File::create(&self.output_path)
+            .with_context(|| format!("Failed to create {}", self.output_path.display()))?;
 
         // Write header
         writeln!(
@@ -55,7 +63,7 @@ impl TsvExporter {
             writeln!(f, "{}", row)?;
         }
 
-        println!("\n✅ TSV results exported to: {}", path);
+        // Don't print here - caller will handle logging
         Ok(())
     }
 
