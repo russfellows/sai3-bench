@@ -2,6 +2,70 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.4] - 2025-10-11
+
+### 🎯 Enhanced Output with HDR Histogram Merging
+
+**Automatic Results Directories & Consolidated Metrics**: Implemented automatic results directory creation for both single-node and distributed workloads, with HDR histogram merging for mathematically accurate aggregate metrics across multiple agents.
+
+#### Core Features
+- **Timestamped Results Directories**: Automatic creation of `sai3-YYYYMMDD-HHMM-{test_name}/` directories
+- **Complete Capture**: config.yaml, console.log, metadata.json, results.tsv in every results directory
+- **Distributed Results Collection**: Per-agent results in `agents/{id}/` subdirectories with metadata
+- **HDR Histogram Merging**: Mathematically accurate percentile aggregation across multiple agents
+
+#### Results Directory Structure
+```
+sai3-YYYYMMDD-HHMM-{test_name}/
+├── config.yaml                    # Controller's workload config
+├── console.log                    # Complete execution log
+├── metadata.json                  # Test metadata (distributed: true/false)
+├── results.tsv                    # Single-node OR consolidated (merged histograms)
+└── agents/                        # Only in distributed mode
+    ├── agent-1/
+    │   ├── metadata.json          # Agent-specific metadata
+    │   ├── results.tsv           # Agent-1 individual results
+    │   └── agent_local_path.txt  # Points to agent's /tmp/ directory
+    └── agent-2/...
+```
+
+#### HDR Histogram Merging (Critical Enhancement)
+**Problem**: Percentiles cannot be simply averaged across agents. If agent-1 has p95=278µs and agent-2 has p95=280µs, the aggregate p95 is NOT necessarily 279µs.
+
+**Solution**: Proper histogram merging via `hdrhistogram` library:
+- Agent serializes 9 size-bucketed histograms per operation type (GET/PUT/META)
+- Controller deserializes and merges histograms mathematically
+- Consolidated results.tsv contains accurate aggregate percentiles
+- Per-agent results preserved for debugging
+
+**Performance Impact**: Negligible overhead (~1ms agent serialization, ~3ms controller merge for 2 agents)
+
+#### gRPC Protocol Extension
+Extended `WorkloadSummary` message with histogram fields:
+- `histogram_get`, `histogram_put`, `histogram_meta` (bytes) - V2 binary format
+- Efficient transfer: Few KB per agent
+- Full backward compatibility maintained
+
+#### Files Changed
+- `proto/iobench.proto` - Extended with histogram fields
+- `src/bin/agent.rs` - Histogram serialization (+109 lines)
+- `src/bin/controller.rs` - Histogram merging + consolidated TSV generation (+250 lines)
+- `src/pb/iobench.rs` - Auto-generated protobuf code
+
+#### Testing
+- Comprehensive test suite with 4 test scenarios
+- Verified 2-agent, 4-agent, and multi-size workloads
+- All tests passing with exact count verification
+- Histogram accuracy validated (proper merging, not averaging)
+
+**Test Scripts**:
+- `tests/verify_v0.6.4.sh` - Quick 2-agent verification
+- `tests/test_comprehensive_v0.6.4.sh` - Full test suite
+- `tests/configs/distributed_mixed_test.yaml` - Mixed workload config
+
+#### Migration Notes
+No breaking changes - fully backward compatible. Results directories are created automatically for all workload executions.
+
 ## [0.6.3] - 2025-10-10
 
 ### 🎯 Critical Performance Fix: s3dlio v0.9.6 Upgrade

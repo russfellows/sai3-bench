@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.3-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,9 @@
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.6) for multi-protocol support.
 
-> **Latest (v0.6.3)**: Upgraded to s3dlio v0.9.6 which **disables RangeEngine by default** for optimal performance on typical workloads. This resolves a 20-25% performance regression caused by HEAD request overhead. RangeEngine can still be explicitly enabled for large-file workloads (≥64 MiB). See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.4)**: Enhanced output with automatic results directories and HDR histogram merging for distributed workloads. All test results are now captured in timestamped directories with mathematically accurate consolidated metrics. See [CHANGELOG](docs/CHANGELOG.md) for details.
+
+> **Previous (v0.6.3)**: Upgraded to s3dlio v0.9.6 which **disables RangeEngine by default** for optimal performance on typical workloads. This resolves a 20-25% performance regression caused by HEAD request overhead. RangeEngine can still be explicitly enabled for large-file workloads (≥64 MiB).
 
 ## 🚀 What Makes sai3-bench Unique?
 
