@@ -8,7 +8,7 @@
 - **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.5)
+- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.6)
 - **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
 - **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
 

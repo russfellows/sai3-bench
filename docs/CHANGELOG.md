@@ -2,6 +2,60 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.6] - 2025-10-11
+
+### ⚠️ BREAKING CHANGE: Command Structure Restructured
+
+**Utility commands now nested under `util` subcommand** to emphasize core workload execution features (run/replay). This change improves tool clarity and aligns with its primary purpose as a benchmarking suite.
+
+#### Breaking Changes
+- **All utility commands require `util` prefix**:
+  - ❌ OLD: `sai3-bench health --uri "s3://bucket/"`
+  - ✅ NEW: `sai3-bench util health --uri "s3://bucket/"`
+  
+- **Affected commands**: health, list, stat, get, put, delete
+- **Unaffected commands**: run, replay (these are now prominently featured)
+- **Error message**: If you try to use old syntax (e.g., `sai3-bench health`), you'll get "unrecognized subcommand" error. Simply add `util` before the command name.
+
+#### Command Structure
+```
+OLD Structure:
+  sai3-bench {health|list|stat|get|delete|put|run|replay}
+
+NEW Structure (v0.6.6):
+  sai3-bench {run|replay|util}
+    util subcommand: {health|list|stat|get|put|delete}
+```
+
+#### Benefits
+1. **Core features prominently displayed**: `run` and `replay` now appear first
+2. **Cleaner help output**: Only 3 top-level commands instead of 8
+3. **Clear tool purpose**: Emphasizes benchmarking/workload execution
+4. **Better organization**: Utility operations clearly separated from core functionality
+
+#### Migration Guide
+Update all utility command invocations:
+```bash
+# Health checks
+sai3-bench util health --uri "file:///tmp/test/"
+sai3-bench util health --uri "s3://bucket/"
+sai3-bench util health --uri "az://account/container/"
+sai3-bench util health --uri "gs://bucket/"
+
+# List operations
+sai3-bench util list --uri "s3://bucket/prefix/"
+
+# Get/Put/Delete operations
+sai3-bench util get --uri "s3://bucket/*" --jobs 8
+sai3-bench util put --uri "file:///tmp/" --object-size 1024 --objects 100
+sai3-bench util delete --uri "s3://bucket/prefix/*"
+```
+
+#### Note on Utility Commands
+For comprehensive storage CLI operations, consider using `s3-cli` from the [s3dlio package](https://github.com/russfellows/s3dlio). The utility commands in sai3-bench are provided as convenience helpers for quick testing and validation.
+
+---
+
 ## [0.6.5] - 2025-10-11
 
 ### 🔍 Configuration Validation & Documentation Enhancements

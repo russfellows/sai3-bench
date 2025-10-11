@@ -59,12 +59,12 @@ s3://my-benchmark-bucket/test-data/object.dat
 
 #### Health Check
 ```bash
-sai3-bench health --uri "s3://my-benchmark-bucket/"
+sai3-bench util health --uri "s3://my-benchmark-bucket/"
 ```
 
 #### List Objects
 ```bash
-sai3-bench list --uri "s3://my-benchmark-bucket/test-data/"
+sai3-bench util list --uri "s3://my-benchmark-bucket/test-data/"
 ```
 
 #### Upload Objects
@@ -124,7 +124,7 @@ export AWS_ENDPOINT_URL="https://minio.example.com"
 export AWS_ACCESS_KEY_ID="minioadmin"
 export AWS_SECRET_ACCESS_KEY="minioadmin"
 
-sai3-bench health --uri "s3://my-bucket/"
+sai3-bench util health --uri "s3://my-bucket/"
 ```
 
 ### Performance Characteristics
@@ -200,12 +200,12 @@ az://mycontainer/test-data/
 export AZURE_STORAGE_ACCOUNT="mystorageaccount"
 export AZURE_STORAGE_ACCOUNT_KEY="$(az storage account keys list --account-name mystorageaccount --query [0].value -o tsv)"
 
-sai3-bench health --uri "az://mystorageaccount/mycontainer/"
+sai3-bench util health --uri "az://mystorageaccount/mycontainer/"
 ```
 
 #### List Objects
 ```bash
-sai3-bench list --uri "az://mystorageaccount/mycontainer/test-data/"
+sai3-bench util list --uri "az://mystorageaccount/mycontainer/test-data/"
 ```
 
 #### Upload Objects
@@ -320,12 +320,12 @@ gcs://my-gcs-bucket/test-data/
 # Ensure credentials are set
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
 
-sai3-bench health --uri "gs://my-gcs-bucket/"
+sai3-bench util health --uri "gs://my-gcs-bucket/"
 ```
 
 #### List Objects
 ```bash
-sai3-bench list --uri "gs://my-gcs-bucket/test-data/"
+sai3-bench util list --uri "gs://my-gcs-bucket/test-data/"
 ```
 
 #### Upload Objects

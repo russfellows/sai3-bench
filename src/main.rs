@@ -49,74 +49,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Verify storage backend reachability across all supported backends
-    /// 
-    /// Examples:
-    ///   sai3-bench health --uri "file:///tmp/test/"
-    ///   sai3-bench health --uri "s3://bucket/prefix/"
-    ///   sai3-bench health --uri "direct:///mnt/fast/"
-    ///   sai3-bench health --uri "az://storageaccount/container/"
-    Health {
-        #[arg(long)]
-        uri: String,
-    },
-    /// List objects (supports basename glob across all backends)
-    /// 
-    /// Examples:
-    ///   sai3-bench list --uri "file:///tmp/data/"
-    ///   sai3-bench list --uri "s3://bucket/prefix/"
-    ///   sai3-bench list --uri "direct:///mnt/data/*.txt"
-    List {
-        #[arg(long)]
-        uri: String,
-    },
-    /// Stat (HEAD) one object across all backends
-    /// 
-    /// Examples:
-    ///   sai3-bench stat --uri "file:///tmp/data/file.txt"
-    ///   sai3-bench stat --uri "s3://bucket/object.txt"
-    Stat {
-        #[arg(long)]
-        uri: String,
-    },
-    /// Get objects (prefix, glob, or single) from any backend
-    /// 
-    /// Examples:
-    ///   sai3-bench get --uri "file:///tmp/data/*" --jobs 8
-    ///   sai3-bench get --uri "s3://bucket/prefix/" --jobs 4
-    Get {
-        #[arg(long)]
-        uri: String,
-        #[arg(long, default_value_t = 4)]
-        jobs: usize,
-    },
-    /// Delete objects (prefix, glob, or single) from any backend
-    /// 
-    /// Examples:
-    ///   sai3-bench delete --uri "file:///tmp/old/*" --jobs 8
-    ///   sai3-bench delete --uri "s3://bucket/prefix/"
-    Delete {
-        #[arg(long)]
-        uri: String,
-        #[arg(long, default_value_t = 4)]
-        jobs: usize,
-    },
-    /// Put random-data objects to any backend
-    /// 
-    /// Examples:
-    ///   sai3-bench put --uri "file:///tmp/data/test*.dat" --objects 100
-    ///   sai3-bench put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
-    Put {
-        #[arg(long)]
-        uri: String,
-        #[arg(long, default_value_t = 1024)]
-        object_size: usize,
-        #[arg(long, default_value_t = 1)]
-        objects: usize,
-        #[arg(long, default_value_t = 4)]
-        concurrency: usize,
-    },
-    /// Run workload from config file
+    /// Run workload from config file (use --dry-run to validate config first)
     /// 
     /// Results are automatically exported to TSV file. Default filename:
     ///   sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv
@@ -188,6 +121,90 @@ enum Commands {
         #[arg(long)]
         continue_on_error: bool,
     },
+    /// Storage utility operations (for quick testing and validation)
+    /// 
+    /// These are helper commands for basic storage operations.
+    /// For comprehensive CLI operations, consider using s3-cli from the s3dlio package.
+    /// 
+    /// Examples:
+    ///   sai3-bench util health --uri "s3://bucket/"
+    ///   sai3-bench util list --uri "file:///tmp/data/"
+    ///   sai3-bench util get --uri "s3://bucket/prefix/*" --jobs 8
+    Util {
+        #[command(subcommand)]
+        command: UtilCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UtilCommands {
+    /// Verify storage backend reachability across all supported backends
+    /// 
+    /// Examples:
+    ///   sai3-bench util health --uri "file:///tmp/test/"
+    ///   sai3-bench util health --uri "s3://bucket/prefix/"
+    ///   sai3-bench util health --uri "direct:///mnt/fast/"
+    ///   sai3-bench util health --uri "az://storageaccount/container/"
+    Health {
+        #[arg(long)]
+        uri: String,
+    },
+    /// List objects (supports basename glob across all backends)
+    /// 
+    /// Examples:
+    ///   sai3-bench util list --uri "file:///tmp/data/"
+    ///   sai3-bench util list --uri "s3://bucket/prefix/"
+    ///   sai3-bench util list --uri "direct:///mnt/data/*.txt"
+    List {
+        #[arg(long)]
+        uri: String,
+    },
+    /// Stat (HEAD) one object across all backends
+    /// 
+    /// Examples:
+    ///   sai3-bench util stat --uri "file:///tmp/data/file.txt"
+    ///   sai3-bench util stat --uri "s3://bucket/object.txt"
+    Stat {
+        #[arg(long)]
+        uri: String,
+    },
+    /// Get objects (prefix, glob, or single) from any backend
+    /// 
+    /// Examples:
+    ///   sai3-bench util get --uri "file:///tmp/data/*" --jobs 8
+    ///   sai3-bench util get --uri "s3://bucket/prefix/" --jobs 4
+    Get {
+        #[arg(long)]
+        uri: String,
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+    },
+    /// Delete objects (prefix, glob, or single) from any backend
+    /// 
+    /// Examples:
+    ///   sai3-bench util delete --uri "file:///tmp/old/*" --jobs 8
+    ///   sai3-bench util delete --uri "s3://bucket/prefix/"
+    Delete {
+        #[arg(long)]
+        uri: String,
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+    },
+    /// Put random-data objects to any backend
+    /// 
+    /// Examples:
+    ///   sai3-bench util put --uri "file:///tmp/data/test*.dat" --objects 100
+    ///   sai3-bench util put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
+    Put {
+        #[arg(long)]
+        uri: String,
+        #[arg(long, default_value_t = 1024)]
+        object_size: usize,
+        #[arg(long, default_value_t = 1)]
+        objects: usize,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
 }
 
 // -----------------------------------------------------------------------------
@@ -224,19 +241,23 @@ fn main() -> Result<()> {
     
     // Execute command
     match cli.command {
-        Commands::Health { uri } => health_cmd(&uri)?,
-        Commands::List { uri } => list_cmd(&uri)?,
-        Commands::Stat { uri } => stat_cmd(&uri)?,
-        Commands::Get { uri, jobs } => get_cmd(&uri, jobs)?,
-        Commands::Delete { uri, jobs } => delete_cmd(&uri, jobs)?,
-        Commands::Put { uri, object_size, objects, concurrency } => {
-            put_cmd(&uri, object_size, objects, concurrency)?
-        }
         Commands::Run { config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
             run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error)?
+        }
+        Commands::Util { command } => {
+            match command {
+                UtilCommands::Health { uri } => health_cmd(&uri)?,
+                UtilCommands::List { uri } => list_cmd(&uri)?,
+                UtilCommands::Stat { uri } => stat_cmd(&uri)?,
+                UtilCommands::Get { uri, jobs } => get_cmd(&uri, jobs)?,
+                UtilCommands::Delete { uri, jobs } => delete_cmd(&uri, jobs)?,
+                UtilCommands::Put { uri, object_size, objects, concurrency } => {
+                    put_cmd(&uri, object_size, objects, concurrency)?
+                }
+            }
         }
     }
     

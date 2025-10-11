@@ -202,7 +202,7 @@ prepare:
 ### "No URIs found for pattern"
 - Ensure objects exist at the path
 - Check glob pattern syntax (use `*` for matching)
-- Verify backend connectivity with `sai3-bench health --uri <uri>`
+- Verify backend connectivity with `sai3-bench util health --uri <uri>`
 
 ### "Failed to parse config"
 - YAML indentation must be consistent (use spaces, not tabs)
