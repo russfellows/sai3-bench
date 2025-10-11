@@ -275,5 +275,5 @@ This is expected when DELETE operations remove objects that GET/STAT are trying 
 
 - [Main Documentation](../README.md)
 - [Configuration Guide](../docs/USAGE.md)
-- [Performance Tuning](../docs/PREPARE_PERFORMANCE_FIX.md)
-- [Pattern Resolution Fix](../docs/PATTERN_RESOLUTION_FIX.md)
+- [Distributed Testing Guide](../docs/DISTRIBUTED_TESTING_GUIDE.md)
+- [Changelog](../docs/CHANGELOG.md)

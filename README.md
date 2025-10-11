@@ -51,11 +51,11 @@ range_engine:
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
+- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation and testing
+- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 - **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
-- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
-- **[s3dlio v0.9.4 Migration Guide](docs/S3DLIO_V0.9.4_MIGRATION.md)** - RangeEngine details and upgrade guide
-- **[Test Results](docs/S3DLIO_V0.9.4_TEST_RESULTS.md)** - Comprehensive backend performance benchmarks
+- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - YAML configuration reference
 - **[Config Examples](tests/configs/README.md)** - Complete guide to test configurations
 
 ## 🏆 sai3-bench Capabilities Overview
@@ -181,10 +181,11 @@ A storage performance testing tool that supports multiple backends through a uni
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
+- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation and testing
+- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 - **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
-- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
-- **[Distributed Design](docs/V0.6.0_DISTRIBUTED_DESIGN.md)** - v0.6.0 distributed workload architecture
+- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - YAML configuration reference
 
 ## 🎊 Latest Release (v0.6.0) - Distributed Multi-Host Workload Execution
 
