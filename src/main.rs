@@ -698,9 +698,19 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
     
     info!("Configuration loaded successfully");
     
+    // Create results directory (v0.6.4+)
+    use sai3_bench::results_dir::ResultsDir;
+    let config_path_buf = std::path::PathBuf::from(config_path);
+    let mut results_dir = ResultsDir::create(&config_path_buf, tsv_name, None)
+        .context("Failed to create results directory")?;
+    
     println!("Running workload from: {}", config_path);
+    results_dir.write_console(&format!("Running workload from: {}", config_path))?;
+    
     if let Some(target) = &config.target {
-        println!("Target: {}", target);
+        let target_msg = format!("Target: {}", target);
+        println!("{}", target_msg);
+        results_dir.write_console(&target_msg)?;
         info!("Target backend: {}", target);
         
         // Log RangeEngine status for all backends
@@ -716,12 +726,20 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
             info!("RangeEngine DISABLED for {} backend (default for optimal performance)", backend.name());
         }
     }
-    println!("Duration: {:?}", config.duration);
-    println!("Concurrency: {} threads", config.concurrency);
+    let duration_msg = format!("Duration: {:?}", config.duration);
+    println!("{}", duration_msg);
+    results_dir.write_console(&duration_msg)?;
+    
+    let concurrency_msg = format!("Concurrency: {} threads", config.concurrency);
+    println!("{}", concurrency_msg);
+    results_dir.write_console(&concurrency_msg)?;
     
     // Calculate and display operation mix with percentages
     let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();
-    println!("\nOperation Mix ({} types):", config.workload.len());
+    let mix_header = format!("\nOperation Mix ({} types):", config.workload.len());
+    println!("{}", mix_header);
+    results_dir.write_console(&mix_header)?;
+    
     for weighted_op in &config.workload {
         let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
         let op_name = match &weighted_op.spec {
@@ -733,13 +751,15 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
         };
         
         // Show per-operation concurrency override if specified
-        if let Some(op_concurrency) = weighted_op.concurrency {
-            println!("  {} - {:.1}% (weight: {}, concurrency: {} threads)", 
-                op_name, percentage, weighted_op.weight, op_concurrency);
+        let op_msg = if let Some(op_concurrency) = weighted_op.concurrency {
+            format!("  {} - {:.1}% (weight: {}, concurrency: {} threads)", 
+                op_name, percentage, weighted_op.weight, op_concurrency)
         } else {
-            println!("  {} - {:.1}% (weight: {})", 
-                op_name, percentage, weighted_op.weight);
-        }
+            format!("  {} - {:.1}% (weight: {})", 
+                op_name, percentage, weighted_op.weight)
+        };
+        println!("{}", op_msg);
+        results_dir.write_console(&op_msg)?;
     }
     
     info!("Starting workload execution with {} operation types", config.workload.len());
@@ -749,10 +769,18 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
     // Verify-only mode: check that prepared objects exist and are accessible
     if verify {
         if let Some(ref prepare_config) = config.prepare {
-            println!("\n=== Verification Phase ===");
+            let verify_header = "\n=== Verification Phase ===";
+            println!("{}", verify_header);
+            results_dir.write_console(verify_header)?;
+            
             info!("Verifying prepared objects");
             rt.block_on(workload::verify_prepared_objects(prepare_config))?;
-            println!("\nVerification complete: all prepared objects are accessible");
+            
+            let verify_complete = "\nVerification complete: all prepared objects are accessible";
+            println!("{}", verify_complete);
+            results_dir.write_console(verify_complete)?;
+            
+            results_dir.finalize(0.0)?; // No wall time for verify-only
             return Ok(());
         } else {
             bail!("--verify requires 'prepare' section in config");
@@ -762,15 +790,24 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
     // Execute prepare step if configured and not skipped
     let prepared_objects = if !skip_prepare {
         if let Some(ref prepare_config) = config.prepare {
-            println!("\n=== Prepare Phase ===");
+            let prepare_header = "\n=== Prepare Phase ===";
+            println!("{}", prepare_header);
+            results_dir.write_console(prepare_header)?;
+            
             info!("Executing prepare step");
             let prepared = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
-            println!("Prepared {} objects", prepared.len());
+            
+            let prepared_msg = format!("Prepared {} objects", prepared.len());
+            println!("{}", prepared_msg);
+            results_dir.write_console(&prepared_msg)?;
             
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                 let delay_secs = prepare_config.post_prepare_delay;
-                println!("Waiting {}s for object propagation (configured delay)...", delay_secs);
+                let delay_msg = format!("Waiting {}s for object propagation (configured delay)...", delay_secs);
+                println!("{}", delay_msg);
+                results_dir.write_console(&delay_msg)?;
+                
                 info!("Delaying {}s for eventual consistency (post_prepare_delay from config)", delay_secs);
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
@@ -790,89 +827,162 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
             bail!("--prepare-only requires 'prepare' section in config");
         }
         info!("Prepare-only mode: objects created, exiting");
-        println!("\nPrepare-only mode: {} objects created, exiting", prepared_objects.len());
+        
+        let prepare_only_msg = format!("\nPrepare-only mode: {} objects created, exiting", prepared_objects.len());
+        println!("{}", prepare_only_msg);
+        results_dir.write_console(&prepare_only_msg)?;
+        
+        results_dir.finalize(0.0)?; // No wall time for prepare-only
         return Ok(());
     }
     
     // Always show preparation status
-    println!("\n=== Test Phase ===");
-    println!("Preparing workload...");
+    let test_header = "\n=== Test Phase ===";
+    println!("{}", test_header);
+    results_dir.write_console(test_header)?;
+    
+    let workload_msg = "Preparing workload...";
+    println!("{}", workload_msg);
+    results_dir.write_console(workload_msg)?;
     
     // Run the workload
     let summary = rt.block_on(workload::run(&config))?;
     
     // Print results
-    println!("\n=== Results ===");
-    println!("Configuration:");
-    println!("  Duration: {:.2}s", summary.wall_seconds);
-    println!("  Concurrency: {} threads", config.concurrency);
+    let results_header = "\n=== Results ===";
+    println!("{}", results_header);
+    results_dir.write_console(results_header)?;
+    
+    let config_header = "Configuration:";
+    println!("{}", config_header);
+    results_dir.write_console(config_header)?;
+    
+    let duration_msg = format!("  Duration: {:.2}s", summary.wall_seconds);
+    println!("{}", duration_msg);
+    results_dir.write_console(&duration_msg)?;
+    
+    let concurrency_msg = format!("  Concurrency: {} threads", config.concurrency);
+    println!("{}", concurrency_msg);
+    results_dir.write_console(&concurrency_msg)?;
     
     // Show actual operation distribution
-    println!("\nActual Operation Distribution:");
+    let dist_header = "\nActual Operation Distribution:";
+    println!("{}", dist_header);
+    results_dir.write_console(dist_header)?;
+    
     if summary.get.ops > 0 {
         let get_pct = (summary.get.ops as f64 / summary.total_ops as f64) * 100.0;
-        println!("  GET: {} ops ({:.1}%)", summary.get.ops, get_pct);
+        let get_msg = format!("  GET: {} ops ({:.1}%)", summary.get.ops, get_pct);
+        println!("{}", get_msg);
+        results_dir.write_console(&get_msg)?;
     }
     if summary.put.ops > 0 {
         let put_pct = (summary.put.ops as f64 / summary.total_ops as f64) * 100.0;
-        println!("  PUT: {} ops ({:.1}%)", summary.put.ops, put_pct);
+        let put_msg = format!("  PUT: {} ops ({:.1}%)", summary.put.ops, put_pct);
+        println!("{}", put_msg);
+        results_dir.write_console(&put_msg)?;
     }
     if summary.meta.ops > 0 {
         let meta_pct = (summary.meta.ops as f64 / summary.total_ops as f64) * 100.0;
-        println!("  META (LIST/STAT/DELETE): {} ops ({:.1}%)", summary.meta.ops, meta_pct);
+        let meta_msg = format!("  META (LIST/STAT/DELETE): {} ops ({:.1}%)", summary.meta.ops, meta_pct);
+        println!("{}", meta_msg);
+        results_dir.write_console(&meta_msg)?;
     }
     
-    println!("\nOverall Performance:");
-    println!("  Total ops: {}", summary.total_ops);
-    println!("  Total bytes: {} ({:.2} MiB)", summary.total_bytes, summary.total_bytes as f64 / 1_048_576.0);
-    println!("  Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
+    let overall_header = "\nOverall Performance:";
+    println!("{}", overall_header);
+    results_dir.write_console(overall_header)?;
+    
+    let total_ops_msg = format!("  Total ops: {}", summary.total_ops);
+    println!("{}", total_ops_msg);
+    results_dir.write_console(&total_ops_msg)?;
+    
+    let total_bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", summary.total_bytes, summary.total_bytes as f64 / 1_048_576.0);
+    println!("{}", total_bytes_msg);
+    results_dir.write_console(&total_bytes_msg)?;
+    
+    let throughput_msg = format!("  Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
+    println!("{}", throughput_msg);
+    results_dir.write_console(&throughput_msg)?;
     
     if summary.get.ops > 0 {
         let get_mib_s = (summary.get.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
-        println!("\nGET Performance:");
-        println!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MiB)", summary.get.bytes, summary.get.bytes as f64 / 1_048_576.0);
-        println!("  Throughput: {:.2} MiB/s", get_mib_s);
-        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+        
+        let get_header = "\nGET Performance:";
+        println!("{}", get_header);
+        results_dir.write_console(get_header)?;
+        
+        let get_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
+        println!("{}", get_ops_msg);
+        results_dir.write_console(&get_ops_msg)?;
+        
+        let get_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.get.bytes, summary.get.bytes as f64 / 1_048_576.0);
+        println!("{}", get_bytes_msg);
+        results_dir.write_console(&get_bytes_msg)?;
+        
+        let get_throughput_msg = format!("  Throughput: {:.2} MiB/s", get_mib_s);
+        println!("{}", get_throughput_msg);
+        results_dir.write_console(&get_throughput_msg)?;
+        
+        let get_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
             summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
+        println!("{}", get_latency_msg);
+        results_dir.write_console(&get_latency_msg)?;
     }
     
     if summary.put.ops > 0 {
         let put_mib_s = (summary.put.bytes as f64 / 1_048_576.0) / summary.wall_seconds;
-        println!("\nPUT Performance:");
-        println!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MiB)", summary.put.bytes, summary.put.bytes as f64 / 1_048_576.0);
-        println!("  Throughput: {:.2} MiB/s", put_mib_s);
-        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+        
+        let put_header = "\nPUT Performance:";
+        println!("{}", put_header);
+        results_dir.write_console(put_header)?;
+        
+        let put_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
+        println!("{}", put_ops_msg);
+        results_dir.write_console(&put_ops_msg)?;
+        
+        let put_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.put.bytes, summary.put.bytes as f64 / 1_048_576.0);
+        println!("{}", put_bytes_msg);
+        results_dir.write_console(&put_bytes_msg)?;
+        
+        let put_throughput_msg = format!("  Throughput: {:.2} MiB/s", put_mib_s);
+        println!("{}", put_throughput_msg);
+        results_dir.write_console(&put_throughput_msg)?;
+        
+        let put_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
             summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+        println!("{}", put_latency_msg);
+        results_dir.write_console(&put_latency_msg)?;
     }
     
     if summary.meta.ops > 0 {
-        println!("\nMETA-DATA Performance:");
-        println!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
-        println!("  Bytes: {} ({:.2} MiB)", summary.meta.bytes, summary.meta.bytes as f64 / 1_048_576.0);
-        println!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
+        let meta_header = "\nMETA-DATA Performance:";
+        println!("{}", meta_header);
+        results_dir.write_console(meta_header)?;
+        
+        let meta_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
+        println!("{}", meta_ops_msg);
+        results_dir.write_console(&meta_ops_msg)?;
+        
+        let meta_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.meta.bytes, summary.meta.bytes as f64 / 1_048_576.0);
+        println!("{}", meta_bytes_msg);
+        results_dir.write_console(&meta_bytes_msg)?;
+        
+        let meta_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
             summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+        println!("{}", meta_latency_msg);
+        results_dir.write_console(&meta_latency_msg)?;
     }
     
-    // Generate TSV filename: use custom name if provided, otherwise auto-generate
-    // (TsvExporter will add -results.tsv suffix)
-    let tsv_basename = if let Some(custom_name) = tsv_name {
-        custom_name.to_string()
-    } else {
-        use chrono::Local;
-        let timestamp = Local::now().format("%Y-%m-%d-%H%M%S");
-        let config_basename = std::path::Path::new(config_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        format!("sai3bench-{}-{}", timestamp, config_basename)
-    };
-    
-    // Export TSV results automatically
+    // Export TSV results to the results directory
     {
         use sai3_bench::tsv_export::TsvExporter;
-        let exporter = TsvExporter::new(&tsv_basename);
+        let tsv_path = results_dir.tsv_path();
+        let tsv_msg = format!("\nExporting results to: {}", tsv_path.display());
+        println!("{}", tsv_msg);
+        results_dir.write_console(&tsv_msg)?;
+        
+        let exporter = TsvExporter::with_path(&tsv_path)?;
         exporter.export_results(
             &summary.get_hists,
             &summary.put_hists,
@@ -882,18 +992,33 @@ fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepar
             &summary.meta_bins,
             summary.wall_seconds,
         )?;
-        // Note: Export message is printed by TsvExporter
+        
+        let export_complete_msg = format!("TSV results exported to: {}", tsv_path.display());
+        println!("{}", export_complete_msg);
+        results_dir.write_console(&export_complete_msg)?;
     }
     
     // Cleanup prepared objects if configured
     if let Some(ref prepare_config) = config.prepare {
         if prepare_config.cleanup && !prepared_objects.is_empty() {
-            println!("\n=== Cleanup Phase ===");
+            let cleanup_header = "\n=== Cleanup Phase ===";
+            println!("{}", cleanup_header);
+            results_dir.write_console(cleanup_header)?;
+            
             info!("Cleaning up prepared objects");
             rt.block_on(workload::cleanup_prepared_objects(&prepared_objects))?;
-            println!("Cleanup complete");
+            
+            let cleanup_msg = "Cleanup complete";
+            println!("{}", cleanup_msg);
+            results_dir.write_console(cleanup_msg)?;
         }
     }
+    
+    // Finalize results directory with metadata
+    results_dir.finalize(summary.wall_seconds)?;
+    
+    let final_msg = format!("\nResults saved to: {}", results_dir.path().display());
+    println!("{}", final_msg);
     
     Ok(())
 }

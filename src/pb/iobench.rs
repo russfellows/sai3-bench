@@ -99,6 +99,34 @@ pub struct WorkloadSummary {
     pub p95_us: u64,
     #[prost(uint64, tag = "10")]
     pub p99_us: u64,
+    /// v0.6.4: Agent results collection (inline for small results)
+    ///
+    /// Agent console output
+    #[prost(string, tag = "11")]
+    pub console_log: ::prost::alloc::string::String,
+    /// Agent metadata JSON
+    #[prost(string, tag = "12")]
+    pub metadata_json: ::prost::alloc::string::String,
+    /// TSV results data
+    #[prost(string, tag = "13")]
+    pub tsv_content: ::prost::alloc::string::String,
+    /// Local path where agent saved results
+    #[prost(string, tag = "14")]
+    pub results_path: ::prost::alloc::string::String,
+    /// Optional: path to operation log (not transferred)
+    #[prost(string, tag = "15")]
+    pub op_log_path: ::prost::alloc::string::String,
+    /// v0.6.4: HDR histogram data for accurate aggregation
+    ///
+    /// Serialized GET histograms (all size buckets)
+    #[prost(bytes = "vec", tag = "16")]
+    pub histogram_get: ::prost::alloc::vec::Vec<u8>,
+    /// Serialized PUT histograms (all size buckets)
+    #[prost(bytes = "vec", tag = "17")]
+    pub histogram_put: ::prost::alloc::vec::Vec<u8>,
+    /// Serialized META histograms (all size buckets)
+    #[prost(bytes = "vec", tag = "18")]
+    pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
 }
 /// Generated client implementations.
 pub mod agent_client {

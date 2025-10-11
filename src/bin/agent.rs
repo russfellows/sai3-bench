@@ -278,12 +278,32 @@ impl Agent for AgentSvc {
         debug!("Summary: {} ops, {} bytes, {:.2}s", 
                summary.total_ops, summary.total_bytes, summary.wall_seconds);
 
+        // v0.6.4: Create results directory and capture output
+        let (metadata_json, tsv_content, results_path, op_log_path, 
+             histogram_get, histogram_put, histogram_meta) = 
+            create_agent_results(&agent_id, &config_yaml, &summary)
+                .await
+                .map_err(|e| {
+                    error!("Failed to create agent results: {}", e);
+                    Status::internal(format!("Failed to create agent results: {}", e))
+                })?;
+
+        info!("Agent results saved to: {}", results_path);
+
         // Convert Summary to WorkloadSummary protobuf message
         Ok(Response::new(WorkloadSummary {
-            agent_id,
+            agent_id: agent_id.clone(),
             wall_seconds: summary.wall_seconds,
             total_ops: summary.total_ops,
             total_bytes: summary.total_bytes,
+            console_log: String::new(),  // Agent doesn't generate console output
+            metadata_json,
+            tsv_content,
+            results_path,
+            op_log_path: op_log_path.unwrap_or_default(),
+            histogram_get,
+            histogram_put,
+            histogram_meta,
             get: Some(OpAggregateMetrics {
                 bytes: summary.get.bytes,
                 ops: summary.get.ops,
@@ -313,6 +333,93 @@ impl Agent for AgentSvc {
             p99_us: summary.p99_us,
         }))
     }
+}
+
+/// Create agent results directory and capture output files (v0.6.4)
+/// Returns: (metadata_json, tsv_content, results_path, op_log_path, histogram_bytes)
+async fn create_agent_results(
+    agent_id: &str,
+    config_yaml: &str,
+    summary: &sai3_bench::workload::Summary,
+) -> anyhow::Result<(String, String, String, Option<String>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    use sai3_bench::results_dir::ResultsDir;
+    use sai3_bench::tsv_export::TsvExporter;
+    use std::fs;
+    use std::io::Write;
+    use hdrhistogram::serialization::{Serializer, V2Serializer};
+    
+    // Get PID for unique naming (prevents collisions when multiple agents run on same host)
+    let pid = std::process::id();
+    
+    // Write config to temp file so ResultsDir can copy it
+    let temp_config_path = std::env::temp_dir().join(format!("agent-{}-{}-config.yaml", agent_id, pid));
+    {
+        let mut temp_file = fs::File::create(&temp_config_path)?;
+        temp_file.write_all(config_yaml.as_bytes())?;
+    }
+    
+    // Create results directory in /tmp for agent (includes PID for uniqueness)
+    let agent_name = format!("{}-pid{}", agent_id, pid);
+    let results_base = std::env::temp_dir();
+    let mut results_dir = ResultsDir::create(
+        &temp_config_path,
+        Some(&agent_name),
+        Some(&results_base),
+    )?;
+    
+    // Clean up temp config file
+    let _ = fs::remove_file(&temp_config_path);
+    
+    // Write TSV export
+    let tsv_path = results_dir.tsv_path();
+    let exporter = TsvExporter::with_path(&tsv_path)?;
+    exporter.export_results(
+        &summary.get_hists,
+        &summary.put_hists,
+        &summary.meta_hists,
+        &summary.get_bins,
+        &summary.put_bins,
+        &summary.meta_bins,
+        summary.wall_seconds,
+    )?;
+    
+    // Note: Operation logs (--op-log) are not transferred via gRPC
+    // They remain on the agent's local filesystem if created
+    let op_log_path: Option<String> = None;  // Future: check for op-log file
+    
+    // Finalize results directory
+    results_dir.finalize(summary.wall_seconds)?;
+    
+    // Read back the files we need to transfer
+    let metadata_json = fs::read_to_string(results_dir.path().join("metadata.json"))?;
+    let tsv_content = fs::read_to_string(&tsv_path)?;
+    let results_path = results_dir.path().display().to_string();
+    
+    // Serialize histograms for accurate aggregation (v0.6.4)
+    let mut serializer = V2Serializer::new();
+    let mut get_hist_bytes = Vec::new();
+    let mut put_hist_bytes = Vec::new();
+    let mut meta_hist_bytes = Vec::new();
+    
+    // Serialize each histogram type
+    for bucket_hist in summary.get_hists.buckets.iter() {
+        let hist = bucket_hist.lock().unwrap();
+        serializer.serialize(&*hist, &mut get_hist_bytes)
+            .context("Failed to serialize GET histogram")?;
+    }
+    for bucket_hist in summary.put_hists.buckets.iter() {
+        let hist = bucket_hist.lock().unwrap();
+        serializer.serialize(&*hist, &mut put_hist_bytes)
+            .context("Failed to serialize PUT histogram")?;
+    }
+    for bucket_hist in summary.meta_hists.buckets.iter() {
+        let hist = bucket_hist.lock().unwrap();
+        serializer.serialize(&*hist, &mut meta_hist_bytes)
+            .context("Failed to serialize META histogram")?;
+    }
+    
+    Ok((metadata_json, tsv_content, results_path, op_log_path, 
+         get_hist_bytes, put_hist_bytes, meta_hist_bytes))
 }
 
 fn to_status<E: std::fmt::Display>(e: E) -> Status {
