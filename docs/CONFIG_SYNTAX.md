@@ -2,6 +2,45 @@
 
 This document defines the correct YAML syntax for sai3-bench workload configurations.
 
+## Configuration Validation
+
+Before running a workload, validate your YAML config file with the `--dry-run` flag:
+
+```bash
+# Parse config and display test summary (no execution)
+sai3-bench run --config my-workload.yaml --dry-run
+```
+
+This will:
+- ✅ Parse and validate YAML syntax
+- ✅ Check for required fields and correct data types
+- ✅ Display test configuration summary (duration, concurrency, backend)
+- ✅ Show prepare phase details (if configured)
+- ✅ List all workload operations with weights and percentages
+- ✅ Report any configuration errors with clear messages
+
+**Example output**:
+```
+✅ Config file parsed successfully: my-workload.yaml
+
+┌─ Test Configuration ────────────────────────────────────────┐
+│ Duration:     60s
+│ Concurrency:  32 threads
+│ Target URI:   s3://my-bucket/test/
+│ Backend:      S3
+└─────────────────────────────────────────────────────────────┘
+
+┌─ Workload Operations ───────────────────────────────────────┐
+│ 2 operation types, total weight: 100
+│
+│ Op 1: GET - 70.0% (weight: 70)
+│       path: data/*
+│
+│ Op 2: PUT - 30.0% (weight: 30)
+│       path: output/, size: 1048576 bytes
+└─────────────────────────────────────────────────────────────┘
+```
+
 ## Basic Structure
 
 ```yaml
@@ -417,6 +456,6 @@ workload:
 ## See Also
 
 - [Usage Guide](USAGE.md) - Getting started with sai3-bench
+- [Data Generation Guide](DATA_GENERATION.md) - Fill patterns, deduplication, and compression testing
 - [Examples Directory](../examples/) - Complete example configurations
-- [Pattern Resolution Fix](PATTERN_RESOLUTION_FIX.md) - Technical details of pattern resolution
 - [CHANGELOG](CHANGELOG.md) - Version history and breaking changes

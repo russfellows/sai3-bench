@@ -8,9 +8,9 @@
 - **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.4)
+- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.5)
 - **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
-- **[WARP_PARITY_STATUS.md](WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
+- **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
 
 ## Development Documentation
 
@@ -29,8 +29,8 @@
 - Kept v0.6.4 implementation summaries for current release context
 
 **Documentation Structure**:
-- **9 total files** (down from 24)
-- **User-facing docs**: 6 files for end users
+- **10 total files** (down from 24)
+- **User-facing docs**: 7 files for end users
 - **Development docs**: 2 files for implementation reference
 - **Index**: This README
 

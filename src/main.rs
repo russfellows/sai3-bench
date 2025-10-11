@@ -123,6 +123,7 @@ enum Commands {
     /// 
     /// Examples:
     ///   sai3-bench run --config mixed.yaml
+    ///   sai3-bench run --config mixed.yaml --dry-run
     ///   sai3-bench run --config mixed.yaml --prepare-only
     ///   sai3-bench run --config mixed.yaml --verify
     ///   sai3-bench run --config mixed.yaml --skip-prepare
@@ -131,6 +132,10 @@ enum Commands {
     Run {
         #[arg(long)]
         config: String,
+        
+        /// Parse and validate config, display test summary, then exit (no execution)
+        #[arg(long)]
+        dry_run: bool,
         
         /// Only execute prepare step, then exit (for pre-populating test data)
         #[arg(long)]
@@ -227,8 +232,8 @@ fn main() -> Result<()> {
         Commands::Put { uri, object_size, objects, concurrency } => {
             put_cmd(&uri, object_size, objects, concurrency)?
         }
-        Commands::Run { config, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
-            run_workload(&config, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
+        Commands::Run { config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
+            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error)?
@@ -668,15 +673,166 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
 }
 
 // -----------------------------------------------------------------------------
-// Workload execution
+// Config validation and summary display (--dry-run)
 // -----------------------------------------------------------------------------
-fn run_workload(config_path: &str, prepare_only: bool, verify: bool, skip_prepare: bool, no_cleanup: bool, tsv_name: Option<&str>) -> Result<()> {
+fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
+    use sai3_bench::size_generator::SizeGenerator;
+    
+    println!("╔═══════════════════════════════════════════════════════════════════════╗");
+    println!("║           CONFIGURATION VALIDATION & TEST SUMMARY                    ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("✅ Config file parsed successfully: {}", config_path);
+    println!();
+    
+    // Basic configuration
+    println!("┌─ Test Configuration ─────────────────────────────────────────────────┐");
+    println!("│ Duration:     {:?}", config.duration);
+    println!("│ Concurrency:  {} threads", config.concurrency);
+    if let Some(ref target) = config.target {
+        let backend = sai3_bench::workload::BackendType::from_uri(target);
+        println!("│ Target URI:   {}", target);
+        println!("│ Backend:      {}", backend.name());
+    } else {
+        println!("│ Target URI:   (not set - using absolute URIs in operations)");
+    }
+    println!("└──────────────────────────────────────────────────────────────────────┘");
+    println!();
+    
+    // RangeEngine configuration
+    if let Some(ref range_config) = config.range_engine {
+        println!("┌─ RangeEngine Configuration ──────────────────────────────────────────┐");
+        println!("│ Enabled:      {}", if range_config.enabled { "✅ YES" } else { "❌ NO" });
+        if range_config.enabled {
+            let min_mb = range_config.min_split_size / (1024 * 1024);
+            let chunk_mb = range_config.chunk_size / (1024 * 1024);
+            println!("│ Min Size:     {} MiB (files >= this use concurrent range downloads)", min_mb);
+            println!("│ Chunk Size:   {} MiB per range request", chunk_mb);
+            println!("│ Max Ranges:   {} concurrent ranges per file", range_config.max_concurrent_ranges);
+        }
+        println!("└──────────────────────────────────────────────────────────────────────┘");
+        println!();
+    }
+    
+    // Prepare configuration
+    if let Some(ref prepare) = config.prepare {
+        println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
+        println!("│ Objects will be created BEFORE test execution");
+        println!("│");
+        
+        for (idx, spec) in prepare.ensure_objects.iter().enumerate() {
+            println!("│ Section {}:", idx + 1);
+            println!("│   URI:              {}", spec.base_uri);
+            println!("│   Count:            {} objects", spec.count);
+            
+            // Display size information
+            if let Some(ref size_spec) = spec.size_spec {
+                let generator = SizeGenerator::new(size_spec)?;
+                println!("│   Size:             {}", generator.description());
+            } else if let (Some(min), Some(max)) = (spec.min_size, spec.max_size) {
+                if min == max {
+                    println!("│   Size:             {} bytes (fixed)", min);
+                } else {
+                    println!("│   Size:             {} - {} bytes (uniform)", min, max);
+                }
+            }
+            
+            // Display fill pattern
+            println!("│   Fill Pattern:     {:?}", spec.fill);
+            if matches!(spec.fill, sai3_bench::config::FillPattern::Random) {
+                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, 
+                    if spec.dedup_factor == 1 { "all unique" } else { &format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) });
+                println!("│   Compress Factor:  {} ({})", spec.compress_factor,
+                    if spec.compress_factor == 1 { "uncompressible" } else { &format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) });
+            }
+            
+            if idx < prepare.ensure_objects.len() - 1 {
+                println!("│");
+            }
+        }
+        
+        println!("│");
+        println!("│ Cleanup:            {}", if prepare.cleanup { "✅ YES (delete after test)" } else { "❌ NO (keep objects)" });
+        if prepare.post_prepare_delay > 0 {
+            println!("│ Post-Prepare Delay: {}s (eventual consistency wait)", prepare.post_prepare_delay);
+        }
+        println!("└──────────────────────────────────────────────────────────────────────┘");
+        println!();
+    }
+    
+    // Workload operations
+    println!("┌─ Workload Operations ────────────────────────────────────────────────┐");
+    let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();
+    println!("│ {} operation types, total weight: {}", config.workload.len(), total_weight);
+    println!("│");
+    
+    for (idx, weighted_op) in config.workload.iter().enumerate() {
+        let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
+        
+        let (op_name, details) = match &weighted_op.spec {
+            sai3_bench::config::OpSpec::Get { path } => {
+                ("GET", format!("path: {}", path))
+            },
+            sai3_bench::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor } => {
+                let mut details = format!("path: {}", path);
+                if let Some(ref spec) = size_spec {
+                    let generator = SizeGenerator::new(spec)?;
+                    details.push_str(&format!(", size: {}", generator.description()));
+                } else if let Some(size) = object_size {
+                    details.push_str(&format!(", size: {} bytes", size));
+                }
+                details.push_str(&format!(", dedup: {}, compress: {}", dedup_factor, compress_factor));
+                ("PUT", details)
+            },
+            sai3_bench::config::OpSpec::List { path } => {
+                ("LIST", format!("path: {}", path))
+            },
+            sai3_bench::config::OpSpec::Stat { path } => {
+                ("STAT", format!("path: {}", path))
+            },
+            sai3_bench::config::OpSpec::Delete { path } => {
+                ("DELETE", format!("path: {}", path))
+            },
+        };
+        
+        println!("│ Op {}: {} - {:.1}% (weight: {})", idx + 1, op_name, percentage, weighted_op.weight);
+        println!("│       {}", details);
+        
+        if let Some(concurrency) = weighted_op.concurrency {
+            println!("│       concurrency override: {} threads", concurrency);
+        }
+        
+        if idx < config.workload.len() - 1 {
+            println!("│");
+        }
+    }
+    
+    println!("└──────────────────────────────────────────────────────────────────────┘");
+    println!();
+    
+    // Summary
+    println!("✅ Configuration is valid and ready to run");
+    println!();
+    println!("To execute this test, run:");
+    println!("  sai3-bench run --config {}", config_path);
+    println!();
+    
+    Ok(())
+}
+
+fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bool, skip_prepare: bool, no_cleanup: bool, tsv_name: Option<&str>) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
     
     let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+    
+    // Dry-run mode: display config summary and exit
+    if dry_run {
+        display_config_summary(&config, config_path)?;
+        return Ok(());
+    }
     
     // Validate flag combinations
     if prepare_only && verify {
