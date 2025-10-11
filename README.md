@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.5-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,9 +8,9 @@
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.6) for multi-protocol support.
 
-> **Latest (v0.6.4)**: Enhanced output with automatic results directories and HDR histogram merging for distributed workloads. All test results are now captured in timestamped directories with mathematically accurate consolidated metrics. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.5)**: Added config validation with `--dry-run` flag, comprehensive data generation documentation, and improved fill pattern recommendations. All configs can now be validated before execution with detailed test summaries. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
-> **Previous (v0.6.3)**: Upgraded to s3dlio v0.9.6 which **disables RangeEngine by default** for optimal performance on typical workloads. This resolves a 20-25% performance regression caused by HEAD request overhead. RangeEngine can still be explicitly enabled for large-file workloads (≥64 MiB).
+> **Previous (v0.6.4)**: Enhanced output with automatic results directories and HDR histogram merging for distributed workloads. All test results are now captured in timestamped directories with mathematically accurate consolidated metrics.
 
 ## 🚀 What Makes sai3-bench Unique?
 
@@ -51,11 +51,11 @@ range_engine:
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
-- **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
+- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation and testing
+- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
+- **[Data Generation Guide](docs/DATA_GENERATION.md)** - Fill patterns, deduplication, and compression testing
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
-- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
-- **[s3dlio v0.9.4 Migration Guide](docs/S3DLIO_V0.9.4_MIGRATION.md)** - RangeEngine details and upgrade guide
-- **[Test Results](docs/S3DLIO_V0.9.4_TEST_RESULTS.md)** - Comprehensive backend performance benchmarks
+- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - YAML configuration reference
 - **[Config Examples](tests/configs/README.md)** - Complete guide to test configurations
 
 ## 🏆 sai3-bench Capabilities Overview
@@ -181,10 +181,11 @@ A storage performance testing tool that supports multiple backends through a uni
 
 ## 📖 Documentation
 - **[Usage Guide](docs/USAGE.md)** - Getting started with sai3-bench
-- **[Warp Parity Status](docs/WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status
+- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation and testing
+- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
+- **[Data Generation Guide](docs/DATA_GENERATION.md)** - Fill patterns, deduplication, and compression testing
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history and release notes
-- **[Azure Setup Guide](docs/AZURE_SETUP.md)** - Azure Blob Storage configuration
-- **[Distributed Design](docs/V0.6.0_DISTRIBUTED_DESIGN.md)** - v0.6.0 distributed workload architecture
+- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - YAML configuration reference
 
 ## 🎊 Latest Release (v0.6.0) - Distributed Multi-Host Workload Execution
 
@@ -495,6 +496,9 @@ cargo build --release
 # Test local filesystem
 ./target/release/sai3-bench health --uri "file:///tmp/test/"
 ./target/release/sai3-bench put --uri "file:///tmp/test/data*.txt" --object-size 1024 --objects 100
+
+# Validate config file before running (parse check + test summary)
+./target/release/sai3-bench run --config my-workload.yaml --dry-run
 
 # Capture workload with op-log
 ./target/release/sai3-bench --op-log /tmp/workload.tsv.zst \

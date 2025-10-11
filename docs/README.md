@@ -1,31 +1,38 @@
 # Documentation Directory
 
-## Active Documentation
+## User Documentation
 
-### User Guides
-- **[USAGE.md](USAGE.md)** - Getting started guide for distributed agent/controller mode
-- **[AZURE_SETUP.md](AZURE_SETUP.md)** - Azure Blob Storage authentication and configuration
+### Getting Started
+- **[USAGE.md](USAGE.md)** - Primary user guide for single-node and distributed modes
+- **[DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation guide
+- **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history with all releases
-- **[WARP_PARITY_STATUS.md](WARP_PARITY_STATUS.md)** - Warp/warp-replay compatibility status (95% complete)
+- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.5)
+- **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
+- **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
 
-### Recent Implementation Records (v0.5.x)
-- **[V0.5.0_IMPLEMENTATION_SUMMARY.md](V0.5.0_IMPLEMENTATION_SUMMARY.md)** - Advanced replay remapping implementation
-- **[V0.5.1_PROGRESS.md](V0.5.1_PROGRESS.md)** - TSV export and enhanced metrics validation
-- **[POLARWARP_ANALYSIS.md](POLARWARP_ANALYSIS.md)** - Reference analysis of polarWarp TSV format
+## Development Documentation
 
-### Example Configurations
-- **[CONFIG.sample.yaml](CONFIG.sample.yaml)** - Sample workload configuration
-- **[multi-backend-config.yaml](multi-backend-config.yaml)** - Multi-protocol example config
+### Implementation Summaries
+- **[V0.6.4_MULTIHOST_SUMMARY.md](V0.6.4_MULTIHOST_SUMMARY.md)** - v0.6.4 results directory implementation
+- **[V0.6.4_TESTING_SUMMARY.md](V0.6.4_TESTING_SUMMARY.md)** - v0.6.4 HDR histogram merging tests
 
 ## Maintenance
 
-**Last Cleanup**: October 4, 2025 (v0.5.2)
-- Removed 11 obsolete files (old release notes, completed plans, and design docs)
+**Last Cleanup**: October 11, 2025 (v0.6.4)
+- Removed 15 obsolete files (old release notes, completed plans, and outdated design docs)
 - Consolidated version history into CHANGELOG.md
-- Kept recent implementation summaries (v0.5.x) for reference
-- Updated USAGE.md with correct binary names (io-bench, sai3bench-agent, sai3bench-ctl)
+- Added DISTRIBUTED_TESTING_GUIDE.md for multi-host testing
+- Replaced AZURE_SETUP.md with comprehensive CLOUD_STORAGE_SETUP.md (S3 + Azure + GCS)
+- Removed s3dlio v0.9.4 migration docs (info now in CHANGELOG)
+- Kept v0.6.4 implementation summaries for current release context
+
+**Documentation Structure**:
+- **10 total files** (down from 24)
+- **User-facing docs**: 7 files for end users
+- **Development docs**: 2 files for implementation reference
+- **Index**: This README
 
 **Cleanup Policy**:
 - All release information goes into CHANGELOG.md (single source of truth)

@@ -2,6 +2,58 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.5] - 2025-10-11
+
+### 🔍 Configuration Validation & Documentation Enhancements
+
+**Config Validation with --dry-run**: Added comprehensive configuration validation and test summary display before execution. Users can now verify YAML syntax, validate configuration structure, and preview test details without running the workload.
+
+#### Core Features
+- **`--dry-run` Flag**: Parse and validate config with detailed summary display
+  - ✅ YAML syntax validation with clear error messages
+  - ✅ Configuration structure and required fields verification
+  - ✅ Test summary with duration, concurrency, backend detection
+  - ✅ Prepare phase details (size distributions, fill patterns, dedup/compress factors)
+  - ✅ Workload operations with weight percentages and concurrency overrides
+  - ✅ RangeEngine configuration display (when enabled)
+  
+- **Data Generation Documentation**: Created comprehensive DATA_GENERATION.md guide
+  - Fill pattern recommendations: **Use `fill: random` for realistic storage testing**
+  - Clear explanation: `fill: zero` produces artificially high compression ratios
+  - Deduplication and compression factor documentation with examples
+  - Implementation details showing exact Rust code paths
+
+- **Documentation Cleanup**: Removed outdated WARP_PARITY_STATUS.md
+  - File was feature-planning focused and out of date
+  - References removed from README.md and docs/README.md
+
+#### Usage Examples
+```bash
+# Validate config before running
+sai3-bench run --config my-workload.yaml --dry-run
+
+# Example output shows:
+# - Test configuration (duration, concurrency, backend)
+# - Prepare phase details (if configured)
+# - Workload operations with percentages
+# - Configuration validation status
+```
+
+#### Files Changed
+- `src/main.rs` - Added `--dry-run` flag and `display_config_summary()` function
+- `docs/DATA_GENERATION.md` - NEW: Comprehensive data generation guide (165 lines)
+- `docs/CONFIG_SYNTAX.md` - Added configuration validation section with examples
+- `README.md` - Added --dry-run to Quick Start, updated documentation links
+- `docs/README.md` - Updated to v0.6.5, added DATA_GENERATION.md reference
+- `docs/WARP_PARITY_STATUS.md` - REMOVED (outdated)
+
+#### Testing
+- Validated with `tests/configs/mixed.yaml` - Basic GET/PUT operations
+- Validated with `tests/configs/size_distributions_test.yaml` - Prepare phase with distributions
+- Validated with `tests/configs/per_op_concurrency_test.yaml` - Per-operation concurrency
+- Validated with `tests/configs/dedupe_compress_test.yaml` - Random fill with dedup/compress
+- Error handling verified with invalid YAML and incomplete configs
+
 ## [0.6.4] - 2025-10-11
 
 ### 🎯 Enhanced Output with HDR Histogram Merging

@@ -223,6 +223,6 @@ prepare:
 
 ## See Also
 
-- [S3DLIO_V0.9.4_MIGRATION.md](../../docs/S3DLIO_V0.9.4_MIGRATION.md) - Migration guide
-- [S3DLIO_V0.9.4_TEST_RESULTS.md](../../docs/S3DLIO_V0.9.4_TEST_RESULTS.md) - Test results
-- [CONFIG.sample.yaml](../../docs/CONFIG.sample.yaml) - Detailed configuration reference
+- [DISTRIBUTED_TESTING_GUIDE.md](../../docs/DISTRIBUTED_TESTING_GUIDE.md) - Multi-host testing guide
+- [CONFIG_SYNTAX.md](../../docs/CONFIG_SYNTAX.md) - YAML configuration reference
+- [USAGE.md](../../docs/USAGE.md) - Getting started guide
