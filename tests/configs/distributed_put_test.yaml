@@ -1,0 +1,14 @@
+# Test config for distributed PUT operations
+# Simple PUT workload without path templating
+# Kept small to avoid filling disk during testing
+
+target: "file:///tmp/sai3bench-test/"
+
+workload:
+  - op: put
+    path: "data/"
+    weight: 100
+    object_size: 4096  # 4 KiB - small objects for testing
+
+concurrency: 4  # Reduced concurrency
+duration: 2s  # Short duration

@@ -9,6 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info};
 
+// Results directory for v0.6.4+
+use sai3_bench::results_dir::ResultsDir;
+
 pub mod pb {
     pub mod iobench {
         include!("../pb/iobench.rs");
@@ -276,6 +279,14 @@ async fn run_distributed_workload(
     debug!("Path template: {}", path_template);
     debug!("Start delay: {}s", start_delay_secs);
     
+    // Create results directory for distributed run (v0.6.4+)
+    let mut results_dir = ResultsDir::create(config_path, None, None)
+        .context("Failed to create results directory for distributed run")?;
+    
+    // Mark as distributed and create agents subdirectory
+    let agents_dir = results_dir.create_agents_dir()?;
+    info!("Created agents directory: {}", agents_dir.display());
+    
     // Read YAML configuration
     let config_yaml = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
@@ -296,12 +307,28 @@ async fn run_distributed_workload(
         is_shared
     };
 
-    println!("=== Distributed Workload ===");
-    println!("Config: {}", config_path.display());
-    println!("Agents: {}", agent_addrs.len());
-    println!("Start delay: {}s", start_delay_secs);
-    println!("Storage mode: {}", if is_shared_storage { "shared (S3/GCS/Azure/NFS)" } else { "local (per-agent)" });
+    let header = "=== Distributed Workload ===";
+    println!("{}", header);
+    results_dir.write_console(header)?;
+    
+    let config_msg = format!("Config: {}", config_path.display());
+    println!("{}", config_msg);
+    results_dir.write_console(&config_msg)?;
+    
+    let agents_msg = format!("Agents: {}", agent_addrs.len());
+    println!("{}", agents_msg);
+    results_dir.write_console(&agents_msg)?;
+    
+    let delay_msg = format!("Start delay: {}s", start_delay_secs);
+    println!("{}", delay_msg);
+    results_dir.write_console(&delay_msg)?;
+    
+    let storage_msg = format!("Storage mode: {}", if is_shared_storage { "shared (S3/GCS/Azure/NFS)" } else { "local (per-agent)" });
+    println!("{}", storage_msg);
+    results_dir.write_console(&storage_msg)?;
+    
     println!();
+    results_dir.write_console("")?;
 
     // Generate agent IDs
     let ids: Vec<String> = if let Some(custom_ids) = agent_ids {
@@ -325,6 +352,11 @@ async fn run_distributed_workload(
             agent_addrs.len()
         );
     }
+    
+    // Register agents in metadata
+    for (idx, agent_id) in ids.iter().enumerate() {
+        results_dir.add_agent(format!("{} ({})", agent_id, agent_addrs[idx]));
+    }
 
     // Calculate coordinated start time (N seconds in the future)
     let start_time = SystemTime::now() + Duration::from_secs(start_delay_secs);
@@ -335,6 +367,10 @@ async fn run_distributed_workload(
     debug!("Coordinated start time: {} ns since epoch", start_ns);
 
     // Send workload to all agents in parallel
+    let msg = format!("Sending workload to {} agents...", agent_addrs.len());
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
+    
     let mut handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
@@ -379,7 +415,6 @@ async fn run_distributed_workload(
         handles.push(handle);
     }
 
-    println!("Sending workload to {} agents...", handles.len());
     info!("Waiting for {} agents to complete workload", handles.len());
     
     // Wait for all agents to complete
@@ -388,73 +423,113 @@ async fn run_distributed_workload(
         match handle.await {
             Ok(Ok(summary)) => {
                 info!("Agent {} ({}) completed successfully", ids[idx], agent_addrs[idx]);
-                println!("✓ Agent {} completed", ids[idx]);
+                let msg = format!("✓ Agent {} completed", ids[idx]);
+                println!("{}", msg);
+                results_dir.write_console(&msg)?;
                 summaries.push(summary);
             }
             Ok(Err(e)) => {
                 error!("Agent {} ({}) failed: {:?}", ids[idx], agent_addrs[idx], e);
-                eprintln!("✗ Agent {} failed: {}", ids[idx], e);
+                let msg = format!("✗ Agent {} failed: {}", ids[idx], e);
+                eprintln!("{}", msg);
+                results_dir.write_console(&msg)?;
                 anyhow::bail!("Agent {} failed: {}", ids[idx], e);
             }
             Err(e) => {
                 error!("Agent {} ({}) join error: {:?}", ids[idx], agent_addrs[idx], e);
-                eprintln!("✗ Agent {} join error: {}", ids[idx], e);
+                let msg = format!("✗ Agent {} join error: {}", ids[idx], e);
+                eprintln!("{}", msg);
+                results_dir.write_console(&msg)?;
                 anyhow::bail!("Agent {} join error: {}", ids[idx], e);
             }
         }
     }
 
-    info!("All {} agents completed successfully", summaries.len());
+    let msg = format!("All {} agents completed successfully", summaries.len());
+    info!("{}", msg);
+    results_dir.write_console(&msg)?;
 
     // Display results
-    print_distributed_results(&summaries);
+    print_distributed_results(&summaries, &mut results_dir)?;
+
+    // Finalize results directory with max wall time
+    let max_wall = summaries
+        .iter()
+        .map(|s| s.wall_seconds)
+        .fold(0.0f64, f64::max);
+    
+    results_dir.finalize(max_wall)?;
+    let msg = format!("\nResults saved to: {}", results_dir.path().display());
+    println!("{}", msg);
 
     Ok(())
 }
 
 /// Print aggregated results from all agents
-fn print_distributed_results(summaries: &[WorkloadSummary]) {
-    println!("\n=== Distributed Results ===");
-    println!("Total agents: {}", summaries.len());
+fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut ResultsDir) -> anyhow::Result<()> {
+    let msg = "\n=== Distributed Results ===".to_string();
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
+    
+    let msg = format!("Total agents: {}", summaries.len());
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
 
     // Per-agent results
     for summary in summaries {
-        println!("\n--- Agent: {} ---", summary.agent_id);
-        println!("  Wall time: {:.2}s", summary.wall_seconds);
-        println!("  Total ops: {} ({:.2} ops/s)", 
+        let msg = format!("\n--- Agent: {} ---", summary.agent_id);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Wall time: {:.2}s", summary.wall_seconds);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total ops: {} ({:.2} ops/s)", 
                  summary.total_ops, 
                  summary.total_ops as f64 / summary.wall_seconds);
-        println!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
                  summary.total_bytes as f64 / 1_048_576.0,
                  (summary.total_bytes as f64 / 1_048_576.0) / summary.wall_seconds);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
         
         if let Some(ref get) = summary.get {
             if get.ops > 0 {
-                println!("  GET: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
+                let msg = format!("  GET: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
                          get.ops,
                          get.bytes as f64 / 1_048_576.0,
                          get.mean_us,
                          get.p95_us);
+                println!("{}", msg);
+                results_dir.write_console(&msg)?;
             }
         }
         
         if let Some(ref put) = summary.put {
             if put.ops > 0 {
-                println!("  PUT: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
+                let msg = format!("  PUT: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
                          put.ops,
                          put.bytes as f64 / 1_048_576.0,
                          put.mean_us,
                          put.p95_us);
+                println!("{}", msg);
+                results_dir.write_console(&msg)?;
             }
         }
         
         if let Some(ref meta) = summary.meta {
             if meta.ops > 0 {
-                println!("  META: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
+                let msg = format!("  META: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
                          meta.ops,
                          meta.bytes as f64 / 1_048_576.0,
                          meta.mean_us,
                          meta.p95_us);
+                println!("{}", msg);
+                results_dir.write_console(&msg)?;
             }
         }
     }
@@ -475,36 +550,69 @@ fn print_distributed_results(summaries: &[WorkloadSummary]) {
 
     let meta_ops: u64 = summaries.iter().filter_map(|s| s.meta.as_ref().map(|m| m.ops)).sum();
 
-    println!("\n=== Aggregate Totals ===");
-    println!("Total ops: {} ({:.2} ops/s)", 
+    let msg = "\n=== Aggregate Totals ===".to_string();
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
+    
+    let msg = format!("Total ops: {} ({:.2} ops/s)", 
              total_ops, 
              total_ops as f64 / max_wall);
-    println!("Total bytes: {:.2} MB ({:.2} MiB/s)", 
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
+    
+    let msg = format!("Total bytes: {:.2} MB ({:.2} MiB/s)", 
              total_bytes as f64 / 1_048_576.0,
              (total_bytes as f64 / 1_048_576.0) / max_wall);
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
     
     if get_ops > 0 {
-        println!("\nGET aggregate:");
-        println!("  Total ops: {} ({:.2} ops/s)", get_ops, get_ops as f64 / max_wall);
-        println!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
+        let msg = "\nGET aggregate:".to_string();
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total ops: {} ({:.2} ops/s)", get_ops, get_ops as f64 / max_wall);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
                  get_bytes as f64 / 1_048_576.0,
                  (get_bytes as f64 / 1_048_576.0) / max_wall);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
     }
     
     if put_ops > 0 {
-        println!("\nPUT aggregate:");
-        println!("  Total ops: {} ({:.2} ops/s)", put_ops, put_ops as f64 / max_wall);
-        println!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
+        let msg = "\nPUT aggregate:".to_string();
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total ops: {} ({:.2} ops/s)", put_ops, put_ops as f64 / max_wall);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
                  put_bytes as f64 / 1_048_576.0,
                  (put_bytes as f64 / 1_048_576.0) / max_wall);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
     }
     
     if meta_ops > 0 {
-        println!("\nMETA aggregate:");
-        println!("  Total ops: {} ({:.2} ops/s)", meta_ops, meta_ops as f64 / max_wall);
+        let msg = "\nMETA aggregate:".to_string();
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("  Total ops: {} ({:.2} ops/s)", meta_ops, meta_ops as f64 / max_wall);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
     }
 
-    println!("\n✅ Distributed workload complete!");
+    let msg = "\n✅ Distributed workload complete!".to_string();
+    println!("{}", msg);
+    results_dir.write_console(&msg)?;
+    
+    Ok(())
 }
 
 /// Detect if storage is shared based on URI scheme
