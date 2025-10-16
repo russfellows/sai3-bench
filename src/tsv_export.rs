@@ -49,13 +49,19 @@ impl TsvExporter {
             "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount"
         )?;
 
-        // Collect all rows first
+        // Collect all rows first (including per-bucket and aggregate rows)
         let mut rows = Vec::new();
         self.collect_op_buckets(&mut rows, "GET", get_hists, get_bins, wall_seconds)?;
         self.collect_op_buckets(&mut rows, "PUT", put_hists, put_bins, wall_seconds)?;
         self.collect_op_buckets(&mut rows, "META", meta_hists, meta_bins, wall_seconds)?;
 
-        // Sort by bucket_idx (field 2)
+        // Add aggregate summary rows with operation-specific bucket indices
+        // META=97, GET=98, PUT=99 ensures correct sort order after per-bucket rows (0-8)
+        self.collect_aggregate_row(&mut rows, "META", 97, meta_hists, meta_bins, wall_seconds)?;
+        self.collect_aggregate_row(&mut rows, "GET", 98, get_hists, get_bins, wall_seconds)?;
+        self.collect_aggregate_row(&mut rows, "PUT", 99, put_hists, put_bins, wall_seconds)?;
+
+        // Sort by bucket_idx (field 0) - this naturally groups operations and puts aggregates at end
         rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
 
         // Write sorted rows
@@ -114,6 +120,64 @@ impl TsvExporter {
 
             rows.push((i, row));
         }
+
+        Ok(())
+    }
+
+    /// Collect an aggregate row combining all size buckets for one operation type
+    fn collect_aggregate_row(
+        &self,
+        rows: &mut Vec<(usize, String)>,
+        op: &str,
+        bucket_idx: usize,
+        hists: &OpHists,
+        bins: &SizeBins,
+        wall_seconds: f64,
+    ) -> Result<()> {
+        // Get combined histogram across all size buckets
+        let combined_hist = hists.combined_histogram();
+        let count = combined_hist.len();
+
+        // Skip if no operations
+        if count == 0 {
+            return Ok(());
+        }
+
+        // Sum up total operations and bytes across all buckets
+        let (total_ops, total_bytes): (u64, u64) = bins.by_bucket
+            .values()
+            .fold((0, 0), |(ops_acc, bytes_acc), (ops, bytes)| {
+                (ops_acc + ops, bytes_acc + bytes)
+            });
+
+        let avg_bytes = if total_ops > 0 {
+            total_bytes as f64 / total_ops as f64
+        } else {
+            0.0
+        };
+
+        let ops_per_sec = count as f64 / wall_seconds;
+        let throughput_mibps = (total_bytes as f64 / 1_048_576.0) / wall_seconds;
+
+        // Create aggregate row with "ALL" as bucket label
+        // bucket_idx is passed in: META=97, GET=98, PUT=99 for proper sorting
+        let row = format!(
+            "{}\tALL\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
+            op,
+            bucket_idx,
+            combined_hist.mean(),
+            combined_hist.value_at_quantile(0.50) as f64,
+            combined_hist.value_at_quantile(0.90) as f64,
+            combined_hist.value_at_quantile(0.95) as f64,
+            combined_hist.value_at_quantile(0.99) as f64,
+            combined_hist.max() as f64,
+            avg_bytes,
+            ops_per_sec,
+            throughput_mibps,
+            count
+        );
+
+        rows.push((bucket_idx, row));
 
         Ok(())
     }

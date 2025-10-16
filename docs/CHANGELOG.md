@@ -2,6 +2,69 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.7] - 2025-10-15
+
+### 📊 TSV Export Enhancement: Aggregate Summary Rows
+
+**Added aggregate summary rows** to TSV export for easy analysis of total GET/PUT/META operations across all size buckets. Supports both single-node and distributed mode.
+
+#### Features
+
+- **Aggregate Rows**: Each operation type (GET, PUT, META) now includes an "ALL" summary row
+  - Combines statistics across all size buckets
+  - Proper HDR histogram merging for accurate latency percentiles
+  - Sum of operations count and throughput across all buckets
+  - Naturally sorted to end of output (META=97, GET=98, PUT=99)
+
+- **Distributed Mode Support**:
+  - Per-agent TSVs (`agents/{agent-id}/results.tsv`) include aggregate rows for that agent
+  - Consolidated TSV (`results.tsv`) includes aggregate rows merged across all agents
+  - HDR histogram merging ensures statistically accurate latency percentiles
+  - Shows both per-agent totals and overall cluster totals
+  
+#### What's in the Aggregate Rows
+
+Each "ALL" row includes:
+- **Count**: Total operations across all size buckets
+- **Throughput**: Total MiB/s (sum of all buckets)
+- **Latency Statistics**: Properly merged HDR histogram values
+  - Mean, P50, P90, P95, P99, Max latencies
+  - Uses HDR histogram merge operation for accuracy
+- **Average Bytes**: Weighted average object size
+- **Bucket Index**: Operation-specific (META=97, GET=98, PUT=99) for natural sorting
+
+#### Example TSV Output
+
+```
+operation  size_bucket   bucket_idx  mean_us  p50_us  p90_us   p95_us   throughput_mibps  count
+GET        1B-8KiB       1           226.21   204.00  328.00   397.00   3.68              19022
+GET        8KiB-64KiB    2           419.28   386.00  574.00   690.00   176.34            14258
+GET        64KiB-512KiB  3           863.18   778.00  1260.00  1423.00  946.67            9568
+GET        ALL           98          432.69   338.00  837.00   1038.00  1126.69           42848
+PUT        8KiB-64KiB    2           137.55   120.00  186.00   222.00   14.93             4828
+PUT        ALL           99          137.55   120.00  186.00   222.00   14.93             4828
+```
+
+Note: Aggregate rows use operation-specific bucket_idx (META=97, GET=98, PUT=99) ensuring they naturally sort to the end after per-bucket rows (0-8).
+
+#### Benefits
+
+1. **Quick Analysis**: Total GET/PUT performance at a glance without manual summation
+2. **Accurate Statistics**: HDR histogram merging ensures correct latency percentiles
+3. **Natural Sorting**: Operation-specific bucket_idx (META=97, GET=98, PUT=99) places aggregates at end
+4. **Machine Readable**: Easy to parse and filter by bucket_idx
+5. **Backward Compatible**: Existing per-bucket rows unchanged
+
+#### Implementation Details
+
+- New method: `TsvExporter::collect_aggregate_row()`
+- Uses `OpHists::combined_histogram()` for HDR merging
+- Aggregates `SizeBins` data for accurate byte counts
+- Operation-specific bucket indices: META=97, GET=98, PUT=99
+- All rows sorted by bucket_idx for natural ordering
+
+---
+
 ## [0.6.6] - 2025-10-11
 
 ### ⚠️ BREAKING CHANGE: Command Structure Restructured
