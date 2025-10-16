@@ -793,30 +793,41 @@ fn create_consolidated_tsv(
     // Write header
     writeln!(f, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
     
-    // Write GET rows
-    write_op_rows(&mut f, "GET", &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
+    // Collect all rows for sorting
+    let mut rows = Vec::new();
     
-    // Write PUT rows
-    write_op_rows(&mut f, "PUT", &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
+    // Write per-bucket rows (merged across all agents)
+    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
+    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
+    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
     
-    // Write META rows
-    write_op_rows(&mut f, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
+    // Write aggregate rows (overall totals across all agents and size buckets)
+    // META=97, GET=98, PUT=99 for natural sorting
+    collect_aggregate_row(&mut rows, "META", 97, &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
+    collect_aggregate_row(&mut rows, "GET", 98, &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
+    collect_aggregate_row(&mut rows, "PUT", 99, &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
+    
+    // Sort by bucket_idx
+    rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
+    
+    // Write sorted rows
+    for (_, row) in rows {
+        writeln!(f, "{}", row)?;
+    }
     
     info!("Consolidated results.tsv written to: {}", tsv_path.display());
     Ok(())
 }
 
-/// Helper to write rows for one operation type
-fn write_op_rows(
-    f: &mut std::fs::File,
+/// Helper to collect rows for one operation type
+fn collect_op_rows(
+    rows: &mut Vec<(usize, String)>,
     op_name: &str,
     accumulators: &[hdrhistogram::Histogram<u64>],
     total_ops: u64,
     total_bytes: u64,
     wall_seconds: f64,
 ) -> anyhow::Result<()> {
-    use std::io::Write;
-    
     const BUCKET_LABELS: [&str; 9] = [
         "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB",
         "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", "2GiB+"
@@ -848,8 +859,7 @@ fn write_op_rows(
         let bucket_bytes = count as f64 * avg_bytes;  // Approximation
         let throughput_mibps = (bucket_bytes / 1_048_576.0) / wall_seconds;
         
-        writeln!(
-            f,
+        let row = format!(
             "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
             op_name,
             BUCKET_LABELS[bucket_idx],
@@ -859,9 +869,72 @@ fn write_op_rows(
             ops_per_sec,
             throughput_mibps,
             count
-        )?;
+        );
+        
+        rows.push((bucket_idx, row));
     }
     
+    Ok(())
+}
+
+/// Helper to collect an aggregate row combining all size buckets for one operation type
+fn collect_aggregate_row(
+    rows: &mut Vec<(usize, String)>,
+    op_name: &str,
+    bucket_idx: usize,
+    accumulators: &[hdrhistogram::Histogram<u64>],
+    total_ops: u64,
+    total_bytes: u64,
+    wall_seconds: f64,
+) -> anyhow::Result<()> {
+    // Combine all size bucket histograms
+    const MIN: u64 = 1;
+    const MAX: u64 = 3_600_000_000;
+    const SIGFIG: u8 = 3;
+    
+    let mut combined = hdrhistogram::Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
+    
+    for hist in accumulators {
+        if hist.len() > 0 {
+            combined.add(hist)?;
+        }
+    }
+    
+    let count = combined.len();
+    if count == 0 {
+        return Ok(());
+    }
+    
+    // Calculate percentiles from combined histogram
+    let mean_us = combined.mean();
+    let p50_us = combined.value_at_quantile(0.50) as f64;
+    let p90_us = combined.value_at_quantile(0.90) as f64;
+    let p95_us = combined.value_at_quantile(0.95) as f64;
+    let p99_us = combined.value_at_quantile(0.99) as f64;
+    let max_us = combined.max() as f64;
+    
+    // Calculate totals
+    let avg_bytes = if total_ops > 0 {
+        total_bytes as f64 / total_ops as f64
+    } else {
+        0.0
+    };
+    
+    let ops_per_sec = count as f64 / wall_seconds;
+    let throughput_mibps = (total_bytes as f64 / 1_048_576.0) / wall_seconds;
+    
+    let row = format!(
+        "{}\tALL\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
+        op_name,
+        bucket_idx,
+        mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+        avg_bytes,
+        ops_per_sec,
+        throughput_mibps,
+        count
+    );
+    
+    rows.push((bucket_idx, row));
     Ok(())
 }
 
