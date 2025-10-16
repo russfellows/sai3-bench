@@ -27,6 +27,13 @@ pub struct Config {
     /// Only applies to network backends (S3, Azure, GCS) with files >= min_split_size
     #[serde(default)]
     pub range_engine: Option<RangeEngineConfig>,
+    
+    /// Optional page cache behavior hint for file system operations (v0.6.8+)
+    /// Only applies to file:// and direct:// backends on Linux/Unix systems
+    /// Maps to posix_fadvise() system call for optimizing kernel page cache behavior
+    /// Default: None (uses Auto mode - Sequential for large files, Random for small)
+    #[serde(default)]
+    pub page_cache_mode: Option<PageCacheMode>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -494,4 +501,44 @@ fn default_min_split_size() -> u64 {
 
 fn default_range_timeout_secs() -> u64 {
     30
+}
+
+/// Page cache behavior modes for file system operations (Linux/Unix posix_fadvise hints)
+/// Only applies to file:// and direct:// backends
+/// 
+/// This controls kernel page cache behavior via posix_fadvise() system calls,
+/// optimizing memory usage and I/O patterns for different access scenarios.
+/// 
+/// **Performance Impact**:
+/// - Proper mode selection can provide 2-3x performance improvement
+/// - Wrong mode can cause cache thrashing and memory pressure
+/// - No effect on non-Linux/Unix systems (silently ignored)
+/// 
+/// **Mode Selection Guide**:
+/// - **Sequential**: Large files read once from start to finish (e.g., video streaming)
+/// - **Random**: Many small seeks within files (e.g., database workloads)
+/// - **DontNeed**: Read-once data that shouldn't evict other cache (e.g., backup/archival)
+/// - **Normal**: Default kernel heuristics (safe but not optimized)
+/// - **Auto**: Smart default - Sequential for full GETs, Random for range GETs
+/// 
+/// **Example YAML**:
+/// ```yaml
+/// target: "file:///data/test/"
+/// page_cache_mode: sequential  # or: random, dontneed, normal, auto
+/// duration: 60
+/// ```
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum PageCacheMode {
+    /// Smart default: Sequential for large files, Random for small/range requests
+    Auto,
+    /// Read ahead aggressively, pages not needed after reading (streaming workloads)
+    Sequential,
+    /// Don't read ahead, pages needed again soon (database/random access)
+    Random,
+    /// Pages will not be accessed again, free immediately (backup/archival)
+    #[serde(rename = "dontneed")]
+    DontNeed,
+    /// Use default kernel heuristics (safe baseline)
+    Normal,
 }

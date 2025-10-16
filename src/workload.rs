@@ -20,8 +20,10 @@ use crate::bucket_index;
 
 use s3dlio::object_store::{
     store_for_uri, store_for_uri_with_logger, ObjectStore,
-    GcsConfig, GcsObjectStore
+    GcsConfig, GcsObjectStore,
 };
+use s3dlio::file_store::{FileSystemObjectStore, FileSystemConfig};
+use s3dlio::PageCacheMode as S3dlioPageCacheMode;
 use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 
 // -----------------------------------------------------------------------------
@@ -69,14 +71,43 @@ impl BackendType {
     }
 }
 
-/// Create ObjectStore instance for given URI with optional RangeEngine configuration
+/// Create ObjectStore instance for given URI with optional RangeEngine and PageCache configuration
 /// 
 /// If range_config is provided and enabled=true for GCS/Azure/S3 backends, creates
 /// store with custom RangeEngine settings. Otherwise uses defaults (RangeEngine disabled).
+/// 
+/// If page_cache_mode is provided for file:// or direct:// backends, configures
+/// posix_fadvise hints for kernel page cache optimization (Linux/Unix only).
 pub fn create_store_for_uri_with_config(
     uri: &str, 
-    range_config: Option<&crate::config::RangeEngineConfig>
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // For file:// and direct:// URIs, apply FileSystemConfig with page_cache_mode
+    if uri.starts_with("file://") || uri.starts_with("direct://") {
+        if let Some(mode) = page_cache_mode {
+            // Convert config::PageCacheMode to s3dlio::PageCacheMode
+            let s3dlio_mode = match mode {
+                crate::config::PageCacheMode::Auto => S3dlioPageCacheMode::Auto,
+                crate::config::PageCacheMode::Sequential => S3dlioPageCacheMode::Sequential,
+                crate::config::PageCacheMode::Random => S3dlioPageCacheMode::Random,
+                crate::config::PageCacheMode::DontNeed => S3dlioPageCacheMode::DontNeed,
+                crate::config::PageCacheMode::Normal => S3dlioPageCacheMode::Normal,
+            };
+            
+            debug!("File system URI detected - page_cache_mode: {:?}", mode);
+            
+            let config = FileSystemConfig {
+                enable_range_engine: false,  // Local files rarely benefit from range parallelism
+                range_engine: Default::default(),
+                page_cache_mode: Some(s3dlio_mode),
+            };
+            
+            let store = FileSystemObjectStore::with_config(config);
+            return Ok(Box::new(store));
+        }
+    }
+    
     // For GCS URIs, apply RangeEngine configuration
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
         let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
@@ -110,15 +141,16 @@ pub fn create_store_for_uri_with_config(
 }
 
 /// Create ObjectStore instance for given URI (backward compatible - no config)
-/// Uses default RangeEngine settings (disabled)
+/// Uses default RangeEngine settings (disabled) and no page cache hints
 pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
-    create_store_for_uri_with_config(uri, None)
+    create_store_for_uri_with_config(uri, None, None)
 }
 
-/// Create ObjectStore instance with op-logger and optional RangeEngine configuration
+/// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
 pub fn create_store_with_logger_and_config(
     uri: &str,
-    range_config: Option<&crate::config::RangeEngineConfig>
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
     // For GCS URIs, apply RangeEngine configuration
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
@@ -151,13 +183,13 @@ pub fn create_store_with_logger_and_config(
     if logger.is_some() {
         store_for_uri_with_logger(uri, logger).context("Failed to create object store with logger")
     } else {
-        create_store_for_uri_with_config(uri, range_config)
+        create_store_for_uri_with_config(uri, range_config, page_cache_mode)
     }
 }
 
 /// Create ObjectStore instance with op-logger if available (backward compatible)
 pub fn create_store_with_logger(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
-    create_store_with_logger_and_config(uri, None)
+    create_store_with_logger_and_config(uri, None, None)
 }
 
 /// Initialize operation logger for performance analysis and replay
@@ -652,6 +684,59 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 }
 
 // -----------------------------------------------------------------------------
+// Internal config-aware variants (used by workload::run with YAML configs)
+// -----------------------------------------------------------------------------
+
+/// Internal GET operation with config support (for performance-critical workloads)
+async fn get_object_with_config(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<Vec<u8>> {
+    debug!("GET operation (with config) starting for URI: {}", uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    let bytes = store.get(uri).await
+        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+    
+    debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
+    Ok(bytes.to_vec())
+}
+
+/// Internal PUT operation with config support (for performance-critical workloads)
+async fn put_object_with_config(
+    uri: &str,
+    data: &[u8],
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("PUT operation (with config) starting for URI: {}, {} bytes", uri, data.len());
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.put(uri, data).await
+        .with_context(|| format!("Failed to put object to URI: {}", uri))?;
+    
+    debug!("PUT operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
+/// Internal DELETE operation with config support (for performance-critical workloads)
+async fn delete_object_with_config(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("DELETE operation (with config) starting for URI: {}", uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.delete(uri).await
+        .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
+    
+    debug!("DELETE operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // NON-LOGGING variants for replay (avoid logging replay operations)
 // -----------------------------------------------------------------------------
 
@@ -1002,7 +1087,11 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         };
 
                         let t0 = Instant::now();
-                        let bytes = get_object_multi_backend(&full_uri).await?;
+                        let bytes = get_object_with_config(
+                            &full_uri,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
                         let duration = t0.elapsed();
 
                         let bucket = crate::metrics::bucket_index(bytes.len());
@@ -1040,7 +1129,12 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         };
 
                         let t0 = Instant::now();
-                        put_object_multi_backend(&full_uri, &buf).await?;
+                        put_object_with_config(
+                            &full_uri,
+                            &buf,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
                         let duration = t0.elapsed();
 
                         let bucket = crate::metrics::bucket_index(buf.len());
@@ -1098,7 +1192,11 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         };
 
                         let t0 = Instant::now();
-                        delete_object_multi_backend(&full_uri).await?;
+                        delete_object_with_config(
+                            &full_uri,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
                         let duration = t0.elapsed();
 
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops

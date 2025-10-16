@@ -735,6 +735,22 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
         println!();
     }
     
+    // PageCache configuration
+    if let Some(page_cache_mode) = config.page_cache_mode {
+        println!("┌─ Page Cache Configuration (file:// and direct:// only) ─────────────┐");
+        let mode_str = match page_cache_mode {
+            sai3_bench::config::PageCacheMode::Auto => "Auto (Sequential for large files, Random for small)",
+            sai3_bench::config::PageCacheMode::Sequential => "Sequential (streaming workloads)",
+            sai3_bench::config::PageCacheMode::Random => "Random (random access patterns)",
+            sai3_bench::config::PageCacheMode::DontNeed => "DontNeed (read-once data, free immediately)",
+            sai3_bench::config::PageCacheMode::Normal => "Normal (default kernel heuristics)",
+        };
+        println!("│ Mode:         {:?} - {}", page_cache_mode, mode_str);
+        println!("│ Note:         Linux/Unix only, uses posix_fadvise() hints");
+        println!("└──────────────────────────────────────────────────────────────────────┘");
+        println!();
+    }
+    
     // Prepare configuration
     if let Some(ref prepare) = config.prepare {
         println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
