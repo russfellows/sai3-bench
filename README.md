@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.7-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,8 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-> **Latest (v0.6.7)**: TSV exports now include aggregate "ALL" rows per operation type, combining statistics across all size buckets with proper HDR histogram merging. Supports both single-node and distributed modes. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.8)**: Add PageCache advisor via fadvise for file "file://" backend operations to enhance performance. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Prior (v0.6.7)**: TSV exports now include aggregate "ALL" rows per operation type, combining statistics across all size buckets with proper HDR histogram merging. Supports both single-node and distributed modes. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
