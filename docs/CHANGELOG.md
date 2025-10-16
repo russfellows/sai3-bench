@@ -2,6 +2,65 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.8] - 2025-10-15
+
+### 🚀 Page Cache Control for File I/O Performance
+
+**Added configurable page cache mode** via `page_cache_mode` YAML field to optimize filesystem I/O performance through `posix_fadvise()` hints on Linux/Unix systems.
+
+#### Features
+
+- **YAML Configuration**: New `page_cache_mode` field accepts: `auto`, `sequential`, `random`, `dontneed`, `normal`
+  - **Auto** (default): Sequential hints for files ≥64MB, Random for smaller files
+  - **Sequential**: Optimize for sequential reads (prefetching, large readahead)
+  - **Random**: Optimize for random access (minimal prefetching)
+  - **DontNeed**: Drop pages from cache after read (useful for large datasets)
+  - **Normal**: Default kernel behavior
+
+- **Platform Support**:
+  - Linux/Unix: Uses `posix_fadvise()` system calls via s3dlio v0.9.7+
+  - Other platforms: Graceful no-op (configuration accepted but ignored)
+
+- **Performance Impact**:
+  - Sequential mode: Up to 2-3x faster for large sequential reads
+  - Random mode: Better performance for small random I/O patterns
+  - DontNeed: Prevents cache pollution from benchmark data
+
+#### Integration
+
+- Integrates with s3dlio v0.9.7+ `FileSystemConfig.page_cache_mode`
+- Applies to `file://` URIs only (not S3, Azure, GCS)
+- Per-operation configuration supported via YAML `workload` section
+
+#### Testing
+
+- Comprehensive test suite: 5 test configs + 12 automated tests
+- Validates all page cache modes and backward compatibility
+- Test configs in `tests/configs/page_cache_*.yaml`
+- Test runner: `tests/test_page_cache_modes.sh`
+
+#### Technical Notes
+
+- **s3dlio API workaround**: Uses `FileSystemObjectStore::with_config()` directly due to type mismatch in `store_for_uri_with_config()` (documented in bug report)
+- Dry-run mode displays page cache configuration with platform notes
+- No impact on non-file:// backends (S3, Azure, GCS, direct://)
+
+#### Example Configuration
+
+```yaml
+target: "file:///data/benchmark/"
+page_cache_mode: sequential  # Apply to all operations
+
+workload:
+  - op: get
+    path: "objects/*"
+    weight: 100
+```
+
+See `docs/CONFIG_SYNTAX.md` for complete documentation.
+
+---
+
 ## [0.6.7] - 2025-10-15
 
 ### 📊 TSV Export Enhancement: Aggregate Summary Rows

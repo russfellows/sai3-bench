@@ -48,6 +48,9 @@ This will:
 target: "gs://bucket-name/"   # Base URI for all operations (optional)
 duration: "60s"               # Test duration (examples: "30s", "5m", "1h")
 concurrency: 32               # Number of parallel workers
+page_cache_mode: auto         # Page cache hint for file:// URIs (optional)
+                              # Values: auto, sequential, random, dontneed, normal
+                              # Default: auto (Linux/Unix only, no-op on other platforms)
 
 # Prepare stage (optional)
 prepare:
@@ -70,6 +73,104 @@ workload:
     object_size: 1048576
     weight: 25
 ```
+
+## Page Cache Control (file:// URIs only)
+
+The `page_cache_mode` field controls filesystem page cache behavior for `file://` URIs using `posix_fadvise()` hints on Linux/Unix systems.
+
+### Supported Modes
+
+- **`auto`** (default): Automatically selects based on file size
+  - Sequential hints for files ≥ 64MB (better for large scans)
+  - Random hints for files < 64MB (better for small random access)
+
+- **`sequential`**: Optimize for sequential reads
+  - Enables aggressive prefetching and large readahead
+  - Best for: Large file scans, streaming workloads, backup/restore
+  - Performance impact: 2-3x faster for large sequential reads
+
+- **`random`**: Optimize for random access
+  - Minimizes prefetching to reduce wasted I/O
+  - Best for: Database-like workloads, small file random access
+  - Performance impact: Better latency for small random reads
+
+- **`dontneed`**: Drop pages from cache after read
+  - Prevents cache pollution from benchmark data
+  - Best for: Large dataset testing where you don't want to evict useful data
+  - Performance impact: Keeps working set cache clean
+
+- **`normal`**: Use default kernel behavior
+  - No specific hints, kernel decides caching strategy
+  - Best for: Mixed workloads or when unsure
+
+### Platform Support
+
+- **Linux/Unix**: Full support via `posix_fadvise()` system calls
+- **Windows/Other**: Gracefully ignored (no-op, no errors)
+
+### Configuration Examples
+
+**Global configuration** (applies to all operations):
+
+```yaml
+target: "file:///data/benchmark/"
+duration: "60s"
+concurrency: 32
+page_cache_mode: sequential  # All file operations use sequential hints
+
+workload:
+  - op: get
+    path: "large-files/*.dat"
+    weight: 100
+```
+
+**Per-operation override** (advanced):
+
+```yaml
+target: "file:///data/"
+page_cache_mode: auto  # Default for all operations
+
+workload:
+  - op: get
+    path: "sequential-data/*.dat"
+    weight: 50
+    # Inherits 'auto' mode
+  
+  - op: get
+    path: "random-data/*.dat"
+    weight: 50
+    # Note: Per-op override not yet supported, uses global setting
+```
+
+### Performance Guidelines
+
+**Sequential Mode** - Use when:
+- Reading large files (>64MB) sequentially
+- Streaming or backup/restore workloads
+- High throughput is more important than latency
+
+**Random Mode** - Use when:
+- Accessing many small files randomly
+- Database-like access patterns
+- Low latency is more important than throughput
+
+**DontNeed Mode** - Use when:
+- Testing with large datasets that shouldn't stay in cache
+- Benchmarking cold-cache scenarios
+- Preventing cache pollution
+
+**Auto Mode** - Use when:
+- Mixed file sizes in workload
+- Unsure of access pattern
+- Want sensible defaults
+
+### Technical Notes
+
+- Only applies to `file://` URIs (not S3, Azure, GCS, or `direct://`)
+- Requires s3dlio v0.9.7 or later
+- Hints are advisory; kernel may ignore them under memory pressure
+- No impact on correctness, only performance
+- Dry-run mode displays current page cache configuration
 
 ## Target URI
 

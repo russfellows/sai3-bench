@@ -1,0 +1,18 @@
+# Test configuration for page_cache_mode: sequential
+target: "file:///tmp/sai3bench-page-cache-test/"
+duration: 10s
+concurrency: 4
+page_cache_mode: sequential
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-page-cache-test/data/"
+      count: 100
+      min_size: 1048576
+      max_size: 1048576
+      fill: zero
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100

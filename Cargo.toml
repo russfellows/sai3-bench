@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.6.7"
+version = "0.6.8"
 edition = "2021"
 build   = "build.rs"
 
@@ -19,9 +19,9 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 
-# s3dlio (version 0.9.6 - RangeEngine disabled by default for all backends)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.6" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.6" }
+# s3dlio (version 0.9.7 - configurable page_cache_mode for file I/O)
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.7" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.7" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
