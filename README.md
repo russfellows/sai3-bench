@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.6-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.7-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 
 A storage performance testing tool that supports multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) (v0.9.6) for multi-protocol support.
 
-> **Latest (v0.6.6)**: Restructured commands to emphasize core workload execution (run/replay). Utility operations (health/list/stat/get/put/delete) now nested under `util` subcommand. **Breaking change**: Use `sai3-bench util health` instead of `sai3-bench health`. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.7)**: Added aggregate summary rows to TSV export. Each operation type (GET/PUT/META) now includes an "ALL" row combining statistics across all size buckets with proper HDR histogram merging for accurate latency percentiles. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
