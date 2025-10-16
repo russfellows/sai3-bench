@@ -6,7 +6,7 @@ All notable changes to sai3-bench will be documented in this file.
 
 ### 📊 TSV Export Enhancement: Aggregate Summary Rows
 
-**Added aggregate summary rows** to TSV export for easy analysis of total GET/PUT/META operations across all size buckets.
+**Added aggregate summary rows** to TSV export for easy analysis of total GET/PUT/META operations across all size buckets. Supports both single-node and distributed mode.
 
 #### Features
 
@@ -15,6 +15,12 @@ All notable changes to sai3-bench will be documented in this file.
   - Proper HDR histogram merging for accurate latency percentiles
   - Sum of operations count and throughput across all buckets
   - Naturally sorted to end of output (META=97, GET=98, PUT=99)
+
+- **Distributed Mode Support**:
+  - Per-agent TSVs (`agents/{agent-id}/results.tsv`) include aggregate rows for that agent
+  - Consolidated TSV (`results.tsv`) includes aggregate rows merged across all agents
+  - HDR histogram merging ensures statistically accurate latency percentiles
+  - Shows both per-agent totals and overall cluster totals
   
 #### What's in the Aggregate Rows
 
