@@ -1,4 +1,14 @@
 // src/bin/run.rs
+//
+// ⚠️  DEPRECATED - This binary is no longer built by default (v0.6.9+)
+// ⚠️  Use: sai3-bench run --config <CONFIG>
+// ⚠️  
+// ⚠️  This legacy standalone runner has been replaced by the "run" subcommand
+// ⚠️  in the main sai3-bench binary, which provides the same functionality
+// ⚠️  plus additional features like --dry-run, --prepare-only, --verify, etc.
+// ⚠️  
+// ⚠️  This file is kept for reference only.
+
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use clap::Parser;

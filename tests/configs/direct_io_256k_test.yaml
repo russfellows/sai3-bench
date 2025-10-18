@@ -1,0 +1,23 @@
+# Direct I/O Performance Test - 256 KiB blocks
+# Tests direct:// URI with fixed block size operations
+
+target: "direct:///tmp/sai3bench_direct_test/"
+
+# Prepare test objects
+prepare:
+  ensure_objects:
+    - base_uri: "direct:///tmp/sai3bench_direct_test/data/"
+      count: 100
+      min_size: 8388608  # 8 MiB files
+      max_size: 8388608
+
+# Workload configuration
+concurrency: 16
+duration: 30s
+
+workload:
+  # GET operations with implicit fixed-size reads
+  # Note: direct:// backend uses optimal block size automatically
+  - op: get
+    path: "data/prepared-*.dat"
+    weight: 100

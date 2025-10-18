@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.6.9-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-35%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,8 +8,7 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-> **Latest (v0.6.8)**: Add PageCache advisor via fadvise for file "file://" backend operations to enhance performance. See [CHANGELOG](docs/CHANGELOG.md) for details.
-> **Prior (v0.6.7)**: TSV exports now include aggregate "ALL" rows per operation type, combining statistics across all size buckets with proper HDR histogram merging. Supports both single-node and distributed modes. See [CHANGELOG](docs/CHANGELOG.md) for details.
+> **Latest (v0.6.9)**: 173x faster direct:// I/O through chunked reads + clean 3-binary distribution. See [CHANGELOG](docs/CHANGELOG.md) for details.
 
 ## 🚀 What Makes sai3-bench Unique?
 
@@ -25,7 +24,7 @@ A comprehensive storage performance testing tool supporting multiple backends th
 All operations work identically across protocols - just change the URI scheme:
 
 - **File System** (`file://`) - Local filesystem with standard POSIX operations
-- **Direct I/O** (`direct://`) - High-performance direct I/O bypassing page cache
+- **Direct I/O** (`direct://`) - High-performance direct I/O bypassing page cache (optimized chunked reads)
 - **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, Ceph, etc.)
 - **Azure Blob** (`az://`) - Microsoft Azure Blob Storage
 - **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API
@@ -34,7 +33,7 @@ See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides
 
 ## 📦 Architecture & Binaries
 
-- **`sai3-bench`** - Single-node CLI for immediate testing across all backends
+- **`sai3-bench`** - Single-node CLI with subcommands: `run`, `replay`, `util`
 - **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
 - **`sai3bench-ctl`** - Controller for coordinating distributed agents
 

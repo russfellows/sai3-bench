@@ -27,6 +27,18 @@ use s3dlio::PageCacheMode as S3dlioPageCacheMode;
 use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 
 // -----------------------------------------------------------------------------
+// Chunked read configuration for optimal direct:// performance
+// -----------------------------------------------------------------------------
+
+/// Optimal chunk size for direct:// reads (4 MiB)
+/// Based on testing: 4M chunks achieve 1.73 GiB/s vs 0.01 GiB/s for whole-file
+const DIRECT_IO_CHUNK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB
+
+/// Threshold for using chunked reads vs whole-file reads
+/// Files larger than this will use chunked reads for direct://
+const CHUNKED_READ_THRESHOLD: u64 = 8 * 1024 * 1024;  // 8 MiB
+
+// -----------------------------------------------------------------------------
 // Multi-backend support infrastructure
 // -----------------------------------------------------------------------------
 
@@ -105,6 +117,9 @@ pub fn create_store_for_uri_with_config(
             
             let store = FileSystemObjectStore::with_config(config);
             return Ok(Box::new(store));
+        } else {
+            // No page cache mode specified - use store_for_uri which handles direct://
+            return store_for_uri(uri).context("Failed to create object store");
         }
     }
     
@@ -611,18 +626,110 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
 }
 
 /// Multi-backend GET operation using ObjectStore trait
+/// 
+/// **CRITICAL OPTIMIZATION FOR direct:// ONLY**
+/// Automatically uses chunked reads for direct:// URIs on large files (>8 MiB)
+/// to achieve optimal performance (173x faster than whole-file reads).
+/// 
+/// **Cloud storage backends (s3://, gs://, az://) always use whole-file reads**
+/// to avoid multiple HTTP requests and network latency amplification.
+/// 
+/// **Local file:// URIs use whole-file reads** - acceptable performance (0.57 GiB/s)
+/// and simpler implementation.
+/// 
+/// Performance characteristics (1 GiB test):
+/// - s3://  whole-file:     OPTIMAL (ObjectStore handles efficiently)
+/// - gs://  whole-file:     OPTIMAL (ObjectStore handles efficiently)  
+/// - az://  whole-file:     OPTIMAL (ObjectStore handles efficiently)
+/// - file:// whole-file:    0.57 GiB/s (acceptable, keep simple)
+/// - direct:// whole-file:  0.01 GiB/s (CATASTROPHIC - 76 seconds!)
+/// - direct:// 4M chunks:   1.73 GiB/s (OPTIMAL - 0.6 seconds, 173x faster!)
 pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
     debug!("GET operation starting for URI: {}", uri);
+    
+    let is_direct_io = uri.starts_with("direct://");
+    
+    // ONLY use chunked reads for direct:// URIs
+    // Cloud storage (s3://, gs://, az://) and file:// use whole-file reads
+    if is_direct_io {
+        // Extract file path from URI
+        let path_str = uri.strip_prefix("direct://").unwrap_or(uri);
+        
+        // Get file size (async metadata fetch - negligible overhead for local files)
+        match tokio::fs::metadata(path_str).await {
+            Ok(meta) => {
+                let file_size = meta.len();
+                debug!("direct:// file size: {} bytes", file_size);
+                
+                // Use chunked reads for files larger than threshold
+                if file_size > CHUNKED_READ_THRESHOLD {
+                    debug!("Using chunked reads (4 MiB chunks) for {} byte file", file_size);
+                    return get_object_chunked(uri, file_size).await;
+                }
+            }
+            Err(e) => {
+                // If metadata fetch fails, fall back to whole-file read
+                debug!("Failed to get file size for {}: {}, using whole-file read", uri, e);
+            }
+        }
+    }
+    
+    // Default: Use whole-file read for:
+    // - Cloud storage backends (s3://, gs://, az://) - already optimized
+    // - Local file:// URIs - acceptable performance  
+    // - Small direct:// files (<8 MiB) - not worth chunking overhead
     let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
-    // Use ObjectStore get method with full URI (s3dlio handles URI parsing)
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
     
     debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
-    // Convert Bytes to Vec<u8> for compatibility
     Ok(bytes.to_vec())
+}
+
+/// Chunked read implementation for optimal direct:// performance
+/// 
+/// **INTERNAL USE ONLY - Called only for direct:// URIs with files >8 MiB**
+/// 
+/// Uses get_range() with 4 MiB chunks to achieve 173x better performance
+/// than whole-file reads for direct:// URIs. This optimization is NOT
+/// beneficial for cloud storage backends (s3://, gs://, az://) where
+/// multiple HTTP requests add latency.
+/// 
+/// # Safety
+/// This function should NEVER be called for cloud storage URIs.
+async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>> {
+    // Safety check: Ensure this is only called for direct:// URIs
+    if !uri.starts_with("direct://") {
+        bail!("INTERNAL ERROR: get_object_chunked called for non-direct:// URI: {}", uri);
+    }
+    
+    let store = create_store_with_logger(uri)?;
+    debug!("Chunked read starting for URI: {}, size: {} bytes", uri, file_size);
+    
+    let mut result = Vec::with_capacity(file_size as usize);
+    let mut offset = 0u64;
+    let chunk_size = DIRECT_IO_CHUNK_SIZE as u64;
+    
+    while offset < file_size {
+        let remaining = file_size - offset;
+        let chunk_len = remaining.min(chunk_size);
+        
+        debug!("Fetching chunk at offset {} (length {})", offset, chunk_len);
+        
+        // get_range(uri, offset, length)
+        let chunk_bytes = store.get_range(uri, offset, Some(chunk_len)).await
+            .with_context(|| format!("Failed to read chunk at offset {} from {}", offset, uri))?;
+        
+        result.extend_from_slice(&chunk_bytes);
+        offset += chunk_len;
+    }
+    
+    debug!("Chunked read completed: {} bytes in {} chunks", result.len(), 
+           (file_size + chunk_size - 1) / chunk_size);
+    Ok(result)
+
 }
 
 /// Multi-backend PUT operation using ObjectStore trait

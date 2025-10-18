@@ -1,13 +1,17 @@
 # sai3-bench — Usage Guide
 
-sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed execution via gRPC. It ships four binaries:
+sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed execution via gRPC. It ships three binaries:
 
 - **`sai3-bench`** — single-node CLI (health/list/stat/get/put/delete/run/replay) using `s3dlio`
 - **`sai3bench-agent`** — per-host gRPC agent that runs I/O operations on that host
 - **`sai3bench-ctl`** — controller that coordinates one or more agents
-- **`sai3bench-run`** — legacy workload runner (being integrated into sai3-bench)
 
 **Supported Backends**: `file://`, `direct://`, `s3://`, `az://`, `gs://`
+
+## Removed Binaries (v0.6.9+)
+
+- **`sai3bench-run`** — Removed (use `sai3-bench run` instead - same functionality, more features)
+- **`fs_read_bench`** — Removed (internal development tool, not needed for production)
 
 ## Configuration Syntax
 

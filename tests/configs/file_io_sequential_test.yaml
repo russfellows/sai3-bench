@@ -1,0 +1,26 @@
+# File I/O Performance Test - for comparison with direct://
+# Uses buffered file:// with sequential page cache hint
+
+target: "file:///tmp/sai3bench_file_test/"
+
+# Page cache configuration (file:// only)
+page_cache:
+  mode: sequential
+
+# Prepare test objects
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench_file_test/data/"
+      count: 100
+      min_size: 8388608  # 8 MiB files
+      max_size: 8388608
+
+# Workload configuration
+concurrency: 16
+duration: 30s
+
+workload:
+  # GET operations with buffered I/O
+  - op: get
+    path: "data/prepared-*.dat"
+    weight: 100
