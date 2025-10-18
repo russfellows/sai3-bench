@@ -1,0 +1,36 @@
+# Test configuration for validating direct:// chunked read optimization
+# 
+# This test validates the 173x performance improvement from using
+# chunked reads (4 MiB blocks) vs whole-file reads for direct:// URIs.
+#
+# Expected performance:
+# - Whole-file read: 0.01 GiB/s (CATASTROPHIC - 76s for 1 GiB)
+# - Chunked read (4M): 1.73 GiB/s (OPTIMAL - 0.6s for 1 GiB)
+
+target: "direct:///tmp/sai3bench-direct-io-test/"
+
+# Prepare step: Create test files with direct I/O
+prepare:
+  - op: put
+    path: "large/"
+    count: 32
+    weight: 100
+    size_distribution:
+      type: fixed
+      size: 16777216  # 16 MiB per file (triggers chunked reads)
+
+# Workload: Test GET performance with chunked reads
+workload:
+  - op: get
+    path: "large/*"
+    weight: 100
+    concurrency: 8  # Test with moderate concurrency
+
+# Run for 30 seconds to get stable measurements
+duration: 30
+
+# Use 8 concurrent workers
+concurrency: 8
+
+# Optional: Enable operation logging
+# op_log: "/tmp/direct_io_chunked_test.tsv.zst"

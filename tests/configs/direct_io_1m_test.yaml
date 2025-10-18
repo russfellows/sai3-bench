@@ -1,0 +1,17 @@
+# Direct I/O Performance Test - 1 MiB blocks
+# Tests direct:// URI with larger block operations
+
+target: "direct:///tmp/sai3bench_direct_test/"
+
+# Reuse existing test objects from previous test
+# No prepare section - objects already exist
+
+# Workload configuration  
+concurrency: 16
+duration: 30s
+
+workload:
+  # GET operations - tests 1 MiB block reads
+  - op: get
+    path: "data/prepared-*.dat"
+    weight: 100

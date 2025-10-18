@@ -5,11 +5,16 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 
 **Current Version**: v0.5.3 (October 2025) - Realistic Size Distributions & Advanced Configurability
 
-## Architecture: Four Binary Strategy
-- **`sai3-bench`** (`src/main.rs`) - Single-node CLI for immediate testing with interactive progress bars
+## Architecture: Three Binary Strategy
+- **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`
 - **`sai3bench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
 - **`sai3bench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
-- **`sai3bench-run`** (`src/bin/run.rs`) - Legacy workload runner (being integrated)
+
+### Removed Binaries (v0.6.9+)
+- **`sai3bench-run`** - Legacy standalone runner, replaced by `sai3-bench run` subcommand (more features)
+- **`fs_read_bench`** - Internal development tool for buffer pool testing (not needed for production)
+
+Both removed for clarity: users should use `sai3-bench` with appropriate subcommands (`run`, `replay`, `util`).
 
 Generated from `proto/iobench.proto` via `tonic-build` in `build.rs`.
 

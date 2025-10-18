@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.6.8"
+version = "0.6.9"
 edition = "2021"
 build   = "build.rs"
 
@@ -19,9 +19,9 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 
-# s3dlio (version 0.9.7 - configurable page_cache_mode for file I/O)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.7" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.7" }
+# s3dlio (version 0.9.9 - enhanced buffer pool management for improved file/direct I/O)
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.9" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.9" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
@@ -64,10 +64,11 @@ path = "src/bin/agent.rs"
 name = "sai3bench-ctl"
 path = "src/bin/controller.rs"
 
-#New sai3bench-run cli, separate for now, plan to integrate into main
-[[bin]]
-name = "sai3bench-run"
-path = "src/bin/run.rs"
+# NOTE: Legacy binaries removed from production builds (v0.6.9+)
+# - sai3bench-run: Replaced by "sai3-bench run" subcommand (more features)
+# - fs_read_bench: Internal dev tool for buffer pool testing
+# 
+# Source files kept in src/bin/run.rs and benches/ for development reference.
 
 [dev-dependencies]
 assert_cmd = "2.0"
