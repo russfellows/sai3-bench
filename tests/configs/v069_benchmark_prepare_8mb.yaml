@@ -1,0 +1,27 @@
+# v0.6.9 Benchmark: Prepare 1TB of 8MB files for chunked read testing
+# This generates ~131,072 files (1TB / 8MB) to test v0.6.9's chunked reads
+# Usage: sai3-bench run --config v069_benchmark_prepare_8mb.yaml
+#
+# 8MB files exceed the CHUNKED_READ_THRESHOLD (8MB), triggering:
+# - Chunked reads with 4 MiB blocks
+# - 2 chunks per file (8MB / 4MB = 2)
+# - v0.6.9's optimization vs v0.6.8's whole-file approach
+
+target: "direct:///tmp/sai3bench-v069-1tb-8mb/"
+duration: 1s  # Minimal duration since we only do prepare phase
+concurrency: 64  # High concurrency for faster generation
+
+prepare:
+  ensure_objects:
+    - base_uri: "direct:///tmp/sai3bench-v069-1tb-8mb/data/"
+      count: 131072  # 1TB / 8MB = 131,072 files
+      size: 8388608  # 8 MB exactly (will trigger chunked reads in v0.6.9)
+      fill: zero  # Zero-filled for fast writes
+  
+  cleanup: false  # DO NOT cleanup - we need these files for testing
+
+workload:
+  # Empty workload - we only want the prepare phase
+  - op: get
+    path: "data/object-000000"  # Just one object to satisfy parser
+    weight: 100

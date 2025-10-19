@@ -1,0 +1,42 @@
+# GCS Benchmark: Read 1TB of 4MB files (RangeEngine ENABLED - suboptimal test)
+# Tests Google Cloud Storage GET performance with RangeEngine for comparison
+# Usage: sai3-bench run --config v069_gcs_read_4mb_rangeengine.yaml
+#
+# ⚠️  WARNING: This config is intentionally suboptimal for testing purposes!
+# ⚠️  RangeEngine adds HEAD overhead for 4MB files without benefit
+# ⚠️  Expected: 20-25% SLOWER than optimal config
+#
+# Prerequisites:
+#   - GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+#   - Files must exist in GCS (use v069_gcs_prepare_4mb.yaml to create)
+#
+# Purpose: Demonstrate why RangeEngine should be disabled for small files
+#
+# Configuration:
+#   - RangeEngine: ENABLED (suboptimal for 4MB files)
+#   - Each GET adds a HEAD request to check file size
+#   - 262,144 files × 2 requests = 524,288 total requests
+#   - Compare results to v069_gcs_read_4mb_optimal.yaml
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/"
+duration: 300s
+concurrency: 128
+
+# RangeEngine enabled for comparison (expect worse performance)
+range_engine:
+  enabled: true
+  chunk_size: 67108864        # 64 MB (default)
+  max_concurrent_ranges: 16   # Default
+  min_split_size: 4194304     # 4 MB - force RangeEngine for our 4MB files
+  range_timeout_secs: 30
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+# Expected Performance:
+# - 20-25% SLOWER than optimal config due to HEAD overhead
+# - Each GET operation = 1 HEAD + 1 GET request
+# - Double the request count = more latency, worse throughput
+# - This demonstrates why min_split_size default is 16 MB

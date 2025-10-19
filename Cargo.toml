@@ -65,10 +65,8 @@ name = "sai3bench-ctl"
 path = "src/bin/controller.rs"
 
 # NOTE: Legacy binaries removed from production builds (v0.6.9+)
-# - sai3bench-run: Replaced by "sai3-bench run" subcommand (more features)
-# - fs_read_bench: Internal dev tool for buffer pool testing
-# 
-# Source files kept in src/bin/run.rs and benches/ for development reference.
+# - sai3bench-run: Replaced by "sai3-bench run" subcommand (more features) - source deleted
+# - fs_read_bench: Internal dev tool for buffer pool testing - moved to benches/
 
 [dev-dependencies]
 assert_cmd = "2.0"
