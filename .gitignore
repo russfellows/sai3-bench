@@ -19,3 +19,6 @@ local-env
 
 # Test result files (auto-generated)
 sai3bench-*.tsv
+
+# Handoff documents (session-specific, not for version control)
+docs/sai3-bench-handoff.md

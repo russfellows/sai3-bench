@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.6.10"
+version = "0.6.11"
 edition = "2021"
 build   = "build.rs"
 
@@ -74,3 +74,4 @@ predicates = "2.1"
 tempfile = "3"
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
+serial_test = "3.2"

@@ -2,6 +2,37 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.11] - 2025-10-20
+
+### 🐛 Bug Fixes
+
+- **Bucket label inconsistency**: Fixed inconsistent BUCKET_LABELS definition between `metrics.rs` (">2GiB") and `controller.rs` ("2GiB+")
+  - Established single source of truth: `controller.rs` now imports from `metrics.rs`
+  - Removed duplicate const definition
+  - Ensures consistent histogram reporting across distributed and single-node modes
+
+### ✅ Test Improvements
+
+- **Comprehensive bucket boundary testing**: Added missing test coverage for 512 KiB boundary
+  - New `test_all_bucket_boundaries_comprehensive()` with 100+ assertions
+  - Validates all 9 bucket boundaries, transitions, and edge cases
+  - Confirms bucket index function produces correct results
+  
+- **Streaming replay test stability**: Fixed 2/6 test failures due to parallel execution
+  - Added `serial_test = "3.2"` dependency
+  - Applied `#[serial]` attribute to all 6 streaming replay tests
+  - Resolved "incomplete frame" errors caused by global op-logger singleton conflicts
+
+- **Test suite status**: 41/41 tests passing (100%) - up from 37/39 (95%)
+
+### 📝 Files Changed
+
+- `src/metrics.rs`: Enhanced test coverage with comprehensive boundary validation
+- `src/bin/controller.rs`: Removed duplicate BUCKET_LABELS, imports from metrics.rs
+- `tests/streaming_replay_tests.rs`: Added serial test attributes
+- `Cargo.toml`: Added serial_test dev-dependency
+- `README.md`: Updated badges (version 0.6.11, 41 tests passing)
+
 ## [0.6.10] - 2025-10-19
 
 ### 🔬 s3dlio v0.9.10 Integration + Performance Analysis

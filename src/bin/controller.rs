@@ -11,6 +11,8 @@ use tracing::{debug, error, info};
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
+// Import BUCKET_LABELS from metrics module
+use sai3_bench::metrics::BUCKET_LABELS;
 
 pub mod pb {
     pub mod iobench {
@@ -828,11 +830,6 @@ fn collect_op_rows(
     total_bytes: u64,
     wall_seconds: f64,
 ) -> anyhow::Result<()> {
-    const BUCKET_LABELS: [&str; 9] = [
-        "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB",
-        "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", "2GiB+"
-    ];
-    
     for (bucket_idx, hist) in accumulators.iter().enumerate() {
         let count = hist.len();
         if count == 0 {
