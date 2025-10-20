@@ -1,0 +1,25 @@
+# v0.6.10 GCS Test: 32MB objects, RangeEngine with 8MB chunks
+# Purpose: Test larger objects with proportionally larger chunks
+#
+# Configuration:
+# - min_split_size: 32 MiB (old default threshold)
+# - chunk_size: 8 MiB (4 chunks per object)
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-32mb/"
+duration: 60s
+concurrency: 64
+
+range_engine:
+  enabled: true
+  min_split_size: 33554432     # 32 MiB
+  chunk_size: 8388608          # 8 MiB chunks
+  max_concurrent_ranges: 8
+  range_timeout_secs: 30
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+# This was the old "definitely worth it" threshold
+# Should show clear benefit with pre-stat

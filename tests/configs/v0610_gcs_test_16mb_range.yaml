@@ -1,0 +1,25 @@
+# v0.6.10 GCS Test: 16MB objects, RangeEngine with 8MB chunks
+# Purpose: Test if 16MB objects benefit from larger chunks
+#
+# Configuration:
+# - min_split_size: 16 MiB
+# - chunk_size: 8 MiB (2 chunks per object - reduced overhead)
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-16mb/"
+duration: 60s
+concurrency: 64
+
+range_engine:
+  enabled: true
+  min_split_size: 16777216     # 16 MiB
+  chunk_size: 8388608          # 8 MiB chunks (2 chunks per object)
+  max_concurrent_ranges: 8
+  range_timeout_secs: 30
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+# Old wisdom: 16MB was minimum for RangeEngine due to HEAD overhead
+# New test: Is 16MB still optimal, or can we go lower?

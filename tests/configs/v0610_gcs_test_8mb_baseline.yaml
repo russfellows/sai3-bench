@@ -1,0 +1,13 @@
+# v0.6.10 GCS Test: 8MB objects, RangeEngine DISABLED (baseline)
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-8mb/"
+duration: 60s
+concurrency: 64
+
+range_engine:
+  enabled: false
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100

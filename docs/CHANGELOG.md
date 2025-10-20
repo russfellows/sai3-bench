@@ -2,6 +2,63 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.10] - 2025-10-19
+
+### 🔬 s3dlio v0.9.10 Integration + Performance Analysis
+
+**Upgraded to s3dlio v0.9.10** with new object size pre-fetching and optimized GET capabilities. Comprehensive GCS testing revealed important performance characteristics - pre-stat and RangeEngine optimizations provide NO benefit for same-region, high-bandwidth scenarios.
+
+#### Key Findings
+
+- **Pre-stat optimization**: Batch HEAD requests (~250ms for 1000 objects) do NOT improve performance for same-region cloud storage
+  - Testing showed <1% difference (within measurement noise)
+  - Root cause: Network bandwidth saturated (~2.6 GB/s), not HEAD-request bound
+  - **Solution**: Gated behind `range_engine.enabled` flag to avoid 250ms overhead when not needed
+
+- **RangeEngine overhead**: Parallel chunk downloads are 35% SLOWER than single-stream for same-region
+  - Tested with 4MB and 8MB chunks across 4-32MB objects
+  - CPU utilization: 100% baseline vs 80% RangeEngine (coordination overhead > parallelism benefit)
+  - **Conclusion**: Use RangeEngine only for cross-region or low-bandwidth scenarios
+
+#### New Features
+
+- **Object size caching** via s3dlio v0.9.10
+  - Thread-safe ObjectSizeCache with 60s TTL for GCS
+  - Pre-stat support: `store.pre_stat_and_cache()` for batch HEAD requests
+  - Available when `range_engine.enabled = true` in config
+
+- **Optimized GET path** for cloud storage
+  - Switched to `get_optimized()` for s3://, gs://, az:// URIs
+  - Cache-aware with automatic RangeEngine integration for large objects
+  - Preserves simple `get()` for local file:// and direct:// backends
+
+#### Configuration
+
+Pre-stat only runs when RangeEngine is enabled:
+```yaml
+range_engine:
+  enabled: true      # Enables pre-stat + parallel chunk downloads
+  chunk_size_mb: 4   # Minimum 4MB chunks
+  max_workers: 8     # Parallel chunk workers
+```
+
+**Recommendation**: Keep RangeEngine disabled (default) for same-region workloads. Enable only for:
+- Cross-region transfers with high latency
+- Low-bandwidth network links
+- Scenarios where parallelism helps more than coordination costs
+
+#### Documentation
+
+- **V0.6.10_PERFORMANCE_ANALYSIS.md**: Comprehensive GCS testing methodology, results, and recommendations
+- **v0.6.9 benchmark configs**: Baseline performance data for 4-32MB objects
+- **v0.6.10 test configs**: 16 GCS test scenarios (prepare + baseline + range variants)
+
+#### Testing
+
+- All 22 Rust tests passing
+- GCS testing: 1000 objects × 4 sizes (4/8/16/32MB) × 2 modes (baseline/range)
+- Performance validated on n2-standard-8 VM (same region as storage)
+
 ## [0.6.9] - 2025-10-18
 
 ### 🚀 Direct I/O Performance Fix + Clean Binary Distribution

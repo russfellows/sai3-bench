@@ -1,0 +1,36 @@
+# GCS Benchmark: Prepare 1TB of 4MB files in Google Cloud Storage
+# Generates test dataset for GCS read benchmarks
+# Usage: sai3-bench run --config v069_gcs_prepare_4mb.yaml
+#
+# Prerequisites:
+#   - GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+#   - OR: Default application credentials configured
+#   - Sufficient GCS quota and permissions
+#   - Cost consideration: ~1TB of GCS storage + egress charges
+#
+# This creates 262,144 4MB files (1TB total) in GCS for benchmarking
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/"
+duration: 1s  # Minimal - we only want prepare phase
+concurrency: 128  # High concurrency for faster upload
+
+prepare:
+  ensure_objects:
+    - base_uri: "gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/data/"
+      count: 262144  # 1TB / 4MB = 262,144 files
+      size: 4194304  # 4 MB exactly
+      fill: zero     # Zero-filled for fast generation
+  
+  cleanup: false  # Keep files for read testing
+
+workload:
+  # Minimal workload to satisfy config requirements
+  - op: get
+    path: "data/object-000000"
+    weight: 100
+
+# Notes:
+# - Upload time: 30-60 minutes depending on network speed
+# - GCS costs: ~$20-30/month for 1TB standard storage
+# - Use gsutil to verify: gsutil ls -lh gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/data/
+# - Cleanup when done: gsutil -m rm -r gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/

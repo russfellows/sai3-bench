@@ -1,0 +1,35 @@
+# GCS Benchmark: Read 1TB of 4MB files (RangeEngine DISABLED - optimal)
+# Tests Google Cloud Storage GET performance with 4MB objects
+# Usage: sai3-bench run --config v069_gcs_read_4mb_optimal.yaml
+#
+# Prerequisites:
+#   - GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+#   - OR: Default application credentials configured
+#   - Files must exist in GCS (use v069_gcs_prepare_4mb.yaml to create)
+#
+# Configuration Rationale:
+#   - RangeEngine: DISABLED (default) - 4MB files are too small
+#     * RangeEngine adds HEAD overhead without benefit for files < 16MB
+#     * For 4MB files, simple GET is 20-25% faster
+#   - Concurrency: 128 - High parallelism to saturate network bandwidth
+#   - Duration: 300s - 5 minutes to measure sustained throughput
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-v069-1tb/"
+duration: 300s
+concurrency: 128  # High concurrency for cloud storage (network-bound)
+
+# RangeEngine explicitly disabled for clarity (also the default)
+# For 4MB files, simple GET requests are fastest
+range_engine:
+  enabled: false
+
+workload:
+  - op: get
+    path: "data/*"  # All 262,144 4MB files
+    weight: 100
+
+# Expected Performance:
+# - Network bandwidth limited (not disk I/O)
+# - Throughput depends on GCS region, network speed, instance type
+# - Typical: 1-10 Gbps (125-1250 MB/s) for multi-region GCS
+# - Latency: 10-50ms depending on region proximity

@@ -5,7 +5,7 @@ use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use rand::{rng, Rng};
 //use rand::rngs::SmallRng;
@@ -137,11 +137,13 @@ pub fn create_store_for_uri_with_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
+                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
             }
         } else {
             // No config provided - use disabled default
             GcsConfig {
                 enable_range_engine: false,
+                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
                 ..Default::default()
             }
         };
@@ -181,10 +183,12 @@ pub fn create_store_with_logger_and_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
+                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
             }
         } else {
             GcsConfig {
                 enable_range_engine: false,
+                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
                 ..Default::default()
             }
         };
@@ -674,15 +678,33 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
         }
     }
     
-    // Default: Use whole-file read for:
-    // - Cloud storage backends (s3://, gs://, az://) - already optimized
-    // - Local file:// URIs - acceptable performance  
-    // - Small direct:// files (<8 MiB) - not worth chunking overhead
+    // Use optimized GET for cloud storage (leverages size cache and concurrent ranges)
+    // For cloud storage backends (s3://, gs://, az://): get_optimized() uses:
+    //   - Size cache from pre_stat_and_cache() to avoid HEAD requests (v0.9.10)
+    //     NOTE: Testing shows this provides NO benefit for high-bandwidth same-region GCS
+    //           Only run pre-stat when RangeEngine is enabled (when we actually need sizes)
+    //   - Concurrent range requests for large objects (>32MB default threshold)
+    //     NOTE: RangeEngine adds ~35% overhead for GCS same-region due to coordination costs
+    //           Only enable for cross-region, high-latency, or throttled scenarios
+    // For local file:// URIs: get_optimized() delegates to regular get()
     let store = create_store_with_logger(uri)?;
     debug!("ObjectStore created successfully for URI: {}", uri);
     
-    let bytes = store.get(uri).await
-        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+    let bytes = if uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("gcs://") || uri.starts_with("az://") {
+        // Cloud storage: use get_optimized() to benefit from size cache
+        debug!("Using get_optimized() for cloud storage URI: {} (should use size cache if available)", uri);
+        let start = std::time::Instant::now();
+        let result = store.get_optimized(uri).await
+            .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+        let elapsed = start.elapsed();
+        debug!("get_optimized() completed for {}: {} bytes in {:?}", uri, result.len(), elapsed);
+        result
+    } else {
+        // Local storage: use regular get()
+        debug!("Using regular get() for local storage URI: {}", uri);
+        store.get(uri).await
+            .with_context(|| format!("Failed to get object from URI: {}", uri))?
+    };
     
     debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes.to_vec())
@@ -1034,6 +1056,29 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                 match prefetch_uris_multi_backend(&uri).await {
                     Ok(full_uris) if !full_uris.is_empty() => {
                         info!("Found {} objects for GET pattern: {}", full_uris.len(), uri);
+                        
+                        // v0.9.10: Pre-stat objects for size caching (cloud storage optimization)
+                        // This eliminates HEAD overhead on subsequent get_optimized() calls
+                        // ONLY run when RangeEngine is enabled, since that's when we need object sizes
+                        let should_prestat = (uri.starts_with("s3://") || uri.starts_with("gs://") || 
+                                             uri.starts_with("gcs://") || uri.starts_with("az://")) &&
+                                            cfg.range_engine.as_ref().map(|re| re.enabled).unwrap_or(false);
+                        
+                        if should_prestat {
+                            let store = create_store_for_uri(&uri)?;
+                            let start = std::time::Instant::now();
+                            match store.pre_stat_and_cache(&full_uris, 100).await {
+                                Ok(cached_count) => {
+                                    info!("Pre-statted {} objects in {:?} (size cache populated for RangeEngine)", 
+                                          cached_count, start.elapsed());
+                                }
+                                Err(e) => {
+                                    // Non-fatal: pre-stat optimization failed, but workload can continue
+                                    warn!("Pre-stat failed (workload will continue): {}", e);
+                                }
+                            }
+                        }
+                        
                         pre.get_lists.push(UriSource {
                             full_uris: full_uris.clone(),
                             uri: uri.clone(),

@@ -1,0 +1,30 @@
+# v0.6.10 GCS Test: 4MB objects, RangeEngine ENABLED
+# Purpose: Test if concurrent range requests help with 4MB objects
+#
+# Configuration:
+# - min_split_size: 4 MiB (force splitting on our 4MB objects)
+# - chunk_size: 4 MiB (single chunk per 4MB object, tests if splitting helps at all)
+# - max_concurrent_ranges: 8
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-4mb/"
+duration: 60s
+concurrency: 64
+
+range_engine:
+  enabled: true
+  min_split_size: 4194304      # 4 MiB - force range splitting
+  chunk_size: 4194304          # 4 MiB chunks (whole object as one range request)
+  max_concurrent_ranges: 8
+  range_timeout_secs: 30
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+# Expected: May be FASTER than baseline if:
+# - Network latency is high (>50ms)
+# - 2 concurrent 2MB requests < 1 sequential 4MB request
+# Expected: May be SLOWER if:
+# - Range request overhead dominates
+# - Network is already saturated
