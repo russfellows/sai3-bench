@@ -1,0 +1,22 @@
+# v0.6.10 GCS Test Data Preparation
+# Creates test datasets of different object sizes for threshold testing
+#
+# This creates a smaller dataset (1000 objects per size) for quick testing
+# Adjust count for larger tests once optimal settings are found
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-4mb/"
+duration: 1s
+concurrency: 128
+
+prepare:
+  ensure_objects:
+    - base_uri: "gs://YOUR_BUCKET_NAME/sai3bench-test-4mb/data/"
+      count: 1000
+      size: 4194304  # 4 MB
+      fill: zero
+  cleanup: false
+
+workload:
+  - op: get
+    path: "data/object-000000"
+    weight: 100

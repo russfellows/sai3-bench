@@ -1,0 +1,18 @@
+# v0.6.10 GCS: Prepare 8MB test objects
+
+target: "gs://YOUR_BUCKET_NAME/sai3bench-test-8mb/"
+duration: 1s
+concurrency: 128
+
+prepare:
+  ensure_objects:
+    - base_uri: "gs://YOUR_BUCKET_NAME/sai3bench-test-8mb/data/"
+      count: 1000
+      size: 8388608  # 8 MB
+      fill: zero
+  cleanup: false
+
+workload:
+  - op: get
+    path: "data/object-000000"
+    weight: 100
