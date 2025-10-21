@@ -8,8 +8,6 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-> **Latest (v0.6.9)**: 173x faster direct:// I/O through chunked reads + clean 3-binary distribution. See [CHANGELOG](docs/CHANGELOG.md) for details.
-
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
