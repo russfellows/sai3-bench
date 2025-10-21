@@ -135,10 +135,16 @@ mod tests {
         assert_eq!(bucket_index(8 * 1024 + 1), 2); // 8KiB-64KiB
         assert_eq!(bucket_index(64 * 1024), 2); // 8KiB-64KiB
         assert_eq!(bucket_index(64 * 1024 + 1), 3); // 64KiB-512KiB
+        assert_eq!(bucket_index(512 * 1024), 3); // 64KiB-512KiB
+        assert_eq!(bucket_index(512 * 1024 + 1), 4); // 512KiB-4MiB
         assert_eq!(bucket_index(4 * 1024 * 1024), 4); // 512KiB-4MiB
+        assert_eq!(bucket_index(4 * 1024 * 1024 + 1), 5); // 4MiB-32MiB
         assert_eq!(bucket_index(32 * 1024 * 1024), 5); // 4MiB-32MiB
+        assert_eq!(bucket_index(32 * 1024 * 1024 + 1), 6); // 32MiB-256MiB
         assert_eq!(bucket_index(256 * 1024 * 1024), 6); // 32MiB-256MiB
+        assert_eq!(bucket_index(256 * 1024 * 1024 + 1), 7); // 256MiB-2GiB
         assert_eq!(bucket_index(2 * 1024 * 1024 * 1024), 7); // 256MiB-2GiB
+        assert_eq!(bucket_index(2 * 1024 * 1024 * 1024 + 1), 8); // >2GiB
         assert_eq!(bucket_index(3 * 1024 * 1024 * 1024), 8); // >2GiB
     }
 
@@ -164,5 +170,116 @@ mod tests {
 
         let hist = hists1.buckets[1].lock().unwrap();
         assert_eq!(hist.len(), 2);
+    }
+
+    #[test]
+    fn test_bucket_labels_count() {
+        // Ensure BUCKET_LABELS array matches NUM_BUCKETS
+        assert_eq!(BUCKET_LABELS.len(), NUM_BUCKETS);
+        assert_eq!(BUCKET_LABELS.len(), 9);
+    }
+
+    #[test]
+    fn test_all_bucket_boundaries_comprehensive() {
+        // This test systematically verifies ALL bucket boundaries to ensure:
+        // 1. No gaps between buckets
+        // 2. No overlaps between buckets
+        // 3. Exact boundary values go to the correct bucket
+        // 4. Boundary+1 values transition to the next bucket
+        
+        // Define all bucket boundaries (inclusive upper bounds)
+        let boundaries: [(usize, usize, &str); 9] = [
+            (0, 0, "zero"),                           // Bucket 0: exactly 0
+            (1, 8 * 1024, "1B-8KiB"),                 // Bucket 1: 1 to 8 KiB
+            (8 * 1024 + 1, 64 * 1024, "8KiB-64KiB"),  // Bucket 2: 8 KiB + 1 to 64 KiB
+            (64 * 1024 + 1, 512 * 1024, "64KiB-512KiB"),  // Bucket 3: 64 KiB + 1 to 512 KiB
+            (512 * 1024 + 1, 4 * 1024 * 1024, "512KiB-4MiB"),  // Bucket 4: 512 KiB + 1 to 4 MiB
+            (4 * 1024 * 1024 + 1, 32 * 1024 * 1024, "4MiB-32MiB"),  // Bucket 5: 4 MiB + 1 to 32 MiB
+            (32 * 1024 * 1024 + 1, 256 * 1024 * 1024, "32MiB-256MiB"),  // Bucket 6: 32 MiB + 1 to 256 MiB
+            (256 * 1024 * 1024 + 1, 2 * 1024 * 1024 * 1024, "256MiB-2GiB"),  // Bucket 7: 256 MiB + 1 to 2 GiB
+            (2 * 1024 * 1024 * 1024 + 1, usize::MAX, ">2GiB"),  // Bucket 8: > 2 GiB
+        ];
+        
+        // Test that each boundary definition matches BUCKET_LABELS
+        for (expected_bucket, (_, _, label)) in boundaries.iter().enumerate() {
+            assert_eq!(
+                BUCKET_LABELS[expected_bucket], 
+                *label,
+                "Bucket {} label mismatch", 
+                expected_bucket
+            );
+        }
+        
+        // Test lower bound of each bucket (except bucket 0 which is special)
+        for (expected_bucket, (lower, _, _)) in boundaries.iter().enumerate() {
+            if expected_bucket == 0 {
+                // Bucket 0 is special: only exactly 0
+                assert_eq!(bucket_index(0), 0, "Zero should be in bucket 0");
+            } else {
+                assert_eq!(
+                    bucket_index(*lower), 
+                    expected_bucket,
+                    "Lower bound {} should be in bucket {}", 
+                    lower, 
+                    expected_bucket
+                );
+            }
+        }
+        
+        // Test upper bound of each bucket (except bucket 8 which is unbounded)
+        for (expected_bucket, (_, upper, _)) in boundaries.iter().enumerate() {
+            if expected_bucket == 8 {
+                // Bucket 8 is unbounded, test a very large value
+                assert_eq!(
+                    bucket_index(10 * 1024 * 1024 * 1024), 
+                    8,
+                    "Very large values should be in bucket 8"
+                );
+            } else if expected_bucket == 0 {
+                // Bucket 0 only contains 0, skip upper bound test
+                continue;
+            } else {
+                assert_eq!(
+                    bucket_index(*upper), 
+                    expected_bucket,
+                    "Upper bound {} should be in bucket {}", 
+                    upper, 
+                    expected_bucket
+                );
+            }
+        }
+        
+        // Test that upper_bound + 1 transitions to next bucket
+        // (except for bucket 0 and bucket 8)
+        for (expected_bucket, (_, upper, _)) in boundaries.iter().enumerate() {
+            if expected_bucket == 0 {
+                // 0 + 1 = 1 should go to bucket 1
+                assert_eq!(bucket_index(1), 1, "1 byte should be in bucket 1");
+            } else if expected_bucket < 8 {
+                // upper + 1 should be in next bucket
+                let next_bucket = expected_bucket + 1;
+                assert_eq!(
+                    bucket_index(*upper + 1), 
+                    next_bucket,
+                    "Upper bound + 1 ({}) should transition from bucket {} to bucket {}", 
+                    upper + 1, 
+                    expected_bucket, 
+                    next_bucket
+                );
+            }
+        }
+        
+        // Additional edge case tests
+        assert_eq!(bucket_index(usize::MAX), 8, "usize::MAX should be in bucket 8");
+        
+        // Test mid-range values for each bucket
+        assert_eq!(bucket_index(4 * 1024), 1, "4 KiB (mid-range) should be in bucket 1");
+        assert_eq!(bucket_index(32 * 1024), 2, "32 KiB (mid-range) should be in bucket 2");
+        assert_eq!(bucket_index(256 * 1024), 3, "256 KiB (mid-range) should be in bucket 3");
+        assert_eq!(bucket_index(2 * 1024 * 1024), 4, "2 MiB (mid-range) should be in bucket 4");
+        assert_eq!(bucket_index(16 * 1024 * 1024), 5, "16 MiB (mid-range) should be in bucket 5");
+        assert_eq!(bucket_index(128 * 1024 * 1024), 6, "128 MiB (mid-range) should be in bucket 6");
+        assert_eq!(bucket_index(1024 * 1024 * 1024), 7, "1 GiB (mid-range) should be in bucket 7");
+        assert_eq!(bucket_index(5 * 1024 * 1024 * 1024), 8, "5 GiB (mid-range) should be in bucket 8");
     }
 }

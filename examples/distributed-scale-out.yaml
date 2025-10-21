@@ -1,0 +1,111 @@
+# Scale-Out Pattern: Multiple VMs with One Container Each
+#
+# This configuration demonstrates horizontal scaling by running agents across
+# 8 separate VMs. Each VM runs one agent container for maximum network bandwidth
+# and fault isolation.
+#
+# Use Case: High network throughput, multi-region testing, fault tolerance
+#
+# VM Requirement: 8 medium instances with 8 vCPUs each
+# Examples:
+#   - AWS: 8× c6i.2xlarge (8 vCPU, 16 GB each)
+#   - GCP: 8× n2-standard-8 (8 vCPU, 32 GB each)
+#   - Azure: 8× Standard_D8s_v3 (8 vCPU, 32 GB each)
+
+target: "s3://my-benchmark-bucket/data/"
+duration: 120s
+concurrency: 32  # Per VM, 256 total (8 VMs × 32)
+
+# Scale-out: 8 VMs, 1 container each
+distributed:
+  agents:
+    - address: "vm1.example.com:7761"
+      id: "agent-1"
+      env:
+        RUST_LOG: "info"
+        AWS_PROFILE: "benchmark"
+    
+    - address: "vm2.example.com:7761"
+      id: "agent-2"
+      env:
+        RUST_LOG: "info"
+        AWS_PROFILE: "benchmark"
+    
+    - address: "vm3.example.com:7761"
+      id: "agent-3"
+    
+    - address: "vm4.example.com:7761"
+      id: "agent-4"
+    
+    - address: "vm5.example.com:7761"
+      id: "agent-5"
+    
+    - address: "vm6.example.com:7761"
+      id: "agent-6"
+    
+    - address: "vm7.example.com:7761"
+      id: "agent-7"
+    
+    - address: "vm8.example.com:7761"
+      id: "agent-8"
+  
+  ssh:
+    enabled: true
+    user: "ubuntu"
+    key_path: "~/.ssh/sai3bench_id_rsa"
+  
+  deployment:
+    deploy_type: "docker"
+    container_runtime: "docker"  # or "podman"
+    image: "sai3bench:v0.6.11"
+    network_mode: "host"
+    pull_policy: "if_not_present"
+  
+  start_delay: 3
+
+# Prepare shared test data (identical to scale-up config for comparison)
+prepare:
+  ensure_objects:
+    - base_uri: "s3://my-benchmark-bucket/data/objects/"
+      count: 10000
+      size_distribution:
+        type: lognormal
+        mean: 524288  # 512 KiB average
+        std_dev: 262144
+        min: 1024
+        max: 5242880  # 5 MiB max
+      fill: random
+
+# Mixed workload (identical to scale-up config for comparison)
+workload:
+  - op: get
+    path: "objects/*"
+    weight: 70
+  
+  - op: put
+    path: "uploads/"
+    weight: 25
+    size_distribution:
+      type: uniform
+      min: 4096
+      max: 1048576
+  
+  - op: delete
+    path: "uploads/*"
+    weight: 5
+
+# Usage:
+# 1. Setup SSH for all VMs (once):
+#    sai3bench-ctl ssh-setup --hosts ubuntu@vm1,ubuntu@vm2,ubuntu@vm3,ubuntu@vm4,ubuntu@vm5,ubuntu@vm6,ubuntu@vm7,ubuntu@vm8
+#
+# 2. Run test:
+#    sai3bench-ctl run --config examples/distributed-scale-out.yaml
+#
+# Expected: 8 VMs each run 1 container, generating 256 concurrent operations
+# (8 × 32) against S3.
+#
+# Comparison with Scale-Up:
+# - Scale-Out: 8 network interfaces = 8× network bandwidth
+# - Scale-Up: 1 network interface, lower latency between agents
+# - Cost: Scale-out typically 10-20% more expensive than 1 large VM
+# - Fault tolerance: Scale-out survives single VM failure

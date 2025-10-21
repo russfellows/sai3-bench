@@ -253,6 +253,141 @@ For production environments, use TLS:
 6. **Review Logs**: Check `console.log` in results directory for any errors
 7. **Histogram Accuracy**: The consolidated `results.tsv` uses proper histogram merging, not simple averaging of percentiles
 
+## Scale-Out vs Scale-Up Testing
+
+sai3-bench supports both horizontal (scale-out) and vertical (scale-up) scaling strategies.
+
+### Scale-Out: Multiple VMs, One Container Each
+
+**Pattern**: Deploy agents across multiple smaller VMs for network bandwidth and fault isolation.
+
+```yaml
+# 8 VMs, 1 container per VM
+distributed:
+  agents:
+    - { address: "vm1.example.com:7761", id: "agent-1" }
+    - { address: "vm2.example.com:7761", id: "agent-2" }
+    - { address: "vm3.example.com:7761", id: "agent-3" }
+    - { address: "vm4.example.com:7761", id: "agent-4" }
+    - { address: "vm5.example.com:7761", id: "agent-5" }
+    - { address: "vm6.example.com:7761", id: "agent-6" }
+    - { address: "vm7.example.com:7761", id: "agent-7" }
+    - { address: "vm8.example.com:7761", id: "agent-8" }
+```
+
+**Advantages**:
+- 8× network bandwidth (each VM has own network interface)
+- Better NUMA locality
+- Fault isolation (one VM crash doesn't affect others)
+- Geographically distributed testing
+
+**Use Cases**: Multi-region benchmarks, high-throughput network testing
+
+### Scale-Up: One Large VM, Multiple Containers
+
+**Pattern**: Deploy multiple agent containers on a single powerful VM to maximize CPU utilization.
+
+```yaml
+# 1 big VM, 8 containers with different ports
+distributed:
+  agents:
+    - { address: "big-vm.example.com:7761", id: "c1", listen_port: 7761 }
+    - { address: "big-vm.example.com:7762", id: "c2", listen_port: 7762 }
+    - { address: "big-vm.example.com:7763", id: "c3", listen_port: 7763 }
+    - { address: "big-vm.example.com:7764", id: "c4", listen_port: 7764 }
+    - { address: "big-vm.example.com:7765", id: "c5", listen_port: 7765 }
+    - { address: "big-vm.example.com:7766", id: "c6", listen_port: 7766 }
+    - { address: "big-vm.example.com:7767", id: "c7", listen_port: 7767 }
+    - { address: "big-vm.example.com:7768", id: "c8", listen_port: 7768 }
+  
+  deployment:
+    network_mode: "host"  # All containers share host network on different ports
+```
+
+**How It Works**:
+- Each container has unique `listen_port` (7761-7768)
+- Container names are unique: `sai3bench-agent-c1`, `sai3bench-agent-c2`, etc.
+- All containers bind to different ports on same host
+- Controller connects to `big-vm:7761`, `big-vm:7762`, etc.
+
+**Advantages**:
+- Lower network latency (no inter-VM communication)
+- Simpler deployment (one VM to manage)
+- Often more cost-effective (1 large VM < 8 small VMs)
+- Easier resource monitoring
+
+**Use Cases**: Single-region testing, CPU-bound workloads, cost optimization
+
+### Comparison Example
+
+Test the same workload with both strategies to understand performance characteristics:
+
+**Scale-Out Config** (`scale-out-8vms.yaml`):
+```yaml
+# 8 VMs: n2-standard-8 (8 vCPU, 32 GB each)
+# Total: 64 vCPU, 256 GB RAM, 8 network interfaces
+target: "gs://my-bucket/data/"
+concurrency: 32  # Per agent = 256 total
+
+distributed:
+  agents:
+    - { address: "vm1:7761", id: "agent-1" }
+    # ... vm2-vm8
+```
+
+**Scale-Up Config** (`scale-up-1vm.yaml`):
+```yaml
+# 1 VM: n2-standard-64 (64 vCPU, 256 GB)
+# Total: 64 vCPU, 256 GB RAM, 1 network interface
+target: "gs://my-bucket/data/"
+concurrency: 32  # Per container = 256 total
+
+distributed:
+  agents:
+    - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
+    - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
+    # ... c3-c8 (8 containers total)
+```
+
+**Both generate equivalent application-level load** (256 concurrent operations), but differ in:
+- Network topology (8 NICs vs 1 NIC)
+- Memory architecture (distributed NUMA vs single NUMA)
+- Fault domain (8 VMs vs 1 VM)
+- Cost profile (typically 1 large VM is 10-20% cheaper)
+
+## Using Podman Instead of Docker
+
+sai3-bench supports both Docker and Podman as container runtimes. Specify via `container_runtime` field:
+
+```yaml
+distributed:
+  deployment:
+    deploy_type: "docker"
+    container_runtime: "podman"  # Default: "docker"
+    image: "sai3bench:v0.6.11"
+    network_mode: "host"
+```
+
+**Podman advantages**:
+- Rootless containers (better security)
+- No daemon required
+- Drop-in Docker replacement
+- Better for rootless CI/CD
+
+**Setup on VMs**:
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y podman
+
+# RHEL/Fedora/CentOS
+sudo dnf install -y podman
+
+# Verify
+podman --version
+```
+
+All SSH automation, deployment, and cleanup commands automatically use the specified runtime.
+
 ## Troubleshooting
 
 **Problem**: Agent connection refused

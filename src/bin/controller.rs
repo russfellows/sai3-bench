@@ -1,16 +1,18 @@
 // src/bin/controller.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
+// Import BUCKET_LABELS from metrics module
+use sai3_bench::metrics::BUCKET_LABELS;
 
 pub mod pb {
     pub mod iobench {
@@ -54,6 +56,32 @@ struct Cli {
 enum Commands {
     /// Simple reachability check (ping) against all agents
     Ping,
+    
+    /// SSH setup wizard for distributed testing (v0.6.11+)
+    /// Automates SSH key generation, distribution, and verification
+    SshSetup {
+        /// Hosts to configure (format: user@host or just host, comma-separated)
+        /// Example: "ubuntu@vm1.example.com,ubuntu@vm2.example.com"
+        #[arg(long)]
+        hosts: String,
+        
+        /// Default SSH user if not specified in host (default: current user)
+        #[arg(long)]
+        user: Option<String>,
+        
+        /// SSH key path (default: ~/.ssh/sai3bench_id_rsa)
+        #[arg(long)]
+        key_path: Option<PathBuf>,
+        
+        /// Interactive mode: prompt for passwords (default: true)
+        #[arg(long, default_value_t = true)]
+        interactive: bool,
+        
+        /// Test connectivity only (don't setup)
+        #[arg(long, default_value_t = false)]
+        test_only: bool,
+    },
+    
     /// Distributed GET
     Get {
         #[arg(long)]
@@ -177,6 +205,55 @@ async fn main() -> Result<()> {
     debug!("Agent addresses: {:?}", agents);
 
     match &cli.command {
+        Commands::SshSetup { hosts, user, key_path, interactive, test_only } => {
+            use sai3_bench::ssh_setup::{SshSetup, test_connectivity, print_setup_instructions};
+            
+            // Parse hosts
+            let default_user = user.clone().unwrap_or_else(|| {
+                std::env::var("USER").unwrap_or_else(|_| "ubuntu".to_string())
+            });
+            
+            let parsed_hosts: Vec<(String, String)> = hosts
+                .split(',')
+                .map(|h| h.trim())
+                .filter(|h| !h.is_empty())
+                .map(|h| {
+                    if h.contains('@') {
+                        let parts: Vec<&str> = h.split('@').collect();
+                        (parts[1].to_string(), parts[0].to_string())
+                    } else {
+                        (h.to_string(), default_user.clone())
+                    }
+                })
+                .collect();
+            
+            if parsed_hosts.is_empty() {
+                bail!("No hosts specified. Use --hosts user@host1,user@host2");
+            }
+            
+            let mut setup = SshSetup::default();
+            if let Some(kp) = key_path {
+                setup.key_path = kp.clone();
+            }
+            
+            if *test_only {
+                // Test connectivity only
+                test_connectivity(&parsed_hosts, &setup.key_path)?;
+            } else {
+                // Full setup
+                match setup.setup_hosts(&parsed_hosts, *interactive) {
+                    Ok(_) => info!("SSH setup completed successfully"),
+                    Err(e) => {
+                        error!("SSH setup failed: {}", e);
+                        print_setup_instructions();
+                        bail!(e);
+                    }
+                }
+            }
+            
+            return Ok(());
+        }
+        
         Commands::Ping => {
             for a in &agents {
                 let mut c = mk_client(a, cli.insecure, cli.agent_ca.as_ref(), &cli.agent_domain)
@@ -244,13 +321,54 @@ async fn main() -> Result<()> {
             start_delay,
             shared_prepare,
         } => {
+            // Read config to check for distributed.agents
+            let config_yaml = fs::read_to_string(config)
+                .with_context(|| format!("Failed to read config file: {}", config.display()))?;
+            let parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+                .context("Failed to parse YAML config")?;
+            
+            // Determine agent addresses: config.distributed.agents takes precedence over CLI --agents
+            let (agent_addrs, ssh_deployment) = if let Some(ref dist_config) = parsed_config.distributed {
+                // Use agents from config
+                let addrs: Vec<String> = dist_config.agents.iter()
+                    .map(|a| {
+                        // If SSH deployment, use address without port (we'll add listen_port)
+                        if dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false) {
+                            // SSH mode: address might be just hostname
+                            if a.address.contains(':') {
+                                a.address.clone()
+                            } else {
+                                format!("{}:{}", a.address, a.listen_port)
+                            }
+                        } else {
+                            // Direct gRPC mode: use address as-is
+                            a.address.clone()
+                        }
+                    })
+                    .collect();
+                
+                info!("Using {} agents from config.distributed.agents", addrs.len());
+                
+                // Check if SSH deployment is enabled
+                let ssh_enabled = dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false);
+                
+                (addrs, if ssh_enabled { Some(dist_config.clone()) } else { None })
+            } else if !agents.is_empty() {
+                // Fallback to CLI --agents (backward compatibility)
+                info!("Using {} agents from CLI --agents argument", agents.len());
+                (agents.clone(), None)
+            } else {
+                bail!("No agents specified. Use --agents on CLI or distributed.agents in config YAML");
+            };
+            
             run_distributed_workload(
-                &agents,
+                &agent_addrs,
                 config,
                 path_template,
                 agent_ids.as_deref(),
                 *start_delay,
                 *shared_prepare,
+                ssh_deployment,
                 cli.insecure,
                 cli.agent_ca.as_ref(),
                 &cli.agent_domain,
@@ -270,6 +388,7 @@ async fn run_distributed_workload(
     agent_ids: Option<&str>,
     start_delay_secs: u64,
     shared_prepare: Option<bool>,
+    ssh_deployment: Option<sai3_bench::config::DistributedConfig>,
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
@@ -286,6 +405,44 @@ async fn run_distributed_workload(
     // Mark as distributed and create agents subdirectory
     let agents_dir = results_dir.create_agents_dir()?;
     info!("Created agents directory: {}", agents_dir.display());
+    
+    // SSH Deployment: Start agent containers if enabled (v0.6.11+)
+    let mut deployments: Vec<sai3_bench::ssh_deploy::AgentDeployment> = Vec::new();
+    if let Some(ref dist_config) = ssh_deployment {
+        if let (Some(ref ssh_config), Some(ref deployment_config)) = 
+            (&dist_config.ssh, &dist_config.deployment) {
+            
+            if ssh_config.enabled {
+                info!("SSH deployment enabled - starting agent containers");
+                
+                let deploy_msg = format!("Deploying {} agents via SSH + Docker...", dist_config.agents.len());
+                println!("{}", deploy_msg);
+                results_dir.write_console(&deploy_msg)?;
+                
+                // Deploy agents
+                use sai3_bench::ssh_deploy;
+                match ssh_deploy::deploy_agents(&dist_config.agents, deployment_config, ssh_config).await {
+                    Ok(deployed) => {
+                        info!("Successfully deployed {} agents", deployed.len());
+                        
+                        let success_msg = format!("✓ All {} agents deployed and ready", deployed.len());
+                        println!("{}", success_msg);
+                        results_dir.write_console(&success_msg)?;
+                        
+                        deployments = deployed;
+                    }
+                    Err(e) => {
+                        error!("Agent deployment failed: {}", e);
+                        bail!("Failed to deploy agents via SSH: {}", e);
+                    }
+                }
+                
+                // Wait a moment for agents to be fully ready
+                info!("Waiting 2s for agents to initialize...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
     
     // Read YAML configuration
     let config_yaml = fs::read_to_string(config_path)
@@ -417,36 +574,91 @@ async fn run_distributed_workload(
 
     info!("Waiting for {} agents to complete workload", handles.len());
     
-    // Wait for all agents to complete
+    // Setup Ctrl+C handler
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    
+    // Wait for all agents to complete (or Ctrl+C)
     let mut summaries = Vec::new();
+    let mut interrupted = false;
+    
     for (idx, handle) in handles.into_iter().enumerate() {
-        match handle.await {
-            Ok(Ok(summary)) => {
-                info!("Agent {} ({}) completed successfully", ids[idx], agent_addrs[idx]);
-                let msg = format!("✓ Agent {} completed", ids[idx]);
-                println!("{}", msg);
-                results_dir.write_console(&msg)?;
-                
-                // Write agent results to agents/{id}/ subdirectory (v0.6.4)
-                write_agent_results(&agents_dir, &ids[idx], &summary)?;
-                
-                summaries.push(summary);
+        // Check for Ctrl+C between each agent completion
+        tokio::select! {
+            result = handle => {
+                match result {
+                    Ok(Ok(summary)) => {
+                        info!("Agent {} ({}) completed successfully", ids[idx], agent_addrs[idx]);
+                        let msg = format!("✓ Agent {} completed", ids[idx]);
+                        println!("{}", msg);
+                        results_dir.write_console(&msg)?;
+                        
+                        // Write agent results to agents/{id}/ subdirectory (v0.6.4)
+                        write_agent_results(&agents_dir, &ids[idx], &summary)?;
+                        
+                        summaries.push(summary);
+                    }
+                    Ok(Err(e)) => {
+                        error!("Agent {} ({}) failed: {:?}", ids[idx], agent_addrs[idx], e);
+                        let msg = format!("✗ Agent {} failed: {}", ids[idx], e);
+                        eprintln!("{}", msg);
+                        results_dir.write_console(&msg)?;
+                        
+                        // Cleanup and exit
+                        if !deployments.is_empty() {
+                            warn!("Cleaning up agents before exit...");
+                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
+                        }
+                        
+                        anyhow::bail!("Agent {} failed: {}", ids[idx], e);
+                    }
+                    Err(e) => {
+                        error!("Agent {} ({}) join error: {:?}", ids[idx], agent_addrs[idx], e);
+                        let msg = format!("✗ Agent {} join error: {}", ids[idx], e);
+                        eprintln!("{}", msg);
+                        results_dir.write_console(&msg)?;
+                        
+                        // Cleanup and exit
+                        if !deployments.is_empty() {
+                            warn!("Cleaning up agents before exit...");
+                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
+                        }
+                        
+                        anyhow::bail!("Agent {} join error: {}", ids[idx], e);
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                error!("Agent {} ({}) failed: {:?}", ids[idx], agent_addrs[idx], e);
-                let msg = format!("✗ Agent {} failed: {}", ids[idx], e);
+            _ = &mut ctrl_c => {
+                warn!("Received Ctrl+C - interrupting workload");
+                let msg = "\n⚠ Interrupted by user (Ctrl+C)";
                 eprintln!("{}", msg);
-                results_dir.write_console(&msg)?;
-                anyhow::bail!("Agent {} failed: {}", ids[idx], e);
-            }
-            Err(e) => {
-                error!("Agent {} ({}) join error: {:?}", ids[idx], agent_addrs[idx], e);
-                let msg = format!("✗ Agent {} join error: {}", ids[idx], e);
-                eprintln!("{}", msg);
-                results_dir.write_console(&msg)?;
-                anyhow::bail!("Agent {} join error: {}", ids[idx], e);
+                results_dir.write_console(msg)?;
+                interrupted = true;
+                break;
             }
         }
+    }
+    
+    // Handle interruption
+    if interrupted {
+        warn!("Workload interrupted - cleaning up agents");
+        
+        if !deployments.is_empty() {
+            let cleanup_msg = "Stopping agent containers...";
+            eprintln!("{}", cleanup_msg);
+            
+            use sai3_bench::ssh_deploy;
+            match ssh_deploy::cleanup_agents(deployments) {
+                Ok(_) => {
+                    eprintln!("✓ Agents cleaned up");
+                }
+                Err(e) => {
+                    eprintln!("⚠ Warning: Cleanup errors: {}", e);
+                }
+            }
+        }
+        
+        bail!("Workload interrupted by user");
     }
 
     let msg = format!("All {} agents completed successfully", summaries.len());
@@ -468,6 +680,29 @@ async fn run_distributed_workload(
     results_dir.finalize(max_wall)?;
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
+
+    // Cleanup SSH-deployed agents (v0.6.11+)
+    if !deployments.is_empty() {
+        info!("Cleaning up {} deployed agents", deployments.len());
+        
+        let cleanup_msg = format!("Stopping {} agent containers...", deployments.len());
+        println!("{}", cleanup_msg);
+        
+        use sai3_bench::ssh_deploy;
+        match ssh_deploy::cleanup_agents(deployments) {
+            Ok(_) => {
+                let success_msg = "✓ All agent containers stopped and cleaned up";
+                println!("{}", success_msg);
+                info!("{}", success_msg);
+            }
+            Err(e) => {
+                let err_msg = format!("⚠ Warning: Agent cleanup had errors: {}", e);
+                eprintln!("{}", err_msg);
+                warn!("{}", err_msg);
+                // Don't fail the whole operation if cleanup has issues
+            }
+        }
+    }
 
     Ok(())
 }
@@ -828,11 +1063,6 @@ fn collect_op_rows(
     total_bytes: u64,
     wall_seconds: f64,
 ) -> anyhow::Result<()> {
-    const BUCKET_LABELS: [&str; 9] = [
-        "zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB",
-        "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", "2GiB+"
-    ];
-    
     for (bucket_idx, hist) in accumulators.iter().enumerate() {
         let count = hist.len();
         if count == 0 {

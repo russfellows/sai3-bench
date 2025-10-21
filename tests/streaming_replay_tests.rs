@@ -1,14 +1,19 @@
 /// Integration tests for streaming replay functionality
 ///
-/// **IMPORTANT**: These tests MUST be run with `--test-threads=1` to ensure proper ordering.
-/// Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
+/// **IMPORTANT**: These tests use s3dlio's global singleton op-logger and MUST run sequentially.
+/// 
+/// **AUTOMATIC SERIAL EXECUTION**: All tests in this module use `#[serial]` attribute to ensure
+/// proper ordering even when cargo test runs with multiple threads.
 ///
 /// **TEST STRUCTURE**: To work around s3dlio's global singleton op-logger limitation:
 /// 1. `test_01_generate_oplog` - Creates op-log files (calls finalize once)
 /// 2. Other tests - Read and replay existing op-logs (no logging)
 ///
 /// This ensures the global logger is only initialized/finalized once per test run.
-/// Tests are numbered to enforce execution order with `--test-threads=1`.
+/// Tests are numbered to enforce execution order.
+///
+/// **NOTE**: If tests fail with "incomplete frame" errors, it means they ran in parallel.
+/// Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
 
 use anyhow::Result;
 use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
@@ -16,6 +21,7 @@ use sai3_bench::workload::{init_operation_logger, finalize_operation_logger, cre
 use s3dlio_oplog::OpLogStreamReader;
 use std::fs;
 use std::path::{Path, PathBuf};
+use serial_test::serial;
 
 /// Get path to shared test op-log (created by test_01_generate_oplog)
 fn get_test_oplog_path() -> PathBuf {
@@ -45,6 +51,7 @@ fn verify_oplog_contents(oplog_path: &Path) -> Result<usize> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_01_generate_oplog() -> Result<()> {
     // Create persistent test directories (not TempDir - we want them to survive)
     let test_base = std::env::temp_dir().join("sai3-bench-streaming-tests");
@@ -110,6 +117,7 @@ async fn test_01_generate_oplog() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_02_replay_basic() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     
@@ -143,6 +151,7 @@ async fn test_02_replay_basic() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_03_streaming_reader() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     
@@ -169,6 +178,7 @@ async fn test_03_streaming_reader() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_04_uri_remapping() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     
@@ -206,6 +216,7 @@ async fn test_04_uri_remapping() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_05_continue_on_error() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     let _data_dir = get_test_data_dir();
@@ -238,6 +249,7 @@ async fn test_05_continue_on_error() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_06_concurrent_limits() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     

@@ -3,7 +3,9 @@
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.5.3 (October 2025) - Realistic Size Distributions & Advanced Configurability
+**Current Version**: v0.6.10 (October 2025) - s3dlio v0.9.10 Integration & Performance Analysis
+
+**Recent Critical Finding**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`
@@ -28,7 +30,44 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
     store_for_uri(uri).context("Failed to create object store")
 }
 ```
-**Key**: s3dlio should use the latest version in head or main for API stability.
+**Key**: Currently using s3dlio v0.9.10 via local path dependency `../s3dlio`.
+
+### Pre-stat Optimization Gating (v0.6.10)
+Pre-stat (batch HEAD requests to populate size cache) is **gated behind RangeEngine flag** due to performance findings:
+```rust
+// Only runs when RangeEngine is enabled
+let should_prestat = (uri.starts_with("s3://") || uri.starts_with("gs://") || 
+                      uri.starts_with("az://")) && cfg.range_engine.enabled;
+
+if should_prestat {
+    info!("Pre-stating {} objects to populate size cache", objects.len());
+    store.pre_stat_and_cache(&objects).await?;
+}
+```
+
+**Why gated**: Testing showed <1% performance difference for same-region scenarios, but pre-stat adds ~250ms startup overhead. Only enable when RangeEngine provides actual benefit (cross-region, low-bandwidth).
+
+### RangeEngine Performance Considerations (v0.6.10)
+**Default**: RangeEngine is **DISABLED** by default in s3dlio v0.9.6+ for optimal performance.
+
+**Key Findings from v0.6.10 testing**:
+- Parallel chunk downloads are 35% SLOWER than single-stream for same-region cloud storage
+- Coordination overhead > parallelism benefit when network bandwidth is saturated (~2.6 GB/s)
+- CPU utilization: 100% baseline vs 80% RangeEngine
+
+**When to enable RangeEngine**:
+- Cross-region transfers with high latency
+- Low-bandwidth network links (<100 Mbps)
+- Scenarios where parallel chunk downloads overcome coordination costs
+
+**Configuration** (disabled by default):
+```yaml
+range_engine:
+  enabled: false  # Keep disabled for same-region workloads (RECOMMENDED)
+  min_size_bytes: 16777216  # Only for files >= 16 MiB
+  chunk_size_bytes: 8388608  # 8 MiB chunks
+  max_workers: 8
+```
 
 ### Progress Bars (v0.3.1)
 Professional progress visualization using `indicatif = "0.17"`:
@@ -154,7 +193,13 @@ rg "gRPC" proto/
 ./target/release/sai3-bench -vv run --config tests/configs/mixed.yaml
 
 # Azure backend (requires AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_ACCOUNT_KEY)
-./target/release/sai3-bench health --uri "az://storage-account/container/"
+./target/release/sai3-bench util health --uri "az://storage-account/container/"
+
+# GCS backend (requires GOOGLE_APPLICATION_CREDENTIALS)
+./target/release/sai3-bench util health --uri "gs://bucket/"
+
+# Direct I/O backend (no credentials, Linux only)
+./target/release/sai3-bench -v run --config tests/configs/direct_io_chunked_test.yaml
 ```
 
 ### Distributed Mode Testing
@@ -164,6 +209,10 @@ rg "gRPC" proto/
 
 # Terminal 2: Test connectivity
 ./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
+
+# Terminal 2: Run distributed workload (v0.6.0+)
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    run --config tests/configs/distributed_mixed_test.yaml --start-delay 2
 ```
 
 ### Progress Bar Examples
@@ -195,13 +244,20 @@ head -20 /tmp/operations.tsv
 - Pre-resolution: GET operations fetch object lists **once** before workload starts
 - Weighted selection via `rand_distr::WeightedIndex` from config weights
 - Semaphore-controlled concurrency: `Arc<Semaphore::new(cfg.concurrency)>`
+- **v0.6.10**: Cloud storage (s3://, gs://, az://) uses `get_optimized()` for cache-aware reads
+- **v0.6.9**: Direct I/O uses intelligent chunked reads for files >8 MiB (173x faster)
 
 ### Backend Detection Logic
 `BackendType::from_uri()` in `src/workload.rs` determines storage backend:
 ```rust
-// "s3://" -> S3, "file://" -> File, "direct://" -> DirectIO, "az://" -> Azure
+// "s3://" -> S3, "file://" -> File, "direct://" -> DirectIO, 
+// "az://" -> Azure, "gs://" -> GCS
 // Default fallback is File for unrecognized schemes
 ```
+
+**Special handling**:
+- **direct:// URIs**: Automatic chunked reads for files >8 MiB (4 MiB blocks)
+- **Cloud URIs** (s3://, gs://, az://): Use `get_optimized()` method for cache-aware operations
 
 ### gRPC Protocol Buffer Build
 - `build.rs` generates `src/pb/iobench.rs` from `proto/iobench.proto`
@@ -223,10 +279,69 @@ head -20 /tmp/operations.tsv
 ### Legacy Code Markers
 Look for `TODO: Remove legacy s3_utils imports` - these indicate partial migration areas that should be updated to use ObjectStore when touched.
 
+## Distributed Workload Execution (v0.6.0+)
+
+### Architecture
+- **Controller** (`sai3bench-ctl`): Orchestrates multi-agent workloads via gRPC
+- **Agents** (`sai3bench-agent`): Execute workloads independently on their nodes
+- **Coordination**: Synchronized start time, per-agent path isolation
+- **Results**: HDR histogram merging (v0.6.4) for accurate aggregate metrics
+
+### Key Features
+- **Automatic storage mode detection**: Shared (s3://, gs://, az://) vs Local (file://, direct://)
+- **Per-agent path isolation**: Each agent operates in `agent-{id}/` subdirectory
+- **Coordinated start**: All agents begin workload simultaneously (configurable delay)
+- **Result aggregation**: Per-agent + consolidated results with proper histogram merging
+
+### Usage Pattern
+```bash
+# Start multiple agents
+sai3bench-agent --listen 0.0.0.0:7761  # On host 1
+sai3bench-agent --listen 0.0.0.0:7761  # On host 2
+
+# Run coordinated workload
+sai3bench-ctl --insecure --agents host1:7761,host2:7761 \
+    run --config workload.yaml --start-delay 2
+```
+
+### Critical Implementation Details
+- **HDR Histogram Merging** (v0.6.4): Percentiles cannot be averaged - use proper histogram merging via `hdrhistogram` library for mathematically accurate aggregate metrics
+- **Shared storage**: Single prepare phase, all agents read same dataset
+- **Local storage**: Each agent prepares independent isolated dataset
+- **Path template**: Default `agent-{id}/` customizable via `--path-template`
+
+## Results Directory Structure (v0.6.4+)
+
+### Automatic Results Capture
+Every workload execution creates timestamped results directory: `sai3-YYYYMMDD-HHMM-{test_name}/`
+
+### Directory Contents
+```
+sai3-YYYYMMDD-HHMM-{test_name}/
+├── config.yaml          # Complete workload configuration
+├── console.log          # Full execution log
+├── metadata.json        # Test metadata (distributed: true/false)
+├── results.tsv          # Single-node OR consolidated aggregate (merged histograms)
+└── agents/              # Only in distributed mode
+    ├── agent-1/
+    │   ├── config.yaml  # Agent's modified config (with path prefix)
+    │   ├── console.log  # Agent's execution log
+    │   └── results.tsv  # Per-agent results
+    └── agent-2/...
+```
+
+### Key Points
+- **Consolidated TSV** (distributed): Contains mathematically accurate merged histogram percentiles, NOT simple averages
+- **Per-agent TSVs**: Preserved for debugging and per-node analysis
+- **Automatic creation**: No manual setup required
+
 ## Performance Characteristics
 - **File backend**: 25k+ ops/s with 1ms latency validated
 - **Azure backend**: 2-3 ops/s with ~700ms latency validated
+- **GCS same-region**: ~2.6 GB/s throughput (network-bound)
+- **Pre-stat overhead**: ~250ms for 1000 objects
+- **Direct I/O**: 173x faster with chunked reads (v0.6.9) - 1.73 GiB/s for large files
 - **Concurrency**: Configurable via YAML `concurrency` field
 - **Logging**: `-v` operational info, `-vv` detailed tracing
 
-When extending functionality, always maintain ObjectStore abstraction and ensure new features work across all backend types (`file://`, `direct://`, `s3://`, `az://`).
+When extending functionality, always maintain ObjectStore abstraction and ensure new features work across all backend types (`file://`, `direct://`, `s3://`, `az://`, `gs://`).

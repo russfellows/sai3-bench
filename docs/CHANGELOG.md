@@ -2,6 +2,141 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.6.11] - 2025-10-20
+
+### � SSH-Automated Distributed Testing
+
+**Major feature release**: Zero-touch distributed deployment with automated SSH, per-agent configuration, and flexible container runtime support (Docker/Podman).
+
+#### New Features
+
+- **SSH Automation** - One-command setup for passwordless access
+  - `sai3bench-ctl ssh-setup --hosts vm1,vm2,vm3` - Automated SSH key generation, distribution, and verification
+  - Automatic Docker/Podman availability checking
+  - See [SSH Setup Guide](SSH_SETUP_GUIDE.md)
+
+- **Config-Driven Agents** - Define all agents in YAML (no CLI flags needed)
+  ```yaml
+  distributed:
+    agents:
+      - address: "vm1.example.com"
+        target_override: "s3://bucket-1/"
+        concurrency_override: 128
+        env: { RUST_LOG: "debug" }
+  ```
+
+- **Flexible Container Runtime** - Docker or Podman via YAML (no recompilation)
+  ```yaml
+  deployment:
+    container_runtime: "docker"  # or "podman"
+    image: "sai3bench:v0.6.11"
+  ```
+
+- **Per-Agent Customization**
+  - Override target storage backend per agent
+  - Custom concurrency levels per agent
+  - Environment variable injection
+  - Volume mounts for local storage testing
+
+- **Automated Deployment** - Controller handles full lifecycle
+  - SSH to VMs, pull images, start containers
+  - Health checks and coordinated start
+  - Graceful Ctrl+C handling with cleanup
+  - Automatic container stop/removal on completion
+
+- **Scale-Out & Scale-Up Support** - Flexible deployment strategies
+  - **Scale-Out**: Multiple VMs, one container each (max network bandwidth)
+  - **Scale-Up**: One large VM, multiple containers on different ports (cost optimization)
+  - See [Scale-Out vs Scale-Up Guide](SCALE_OUT_VS_SCALE_UP.md)
+
+#### Cloud Automation Scripts
+
+- **GCP Script** (`scripts/gcp_distributed_test.sh`) - Production-ready GCP automation
+  - Automated VM creation with Docker pre-installed
+  - Workload config generation
+  - Results collection and optional cleanup
+  - 559 lines of complete lifecycle management
+
+- **Cloud Templates** (`scripts/cloud_test_template.sh`) - Adapt for AWS/Azure
+  - Generic template with example implementations
+  - Cloud-agnostic interface functions
+  
+- **Local Testing** (`scripts/local_docker_test.sh`) - Test distributed mode locally
+  - No cloud resources needed
+  - Optional MinIO for S3 simulation
+  - Perfect for CI/CD pipelines
+
+#### Documentation
+
+- **[Distributed Testing Guide](DISTRIBUTED_TESTING_GUIDE.md)** - Complete workflows, scale-out vs scale-up patterns, Podman support
+- **[SSH Setup Guide](SSH_SETUP_GUIDE.md)** - One-command SSH automation, troubleshooting
+- **[Scale-Out vs Scale-Up](SCALE_OUT_VS_SCALE_UP.md)** - Performance comparison, cost analysis, use cases
+- **[Cloud Test Scripts](../scripts/README.md)** - GCP automation, AWS/Azure templates, local testing
+
+#### Testing
+
+- **60 total tests** (24 lib, 11 distributed config, 8 controller simulation, 8 GCS, 1 gRPC, 6 streaming, 2 utils)
+- **58/60 passing** (97%) - Only 2 non-critical doc test failures
+- **Config validation**: All distributed YAML schemas validated
+- **Simulation tests**: Controller logic verified without real VMs
+
+### �🐛 Bug Fixes
+
+- **Bucket label inconsistency**: Fixed inconsistent BUCKET_LABELS definition between `metrics.rs` (">2GiB") and `controller.rs` ("2GiB+")
+  - Established single source of truth: `controller.rs` now imports from `metrics.rs`
+  - Removed duplicate const definition
+  - Ensures consistent histogram reporting across distributed and single-node modes
+
+### ✅ Test Improvements
+
+- **Comprehensive bucket boundary testing**: Added missing test coverage for 512 KiB boundary
+  - New `test_all_bucket_boundaries_comprehensive()` with 100+ assertions
+  - Validates all 9 bucket boundaries, transitions, and edge cases
+  - Confirms bucket index function produces correct results
+  
+- **Streaming replay test stability**: Fixed 2/6 test failures due to parallel execution
+  - Added `serial_test = "3.2"` dependency
+  - Applied `#[serial]` attribute to all 6 streaming replay tests
+  - Resolved "incomplete frame" errors caused by global op-logger singleton conflicts
+
+- **Test suite status**: 60 tests total, 58 passing (97%) - up from 41 tests
+
+### 📝 Files Modified
+
+**Core Implementation**:
+- `src/config.rs`: Added DistributedConfig, AgentConfig, SshConfig, DeploymentConfig (+180 lines)
+- `src/ssh_deploy.rs`: SSH deployment automation (NEW, 360 lines)
+- `src/ssh_setup.rs`: SSH key setup wizard (NEW, 300 lines)
+- `src/bin/controller.rs`: Config-driven agent discovery, SSH automation, Ctrl+C handling (+120 lines)
+- `Cargo.toml`: Added ssh2, shellexpand dependencies
+
+**Example Configs**:
+- `examples/distributed-ssh-automated.yaml`: Complete SSH automation example
+- `examples/distributed-scale-up.yaml`: 8 containers on 1 VM
+- `examples/distributed-scale-out.yaml`: 8 VMs, 1 container each
+
+**Testing**:
+- `tests/distributed_config_tests.rs`: 11 YAML parsing validation tests (NEW)
+- `tests/distributed_simulation_test.rs`: 8 controller logic tests (NEW)
+- `tests/configs/distributed_yaml_test.yaml`: Test configuration
+
+**Cloud Automation**:
+- `scripts/gcp_distributed_test.sh`: Complete GCP automation (NEW, 559 lines)
+- `scripts/cloud_test_template.sh`: Cloud-agnostic template (NEW, 406 lines)
+- `scripts/local_docker_test.sh`: Local multi-container testing (NEW, 399 lines)
+- `scripts/validate_gcp_script.sh`: Config validation without VMs (NEW)
+- `scripts/README.md`: Complete script documentation
+- `scripts/QUICKSTART.md`: Progressive cloud testing guide
+
+### 📚 Documentation Consolidation
+
+**Archived** (superseded by comprehensive distributed guides):
+- `docs/V0.6.4_MULTIHOST_SUMMARY.md` - Functionality now in DISTRIBUTED_TESTING_GUIDE.md
+- `docs/V0.6.4_TESTING_SUMMARY.md` - Results directory feature completed in v0.6.4
+
+**Updated**:
+- `README.md`: Feature-focused distributed section with links to guides
+
 ## [0.6.10] - 2025-10-19
 
 ### 🔬 s3dlio v0.9.10 Integration + Performance Analysis

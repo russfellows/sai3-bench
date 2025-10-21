@@ -10,6 +10,8 @@ pub mod replay_streaming; // New streaming replay (v0.5.0+)
 pub mod remap; // Advanced remapping for replay (v0.5.0+)
 pub mod results_dir; // Results directory management (v0.6.4+)
 pub mod size_generator; // Size distributions for realistic workloads (v0.5.3+)
+pub mod ssh_deploy; // SSH-based distributed deployment (v0.6.11+)
+pub mod ssh_setup; // SSH key setup automation (v0.6.11+)
 pub mod tsv_export; // TSV export for machine-readable results (v0.5.1+)
 pub mod workload;
 
