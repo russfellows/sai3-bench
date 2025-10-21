@@ -4,38 +4,47 @@
 
 ### Getting Started
 - **[USAGE.md](USAGE.md)** - Primary user guide for single-node and distributed modes
-- **[DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation guide
+- **[DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation, scale-out vs scale-up patterns
+- **[SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md)** - One-command SSH automation for distributed testing
+- **[SCALE_OUT_VS_SCALE_UP.md](SCALE_OUT_VS_SCALE_UP.md)** - Performance comparison, cost analysis, deployment strategies
 - **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.6)
+- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.6.11)
 - **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
 - **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
 
-## Development Documentation
+## Technical Documentation
 
-### Implementation Summaries
-- **[V0.6.4_MULTIHOST_SUMMARY.md](V0.6.4_MULTIHOST_SUMMARY.md)** - v0.6.4 results directory implementation
-- **[V0.6.4_TESTING_SUMMARY.md](V0.6.4_TESTING_SUMMARY.md)** - v0.6.4 HDR histogram merging tests
+### Performance & Optimization
+- **[IO_SIZE_OPTIMIZATION.md](IO_SIZE_OPTIMIZATION.md)** - I/O size tuning for different backends
+- **[CHUNKED_READS_STRATEGY.md](CHUNKED_READS_STRATEGY.md)** - Direct I/O chunked read implementation
+- **[CHUNKED_READS_IMPLEMENTATION.md](CHUNKED_READS_IMPLEMENTATION.md)** - Technical details of chunked read optimization
+
+## Archived Documentation
+
+- **[archive/](archive/)** - Version-specific release notes and implementation summaries
+  - v0.6.4, v0.6.9, v0.6.10 detailed release documentation
+  - See [archive/README.md](archive/README.md) for details
 
 ## Maintenance
 
-**Last Cleanup**: October 11, 2025 (v0.6.4)
-- Removed 15 obsolete files (old release notes, completed plans, and outdated design docs)
-- Consolidated version history into CHANGELOG.md
-- Added DISTRIBUTED_TESTING_GUIDE.md for multi-host testing
-- Replaced AZURE_SETUP.md with comprehensive CLOUD_STORAGE_SETUP.md (S3 + Azure + GCS)
-- Removed s3dlio v0.9.4 migration docs (info now in CHANGELOG)
-- Kept v0.6.4 implementation summaries for current release context
+**Last Cleanup**: October 20, 2025 (v0.6.11)
+- **Archived**: 4 version-specific docs (v0.6.4, v0.6.9, v0.6.10) - functionality integrated into feature guides
+- **Added**: SSH_SETUP_GUIDE.md, SCALE_OUT_VS_SCALE_UP.md for v0.6.11 distributed features
+- **Updated**: DISTRIBUTED_TESTING_GUIDE.md with SSH automation, scale-up patterns, Podman support
+- **Updated**: CHANGELOG.md with comprehensive v0.6.11 distributed testing release notes
 
 **Documentation Structure**:
-- **10 total files** (down from 24)
-- **User-facing docs**: 7 files for end users
-- **Development docs**: 2 files for implementation reference
-- **Index**: This README
+- **13 active files** (11 docs + 1 archive dir + this README)
+- **User-facing**: 8 guides (getting started, distributed, cloud setup)
+- **Technical**: 3 optimization/implementation docs
+- **Reference**: 1 changelog, 1 config syntax
+- **Archived**: 4 version-specific docs (preserved for historical reference)
 
 **Cleanup Policy**:
 - All release information goes into CHANGELOG.md (single source of truth)
-- Implementation summaries kept for 1-2 major versions as reference
-- Completed design documents removed once features are stable
+- Version-specific implementation docs archived after features are mature and integrated
+- Feature guides remain current across releases (not tied to specific versions)
 - User guides and technical references kept permanently
+- Archive directory preserves historical context

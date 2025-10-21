@@ -148,21 +148,80 @@ See [Config Syntax](docs/CONFIG_SYNTAX.md) for complete options.
 
 ## 🌐 Distributed Testing
 
-Coordinate workloads across multiple agent nodes for large-scale load generation:
+Generate large-scale coordinated load across multiple nodes with automated deployment:
 
+### Automated SSH Deployment
 ```bash
-# Start agents on each host
-sai3bench-agent --listen 0.0.0.0:7761
+# One-time setup: Configure passwordless SSH
+sai3bench-ctl ssh-setup --hosts ubuntu@vm1,ubuntu@vm2,ubuntu@vm3
 
-# Run distributed workload from controller
-sai3bench-ctl --insecure \
-  --agents host1:7761,host2:7761,host3:7761 \
-  run --config workload.yaml
+# Run distributed test: Agents deploy automatically
+sai3bench-ctl run --config distributed-workload.yaml
 ```
 
-**Features**: Coordinated start, automatic storage detection, result aggregation with HDR histogram merging, per-agent and consolidated metrics.
+### Configuration-Driven Agents
+Define all agents in YAML with per-agent customization:
+```yaml
+distributed:
+  agents:
+    - address: "vm1.example.com"
+      id: "us-west-agent"
+      target_override: "s3://us-west-bucket/"
+      concurrency_override: 128
+      env: { AWS_PROFILE: "benchmark" }
+    
+    - address: "vm2.example.com"
+      id: "us-east-agent"
+      target_override: "s3://us-east-bucket/"
+  
+  ssh:
+    enabled: true
+    key_path: "~/.ssh/sai3bench_id_rsa"
+  
+  deployment:
+    container_runtime: "docker"  # or "podman"
+    image: "sai3bench:latest"
+    network_mode: "host"
+```
 
-See [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) for details.
+### Flexible Scaling Strategies
+
+**Scale-Out** (Multiple VMs): Maximum network bandwidth, fault tolerance
+```yaml
+# 8 VMs, 1 container each = 8× network interfaces
+agents:
+  - { address: "vm1:7761", id: "agent-1" }
+  - { address: "vm2:7761", id: "agent-2" }
+  # ... vm3-vm8
+```
+
+**Scale-Up** (Single VM): Cost optimization, lower latency
+```yaml
+# 1 large VM, 8 containers on different ports
+agents:
+  - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
+  - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
+  # ... c3-c8
+```
+
+### Cloud Automation
+Pre-built scripts for rapid deployment:
+- **GCP**: `scripts/gcp_distributed_test.sh` - Complete VM lifecycle automation
+- **AWS/Azure**: `scripts/cloud_test_template.sh` - Customizable templates
+- **Local**: `scripts/local_docker_test.sh` - Test distributed mode without cloud
+
+### Key Features
+- **Automated lifecycle**: SSH, container deployment, health checks, cleanup
+- **Per-agent overrides**: Target storage, concurrency, environment variables, volumes
+- **Graceful shutdown**: Ctrl+C handling with automatic container cleanup
+- **Result aggregation**: Proper HDR histogram merging for accurate percentiles
+- **Container flexibility**: Docker or Podman via YAML (no recompilation)
+
+**Learn More**:
+- [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) - Complete workflows and patterns
+- [SSH Setup Guide](docs/SSH_SETUP_GUIDE.md) - One-command SSH automation
+- [Scale-Out vs Scale-Up](docs/SCALE_OUT_VS_SCALE_UP.md) - Performance and cost comparison
+- [Cloud Scripts Guide](scripts/README.md) - GCP automation and templates
 
 ## ⚙️ Key Features
 

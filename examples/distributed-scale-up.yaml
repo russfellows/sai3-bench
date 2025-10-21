@@ -1,0 +1,122 @@
+# Scale-Up Pattern: Multiple Containers on Single Large VM
+#
+# This configuration demonstrates vertical scaling by running 8 agent containers
+# on a single powerful VM. Each container gets its own port for gRPC communication.
+#
+# Use Case: Maximize CPU utilization on large instances, lower network latency
+#
+# VM Requirement: Large instance with 32+ vCPUs
+# Examples:
+#   - AWS: c6i.16xlarge (64 vCPU, 128 GB)
+#   - GCP: n2-standard-64 (64 vCPU, 256 GB)
+#   - Azure: Standard_D64s_v3 (64 vCPU, 256 GB)
+
+target: "s3://my-benchmark-bucket/data/"
+duration: 120s
+concurrency: 32  # Per container, 256 total (8 containers × 32)
+
+# Scale-up: 8 containers on 1 VM
+distributed:
+  agents:
+    # Container 1
+    - address: "big-vm.example.com:7761"
+      id: "container-1"
+      listen_port: 7761
+      env:
+        RUST_LOG: "info"
+        CONTAINER_NUM: "1"
+    
+    # Container 2
+    - address: "big-vm.example.com:7762"
+      id: "container-2"
+      listen_port: 7762
+      env:
+        RUST_LOG: "info"
+        CONTAINER_NUM: "2"
+    
+    # Container 3
+    - address: "big-vm.example.com:7763"
+      id: "container-3"
+      listen_port: 7763
+    
+    # Container 4
+    - address: "big-vm.example.com:7764"
+      id: "container-4"
+      listen_port: 7764
+    
+    # Container 5
+    - address: "big-vm.example.com:7765"
+      id: "container-5"
+      listen_port: 7765
+    
+    # Container 6
+    - address: "big-vm.example.com:7766"
+      id: "container-6"
+      listen_port: 7766
+    
+    # Container 7
+    - address: "big-vm.example.com:7767"
+      id: "container-7"
+      listen_port: 7767
+    
+    # Container 8
+    - address: "big-vm.example.com:7768"
+      id: "container-8"
+      listen_port: 7768
+  
+  ssh:
+    enabled: true
+    user: "ubuntu"
+    key_path: "~/.ssh/sai3bench_id_rsa"
+  
+  deployment:
+    deploy_type: "docker"
+    container_runtime: "docker"  # or "podman"
+    image: "sai3bench:v0.6.11"
+    network_mode: "host"  # All containers share host network, different ports
+    pull_policy: "if_not_present"
+  
+  start_delay: 3
+
+# Prepare shared test data
+prepare:
+  ensure_objects:
+    - base_uri: "s3://my-benchmark-bucket/data/objects/"
+      count: 10000
+      size_distribution:
+        type: lognormal
+        mean: 524288  # 512 KiB average
+        std_dev: 262144
+        min: 1024
+        max: 5242880  # 5 MiB max
+      fill: random
+
+# Mixed workload
+workload:
+  - op: get
+    path: "objects/*"
+    weight: 70
+  
+  - op: put
+    path: "uploads/"
+    weight: 25
+    size_distribution:
+      type: uniform
+      min: 4096
+      max: 1048576
+  
+  - op: delete
+    path: "uploads/*"
+    weight: 5
+
+# Usage:
+# 1. Setup SSH (once):
+#    sai3bench-ctl ssh-setup --hosts ubuntu@big-vm.example.com
+#
+# 2. Run test:
+#    sai3bench-ctl run --config examples/distributed-scale-up.yaml
+#
+# Expected: 8 containers start on big-vm on ports 7761-7768, generating
+# 256 concurrent operations (8 × 32) against S3.
+#
+# Compare with scale-out: 8 VMs with 1 container each for network/cost analysis.

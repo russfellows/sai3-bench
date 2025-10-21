@@ -1,0 +1,44 @@
+# Simple distributed config test for YAML validation
+# Tests parsing of distributed.agents section without SSH deployment
+
+target: "file:///tmp/sai3bench-distributed-test/"
+duration: 5s
+concurrency: 16
+
+# Distributed configuration (SSH disabled for testing)
+distributed:
+  # Agent definitions
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+    
+    - address: "localhost:7762"
+      id: "agent-2"
+      target_override: "file:///tmp/sai3bench-test-agent2/"
+      concurrency_override: 32
+  
+  # SSH disabled for local testing
+  ssh:
+    enabled: false
+  
+  # Docker settings (won't be used when SSH is disabled)
+  deployment:
+    deploy_type: "docker"
+    image: "sai3bench:test"
+  
+  start_delay: 1
+  path_template: "agent-{id}/"
+
+# Simple workload for testing
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-distributed-test/data/"
+      count: 10
+      min_size: 1024
+      max_size: 1024
+      fill: zero

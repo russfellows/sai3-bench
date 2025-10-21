@@ -34,6 +34,11 @@ pub struct Config {
     /// Default: None (uses Auto mode - Sequential for large files, Random for small)
     #[serde(default)]
     pub page_cache_mode: Option<PageCacheMode>,
+    
+    /// Optional distributed testing configuration (v0.6.11+)
+    /// Enables automated SSH deployment, per-agent customization, and coordinated execution
+    #[serde(default)]
+    pub distributed: Option<DistributedConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -541,4 +546,172 @@ pub enum PageCacheMode {
     DontNeed,
     /// Use default kernel heuristics (safe baseline)
     Normal,
+}
+
+/// Distributed testing configuration (v0.6.11+)
+/// Enables automated multi-host deployment with per-agent customization
+#[derive(Debug, Deserialize, Clone)]
+pub struct DistributedConfig {
+    /// List of agent configurations
+    pub agents: Vec<AgentConfig>,
+    
+    /// SSH deployment configuration (optional)
+    #[serde(default)]
+    pub ssh: Option<SshConfig>,
+    
+    /// Docker deployment configuration (optional)
+    #[serde(default)]
+    pub deployment: Option<DeploymentConfig>,
+    
+    /// Delay in seconds before coordinated start (default: 2)
+    /// Allows time for all agents to receive config and prepare
+    #[serde(default = "default_start_delay")]
+    pub start_delay: u64,
+    
+    /// Path prefix template for agent isolation (default: "agent-{id}/")
+    /// Use {id} as placeholder for agent identifier
+    #[serde(default = "default_path_template")]
+    pub path_template: String,
+}
+
+/// Individual agent configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentConfig {
+    /// Agent address (host:port) or hostname (for SSH deployment)
+    /// Examples: "node1.example.com:7761", "10.0.1.50:7761", "node1" (SSH mode)
+    pub address: String,
+    
+    /// Optional friendly identifier (default: derived from address)
+    /// Used in results directory naming and logging
+    #[serde(default)]
+    pub id: Option<String>,
+    
+    /// Override base target URI for this agent
+    /// Example: "s3://bucket-2/" to use different bucket
+    #[serde(default)]
+    pub target_override: Option<String>,
+    
+    /// Override concurrency for this agent
+    /// Useful for heterogeneous hardware (different CPU counts)
+    #[serde(default)]
+    pub concurrency_override: Option<usize>,
+    
+    /// Environment variables to inject into agent container/process
+    /// Example: {"AWS_PROFILE": "benchmark-reader", "RUST_LOG": "debug"}
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    
+    /// Docker volume mounts for this agent (format: "host:container" or "host:container:mode")
+    /// Example: ["/mnt/nvme:/data", "/tmp/results:/results:ro"]
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    
+    /// Custom path template override for this agent (default: uses distributed.path_template)
+    #[serde(default)]
+    pub path_template: Option<String>,
+    
+    /// Listen port for agent (SSH mode only, default: 7761)
+    #[serde(default = "default_agent_port")]
+    pub listen_port: u16,
+}
+
+/// SSH configuration for automated deployment
+#[derive(Debug, Deserialize, Clone)]
+pub struct SshConfig {
+    /// Enable SSH automation (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+    
+    /// SSH username (default: current user)
+    #[serde(default)]
+    pub user: Option<String>,
+    
+    /// Path to SSH private key (default: ~/.ssh/id_rsa)
+    #[serde(default)]
+    pub key_path: Option<String>,
+    
+    /// SSH connection timeout in seconds (default: 10)
+    #[serde(default = "default_ssh_timeout")]
+    pub timeout: u64,
+    
+    /// Known hosts file path (default: ~/.ssh/known_hosts)
+    /// Set to empty string to disable host key checking (insecure!)
+    #[serde(default)]
+    pub known_hosts: Option<String>,
+}
+
+/// Container deployment configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeploymentConfig {
+    /// Deployment type: "docker" or "binary"
+    /// - docker: Use container runtime with specified image
+    /// - binary: Execute sai3bench-agent directly on host
+    #[serde(default = "default_deployment_type")]
+    pub deploy_type: String,
+    
+    /// Container runtime command: "docker" or "podman" (default: "docker")
+    /// Used for: container_runtime run, container_runtime pull, container_runtime ps, etc.
+    #[serde(default = "default_container_runtime")]
+    pub container_runtime: String,
+    
+    /// Container image to use (e.g., "sai3bench:v0.6.11")
+    #[serde(default = "default_docker_image")]
+    pub image: String,
+    
+    /// Container network mode (default: "host")
+    /// For gRPC agent communication, "host" is recommended
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    
+    /// Image pull policy: "always", "if_not_present", "never"
+    #[serde(default = "default_pull_policy")]
+    pub pull_policy: String,
+    
+    /// Path to sai3bench-agent binary on remote hosts (binary mode)
+    #[serde(default = "default_binary_path")]
+    pub binary_path: String,
+    
+    /// Additional docker run arguments
+    #[serde(default)]
+    pub docker_args: Vec<String>,
+}
+
+fn default_start_delay() -> u64 {
+    2
+}
+
+fn default_path_template() -> String {
+    "agent-{id}/".to_string()
+}
+
+fn default_agent_port() -> u16 {
+    7761
+}
+
+fn default_ssh_timeout() -> u64 {
+    10
+}
+
+fn default_deployment_type() -> String {
+    "docker".to_string()
+}
+
+fn default_docker_image() -> String {
+    "sai3bench:latest".to_string()
+}
+
+fn default_container_runtime() -> String {
+    "docker".to_string()
+}
+
+fn default_network_mode() -> String {
+    "host".to_string()
+}
+
+fn default_pull_policy() -> String {
+    "if_not_present".to_string()
+}
+
+fn default_binary_path() -> String {
+    "/usr/local/bin/sai3bench-agent".to_string()
 }
