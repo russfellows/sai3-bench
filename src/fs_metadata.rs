@@ -9,8 +9,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::PathBuf;
 use tracing::{debug, warn};
 
 use crate::metadata_ops::{
@@ -177,11 +176,20 @@ impl MetadataOperations for FileMetadataOps {
             size: metadata.len(),
             modified: metadata.modified().ok(),
             content_type: None,
+            cache_control: None,
+            content_encoding: None,
+            content_language: None,
+            content_disposition: None,
             etag: None,
+            expires: None,
             permissions: Some(metadata.permissions().mode()),
             owner_uid: None,  // TODO: Use nix crate for stat() to get uid/gid
             owner_gid: None,
             storage_class: None,
+            server_side_encryption: None,
+            ssekms_key_id: None,
+            version_id: None,
+            replication_status: None,
             custom_metadata: HashMap::new(),
         })
     }

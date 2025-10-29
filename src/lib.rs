@@ -3,6 +3,7 @@
 use regex::escape;
 
 pub mod config;
+pub mod cloud_metadata; // Cloud storage metadata ops (v0.7.0+)
 pub mod fs_metadata; // POSIX filesystem metadata ops (v0.7.0+)
 pub mod metadata_ops; // Metadata operations trait (v0.7.0+)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)

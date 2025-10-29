@@ -60,6 +60,9 @@ pub trait MetadataOperations: Send + Sync {
 }
 
 /// Unified metadata representation across backends
+/// 
+/// For cloud backends (S3/GCS/Azure), populated from ObjectStore::stat()
+/// For POSIX backends (file://,direct://), populated from filesystem metadata
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
     /// Object/file path
@@ -71,11 +74,28 @@ pub struct ObjectMetadata {
     /// Last modified timestamp
     pub modified: Option<SystemTime>,
     
-    /// MIME content type (cloud backends)
+    // Standard HTTP/Cloud metadata (all backends can provide some of these)
+    
+    /// MIME content type (e.g., "application/json", "text/plain")
     pub content_type: Option<String>,
     
-    /// ETag/version identifier (cloud backends)
+    /// Cache-Control header (HTTP caching directives)
+    pub cache_control: Option<String>,
+    
+    /// Content-Encoding header (e.g., "gzip", "br")
+    pub content_encoding: Option<String>,
+    
+    /// Content-Language header (e.g., "en-US")
+    pub content_language: Option<String>,
+    
+    /// Content-Disposition header (download filename hint)
+    pub content_disposition: Option<String>,
+    
+    /// ETag/version identifier (for conditional requests)
     pub etag: Option<String>,
+    
+    /// Expiration time (HTTP Expires header)
+    pub expires: Option<String>,
     
     // POSIX-specific fields (file://, direct://)
     
@@ -90,10 +110,22 @@ pub struct ObjectMetadata {
     
     // Cloud-specific fields (s3://, gs://, az://)
     
-    /// Storage class/tier (e.g., "STANDARD", "NEARLINE")
+    /// Storage class/tier (e.g., "STANDARD", "GLACIER", "NEARLINE", "ARCHIVE")
     pub storage_class: Option<String>,
     
-    /// Custom metadata key-value pairs
+    /// Server-side encryption type (e.g., "AES256", "aws:kms")
+    pub server_side_encryption: Option<String>,
+    
+    /// KMS key ID (for SSE-KMS encryption)
+    pub ssekms_key_id: Option<String>,
+    
+    /// Object version ID (for versioned buckets)
+    pub version_id: Option<String>,
+    
+    /// Replication status (e.g., "COMPLETED", "PENDING")
+    pub replication_status: Option<String>,
+    
+    /// Custom metadata key-value pairs (user-defined, x-amz-meta-* for S3)
     pub custom_metadata: HashMap<String, String>,
 }
 
@@ -113,14 +145,35 @@ pub enum MetadataAttributes {
     },
     
     /// Cloud storage metadata (s3://, gs://, az://)
+    /// 
+    /// These map to HTTP headers and cloud-specific metadata:
+    /// - S3: x-amz-meta-* for custom, standard headers for others
+    /// - GCS: x-goog-meta-* for custom, standard headers for others  
+    /// - Azure: x-ms-meta-* for custom, standard headers for others
     Cloud {
         /// MIME content type (e.g., "application/json")
         content_type: Option<String>,
         
-        /// Cache control header
+        /// Cache control header (e.g., "max-age=3600, public")
         cache_control: Option<String>,
         
-        /// Custom metadata key-value pairs
+        /// Content encoding (e.g., "gzip")
+        content_encoding: Option<String>,
+        
+        /// Content language (e.g., "en-US")
+        content_language: Option<String>,
+        
+        /// Content disposition (e.g., "attachment; filename=file.txt")
+        content_disposition: Option<String>,
+        
+        /// Expiration time (HTTP Expires header)
+        expires: Option<String>,
+        
+        /// Storage class/tier (e.g., "GLACIER", "NEARLINE", "ARCHIVE")
+        /// Note: Changing storage class may require object copy
+        storage_class: Option<String>,
+        
+        /// Custom metadata key-value pairs (x-amz-meta-*, x-goog-meta-*, x-ms-meta-*)
         custom: HashMap<String, String>,
     },
 }
