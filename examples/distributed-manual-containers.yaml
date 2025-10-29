@@ -1,0 +1,115 @@
+# Distributed testing with manually-started containers
+#
+# Use Case: You have pre-started containers on multiple VMs and want to
+# run coordinated distributed tests without SSH automation.
+#
+# Prerequisites:
+# 1. Container image with sai3-bench binaries
+# 2. Agents started manually on each VM:
+#    docker run --net=host -it -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+#      myregistry/sai3-tools:latest \
+#      sai3bench-agent --listen 0.0.0.0:7761 --agent-id vm1
+# 3. Network connectivity between controller and agents
+#
+# This config does NOT use SSH automation - agents must be pre-started.
+
+target: "s3://benchmark-bucket/data/"
+duration: 120s
+concurrency: 64
+
+# Distributed configuration (manual agent startup)
+distributed:
+  # Agent addresses - must be already running
+  agents:
+    # Agent 1: AWS S3 testing
+    - address: "vm1-aws.cloud.com:7761"
+      id: "aws-vm1"
+    
+    # Agent 2: Azure Blob testing (different storage backend)
+    - address: "vm2-azure.cloud.com:7761"
+      id: "azure-vm2"
+      target_override: "az://mystorageacct/testcontainer/"
+    
+    # Agent 3: GCS testing (different storage backend)
+    - address: "vm3-gcp.cloud.com:7761"
+      id: "gcp-vm3"
+      target_override: "gs://benchmark-bucket/data/"
+    
+    # Agent 4: Higher concurrency for powerful VM
+    - address: "vm4-large.cloud.com:7761"
+      id: "large-vm"
+      concurrency_override: 128
+  
+  # No SSH configuration - agents are pre-started manually
+  # No deployment configuration - containers already running
+  
+  # Coordination settings
+  start_delay: 2  # Seconds to wait before coordinated start
+  path_template: "agent-{id}/"  # Path isolation for file:// backends
+
+# Pre-populate test data (only for S3 - Azure/GCS agents skip prepare)
+prepare:
+  ensure_objects:
+    - base_uri: "s3://benchmark-bucket/data/"
+      count: 1000
+      size_distribution:
+        type: lognormal
+        mean: 1048576  # 1 MiB average
+        std_dev: 524288  # 512 KiB std dev
+        min: 1024  # 1 KiB min
+        max: 10485760  # 10 MiB max
+      fill: random
+  post_prepare_delay: 3
+
+# Mixed read/write workload
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 64
+  
+  - op: put
+    path: "uploads/"
+    weight: 20
+    size_distribution:
+      type: lognormal
+      mean: 1048576
+      std_dev: 524288
+  
+  - op: list
+    path: "data/"
+    weight: 5
+  
+  - op: delete
+    path: "uploads/*"
+    weight: 5
+
+# Usage:
+# 1. Start agents manually on each VM (see Prerequisites above)
+#
+# 2. Verify agents are reachable:
+#    sai3bench-ctl --insecure \
+#      --agents vm1-aws:7761,vm2-azure:7761,vm3-gcp:7761,vm4-large:7761 \
+#      ping
+#
+# 3. Run distributed test:
+#    sai3bench-ctl --insecure run --config examples/distributed-manual-containers.yaml
+#
+# 4. Controller will:
+#    - Connect to pre-started agents
+#    - Run prepare step (if needed)
+#    - Coordinate workload execution
+#    - Collect and merge results
+#    - Exit (agents continue running until manually stopped)
+#
+# 5. Stop agents when done:
+#    docker stop <container-name>
+#
+# Results saved to: sai3-YYYYMMDD-HHMM-distributed-manual-containers/
+
+# Notes:
+# - Agents must be started BEFORE running controller
+# - Each agent needs appropriate cloud credentials in environment
+# - Use --net=host for agents to expose gRPC port
+# - Controller can run from any location with network access to agents
+# - No automatic cleanup - you must manually stop agent containers

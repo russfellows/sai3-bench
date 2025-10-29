@@ -3,9 +3,16 @@
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.6.10 (October 2025) - s3dlio v0.9.10 Integration & Performance Analysis
+**Current Version**: v0.6.11 (October 2025) - SSH-Automated Distributed Testing & Config-Driven Agents
 
-**Recent Critical Finding**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
+**v0.6.11 Key Features**:
+- SSH automation for zero-touch distributed deployment
+- Config-driven agent specification (no CLI flags needed)
+- Flexible container runtime (Docker/Podman) via YAML
+- Per-agent customization (target override, concurrency, env vars)
+- GCP automation scripts with full lifecycle management
+
+**v0.6.10 Critical Findings**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`
