@@ -179,12 +179,12 @@ impl MetadataOperations for CloudMetadataOps {
                 //   store.copy_with_metadata(src, dst, metadata)
                 // For now, this is a stub showing what metadata can be updated
                 
-                antml:bail!(
+                bail!(
                     "Metadata updates not yet implemented - requires ObjectStore::copy_with_metadata() extension"
                 );
             },
             MetadataAttributes::Posix { .. } => {
-                anyhow::bail!("POSIX attributes not supported for cloud storage backend");
+                bail!("POSIX attributes not supported for cloud storage backend");
             }
         }
     }
