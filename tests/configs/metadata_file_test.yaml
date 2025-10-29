@@ -1,0 +1,69 @@
+# sai3-bench Metadata Operations Test Configuration
+# 
+# This config demonstrates the new MKDIR and RMDIR operations added in v0.7.0.
+# These operations are useful for testing filesystem metadata performance
+# and simulating directory-heavy workloads (e.g., ML training with nested dataset structures).
+#
+# Supported backends: file://, direct://
+# Cloud backends (s3://, az://, gs://) may emulate directories using marker objects.
+
+target: "file:///tmp/sai3bench-metadata-test/"
+duration: 30s
+concurrency: 8
+
+workload:
+  # Create nested directory structures (like mkdir -p)
+  - op: mkdir
+    path: "datasets/train/batch-*"
+    weight: 20
+    
+  # Create more directories for validation data
+  - op: mkdir
+    path: "datasets/validation/batch-*"
+    weight: 20
+    
+  # Put some files into the created directories
+  - op: put
+    path: "datasets/train/"
+    size_distribution:
+      type: "fixed"
+      value: 1048576  # 1 MB files
+    weight: 30
+    
+  # List directories to verify structure
+  - op: list
+    path: "datasets/"
+    weight: 10
+    
+  # Stat directory metadata
+  - op: stat
+    path: "datasets/train/"
+    weight: 10
+    
+  # Remove empty subdirectories
+  - op: rmdir
+    path: "datasets/validation/batch-*"
+    recursive: false
+    weight: 5
+    
+  # Remove directories with contents (recursive)
+  - op: rmdir
+    path: "datasets/train/batch-*"
+    recursive: true
+    weight: 5
+
+# Pre-populate some base directories and files for testing
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-metadata-test/datasets/existing/"
+      count: 10
+      size_distribution:
+        type: "fixed"
+        value: 4096  # Small marker files
+  cleanup: true
+  post_prepare_delay: 0  # No delay needed for local filesystem
+
+# Optional: Enable operation logging
+# op_log:
+#   path: "./oplogs/metadata-test.log.zst"
+#   compression: "zstd"

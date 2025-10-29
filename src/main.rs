@@ -830,6 +830,13 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
             sai3_bench::config::OpSpec::Delete { path } => {
                 ("DELETE", format!("path: {}", path))
             },
+            sai3_bench::config::OpSpec::Mkdir { path } => {
+                ("MKDIR", format!("path: {}", path))
+            },
+            sai3_bench::config::OpSpec::Rmdir { path, recursive } => {
+                let rec = if *recursive { " (recursive)" } else { "" };
+                ("RMDIR", format!("path: {}{}", path, rec))
+            },
         };
         
         println!("│ Op {}: {} - {:.1}% (weight: {})", idx + 1, op_name, percentage, weighted_op.weight);
@@ -941,6 +948,8 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
             sai3_bench::config::OpSpec::List { .. } => "LIST",
             sai3_bench::config::OpSpec::Stat { .. } => "STAT",
             sai3_bench::config::OpSpec::Delete { .. } => "DELETE",
+            sai3_bench::config::OpSpec::Mkdir { .. } => "MKDIR",
+            sai3_bench::config::OpSpec::Rmdir { .. } => "RMDIR",
         };
         
         // Show per-operation concurrency override if specified

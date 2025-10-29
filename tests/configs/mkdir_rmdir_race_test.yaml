@@ -1,0 +1,30 @@
+# MKDIR + RMDIR Race Condition Test
+#
+# Tests what happens when we try to remove directories that may not exist,
+# or try to remove non-empty directories without recursive flag.
+
+target: "file:///tmp/sai3bench-mkdir-rmdir-race/"
+duration: 5s
+concurrency: 16
+
+workload:
+  # Create directories
+  - op: mkdir
+    path: "test-dirs/"
+    weight: 40
+    
+  # Try to remove directories (non-recursive - will fail if not empty)
+  - op: rmdir
+    path: "test-dirs/"
+    recursive: false
+    weight: 30
+    
+  # Try to remove directories (recursive - should always work)
+  - op: rmdir
+    path: "test-dirs/"
+    recursive: true
+    weight: 30
+
+prepare:
+  ensure_objects: []
+  cleanup: true

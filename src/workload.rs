@@ -244,7 +244,7 @@ pub fn detect_pool_requirements(workload: &[crate::config::WeightedOp]) -> (bool
     
     for wo in workload {
         match &wo.spec {
-            OpSpec::Delete { .. } => has_delete = true,
+            OpSpec::Delete { .. } | OpSpec::Rmdir { .. } => has_delete = true,
             OpSpec::Get { .. } | OpSpec::Stat { .. } => has_readonly = true,
             _ => {}
         }
@@ -865,6 +865,39 @@ async fn delete_object_with_config(
     Ok(())
 }
 
+/// Internal MKDIR operation with config support (for filesystem backends)
+async fn mkdir_with_config(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("MKDIR operation (with config) starting for URI: {}", uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.mkdir(uri).await
+        .with_context(|| format!("Failed to create directory at URI: {}", uri))?;
+    
+    debug!("MKDIR operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
+/// Internal RMDIR operation with config support (for filesystem backends)
+async fn rmdir_with_config(
+    uri: &str,
+    recursive: bool,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("RMDIR operation (with config, recursive={}) starting for URI: {}", recursive, uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.rmdir(uri, recursive).await
+        .with_context(|| format!("Failed to remove directory at URI: {}", uri))?;
+    
+    debug!("RMDIR operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // NON-LOGGING variants for replay (avoid logging replay operations)
 // -----------------------------------------------------------------------------
@@ -1354,6 +1387,67 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
                         ws.meta_ops += 1;
                         // Delete operations don't transfer data
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Mkdir { .. } => {
+                        // Get base URI from config
+                        let base_uri = cfg.get_meta_uri(op);
+                        
+                        // Generate unique directory name to avoid conflicts
+                        let dir_name = {
+                            let mut r = rng();
+                            format!("dir_{}", r.random::<u64>())
+                        };
+                        
+                        // Build full URI for the specific directory
+                        let full_uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, dir_name)
+                        } else {
+                            format!("{}/{}", base_uri, dir_name)
+                        };
+
+                        let t0 = Instant::now();
+                        mkdir_with_config(
+                            &full_uri,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
+                        let duration = t0.elapsed();
+
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
+                        ws.meta_ops += 1;
+                        // Mkdir operations don't transfer data
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Rmdir { recursive, .. } => {
+                        // Get base URI from config
+                        let base_uri = cfg.get_meta_uri(op);
+                        
+                        // Generate unique directory name to avoid conflicts
+                        let dir_name = {
+                            let mut r = rng();
+                            format!("dir_{}", r.random::<u64>())
+                        };
+                        
+                        // Build full URI for the specific directory
+                        let full_uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, dir_name)
+                        } else {
+                            format!("{}/{}", base_uri, dir_name)
+                        };
+
+                        let t0 = Instant::now();
+                        rmdir_with_config(
+                            &full_uri,
+                            *recursive,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
+                        let duration = t0.elapsed();
+
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
+                        ws.meta_ops += 1;
+                        // Rmdir operations don't transfer data
                         ws.meta_bins.add(0);
                     }
                 }

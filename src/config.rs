@@ -110,6 +110,22 @@ pub enum OpSpec {
     Delete {
         path: String,
     },
+
+    /// MKDIR - Create a directory (filesystem backends only).
+    /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
+    /// Creates parent directories as needed (like mkdir -p).
+    Mkdir {
+        path: String,
+    },
+
+    /// RMDIR - Remove a directory (filesystem backends only).
+    /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
+    /// Set recursive=true to remove non-empty directories (like rm -r).
+    Rmdir {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
 }
 
 fn default_duration() -> std::time::Duration {
@@ -314,10 +330,14 @@ impl Config {
         }
     }
 
-    /// Get the resolved URI for a metadata operation (List, Stat, Delete)
+    /// Get the resolved URI for a metadata operation (List, Stat, Delete, Mkdir, Rmdir)
     pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
         match meta_op {
-            OpSpec::List { path } | OpSpec::Stat { path } | OpSpec::Delete { path } => {
+            OpSpec::List { path } 
+            | OpSpec::Stat { path } 
+            | OpSpec::Delete { path }
+            | OpSpec::Mkdir { path }
+            | OpSpec::Rmdir { path, .. } => {
                 self.resolve_uri(path)
             }
             _ => panic!("Expected metadata operation"),
