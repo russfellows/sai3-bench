@@ -520,3 +520,216 @@ mod tests {
         assert_eq!(level3_with_files, 8, "Level 3 should have 8 dirs with files");
     }
 }
+
+/// Serializable tree manifest for coordination between agents
+/// Provides a shared logical map of the complete directory/file structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeManifest {
+    /// All directory paths in the tree (relative to anchor)
+    pub all_directories: Vec<String>,
+    
+    /// Directories grouped by depth level (1-indexed)
+    pub by_level: HashMap<usize, Vec<String>>,
+    
+    /// For partitioned/exclusive modes: which agent owns which directories
+    /// Key is agent_id (0-indexed), value is list of directory paths
+    #[serde(default)]
+    pub agent_assignments: HashMap<usize, Vec<String>>,
+    
+    /// Configuration hash for validation (ensures all agents use same config)
+    pub config_hash: String,
+    
+    /// Total directory count
+    pub total_dirs: usize,
+    
+    /// Total file count (based on distribution strategy)
+    pub total_files: usize,
+    
+    /// Files per directory (from config)
+    pub files_per_dir: usize,
+    
+    /// Distribution strategy: "bottom" or "all"
+    pub distribution: String,
+}
+
+impl TreeManifest {
+    /// Create manifest from a DirectoryTree
+    pub fn from_tree(tree: &DirectoryTree) -> Self {
+        let config_hash = Self::hash_config(&tree.config);
+        
+        TreeManifest {
+            all_directories: tree.all_paths.clone(),
+            by_level: tree.by_level.clone(),
+            agent_assignments: HashMap::new(),  // Filled in by coordinator
+            config_hash,
+            total_dirs: tree.total_directories,
+            total_files: tree.total_files,
+            files_per_dir: tree.config.files_per_dir,
+            distribution: tree.config.distribution.clone(),
+        }
+    }
+    
+    /// Compute agent assignments for exclusive or partitioned modes
+    pub fn assign_agents(&mut self, num_agents: usize) {
+        if num_agents == 0 {
+            return;
+        }
+        
+        self.agent_assignments.clear();
+        
+        // Distribute directories evenly across agents
+        for (idx, path) in self.all_directories.iter().enumerate() {
+            let agent_id = idx % num_agents;
+            self.agent_assignments
+                .entry(agent_id)
+                .or_insert_with(Vec::new)
+                .push(path.clone());
+        }
+    }
+    
+    /// Get directories assigned to a specific agent
+    pub fn get_agent_dirs(&self, agent_id: usize) -> Vec<String> {
+        self.agent_assignments
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+    
+    /// Validate config hash matches expected
+    pub fn validate_config(&self, config: &DirectoryStructureConfig) -> bool {
+        Self::hash_config(config) == self.config_hash
+    }
+    
+    /// Compute deterministic hash of config for validation
+    fn hash_config(config: &DirectoryStructureConfig) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        config.width.hash(&mut hasher);
+        config.depth.hash(&mut hasher);
+        config.files_per_dir.hash(&mut hasher);
+        config.distribution.hash(&mut hasher);
+        config.dir_mask.hash(&mut hasher);
+        
+        format!("{:x}", hasher.finish())
+    }
+    
+    /// Serialize manifest to JSON string
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize TreeManifest: {}", e))
+    }
+    
+    /// Deserialize manifest from JSON string
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize TreeManifest: {}", e))
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+    
+    #[test]
+    fn test_manifest_from_tree() {
+        let config = DirectoryStructureConfig {
+            width: 2,
+            depth: 2,
+            files_per_dir: 10,
+            distribution: "bottom".to_string(),
+            dir_mask: "sai3bench.d%d_w%d.dir".to_string(),
+        };
+        
+        let tree = DirectoryTree::new(config).unwrap();
+        let manifest = TreeManifest::from_tree(&tree);
+        
+        assert_eq!(manifest.total_dirs, 6);  // 2 + 4 = 6
+        assert_eq!(manifest.total_files, 40);  // 4 leaf dirs * 10 files
+        assert_eq!(manifest.all_directories.len(), 6);
+        assert_eq!(manifest.by_level.len(), 2);
+        assert_eq!(manifest.files_per_dir, 10);
+        assert_eq!(manifest.distribution, "bottom");
+    }
+    
+    #[test]
+    fn test_manifest_agent_assignment() {
+        let config = DirectoryStructureConfig {
+            width: 2,
+            depth: 2,
+            files_per_dir: 5,
+            distribution: "all".to_string(),
+            dir_mask: "bench.d%d_w%d.dir".to_string(),
+        };
+        
+        let tree = DirectoryTree::new(config).unwrap();
+        let mut manifest = TreeManifest::from_tree(&tree);
+        
+        // Assign to 3 agents
+        manifest.assign_agents(3);
+        
+        // Verify assignments
+        assert_eq!(manifest.agent_assignments.len(), 3);
+        
+        let agent0_dirs = manifest.get_agent_dirs(0);
+        let agent1_dirs = manifest.get_agent_dirs(1);
+        let agent2_dirs = manifest.get_agent_dirs(2);
+        
+        // Total should equal all directories
+        let total_assigned = agent0_dirs.len() + agent1_dirs.len() + agent2_dirs.len();
+        assert_eq!(total_assigned, 6);
+        
+        // Each agent gets 2 directories (6 / 3)
+        assert_eq!(agent0_dirs.len(), 2);
+        assert_eq!(agent1_dirs.len(), 2);
+        assert_eq!(agent2_dirs.len(), 2);
+    }
+    
+    #[test]
+    fn test_manifest_serialization() {
+        let config = DirectoryStructureConfig {
+            width: 2,
+            depth: 1,
+            files_per_dir: 3,
+            distribution: "all".to_string(),
+            dir_mask: "dir.d%d_w%d".to_string(),
+        };
+        
+        let tree = DirectoryTree::new(config.clone()).unwrap();
+        let manifest = TreeManifest::from_tree(&tree);
+        
+        // Serialize to JSON
+        let json = manifest.to_json().unwrap();
+        assert!(json.contains("all_directories"));
+        assert!(json.contains("total_dirs"));
+        
+        // Deserialize back
+        let manifest2 = TreeManifest::from_json(&json).unwrap();
+        assert_eq!(manifest2.total_dirs, manifest.total_dirs);
+        assert_eq!(manifest2.total_files, manifest.total_files);
+        assert_eq!(manifest2.all_directories, manifest.all_directories);
+    }
+    
+    #[test]
+    fn test_manifest_config_validation() {
+        let config = DirectoryStructureConfig {
+            width: 3,
+            depth: 2,
+            files_per_dir: 7,
+            distribution: "bottom".to_string(),
+            dir_mask: "test.d%d_w%d.dir".to_string(),
+        };
+        
+        let tree = DirectoryTree::new(config.clone()).unwrap();
+        let manifest = TreeManifest::from_tree(&tree);
+        
+        // Same config should validate
+        assert!(manifest.validate_config(&config));
+        
+        // Different config should not validate
+        let mut different_config = config.clone();
+        different_config.width = 4;
+        assert!(!manifest.validate_config(&different_config));
+    }
+}
