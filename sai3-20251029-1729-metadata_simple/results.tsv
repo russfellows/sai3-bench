@@ -1,3 +1,0 @@
-operation	size_bucket	bucket_idx	mean_us	p50_us	p90_us	p95_us	p99_us	max_us	avg_bytes	ops_per_sec	throughput_mibps	count
-META	zero	0	99.44	44.00	58.00	70.00	101.00	321535.00	0	19696.43	0.00	99511
-META	ALL	97	99.44	44.00	58.00	70.00	101.00	321535.00	0	19696.43	0.00	99511
