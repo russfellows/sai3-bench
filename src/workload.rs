@@ -645,6 +645,30 @@ pub async fn create_directory_tree(
         info!("Creating {} files across {} directories...", 
             total_files, file_dirs.len());
         
+        // Get file generation configuration from ensure_objects (if configured)
+        // Use same pattern as regular prepare_objects for consistency
+        let (size_spec, fill_pattern, dedup_factor, compress_factor) = 
+            if let Some(ensure_spec) = config.ensure_objects.first() {
+                (
+                    ensure_spec.get_size_spec(),
+                    ensure_spec.fill,
+                    ensure_spec.dedup_factor,
+                    ensure_spec.compress_factor,
+                )
+            } else {
+                // Default: 1KB fixed size, zero fill, no dedup/compression
+                use crate::size_generator::SizeSpec;
+                (SizeSpec::Fixed(1024), crate::config::FillPattern::Zero, 1, 1)
+            };
+        
+        // Create size generator
+        use crate::size_generator::SizeGenerator;
+        let size_generator = SizeGenerator::new(&size_spec)
+            .context("Failed to create size generator for tree files")?;
+        
+        info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 
+            size_generator.description(), fill_pattern, dedup_factor, compress_factor);
+        
         let pb = ProgressBar::new(total_files as u64);
         pb.set_style(ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
@@ -666,11 +690,18 @@ pub async fn create_directory_tree(
                 
                 if assigned_agent == agent_id {
                     // This file belongs to us - create it
-                    let file_name = format!("file_{:08}.dat", global_file_idx);
+                    let file_name = manifest.get_file_name(global_file_idx);
                     let file_uri = format!("{}/{}", dir_uri, file_name);
                     
-                    // Create empty file (or small placeholder)
-                    let data = vec![0u8; 1024];  // 1KB placeholder
+                    // Generate file data using EXACT same pattern as regular prepare_objects
+                    let size = size_generator.generate();
+                    let data = match fill_pattern {
+                        crate::config::FillPattern::Zero => vec![0u8; size as usize],
+                        crate::config::FillPattern::Random => {
+                            s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                        }
+                    };
+                    
                     store.put(&file_uri, &data).await
                         .with_context(|| format!("Failed to create file: {}", file_uri))?;
                     

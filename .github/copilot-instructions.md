@@ -48,6 +48,60 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 
 ## Testing Requirements (CRITICAL - v0.7.0+)
 
+### Test Directories and Storage Configuration
+
+**Primary Test Directory**: `/mnt/test` (dedicated device and mount point)
+- Use for realistic testing with actual I/O characteristics
+- Avoids memory caching effects from `/tmp` (may be tmpfs)
+- Provides consistent performance baseline
+- Recommended for all performance testing and benchmarking
+
+**Secondary Test Directory**: `/tmp` (temporary filesystem)
+- Use for quick, small tests only
+- May be memory-backed (tmpfs), giving unrealistic performance
+- Useful for rapid iteration and unit testing
+- NOT suitable for performance validation
+
+**Example Usage**:
+```bash
+# Realistic performance test
+./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_lognormal.yaml
+# (Uses target: "file:///mnt/test/...")
+
+# Quick validation test
+./target/release/sai3-bench run --config tests/configs/file_test.yaml
+# (Uses target: "file:///tmp/...")
+```
+
+### Directory Tree Test Configurations (v0.7.0)
+
+**Location**: `tests/configs/directory-tree/` - Comprehensive test suite with 4 configs
+
+**Available Tests**:
+1. **tree_test_basic.yaml**: Basic functionality (3×2 tree, 45 files, uniform 1-4KB)
+2. **tree_test_fixed_size.yaml**: Fixed sizes (2×2 tree, 12 files, fixed 8KB)
+3. **tree_test_lognormal.yaml**: Realistic workload (4×3 tree, 840 files, lognormal 1KB-10MB)
+4. **tree_test_bottom.yaml**: Deep tree validation (3×4 tree, 405 files, strict bottom-only)
+
+**Key Features**:
+- Distribution strategies: `bottom` (leaf-only) or `all` (every level)
+- Size distributions: Fixed, Uniform, Lognormal
+- Global file indexing with unique file names
+- Comprehensive documentation in `tests/configs/directory-tree/README.md`
+
+**Usage**:
+```bash
+# Run prepare-only to create tree structure
+./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_lognormal.yaml --prepare-only
+
+# Run full workload with tree-based operations
+./target/release/sai3-bench -v run --config tests/configs/directory-tree/tree_test_basic.yaml
+
+# Verify tree structure
+find /mnt/test/sai3bench-tree-lognormal -type d | wc -l  # Count directories
+find /mnt/test/sai3bench-tree-lognormal -type f | wc -l  # Count files
+```
+
 ### NO COMMITS WITHOUT COMPREHENSIVE TESTS
 **Enforcement**: Any code commit MUST include:
 1. **New tests** for all new functionality (config fields, enums, functions)

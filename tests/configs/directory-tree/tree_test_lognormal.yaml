@@ -1,0 +1,58 @@
+# Directory Tree Test - Lognormal Distribution (Realistic Workload)
+# 
+# Purpose: Validates realistic file size distribution (many small, few large files)
+#
+# Configuration:
+#   - Structure: 4-way tree, 3 levels deep (64 leaf directories)
+#   - Files: 10 files per directory across ALL levels = 840 total files
+#   - Distribution: all (files at every directory level, not just leaves)
+#   - Size: Lognormal (mean=1MB, stddev=512KB, range=1KB-10MB)
+#   - Fill: Random data with dedup_factor=2, compress_factor=3
+#   - Workload: GET only (100%)
+#
+# Expected Results:
+#   - 84 total directories (4 + 16 + 64 across 3 levels)
+#   - 840 total files (10 per directory)
+#   - File sizes concentrated around 300KB-2MB with some large outliers
+#   - Realistic distribution: many small files, few large files
+#
+# Validates:
+#   - Lognormal size distribution
+#   - "all" distribution strategy (files throughout tree)
+#   - Deduplication and compression factors
+#   - Large-scale tree (840+ files)
+#
+# Usage:
+#   ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_lognormal.yaml --prepare-only
+#   ./target/release/sai3-bench -v run --config tests/configs/directory-tree/tree_test_lognormal.yaml
+
+version: 1
+duration: 5s
+concurrency: 4
+target: "file:///mnt/test/sai3bench-tree-lognormal"
+
+prepare:
+  directory_structure:
+    width: 4              # 4 subdirectories at each level
+    depth: 3              # 3 levels deep
+    files_per_dir: 10     # 10 files PER DIRECTORY (not just leaves!)
+    distribution: "all"   # Files at ALL levels (root + level 1 + level 2 + leaves)
+    dir_mask: "level%d.width%d"  # Custom naming for easy identification
+  
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3bench-tree-lognormal"
+      count: 0
+      size_spec:
+        type: "lognormal"
+        mean: 1048576
+        std_dev: 524288
+        min: 1024
+        max: 10485760
+      fill: "random"
+      dedup_factor: 2
+      compress_factor: 3
+
+workload:
+  - op: get
+    path: "/"
+    weight: 100

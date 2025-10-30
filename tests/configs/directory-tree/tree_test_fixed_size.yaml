@@ -1,0 +1,60 @@
+# Directory Tree Test - Fixed Size Files
+# 
+# Purpose: Validates fixed-size file creation in tree structure
+#
+# Configuration:
+#   - Structure: 2-way tree, 2 levels deep (4 leaf directories)
+#   - Files: 3 files per leaf directory = 12 total files
+#   - Distribution: bottom (files only in leaf directories)
+#   - Size: Fixed 8192 bytes (8 KB)
+#   - Fill: Zero-filled, no dedup/compression
+#   - Workload: MKDIR (30%), RMDIR (20%), GET (50%)
+#
+# Expected Results:
+#   - 4 leaf directories
+#   - 12 files, all exactly 8.0K
+#   - All files zero-filled
+#
+# Validates:
+#   - Fixed-size file generation
+#   - Zero-fill pattern
+#   - Directory operations combined with file operations
+#
+# Usage:
+#   ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_fixed_size.yaml --prepare-only
+#   ./target/release/sai3-bench -v run --config tests/configs/directory-tree/tree_test_fixed_size.yaml
+
+version: 1
+duration: 5s
+concurrency: 4
+target: "file:///mnt/test/sai3bench-tree-fixed"
+
+prepare:
+  directory_structure:
+    width: 2              # 2 subdirectories at each level
+    depth: 2              # 2 levels deep
+    files_per_dir: 3      # 3 files per leaf directory
+    distribution: "bottom"  # Files only in leaf directories
+    dir_mask: "sai3.d%d_w%d"  # Custom naming pattern
+  
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3bench-tree-fixed"
+      count: 0
+      size_spec: 8192  # Fixed size
+      fill: "zero"
+      dedup_factor: 1
+      compress_factor: 1
+
+workload:
+  - op: mkdir
+    path: "/"
+    weight: 30
+  
+  - op: rmdir
+    path: "/"
+    recursive: false
+    weight: 20
+  
+  - op: get
+    path: "/"
+    weight: 50
