@@ -286,10 +286,12 @@ pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_p
 /// both DELETE and (GET|STAT) operations to prevent race conditions:
 /// - prepared-NNNN.dat: Readonly pool for GET/STAT operations (never deleted)
 /// - deletable-NNNN.dat: Consumable pool for DELETE operations
+/// 
+/// v0.7.0+: Returns TreeManifest when directory_structure is configured
 pub async fn prepare_objects(
     config: &crate::config::PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>
-) -> anyhow::Result<Vec<PreparedObject>> {
+) -> anyhow::Result<(Vec<PreparedObject>, Option<TreeManifest>)> {
     use crate::config::FillPattern;
     use crate::size_generator::SizeGenerator;
     
@@ -444,8 +446,37 @@ pub async fn prepare_objects(
         }
     }
     
+    // v0.7.0: Create directory tree if configured
+    let tree_manifest = if config.directory_structure.is_some() {
+        info!("Creating directory tree structure...");
+        // For now, use agent_id=0, num_agents=1 (distributed config integration is TODO)
+        // This will be properly extracted from distributed config in a future update
+        let agent_id = 0;
+        let num_agents = 1;
+        
+        // Need to extract base_uri from ensure_objects (first entry)
+        let base_uri = config.ensure_objects.first()
+            .map(|spec| spec.base_uri.as_str())
+            .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
+        
+        let manifest = create_directory_tree(
+            config,
+            agent_id,
+            num_agents,
+            base_uri
+        ).await?;
+        
+        info!("Directory tree created: {} total directories",
+            manifest.all_directories.len()
+        );
+        
+        Some(manifest)
+    } else {
+        None
+    };
+    
     info!("Prepare complete: {} objects ready", all_prepared.len());
-    Ok(all_prepared)
+    Ok((all_prepared, tree_manifest))
 }
 
 /// Cleanup prepared objects
@@ -1330,7 +1361,7 @@ impl Default for WorkerStats {
 }
 
 /// Public entry: run a config and print a summary-like struct back.
-pub async fn run(cfg: &Config) -> Result<Summary> {
+pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Summary> {
     info!("Starting workload execution: duration={:?}, concurrency={}", cfg.duration, cfg.concurrency);
     
     let start = Instant::now();
@@ -1521,10 +1552,33 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         }
     });
     
-    // Create PathSelector for directory-based operations
+    // Create PathSelector for directory-based operations (v0.7.0)
     // MKDIR/RMDIR operations REQUIRE a TreeManifest - they only make sense with directory structure
     // If user wants to test mkdir/rmdir, they MUST configure directory_structure in prepare phase
-    let path_selector: Option<Arc<PathSelector>> = None;  // TODO: Will be Some() when TreeManifest is passed from prepare phase
+    let path_selector: Option<Arc<PathSelector>> = if let Some(manifest) = tree_manifest {
+        // Extract agent_id, num_agents, and path_selection strategy from distributed config
+        // Default to single-agent mode with Random strategy if not configured
+        let (agent_id, num_agents, strategy, partition_overlap) = if let Some(ref dist) = cfg.distributed {
+            let num_agents = dist.agents.len();
+            // TODO: Need mechanism to identify which agent this is (env var? command line flag?)
+            // For now, default to agent 0 (coordinator) for single-process testing
+            let agent_id = 0;
+            let strategy = dist.path_selection.clone();
+            let overlap = dist.partition_overlap;
+            (agent_id, num_agents, strategy, overlap)
+        } else {
+            // Single-agent mode: use Random strategy (all directories available)
+            (0, 1, PathSelectionStrategy::Random, 0.3)
+        };
+        
+        info!("Creating PathSelector: strategy={:?}, agent_id={}, num_agents={}, {} total dirs",
+            strategy, agent_id, num_agents, manifest.all_directories.len()
+        );
+        
+        Some(Arc::new(PathSelector::new(manifest, agent_id, num_agents, strategy, partition_overlap)))
+    } else {
+        None
+    };
     
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {

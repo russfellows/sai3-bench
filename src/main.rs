@@ -990,14 +990,14 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
     }
     
     // Execute prepare step if configured and not skipped
-    let prepared_objects = if !skip_prepare {
+    let (prepared_objects, tree_manifest) = if !skip_prepare {
         if let Some(ref prepare_config) = config.prepare {
             let prepare_header = "\n=== Prepare Phase ===";
             println!("{}", prepare_header);
             results_dir.write_console(prepare_header)?;
             
             info!("Executing prepare step");
-            let prepared = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
+            let (prepared, manifest) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
             
             let prepared_msg = format!("Prepared {} objects", prepared.len());
             println!("{}", prepared_msg);
@@ -1014,13 +1014,13 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
             
-            prepared
+            (prepared, manifest)
         } else {
-            Vec::new()
+            (Vec::new(), None)
         }
     } else {
         info!("Skipping prepare phase (--skip-prepare flag)");
-        Vec::new()
+        (Vec::new(), None)
     };
     
     // If prepare-only mode, exit after preparation
@@ -1048,7 +1048,7 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
     results_dir.write_console(workload_msg)?;
     
     // Run the workload
-    let summary = rt.block_on(workload::run(&config))?;
+    let summary = rt.block_on(workload::run(&config, tree_manifest))?;
     
     // Print results
     let results_header = "\n=== Results ===";
