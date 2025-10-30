@@ -1,0 +1,11 @@
+Running workload from: tests/configs/metadata_simple.yaml
+Target: file:///tmp/sai3bench-simple-metadata/
+Duration: 5s
+Concurrency: 2 threads
+
+Operation Mix (2 types):
+  MKDIR - 50.0% (weight: 50)
+  RMDIR - 50.0% (weight: 50)
+
+=== Test Phase ===
+Preparing workload...

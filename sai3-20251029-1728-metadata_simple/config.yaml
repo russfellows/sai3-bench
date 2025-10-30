@@ -1,0 +1,18 @@
+# Simple metadata operations test
+# Tests basic mkdir functionality (rmdir requires existing directories)
+
+target: "file:///tmp/sai3bench-simple-metadata/"
+duration: 5s
+concurrency: 2
+
+workload:
+  # Create directories with unique names to avoid conflicts
+  - op: mkdir
+    path: "test-dirs/dir-*"
+    weight: 100
+
+# Pre-create some directories for cleanup testing
+prepare:
+  ensure_objects: []
+  cleanup: true
+

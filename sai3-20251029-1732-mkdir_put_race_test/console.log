@@ -1,0 +1,41 @@
+Running workload from: tests/configs/mkdir_put_race_test.yaml
+Target: file:///tmp/sai3bench-mkdir-put-race/
+Duration: 5s
+Concurrency: 16 threads
+
+Operation Mix (2 types):
+  MKDIR - 20.0% (weight: 20)
+  PUT - 80.0% (weight: 80)
+
+=== Prepare Phase ===
+Prepared 0 objects
+
+=== Test Phase ===
+Preparing workload...
+
+=== Results ===
+Configuration:
+  Duration: 5.05s
+  Concurrency: 16 threads
+
+Actual Operation Distribution:
+  PUT: 151951 ops (79.9%)
+  META (LIST/STAT/DELETE): 38190 ops (20.1%)
+
+Overall Performance:
+  Total ops: 190141
+  Total bytes: 622391296 (593.56 MiB)
+  Throughput: 37641.64 ops/s
+
+PUT Performance:
+  Ops: 151951 (30081.28 ops/s)
+  Bytes: 622391296 (593.56 MiB)
+  Throughput: 117.51 MiB/s
+  Latency: mean=379µs, p50=117µs, p95=1521µs, p99=2319µs
+
+META-DATA Performance:
+  Ops: 38190 (7560.36 ops/s)
+  Bytes: 0 (0.00 MiB)
+  Latency: mean=340µs, p50=90µs, p95=1422µs, p99=2127µs
+
+Exporting results to: ./sai3-20251029-1732-mkdir_put_race_test/results.tsv

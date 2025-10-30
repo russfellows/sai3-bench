@@ -1,0 +1,37 @@
+Running workload from: tests/configs/rmdir_nonempty_test.yaml
+Target: file:///tmp/sai3bench-rmdir-nonempty/
+Duration: 3s
+Concurrency: 4 threads
+
+Operation Mix (1 types):
+  RMDIR - 100.0% (weight: 100)
+
+=== Prepare Phase ===
+Prepared 20 objects
+
+=== Test Phase ===
+Preparing workload...
+
+=== Results ===
+Configuration:
+  Duration: 3.03s
+  Concurrency: 4 threads
+
+Actual Operation Distribution:
+  META (LIST/STAT/DELETE): 820813 ops (100.0%)
+
+Overall Performance:
+  Total ops: 820813
+  Total bytes: 0 (0.00 MiB)
+  Throughput: 270765.94 ops/s
+
+META-DATA Performance:
+  Ops: 820813 (270765.94 ops/s)
+  Bytes: 0 (0.00 MiB)
+  Latency: mean=12µs, p50=11µs, p95=28µs, p99=42µs
+
+Exporting results to: ./sai3-20251029-1736-rmdir_nonempty_test/results.tsv
+TSV results exported to: ./sai3-20251029-1736-rmdir_nonempty_test/results.tsv
+
+=== Cleanup Phase ===
+Cleanup complete

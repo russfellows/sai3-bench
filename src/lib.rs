@@ -3,6 +3,7 @@
 use regex::escape;
 
 pub mod config;
+pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod replay; // Legacy in-memory replay (v0.4.0)

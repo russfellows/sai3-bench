@@ -1,0 +1,15 @@
+Running workload from: tests/configs/mkdir_rmdir_race_test.yaml
+Target: file:///tmp/sai3bench-mkdir-rmdir-race/
+Duration: 5s
+Concurrency: 16 threads
+
+Operation Mix (3 types):
+  MKDIR - 40.0% (weight: 40)
+  RMDIR - 30.0% (weight: 30)
+  RMDIR - 30.0% (weight: 30)
+
+=== Prepare Phase ===
+Prepared 0 objects
+
+=== Test Phase ===
+Preparing workload...

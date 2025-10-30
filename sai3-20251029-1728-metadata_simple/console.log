@@ -1,0 +1,34 @@
+Running workload from: tests/configs/metadata_simple.yaml
+Target: file:///tmp/sai3bench-simple-metadata/
+Duration: 5s
+Concurrency: 2 threads
+
+Operation Mix (1 types):
+  MKDIR - 100.0% (weight: 100)
+
+=== Prepare Phase ===
+Prepared 0 objects
+
+=== Test Phase ===
+Preparing workload...
+
+=== Results ===
+Configuration:
+  Duration: 5.06s
+  Concurrency: 2 threads
+
+Actual Operation Distribution:
+  META (LIST/STAT/DELETE): 95849 ops (100.0%)
+
+Overall Performance:
+  Total ops: 95849
+  Total bytes: 0 (0.00 MiB)
+  Throughput: 18951.50 ops/s
+
+META-DATA Performance:
+  Ops: 95849 (18951.50 ops/s)
+  Bytes: 0 (0.00 MiB)
+  Latency: mean=102µs, p50=48µs, p95=84µs, p99=153µs
+
+Exporting results to: ./sai3-20251029-1728-metadata_simple/results.tsv
+TSV results exported to: ./sai3-20251029-1728-metadata_simple/results.tsv

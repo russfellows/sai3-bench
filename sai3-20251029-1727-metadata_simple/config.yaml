@@ -1,0 +1,18 @@
+# Simple metadata operations test
+# Tests basic mkdir and rmdir functionality
+
+target: "file:///tmp/sai3bench-simple-metadata/"
+duration: 5s
+concurrency: 2
+
+workload:
+  # Create a directory
+  - op: mkdir
+    path: "test-dir/"
+    weight: 50
+    
+  # Remove the directory
+  - op: rmdir
+    path: "test-dir/"
+    recursive: false
+    weight: 50
