@@ -20,6 +20,32 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 
 **v0.6.10 Critical Findings**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
 
+## v0.7.0 Implementation Status
+
+**Design Status:** ✅ Complete  
+**Config Status:** ✅ Complete (30 tests passing)  
+**Implementation Status:** 🔄 In Progress (see gap analysis below)
+
+**Critical Document:** See [`docs/v0.7.0-gap-analysis.md`](../docs/v0.7.0-gap-analysis.md) for:
+- Feature parity assessment with rdf-bench (current: 65%, projected: 85%)
+- Implementation gaps and roadmap (Phases 1-3, ~7-10 days)
+- Strategic positioning (complementary tool, not replacement)
+- Recommendation for TreeManifest (shared logical map)
+
+**What Works:**
+- DirectoryTree module with width/depth model
+- Config structs for all coordination modes
+- Metadata operations (mkdir/rmdir)
+- Path selection strategy enums
+
+**What's Missing:**
+- PrepareConfig → DirectoryTree integration
+- Tree creation in prepare phase
+- Path selection in workload
+- Agent coordination for concurrent mode
+
+**Next Action:** Implement Phase 1 (Tree Creation Logic) from gap analysis.
+
 ## Testing Requirements (CRITICAL - v0.7.0+)
 
 ### NO COMMITS WITHOUT COMPREHENSIVE TESTS
