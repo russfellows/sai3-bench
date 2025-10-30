@@ -658,6 +658,165 @@ pub async fn create_directory_tree(
     Ok(manifest)
 }
 
+// ============================================================================
+// Path Selection for Directory-based Workloads
+// ============================================================================
+
+use crate::config::PathSelectionStrategy;
+use crate::directory_tree::TreeManifest;
+
+/// Path selector for directory-based workload operations
+/// 
+/// **IMPORTANT**: PathSelector is ONLY used when directory_structure is configured.
+/// For simple mkdir/rmdir throughput testing without a tree, use random naming directly.
+/// 
+/// Implements 4 selection strategies that control contention level:
+/// - Random: All agents pick any directory from tree (max contention)
+/// - Partitioned: Agents prefer assigned dirs but can use others (medium contention)
+/// - Exclusive: Agents only use assigned dirs (minimal contention)
+/// - Weighted: Probabilistic mix based on partition_overlap
+#[derive(Clone)]
+pub struct PathSelector {
+    /// Directory manifest with all paths (REQUIRED - PathSelector doesn't exist without tree)
+    manifest: TreeManifest,
+    
+    /// This agent's ID (0-indexed)
+    agent_id: usize,
+    
+    /// Total number of agents (reserved for future distributed mode validation)
+    #[allow(dead_code)]
+    num_agents: usize,
+    
+    /// Path selection strategy
+    strategy: PathSelectionStrategy,
+    
+    /// Overlap probability for weighted mode (0.0 = exclusive, 1.0 = random)
+    partition_overlap: f64,
+}
+
+impl PathSelector {
+    /// Create a new path selector for structured directory testing
+    /// 
+    /// # Arguments
+    /// - `manifest`: TreeManifest with directory structure (REQUIRED)
+    /// - `agent_id`: This agent's ID (0-indexed)
+    /// - `num_agents`: Total number of agents
+    /// - `strategy`: Path selection strategy
+    /// - `partition_overlap`: Overlap probability for weighted mode
+    pub fn new(
+        manifest: TreeManifest,
+        agent_id: usize,
+        num_agents: usize,
+        strategy: PathSelectionStrategy,
+        partition_overlap: f64,
+    ) -> Self {
+        Self {
+            manifest,
+            agent_id,
+            num_agents,
+            strategy,
+            partition_overlap,
+        }
+    }
+    
+    /// Select a directory path based on the configured strategy
+    /// 
+    /// Always returns Some() since manifest is guaranteed to exist
+    pub fn select_directory(&self) -> String {
+        if self.manifest.all_directories.is_empty() {
+            // Shouldn't happen with valid TreeManifest, but handle gracefully
+            warn!("PathSelector has empty manifest - this indicates a bug");
+            return "fallback_dir".to_string();
+        }
+        
+        match self.strategy {
+            PathSelectionStrategy::Random => self.select_random(),
+            PathSelectionStrategy::Partitioned => self.select_partitioned(),
+            PathSelectionStrategy::Exclusive => self.select_exclusive(),
+            PathSelectionStrategy::Weighted => self.select_weighted(),
+        }
+    }
+    
+    /// Random: Pick any directory uniformly from the tree
+    fn select_random(&self) -> String {
+        let mut rng = rng();
+        let idx = rng.random_range(0..self.manifest.all_directories.len());
+        self.manifest.all_directories[idx].clone()
+    }
+    
+    /// Partitioned: Prefer assigned directories, but can pick others
+    /// Uses 70/30 split to reduce contention while allowing flexibility
+    fn select_partitioned(&self) -> String {
+        let mut rng = rng();
+        
+        // 70% chance to pick from assigned directories
+        // 30% chance to pick from any directory
+        if rng.random::<f64>() < 0.7 {
+            // Pick from assigned directories
+            let assigned = self.manifest.get_agent_dirs(self.agent_id);
+            if !assigned.is_empty() {
+                let idx = rng.random_range(0..assigned.len());
+                return assigned[idx].clone();
+            }
+        }
+        
+        // Fall back to random selection
+        self.select_random()
+    }
+    
+    /// Exclusive: Only pick from assigned directories
+    /// Minimal contention - each agent has its own namespace
+    fn select_exclusive(&self) -> String {
+        let assigned = self.manifest.get_agent_dirs(self.agent_id);
+        
+        if assigned.is_empty() {
+            warn!("Agent {} has no assigned directories in exclusive mode, using random", self.agent_id);
+            return self.select_random();
+        }
+        
+        let mut rng = rng();
+        let idx = rng.random_range(0..assigned.len());
+        assigned[idx].clone()
+    }
+    
+    /// Weighted: Probabilistic mix based on partition_overlap
+    /// - overlap=0.0: Exclusive (0% from other agents)
+    /// - overlap=0.3: 30% from other agents, 70% from assigned
+    /// - overlap=1.0: Random (100% from any directory)
+    fn select_weighted(&self) -> String {
+        let mut rng = rng();
+        
+        let use_assigned_probability = 1.0 - self.partition_overlap;
+        
+        if rng.random::<f64>() < use_assigned_probability {
+            // Pick from assigned directories
+            let assigned = self.manifest.get_agent_dirs(self.agent_id);
+            if !assigned.is_empty() {
+                let idx = rng.random_range(0..assigned.len());
+                return assigned[idx].clone();
+            }
+        }
+        
+        // Pick from any directory (not assigned to this agent)
+        // This creates controlled contention
+        let all_dirs = &self.manifest.all_directories;
+        let assigned_dirs = self.manifest.get_agent_dirs(self.agent_id);
+        let assigned_set: std::collections::HashSet<_> = assigned_dirs.iter().collect();
+        
+        let other_dirs: Vec<_> = all_dirs.iter()
+            .filter(|d| !assigned_set.contains(d))
+            .collect();
+        
+        if !other_dirs.is_empty() {
+            let idx = rng.random_range(0..other_dirs.len());
+            other_dirs[idx].clone()
+        } else {
+            // No other dirs available, use assigned
+            self.select_exclusive()
+        }
+    }
+}
+
 /// Verify that prepared objects exist and are accessible
 pub async fn verify_prepared_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
@@ -1362,6 +1521,11 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         }
     });
     
+    // Create PathSelector for directory-based operations
+    // MKDIR/RMDIR operations REQUIRE a TreeManifest - they only make sense with directory structure
+    // If user wants to test mkdir/rmdir, they MUST configure directory_structure in prepare phase
+    let path_selector: Option<Arc<PathSelector>> = None;  // TODO: Will be Some() when TreeManifest is passed from prepare phase
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
@@ -1370,6 +1534,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         let pre = pre.clone();
         let cfg = cfg.clone();
         let separate_pools = needs_separate_pools;  // Clone flag for workers
+        let path_selector = path_selector.clone();  // Clone PathSelector for this worker
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1524,14 +1689,21 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Mkdir { .. } => {
+                        // MKDIR requires PathSelector with TreeManifest
+                        // These operations only make sense with a structured directory tree
+                        let dir_name = if let Some(ref selector) = path_selector {
+                            selector.select_directory()
+                        } else {
+                            // No TreeManifest available - this is a configuration error
+                            return Err(anyhow!(
+                                "MKDIR operation requires directory_structure in prepare config. \
+                                 MKDIR/RMDIR are only for testing structured directory trees. \
+                                 Configure prepare.directory_structure with width/depth/files_per_dir."
+                            ));
+                        };
+                        
                         // Get base URI from config
                         let base_uri = cfg.get_meta_uri(op);
-                        
-                        // Generate unique directory name to avoid conflicts
-                        let dir_name = {
-                            let mut r = rng();
-                            format!("dir_{}", r.random::<u64>())
-                        };
                         
                         // Build full URI for the specific directory
                         let full_uri = if base_uri.ends_with('/') {
@@ -1554,14 +1726,21 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Rmdir { recursive, .. } => {
+                        // RMDIR requires PathSelector with TreeManifest
+                        // These operations only make sense with a structured directory tree
+                        let dir_name = if let Some(ref selector) = path_selector {
+                            selector.select_directory()
+                        } else {
+                            // No TreeManifest available - this is a configuration error
+                            return Err(anyhow!(
+                                "RMDIR operation requires directory_structure in prepare config. \
+                                 MKDIR/RMDIR are only for testing structured directory trees. \
+                                 Configure prepare.directory_structure with width/depth/files_per_dir."
+                            ));
+                        };
+                        
                         // Get base URI from config
                         let base_uri = cfg.get_meta_uri(op);
-                        
-                        // Generate unique directory name to avoid conflicts
-                        let dir_name = {
-                            let mut r = rng();
-                            format!("dir_{}", r.random::<u64>())
-                        };
                         
                         // Build full URI for the specific directory
                         let full_uri = if base_uri.ends_with('/') {
