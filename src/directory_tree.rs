@@ -550,6 +550,12 @@ pub struct TreeManifest {
     
     /// Distribution strategy: "bottom" or "all"
     pub distribution: String,
+    
+    /// File index ranges per directory: HashMap<dir_path, (start_idx, end_idx)>
+    /// Enables fast file selection: "which files live in this directory?"
+    /// Example: {"d1_w1.dir/d2_w1.dir": (0, 100), "d1_w1.dir/d2_w2.dir": (100, 200)}
+    #[serde(default)]
+    pub file_ranges: HashMap<String, (usize, usize)>,
 }
 
 impl TreeManifest {
@@ -557,7 +563,7 @@ impl TreeManifest {
     pub fn from_tree(tree: &DirectoryTree) -> Self {
         let config_hash = Self::hash_config(&tree.config);
         
-        TreeManifest {
+        let mut manifest = TreeManifest {
             all_directories: tree.all_paths.clone(),
             by_level: tree.by_level.clone(),
             agent_assignments: HashMap::new(),  // Filled in by coordinator
@@ -566,6 +572,81 @@ impl TreeManifest {
             total_files: tree.total_files,
             files_per_dir: tree.config.files_per_dir,
             distribution: tree.config.distribution.clone(),
+            file_ranges: HashMap::new(),
+        };
+        
+        // Compute file ranges immediately
+        manifest.compute_file_ranges();
+        
+        manifest
+    }
+    
+    /// Compute file distribution across directories
+    /// Creates global file index ranges for each directory based on distribution strategy
+    pub fn compute_file_ranges(&mut self) {
+        self.file_ranges.clear();
+        let mut global_idx = 0;
+        
+        // Determine max depth for "bottom" distribution
+        let max_depth = if let Some(max_level) = self.by_level.keys().max() {
+            *max_level
+        } else {
+            return; // No directories
+        };
+        
+        for dir_path in &self.all_directories {
+            let should_have_files = match self.distribution.as_str() {
+                "bottom" => {
+                    // Only deepest level directories have files
+                    // Count slashes to determine depth
+                    let depth = dir_path.matches('/').count() + 1;
+                    depth == max_depth
+                }
+                "all" => true,
+                _ => false,
+            };
+            
+            if should_have_files && self.files_per_dir > 0 {
+                let start_idx = global_idx;
+                let end_idx = global_idx + self.files_per_dir;
+                self.file_ranges.insert(dir_path.clone(), (start_idx, end_idx));
+                global_idx = end_idx;
+            }
+        }
+        
+        // Update total_files based on actual file ranges
+        self.total_files = global_idx;
+    }
+    
+    /// Get file name for a global file index
+    /// Returns standardized file name: "file_00000000.dat"
+    pub fn get_file_name(&self, global_idx: usize) -> String {
+        format!("file_{:08}.dat", global_idx)
+    }
+    
+    /// Get full relative path for a global file index
+    /// Returns: "d1_w1.dir/d2_w1.dir/file_00000000.dat"
+    /// Returns None if global_idx is out of range
+    pub fn get_file_path(&self, global_idx: usize) -> Option<String> {
+        // Find which directory this file belongs to
+        for (dir_path, (start, end)) in &self.file_ranges {
+            if global_idx >= *start && global_idx < *end {
+                let file_name = self.get_file_name(global_idx);
+                return Some(format!("{}/{}", dir_path, file_name));
+            }
+        }
+        None
+    }
+    
+    /// Get list of all files in a specific directory
+    /// Returns empty vec if directory has no files
+    pub fn get_files_in_directory(&self, dir_path: &str) -> Vec<String> {
+        if let Some((start, end)) = self.file_ranges.get(dir_path) {
+            (*start..*end)
+                .map(|idx| self.get_file_name(idx))
+                .collect()
+        } else {
+            Vec::new()
         }
     }
     
