@@ -714,8 +714,7 @@ pub struct PathSelector {
     /// This agent's ID (0-indexed)
     agent_id: usize,
     
-    /// Total number of agents (reserved for future distributed mode validation)
-    #[allow(dead_code)]
+    /// Total number of agents (used for validation)
     num_agents: usize,
     
     /// Path selection strategy
@@ -741,6 +740,16 @@ impl PathSelector {
         strategy: PathSelectionStrategy,
         partition_overlap: f64,
     ) -> Self {
+        // Validate agent configuration
+        if num_agents == 0 {
+            warn!("PathSelector created with num_agents=0, setting to 1");
+        }
+        
+        if agent_id >= num_agents && num_agents > 0 {
+            warn!("PathSelector: agent_id ({}) >= num_agents ({}), path selection may not work correctly", 
+                agent_id, num_agents);
+        }
+        
         Self {
             manifest,
             agent_id,
@@ -801,7 +810,8 @@ impl PathSelector {
         let assigned = self.manifest.get_agent_dirs(self.agent_id);
         
         if assigned.is_empty() {
-            warn!("Agent {} has no assigned directories in exclusive mode, using random", self.agent_id);
+            warn!("Agent {}/{} has no assigned directories in exclusive mode (total dirs: {}), falling back to random", 
+                self.agent_id, self.num_agents, self.manifest.all_directories.len());
             return self.select_random();
         }
         
@@ -844,6 +854,125 @@ impl PathSelector {
         } else {
             // No other dirs available, use assigned
             self.select_exclusive()
+        }
+    }
+    
+    /// Select a file path (directory + file) based on strategy
+    /// 
+    /// Returns full relative path: "d1_w1.dir/d2_w1.dir/d3_w1.dir/file_00001.dat"
+    /// This is the primary method for GET/PUT/STAT/DELETE operations
+    pub fn select_file(&self) -> String {
+        // 1. Select directory using existing strategy
+        let dir = self.select_directory_with_files();
+        
+        // 2. Pick a file within that directory
+        let file = self.select_file_in_directory(&dir);
+        
+        // 3. Return full path
+        if dir.is_empty() {
+            file
+        } else {
+            format!("{}/{}", dir, file)
+        }
+    }
+    
+    /// Select a file within a specific directory
+    /// Returns just the file name (not full path)
+    fn select_file_in_directory(&self, dir_path: &str) -> String {
+        // Get file range for this directory
+        if let Some((start_idx, end_idx)) = self.manifest.file_ranges.get(dir_path) {
+            if end_idx > start_idx {
+                // Pick random file in range
+                let mut rng = rng();
+                let global_idx = rng.random_range(*start_idx..*end_idx);
+                return self.manifest.get_file_name(global_idx);
+            }
+        }
+        
+        // Directory has no files (shouldn't happen with proper config)
+        warn!("Directory {} has no files in manifest", dir_path);
+        "fallback_file_00000.dat".to_string()
+    }
+    
+    /// Select a directory that has files (respects distribution strategy)
+    /// Used when operation REQUIRES files (GET/STAT/DELETE)
+    pub fn select_directory_with_files(&self) -> String {
+        // Filter to directories that actually have files
+        let dirs_with_files: Vec<&String> = self.manifest.all_directories
+            .iter()
+            .filter(|d| self.manifest.file_ranges.contains_key(*d))
+            .collect();
+        
+        if dirs_with_files.is_empty() {
+            warn!("No directories with files in manifest");
+            return self.select_directory();
+        }
+        
+        // Apply strategy to filtered list
+        match self.strategy {
+            PathSelectionStrategy::Random => {
+                let mut rng = rng();
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Exclusive => {
+                // Pick from assigned directories that have files
+                let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                let assigned_with_files: Vec<String> = assigned.into_iter()
+                    .filter(|d| self.manifest.file_ranges.contains_key(d))
+                    .collect();
+                    
+                if assigned_with_files.is_empty() {
+                    // Fallback to any directory with files
+                    let mut rng = rng();
+                    let idx = rng.random_range(0..dirs_with_files.len());
+                    return dirs_with_files[idx].clone();
+                }
+                
+                let mut rng = rng();
+                let idx = rng.random_range(0..assigned_with_files.len());
+                assigned_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Partitioned => {
+                let mut rng = rng();
+                
+                // 70% chance to pick from assigned directories with files
+                if rng.random::<f64>() < 0.7 {
+                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                    let assigned_with_files: Vec<String> = assigned.into_iter()
+                        .filter(|d| self.manifest.file_ranges.contains_key(d))
+                        .collect();
+                    
+                    if !assigned_with_files.is_empty() {
+                        let idx = rng.random_range(0..assigned_with_files.len());
+                        return assigned_with_files[idx].clone();
+                    }
+                }
+                
+                // Fall back to random from all dirs with files
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Weighted => {
+                let mut rng = rng();
+                let use_assigned_probability = 1.0 - self.partition_overlap;
+                
+                if rng.random::<f64>() < use_assigned_probability {
+                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                    let assigned_with_files: Vec<String> = assigned.into_iter()
+                        .filter(|d| self.manifest.file_ranges.contains_key(d))
+                        .collect();
+                    
+                    if !assigned_with_files.is_empty() {
+                        let idx = rng.random_range(0..assigned_with_files.len());
+                        return assigned_with_files[idx].clone();
+                    }
+                }
+                
+                // Pick from any directory with files
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
         }
     }
 }
