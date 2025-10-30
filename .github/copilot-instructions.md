@@ -3,7 +3,13 @@
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.6.11 (October 2025) - SSH-Automated Distributed Testing & Config-Driven Agents
+**Current Version**: v0.7.0 (October 2025) - Directory Tree Support with Multi-Client Coordination
+
+**v0.7.0 Key Features**:
+- rdf-bench-style hierarchical directory trees (width/depth model)
+- Multi-client coordination modes: isolated, coordinator, concurrent
+- Path selection strategies for contention control: random, partitioned, exclusive, weighted
+- Explicit shared filesystem configuration (no auto-detection)
 
 **v0.6.11 Key Features**:
 - SSH automation for zero-touch distributed deployment
@@ -13,6 +19,35 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 - GCP automation scripts with full lifecycle management
 
 **v0.6.10 Critical Findings**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
+
+## Testing Requirements (CRITICAL - v0.7.0+)
+
+### NO COMMITS WITHOUT COMPREHENSIVE TESTS
+**Enforcement**: Any code commit MUST include:
+1. **New tests** for all new functionality (config fields, enums, functions)
+2. **All tests passing** (`cargo test --lib` and affected integration tests)
+3. **Test count verification** in commit message (e.g., "Added 21 new tests")
+4. **Updated tests** for any modified existing tests
+
+### Test Coverage Standards
+- **New config fields**: Minimum 3 tests (parse, serialize/deserialize, validation)
+- **New enums**: Test all variants + equality + clone + debug format + invalid values
+- **New functions**: Unit tests with edge cases + error conditions
+- **Integration tests**: End-to-end scenarios for user-facing features
+
+### Example: TreeCreationMode and PathSelectionStrategy (v0.7.0)
+Added 21 new tests in `tests/distributed_config_tests.rs`:
+- 3 tests for TreeCreationMode variants (isolated, coordinator, concurrent)
+- 4 tests for PathSelectionStrategy variants (random, partitioned, exclusive, weighted)
+- 4 tests for partition_overlap field (default, zero, one, custom values)
+- 2 tests for shared_filesystem field (true, false)
+- 3 tests for enum behavior (equality, clone, debug format)
+- 2 tests for invalid enum values
+- 1 comprehensive integration test
+- 1 serialize/deserialize round-trip test
+- Updated 9 existing tests to include new required fields
+
+**Current test count**: 30 tests in `tests/distributed_config_tests.rs`, 34 tests in `src/lib.rs`
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`

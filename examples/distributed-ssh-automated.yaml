@@ -61,6 +61,12 @@ distributed:
   # Coordination settings
   start_delay: 2  # Seconds to wait before coordinated start
   path_template: "agent-{id}/"  # Path isolation for file:// backends
+  
+  # Directory tree and contention control (v0.7.0+)
+  shared_filesystem: true  # S3 is shared across all agents
+  tree_creation_mode: coordinator  # Controller creates tree once
+  path_selection: partitioned  # Agents prefer different directories
+  partition_overlap: 0.2  # 20% chance to access other partitions
 
 # Pre-populate test data (runs once on shared storage)
 prepare:
