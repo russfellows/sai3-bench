@@ -71,22 +71,24 @@ pub struct ReplayStats {
 /// # Example
 ///
 /// ```no_run
-/// use sai3_bench::replay::{ReplayConfig, replay_workload_streaming};
+/// use sai3_bench::replay_streaming::{ReplayConfig, replay_workload_streaming};
 /// use std::path::PathBuf;
 ///
-/// # tokio_test::block_on(async {
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), anyhow::Error> {
 /// let config = ReplayConfig {
 ///     op_log_path: PathBuf::from("large_workload.tsv.zst"),
 ///     target_uri: Some("s3://test-bucket/replay/".to_string()),
 ///     speed: 2.0,  // 2x faster
 ///     continue_on_error: true,
 ///     max_concurrent: Some(500),
+///     remap_config: None,
 /// };
 ///
 /// let stats = replay_workload_streaming(config).await?;
 /// println!("Completed: {}/{}", stats.completed_operations, stats.total_operations);
-/// # Ok::<(), anyhow::Error>(())
-/// # });
+/// # Ok(())
+/// # }
 /// ```
 pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplayStats> {
     info!("Starting streaming replay with config: {:?}", config);

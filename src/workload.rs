@@ -524,6 +524,140 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Res
     Ok(())
 }
 
+/// Create directory tree structure from PrepareConfig
+/// 
+/// This function creates the hierarchical directory tree and populates it with files.
+/// CRITICAL: Uses global file indexing to avoid rdf-bench collision bug (v2025.10.0 fix)
+/// 
+/// # Arguments
+/// * `config` - PrepareConfig containing directory_structure
+/// * `agent_id` - This agent's ID (0-indexed), used for modulo distribution
+/// * `num_agents` - Total number of agents creating the tree
+/// * `base_uri` - Base URI where tree will be created (e.g., "file:///tmp/test/")
+/// 
+/// # Returns
+/// TreeManifest with all paths and agent assignments
+pub async fn create_directory_tree(
+    config: &crate::config::PrepareConfig,
+    agent_id: usize,
+    num_agents: usize,
+    base_uri: &str,
+) -> anyhow::Result<crate::directory_tree::TreeManifest> {
+    use crate::directory_tree::{DirectoryTree, TreeManifest};
+    
+    let dir_config = config.directory_structure.as_ref()
+        .ok_or_else(|| anyhow!("No directory_structure specified in PrepareConfig"))?;
+    
+    info!("Creating directory tree: width={}, depth={}, files_per_dir={}, distribution={}", 
+        dir_config.width, dir_config.depth, dir_config.files_per_dir, dir_config.distribution);
+    
+    // 1. Generate tree structure
+    let tree = DirectoryTree::new(dir_config.clone())
+        .context("Failed to create DirectoryTree")?;
+    
+    // 2. Create manifest with agent assignments
+    let mut manifest = TreeManifest::from_tree(&tree);
+    manifest.assign_agents(num_agents);
+    
+    info!("Tree structure: {} directories, {} files total", 
+        manifest.total_dirs, manifest.total_files);
+    
+    if num_agents > 1 {
+        let my_dirs = manifest.get_agent_dirs(agent_id);
+        info!("Agent {}/{}: Assigned {} directories", 
+            agent_id, num_agents, my_dirs.len());
+    }
+    
+    // 3. Create ObjectStore for this base URI
+    let store = create_store_for_uri(base_uri)?;
+    
+    // 4. Get directories this agent should create
+    let dirs_to_create = if num_agents == 1 {
+        // Single agent - create all directories
+        manifest.all_directories.clone()
+    } else {
+        // Multiple agents - only create assigned directories
+        manifest.get_agent_dirs(agent_id)
+    };
+    
+    // 5. Create directories
+    if !dirs_to_create.is_empty() {
+        info!("Creating {} directories...", dirs_to_create.len());
+        let pb = ProgressBar::new(dirs_to_create.len() as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
+        )?);
+        
+        for dir_path in &dirs_to_create {
+            let full_uri = if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, dir_path)
+            } else {
+                format!("{}/{}", base_uri, dir_path)
+            };
+            
+            store.mkdir(&full_uri).await
+                .with_context(|| format!("Failed to create directory: {}", full_uri))?;
+            pb.inc(1);
+        }
+        
+        pb.finish_with_message("directories created");
+    }
+    
+    // 6. Create files if specified
+    if manifest.files_per_dir > 0 {
+        // CRITICAL: Use global file indexing to avoid rdf-bench collision bug
+        // Each file gets a unique global index, then modulo distribution assigns to agents
+        
+        let file_dirs = tree.file_directories();
+        let total_files = manifest.total_files;
+        
+        info!("Creating {} files across {} directories...", 
+            total_files, file_dirs.len());
+        
+        let pb = ProgressBar::new(total_files as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
+        )?);
+        
+        let mut global_file_idx = 0usize;
+        
+        for dir_node in file_dirs {
+            let dir_uri = if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, dir_node.full_path)
+            } else {
+                format!("{}/{}", base_uri, dir_node.full_path)
+            };
+            
+            // Create files_per_dir files in this directory
+            for _local_idx in 0..manifest.files_per_dir {
+                // CORRECT PATTERN: Check if this global file index belongs to this agent
+                let assigned_agent = global_file_idx % num_agents;
+                
+                if assigned_agent == agent_id {
+                    // This file belongs to us - create it
+                    let file_name = format!("file_{:08}.dat", global_file_idx);
+                    let file_uri = format!("{}/{}", dir_uri, file_name);
+                    
+                    // Create empty file (or small placeholder)
+                    let data = vec![0u8; 1024];  // 1KB placeholder
+                    store.put(&file_uri, &data).await
+                        .with_context(|| format!("Failed to create file: {}", file_uri))?;
+                    
+                    pb.inc(1);
+                }
+                
+                // CRITICAL: Always increment global index, even if we skip this file
+                global_file_idx += 1;
+            }
+        }
+        
+        pb.finish_with_message(format!("files created (agent {}/{})", agent_id, num_agents));
+    }
+    
+    info!("Directory tree creation complete");
+    Ok(manifest)
+}
+
 /// Verify that prepared objects exist and are accessible
 pub async fn verify_prepared_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};

@@ -365,13 +365,21 @@ impl Config {
     /// 
     /// # Example
     /// ```
-    /// // Shared storage (S3):
-    /// config.apply_agent_prefix("agent-1", "agent-1/", true)?;
-    /// // Result: target = "s3://bucket/bench/agent-1/", prepare base_uri unchanged
+    /// # use sai3_bench::config::Config;
+    /// # use serde_yaml;
     /// 
-    /// // Local storage (file://):
-    /// config.apply_agent_prefix("agent-1", "agent-1/", false)?;
-    /// // Result: target = "file:///tmp/bench/agent-1/", prepare base_uri = "file:///tmp/bench/agent-1/data/"
+    /// // Shared storage example:
+    /// let yaml = r#"
+    /// target: "s3://bucket/bench/"
+    /// duration: 5s
+    /// workload:
+    ///   - op: get
+    ///     path: "*"
+    ///     weight: 100
+    /// "#;
+    /// let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+    /// config.apply_agent_prefix("agent-1", "agent-1/", true).unwrap();
+    /// assert_eq!(config.target.unwrap(), "s3://bucket/bench/agent-1/");
     /// ```
     pub fn apply_agent_prefix(&mut self, _agent_id: &str, prefix: &str, shared_storage: bool) -> anyhow::Result<()> {
         // Store original target for prepare base_uri rewriting
