@@ -1,0 +1,67 @@
+# Directory Tree Test - I/O Operations on Existing Files
+# 
+# Purpose: Validates GET/PUT/STAT operations on pre-populated tree
+#
+# Configuration:
+#   - Structure: 3-way tree, 2 levels deep (9 leaf directories)
+#   - Files: 5 files per leaf directory = 45 total files
+#   - Distribution: bottom (files only in leaf directories)
+#   - Size: Uniform 1-4 KB
+#   - Fill: Random data with dedup/compression
+#   - Workload: GET (50%), PUT (30%), STAT (20%)
+#
+# Expected Results:
+#   - 45 files created during prepare
+#   - GET operations read existing files
+#   - PUT operations overwrite/update existing files
+#   - STAT operations check file metadata
+#   - PathSelector distributes operations across tree
+#
+# Validates:
+#   - File I/O within directory tree structure
+#   - PathSelector working correctly
+#   - Dynamic file selection (no pre-resolved URIs)
+#   - Realistic workload patterns
+#
+# Usage:
+#   ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_io_operations.yaml
+
+version: 1
+duration: 10s
+concurrency: 4
+target: "file:///mnt/test/sai3bench-tree-io"
+
+prepare:
+  directory_structure:
+    width: 3              # 3 subdirectories at each level
+    depth: 2              # 2 levels deep
+    files_per_dir: 5      # 5 files per leaf directory
+    distribution: "bottom"  # Files only in leaf directories
+    dir_mask: "sai3.d%d_w%d"
+  file_size:
+    dist: "uniform"
+    min: 1024            # 1 KB
+    max: 4096            # 4 KB
+  fill: "random"
+  dedup_factor: 2
+  compress_factor: 2
+  
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3bench-tree-io"
+      count: 0            # No flat objects, only tree files
+
+workload:
+  - op: get
+    path: "/"
+    weight: 50
+  
+  - op: put
+    path: "/"
+    object_size: 2048     # Fixed 2KB for simplicity
+    dedup_factor: 2
+    compress_factor: 2
+    weight: 30
+  
+  - op: stat
+    path: "/"
+    weight: 20

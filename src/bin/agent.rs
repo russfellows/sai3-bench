@@ -243,9 +243,9 @@ impl Agent for AgentSvc {
         info!("Starting workload execution for agent {}", agent_id);
 
         // Execute prepare phase if configured
-        let _prepared_objects = if let Some(ref prepare_config) = config.prepare {
+        let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let prepared = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+            let (prepared, manifest) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
@@ -260,14 +260,14 @@ impl Agent for AgentSvc {
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
             }
             
-            prepared
+            (prepared, manifest)
         } else {
             debug!("No prepare phase configured");
-            Vec::new()
+            (Vec::new(), None)
         };
 
         // Execute the workload using existing workload::run function
-        let summary = sai3_bench::workload::run(&config)
+        let summary = sai3_bench::workload::run(&config, tree_manifest)
             .await
             .map_err(|e| {
                 error!("Workload execution failed: {}", e);

@@ -1,5 +1,5 @@
 // src/config.rs
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use crate::size_generator::SizeSpec;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -110,6 +110,22 @@ pub enum OpSpec {
     Delete {
         path: String,
     },
+
+    /// MKDIR - Create a directory (filesystem backends only).
+    /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
+    /// Creates parent directories as needed (like mkdir -p).
+    Mkdir {
+        path: String,
+    },
+
+    /// RMDIR - Remove a directory (filesystem backends only).
+    /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
+    /// Set recursive=true to remove non-empty directories (like rm -r).
+    Rmdir {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
 }
 
 fn default_duration() -> std::time::Duration {
@@ -135,6 +151,11 @@ pub struct PrepareConfig {
     /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
     #[serde(default)]
     pub post_prepare_delay: u64,
+    
+    /// Optional directory tree structure (rdf-bench style width/depth model)
+    /// When specified, creates deterministic hierarchical directory structure before workload
+    #[serde(default)]
+    pub directory_structure: Option<crate::directory_tree::DirectoryStructureConfig>,
 }
 
 /// Specification for ensuring objects exist
@@ -221,7 +242,7 @@ fn default_max_size() -> u64 {
 }
 
 fn default_fill() -> FillPattern { 
-    FillPattern::Zero 
+    FillPattern::Random 
 }
 
 fn default_dedup_factor() -> usize {
@@ -314,10 +335,14 @@ impl Config {
         }
     }
 
-    /// Get the resolved URI for a metadata operation (List, Stat, Delete)
+    /// Get the resolved URI for a metadata operation (List, Stat, Delete, Mkdir, Rmdir)
     pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
         match meta_op {
-            OpSpec::List { path } | OpSpec::Stat { path } | OpSpec::Delete { path } => {
+            OpSpec::List { path } 
+            | OpSpec::Stat { path } 
+            | OpSpec::Delete { path }
+            | OpSpec::Mkdir { path }
+            | OpSpec::Rmdir { path, .. } => {
                 self.resolve_uri(path)
             }
             _ => panic!("Expected metadata operation"),
@@ -340,13 +365,21 @@ impl Config {
     /// 
     /// # Example
     /// ```
-    /// // Shared storage (S3):
-    /// config.apply_agent_prefix("agent-1", "agent-1/", true)?;
-    /// // Result: target = "s3://bucket/bench/agent-1/", prepare base_uri unchanged
+    /// # use sai3_bench::config::Config;
+    /// # use serde_yaml;
     /// 
-    /// // Local storage (file://):
-    /// config.apply_agent_prefix("agent-1", "agent-1/", false)?;
-    /// // Result: target = "file:///tmp/bench/agent-1/", prepare base_uri = "file:///tmp/bench/agent-1/data/"
+    /// // Shared storage example:
+    /// let yaml = r#"
+    /// target: "s3://bucket/bench/"
+    /// duration: 5s
+    /// workload:
+    ///   - op: get
+    ///     path: "*"
+    ///     weight: 100
+    /// "#;
+    /// let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+    /// config.apply_agent_prefix("agent-1", "agent-1/", true).unwrap();
+    /// assert_eq!(config.target.unwrap(), "s3://bucket/bench/agent-1/");
     /// ```
     pub fn apply_agent_prefix(&mut self, _agent_id: &str, prefix: &str, shared_storage: bool) -> anyhow::Result<()> {
         // Store original target for prepare base_uri rewriting
@@ -550,7 +583,7 @@ pub enum PageCacheMode {
 
 /// Distributed testing configuration (v0.6.11+)
 /// Enables automated multi-host deployment with per-agent customization
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DistributedConfig {
     /// List of agent configurations
     pub agents: Vec<AgentConfig>,
@@ -572,10 +605,35 @@ pub struct DistributedConfig {
     /// Use {id} as placeholder for agent identifier
     #[serde(default = "default_path_template")]
     pub path_template: String,
+    
+    /// Whether target filesystem is shared across agents (REQUIRED - no default)
+    /// Must be explicitly set to true or false
+    /// - true: Shared filesystem (NFS, Lustre, S3, GCS, Azure) - agents may access same paths
+    /// - false: Local per-agent storage - each agent has independent namespace
+    pub shared_filesystem: bool,
+    
+    /// How agents create directory tree structure (REQUIRED - no default)
+    /// - isolated: Each agent creates separate tree under agent-{id}/ prefix
+    /// - coordinator: Controller creates tree once, agents skip prepare phase
+    /// - concurrent: All agents create same tree (idempotent mkdir handles races)
+    pub tree_creation_mode: TreeCreationMode,
+    
+    /// How agents select paths during workload (REQUIRED - affects contention level)
+    /// - random: All agents pick any directory - maximum contention
+    /// - partitioned: Agents prefer hash(path) % agent_id directories - reduced contention
+    /// - exclusive: Each agent only uses assigned directories - minimal contention
+    /// - weighted: Probabilistic mix controlled by partition_overlap
+    pub path_selection: PathSelectionStrategy,
+    
+    /// For partitioned/weighted modes: probability of accessing other agents' partitions (0.0-1.0)
+    /// Default: 0.3 (30% chance to access another agent's partition)
+    /// Only used when path_selection is "partitioned" or "weighted"
+    #[serde(default = "default_partition_overlap")]
+    pub partition_overlap: f64,
 }
 
 /// Individual agent configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AgentConfig {
     /// Agent address (host:port) or hostname (for SSH deployment)
     /// Examples: "node1.example.com:7761", "10.0.1.50:7761", "node1" (SSH mode)
@@ -616,7 +674,7 @@ pub struct AgentConfig {
 }
 
 /// SSH configuration for automated deployment
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SshConfig {
     /// Enable SSH automation (default: false)
     #[serde(default)]
@@ -641,7 +699,7 @@ pub struct SshConfig {
 }
 
 /// Container deployment configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeploymentConfig {
     /// Deployment type: "docker" or "binary"
     /// - docker: Use container runtime with specified image
@@ -714,4 +772,34 @@ fn default_pull_policy() -> String {
 
 fn default_binary_path() -> String {
     "/usr/local/bin/sai3bench-agent".to_string()
+}
+
+fn default_partition_overlap() -> f64 {
+    0.3  // 30% overlap
+}
+
+/// Directory tree creation mode for distributed testing
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TreeCreationMode {
+    /// Each agent creates separate tree under agent-{id}/ prefix
+    Isolated,
+    /// Controller creates tree once, agents skip prepare phase
+    Coordinator,
+    /// All agents create same tree (idempotent mkdir handles races)
+    Concurrent,
+}
+
+/// Path selection strategy for workload operations (affects contention level)
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PathSelectionStrategy {
+    /// All agents pick any directory - maximum contention
+    Random,
+    /// Agents prefer hash(path) % agent_id directories - reduced contention
+    Partitioned,
+    /// Each agent only uses assigned directories - minimal contention
+    Exclusive,
+    /// Probabilistic mix controlled by partition_overlap parameter
+    Weighted,
 }

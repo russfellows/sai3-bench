@@ -4269,10 +4269,11 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.6.11"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "bytes",
@@ -4285,6 +4286,7 @@ dependencies = [
  "hostname 0.4.1",
  "humantime-serde",
  "indicatif",
+ "libc",
  "predicates 2.1.5",
  "prost 0.13.5",
  "prost-build 0.13.5",

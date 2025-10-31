@@ -1,0 +1,80 @@
+# Directory Tree Test - S3 Backend Example
+# 
+# Purpose: Demonstrates directory tree testing on S3 object storage
+#
+# **IMPORTANT**: This is an EXAMPLE config. You must update:
+#   - `target`: Use your actual S3 bucket URI
+#   - Environment: Set AWS_PROFILE or AWS credentials before running
+#
+# Key Differences from File Backend:
+#   - No explicit mkdir operations (directories are implicit in object keys)
+#   - Objects stored with keys like: "prefix/d1_w1/d2_w1/file_00000042.dat"
+#   - Same PathSelector logic works identically
+#   - Same GET/PUT/STAT/DELETE operations
+#
+# Configuration:
+#   - Structure: 3-way tree, 2 levels deep (9 leaf directories)
+#   - Files: 10 files per leaf directory = 90 total files
+#   - Distribution: bottom (files only in leaf directories)
+#   - Size: Uniform 4-16 KB (reasonable for S3)
+#   - Workload: GET (60%), PUT (30%), STAT (10%)
+#
+# Setup Instructions:
+#   1. Create S3 bucket: `aws s3 mb s3://my-sai3-test-bucket`
+#   2. Set AWS credentials: `export AWS_PROFILE=my-profile`
+#   3. Update target URI below
+#   4. Run: `./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_s3_example.yaml`
+#
+# Expected Behavior:
+#   - Skips directory creation (object storage doesn't need mkdir)
+#   - Creates 90 objects with hierarchical keys
+#   - Operations access objects using tree structure paths
+#   - Performance depends on S3 region and network
+#
+# Clean Up:
+#   aws s3 rm s3://my-sai3-test-bucket/sai3-test-tree --recursive
+#
+# Works on All Object Storage:
+#   - S3: s3://bucket-name/prefix
+#   - Azure: az://container-name/prefix
+#   - GCS: gs://bucket-name/prefix
+
+version: 1
+duration: 30s
+concurrency: 8
+target: "s3://MY-BUCKET-NAME/sai3-test-tree"  # ← UPDATE THIS
+
+prepare:
+  directory_structure:
+    width: 3              # 3 subdirectories at each level
+    depth: 2              # 2 levels deep  
+    files_per_dir: 10     # 10 files per leaf directory
+    distribution: "bottom"  # Files only in leaf directories
+    dir_mask: "sai3.d%d_w%d"
+  file_size:
+    dist: "uniform"
+    min: 4096            # 4 KB
+    max: 16384           # 16 KB
+  fill: "random"
+  dedup_factor: 2
+  compress_factor: 2
+  
+  ensure_objects:
+    - base_uri: "s3://MY-BUCKET-NAME/sai3-test-tree"  # ← UPDATE THIS
+      count: 0            # No flat objects, only tree files
+
+workload:
+  - op: get
+    path: "/"
+    weight: 60
+  
+  - op: put
+    path: "/"
+    object_size: 8192     # Fixed 8KB 
+    dedup_factor: 2
+    compress_factor: 2
+    weight: 30
+  
+  - op: stat
+    path: "/"
+    weight: 10

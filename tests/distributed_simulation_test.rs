@@ -13,6 +13,9 @@ target: "file:///tmp/test/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "vm1.example.com:7761"
       id: "agent-1"
@@ -79,6 +82,9 @@ duration: 10s
 concurrency: 64
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "agent1:7761"
       id: "reader"
@@ -145,6 +151,9 @@ target: "s3://bucket/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "agent1:7761"
       env:
@@ -190,6 +199,9 @@ target: "file:///data/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "agent1:7761"
       volumes:
@@ -233,6 +245,9 @@ target: "file:///tmp/test/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "agent1:7761"
     - address: "agent2:7761"
@@ -309,6 +324,9 @@ target: "s3://default-bucket/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "cloud-agent-1:7761"
       id: "s3-1"
@@ -378,6 +396,9 @@ target: "file:///tmp/test/"
 duration: 5s
 
 distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
   agents:
     - address: "vm1.example.com"
       id: "agent-1"

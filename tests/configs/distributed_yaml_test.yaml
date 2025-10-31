@@ -28,6 +28,11 @@ distributed:
   
   start_delay: 1
   path_template: "agent-{id}/"
+  
+  # Required fields (v0.7.0+)
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
 
 # Simple workload for testing
 workload:

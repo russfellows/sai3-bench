@@ -40,6 +40,23 @@ This directory contains YAML configuration files for testing sai3-bench with var
 | `size_distributions_test.yaml` | Tests SizeGenerator | Lognormal, uniform, fixed distributions |
 | `multisize_test.yaml` | Multiple object sizes | Various size buckets |
 
+### Directory Tree Tests (v0.7.0+)
+
+The `directory-tree/` subdirectory contains comprehensive tests for hierarchical directory structures with files. See [directory-tree/README.md](directory-tree/README.md) for detailed documentation.
+
+| File | Structure | Files | Distribution | Purpose |
+|------|-----------|-------|--------------|---------|
+| `directory-tree/tree_test_basic.yaml` | 3×2 (9 leaves) | 45 | bottom, uniform 1-4KB | Basic functionality |
+| `directory-tree/tree_test_fixed_size.yaml` | 2×2 (4 leaves) | 12 | bottom, fixed 8KB | Fixed sizes + MKDIR/RMDIR |
+| `directory-tree/tree_test_lognormal.yaml` | 4×3 (64 leaves) | 840 | all, lognormal 1KB-10MB | Realistic workload, large scale |
+| `directory-tree/tree_test_bottom.yaml` | 3×4 (81 leaves) | 405 | bottom, uniform 2-8KB | Deep tree, strict bottom dist |
+
+**Key Features**:
+- **Distribution strategies**: `bottom` (leaf-only) or `all` (every level)
+- **Size distributions**: Fixed, Uniform, Lognormal
+- **Global file indexing**: Unique file names prevent collisions
+- **Path selection**: Random, partitioned, exclusive, weighted strategies
+
 ### Feature-Specific Tests
 
 | File | Purpose |

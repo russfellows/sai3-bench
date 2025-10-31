@@ -1,11 +1,168 @@
 # sai3-bench AI Agent Guide
 
+## Critical Build and Debug Instructions
+
+**IMPORTANT**: When running `cargo build` or `cargo test`, do NOT pipe output to `head` or `tail`. The user needs to see the ENTIRE output, including all warnings and errors. Run build commands without filtering:
+```bash
+# CORRECT:
+cargo build --release
+cargo test
+
+# WRONG:
+cargo build --release 2>&1 | head -100
+cargo build --release 2>&1 | tail -50
+```
+
+**DEBUGGING RULE**: When troubleshooting issues or investigating unexpected behavior, **ALWAYS** use the verbose flags **BEFORE** other CLI options:
+```bash
+# CORRECT - verbose flags MUST come BEFORE subcommands:
+./target/release/sai3-bench -v run --config <config>     # Basic verbosity
+./target/release/sai3-bench -vv run --config <config>    # More verbose (RECOMMENDED)
+./target/release/sai3-bench -vvv run --config <config>   # Maximum verbosity
+
+# WRONG - verbose flags after subcommand won't work:
+./target/release/sai3-bench run --config <config> -vv    # ERROR: unexpected argument
+
+# NEVER use RUST_LOG - use the built-in -v/-vv/-vvv flags instead
+```
+
+The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
+- Object store initialization and backend detection
+- Directory creation operations
+- File operations and paths
+- Error details and stack traces
+- Timing information
+
+**Use `-vv` as the default for all debugging sessions. Remember: flags BEFORE subcommands!**
+
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.6.10 (October 2025) - s3dlio v0.9.10 Integration & Performance Analysis
+**Current Version**: v0.7.0 (October 2025) - Directory Tree Support with Multi-Client Coordination
 
-**Recent Critical Finding**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
+**v0.7.0 Key Features**:
+- rdf-bench-style hierarchical directory trees (width/depth model)
+- Multi-client coordination modes: isolated, coordinator, concurrent
+- Path selection strategies for contention control: random, partitioned, exclusive, weighted
+- Explicit shared filesystem configuration (no auto-detection)
+
+**v0.6.11 Key Features**:
+- SSH automation for zero-touch distributed deployment
+- Config-driven agent specification (no CLI flags needed)
+- Flexible container runtime (Docker/Podman) via YAML
+- Per-agent customization (target override, concurrency, env vars)
+- GCP automation scripts with full lifecycle management
+
+**v0.6.10 Critical Findings**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
+
+## v0.7.0 Implementation Status
+
+**Design Status:** ✅ Complete  
+**Config Status:** ✅ Complete (30 tests passing)  
+**Implementation Status:** 🔄 In Progress (see gap analysis below)
+
+**Critical Document:** See [`docs/v0.7.0-gap-analysis.md`](../docs/v0.7.0-gap-analysis.md) for:
+- Feature parity assessment with rdf-bench (current: 65%, projected: 85%)
+- Implementation gaps and roadmap (Phases 1-3, ~7-10 days)
+- Strategic positioning (complementary tool, not replacement)
+- Recommendation for TreeManifest (shared logical map)
+
+**What Works:**
+- DirectoryTree module with width/depth model
+- Config structs for all coordination modes
+- Metadata operations (mkdir/rmdir)
+- Path selection strategy enums
+
+**What's Missing:**
+- PrepareConfig → DirectoryTree integration
+- Tree creation in prepare phase
+- Path selection in workload
+- Agent coordination for concurrent mode
+
+**Next Action:** Implement Phase 1 (Tree Creation Logic) from gap analysis.
+
+## Testing Requirements (CRITICAL - v0.7.0+)
+
+### Test Directories and Storage Configuration
+
+**Primary Test Directory**: `/mnt/test` (dedicated device and mount point)
+- Use for realistic testing with actual I/O characteristics
+- Avoids memory caching effects from `/tmp` (may be tmpfs)
+- Provides consistent performance baseline
+- Recommended for all performance testing and benchmarking
+
+**Secondary Test Directory**: `/tmp` (temporary filesystem)
+- Use for quick, small tests only
+- May be memory-backed (tmpfs), giving unrealistic performance
+- Useful for rapid iteration and unit testing
+- NOT suitable for performance validation
+
+**Example Usage**:
+```bash
+# Realistic performance test
+./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_lognormal.yaml
+# (Uses target: "file:///mnt/test/...")
+
+# Quick validation test
+./target/release/sai3-bench run --config tests/configs/file_test.yaml
+# (Uses target: "file:///tmp/...")
+```
+
+### Directory Tree Test Configurations (v0.7.0)
+
+**Location**: `tests/configs/directory-tree/` - Comprehensive test suite with 4 configs
+
+**Available Tests**:
+1. **tree_test_basic.yaml**: Basic functionality (3×2 tree, 45 files, uniform 1-4KB)
+2. **tree_test_fixed_size.yaml**: Fixed sizes (2×2 tree, 12 files, fixed 8KB)
+3. **tree_test_lognormal.yaml**: Realistic workload (4×3 tree, 840 files, lognormal 1KB-10MB)
+4. **tree_test_bottom.yaml**: Deep tree validation (3×4 tree, 405 files, strict bottom-only)
+
+**Key Features**:
+- Distribution strategies: `bottom` (leaf-only) or `all` (every level)
+- Size distributions: Fixed, Uniform, Lognormal
+- Global file indexing with unique file names
+- Comprehensive documentation in `tests/configs/directory-tree/README.md`
+
+**Usage**:
+```bash
+# Run prepare-only to create tree structure
+./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_lognormal.yaml --prepare-only
+
+# Run full workload with tree-based operations
+./target/release/sai3-bench -v run --config tests/configs/directory-tree/tree_test_basic.yaml
+
+# Verify tree structure
+find /mnt/test/sai3bench-tree-lognormal -type d | wc -l  # Count directories
+find /mnt/test/sai3bench-tree-lognormal -type f | wc -l  # Count files
+```
+
+### NO COMMITS WITHOUT COMPREHENSIVE TESTS
+**Enforcement**: Any code commit MUST include:
+1. **New tests** for all new functionality (config fields, enums, functions)
+2. **All tests passing** (`cargo test --lib` and affected integration tests)
+3. **Test count verification** in commit message (e.g., "Added 21 new tests")
+4. **Updated tests** for any modified existing tests
+
+### Test Coverage Standards
+- **New config fields**: Minimum 3 tests (parse, serialize/deserialize, validation)
+- **New enums**: Test all variants + equality + clone + debug format + invalid values
+- **New functions**: Unit tests with edge cases + error conditions
+- **Integration tests**: End-to-end scenarios for user-facing features
+
+### Example: TreeCreationMode and PathSelectionStrategy (v0.7.0)
+Added 21 new tests in `tests/distributed_config_tests.rs`:
+- 3 tests for TreeCreationMode variants (isolated, coordinator, concurrent)
+- 4 tests for PathSelectionStrategy variants (random, partitioned, exclusive, weighted)
+- 4 tests for partition_overlap field (default, zero, one, custom values)
+- 2 tests for shared_filesystem field (true, false)
+- 3 tests for enum behavior (equality, clone, debug format)
+- 2 tests for invalid enum values
+- 1 comprehensive integration test
+- 1 serialize/deserialize round-trip test
+- Updated 9 existing tests to include new required fields
+
+**Current test count**: 30 tests in `tests/distributed_config_tests.rs`, 34 tests in `src/lib.rs`
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`

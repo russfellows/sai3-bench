@@ -1,0 +1,58 @@
+# Directory Tree Test - Basic Functionality
+# 
+# Purpose: Validates basic directory tree creation with uniform file sizes
+#
+# Configuration:
+#   - Structure: 3-way tree, 2 levels deep (9 leaf directories)
+#   - Files: 5 files per leaf directory = 45 total files
+#   - Distribution: bottom (files only in leaf directories)
+#   - Size: Uniform 1-4 KB (1024-4096 bytes)
+#   - Fill: Random data, no dedup/compression
+#   - Workload: Mixed GET (50%), PUT (30%), STAT (20%)
+#
+# Expected Results:
+#   - 9 directories at depth 2
+#   - 45 files total (5 per leaf directory)
+#   - File sizes uniformly distributed 1.1K-4.0K
+#
+# Usage:
+#   ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_basic.yaml --prepare-only
+#   ./target/release/sai3-bench -v run --config tests/configs/directory-tree/tree_test_basic.yaml
+
+version: 1
+duration: 5s
+concurrency: 4
+target: "file:///mnt/test/sai3bench-tree-basic"
+
+prepare:
+  directory_structure:
+    width: 3              # 3 subdirectories at each level
+    depth: 2              # 2 levels deep (root + 2)
+    files_per_dir: 5      # 5 files per leaf directory
+    distribution: "bottom"  # Files only in leaf directories (depth 2)
+    dir_mask: "d%d_w%d.dir"  # Directory naming: d{depth}_w{width}.dir
+  
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3bench-tree-basic"
+      count: 0
+      size_spec: 
+        type: "uniform"
+        min: 1024
+        max: 4096
+      fill: "random"
+      dedup_factor: 1
+      compress_factor: 1
+
+workload:
+  - op: get
+    path: "/"
+    weight: 50
+  
+  - op: put
+    path: "/"
+    object_size: 2048
+    weight: 30
+  
+  - op: stat
+    path: "/"
+    weight: 20

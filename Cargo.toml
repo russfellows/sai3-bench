@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.6.11"
+version = "0.7.0"
 edition = "2021"
 build   = "build.rs"
 
@@ -48,6 +48,11 @@ zstd = "0.13"
 # SSH automation for distributed deployment (v0.6.11+)
 ssh2 = "0.9"
 shellexpand = "3.1"
+
+# Metadata operations (v0.7.0+)
+async-trait = "0.1"
+libc = "0.2"
+bytes = "1"
 
 [build-dependencies]
 tonic-build = "^0.13"

@@ -1,0 +1,119 @@
+# Directory Tree Test - Azure Blob Storage
+# 
+# Purpose: Demonstrates directory tree testing on Azure Blob Storage
+#
+# **SETUP REQUIRED**: Configure Azure credentials before running
+#
+# Setup Instructions:
+#   1. Install Azure CLI: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli
+#   
+#   2. Login to Azure:
+#      az login
+#   
+#   3. Create storage account (if needed):
+#      az storage account create \
+#        --name mystorageaccount \
+#        --resource-group myresourcegroup \
+#        --location eastus \
+#        --sku Standard_LRS
+#   
+#   4. Create container:
+#      az storage container create \
+#        --name sai3-test-container \
+#        --account-name mystorageaccount
+#   
+#   5. Get connection string:
+#      az storage account show-connection-string \
+#        --name mystorageaccount \
+#        --resource-group myresourcegroup
+#   
+#   6. Set environment variable:
+#      export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=..."
+#      
+#      OR use SAS token:
+#      export AZURE_STORAGE_SAS_TOKEN="?sv=2021-06-08&ss=b&srt=sco&sp=rwdlacx..."
+#
+#   7. Update target URI below with your container name
+#
+#   8. Run test:
+#      ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_azure_blob.yaml
+#
+# Key Differences from File Backend:
+#   - No explicit mkdir operations (directories are implicit in blob names)
+#   - Blobs stored with hierarchical names: "prefix/d1_w1/d2_w1/file_00000042.dat"
+#   - Same PathSelector logic works identically
+#   - Same GET/PUT/STAT/DELETE operations
+#   - Virtual directory listing supported by Azure Blob API
+#
+# Configuration:
+#   - Structure: 3-way tree, 2 levels deep (9 leaf directories)
+#   - Files: 10 files per leaf directory = 90 total files
+#   - Distribution: bottom (files only in leaf directories)
+#   - Size: Uniform 4-16 KB (reasonable for Azure Blob)
+#   - Workload: GET (60%), PUT (30%), STAT (10%)
+#
+# Dry-Run First (Recommended):
+#   ./target/release/sai3-bench run --config tests/configs/directory-tree/tree_test_azure_blob.yaml --dry-run
+#   
+#   This will show you:
+#   - Total directories: 12
+#   - Total files: 90
+#   - Total data size: ~900 KB
+#
+# Expected Behavior:
+#   - Skips directory creation (object storage doesn't need mkdir)
+#   - Creates 90 blobs with hierarchical names
+#   - Operations access blobs using tree structure paths
+#   - Performance depends on Azure region and network
+#
+# Clean Up:
+#   az storage blob delete-batch \
+#     --source sai3-test-container \
+#     --pattern "sai3-test-tree/*" \
+#     --account-name mystorageaccount
+#
+# Performance Tips:
+#   - Use Azure region close to your location
+#   - Increase concurrency for better throughput
+#   - Use larger files (>1MB) for better Azure Blob performance
+#   - Consider Premium Block Blob storage for higher IOPS
+
+version: 1
+duration: 30s
+concurrency: 8
+target: "az://egiazurestore1/s3dlio/sai3-test-tree"  # Format: az://{account}/{container}/{prefix}
+
+prepare:
+  directory_structure:
+    width: 3              # 3 subdirectories at each level
+    depth: 2              # 2 levels deep  
+    files_per_dir: 10     # 10 files per leaf directory (90 total)
+    distribution: "bottom"  # Files only in leaf directories
+    dir_mask: "sai3.d%d_w%d"
+  file_size:
+    dist: "uniform"
+    min: 4096            # 4 KB
+    max: 16384           # 16 KB
+  fill: "random"
+  dedup_factor: 2
+  compress_factor: 2
+  
+  ensure_objects:
+    - base_uri: "az://egiazurestore1/s3dlio/sai3-test-tree"  # Format: az://{account}/{container}/{prefix}
+      count: 0            # No flat objects, only tree files
+
+workload:
+  - op: get
+    path: "/"
+    weight: 60
+  
+  - op: put
+    path: "/"
+    object_size: 8192     # Fixed 8KB 
+    dedup_factor: 2
+    compress_factor: 2
+    weight: 30
+  
+  - op: stat
+    path: "/"
+    weight: 10

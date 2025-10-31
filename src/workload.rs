@@ -244,7 +244,7 @@ pub fn detect_pool_requirements(workload: &[crate::config::WeightedOp]) -> (bool
     
     for wo in workload {
         match &wo.spec {
-            OpSpec::Delete { .. } => has_delete = true,
+            OpSpec::Delete { .. } | OpSpec::Rmdir { .. } => has_delete = true,
             OpSpec::Get { .. } | OpSpec::Stat { .. } => has_readonly = true,
             _ => {}
         }
@@ -286,10 +286,12 @@ pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_p
 /// both DELETE and (GET|STAT) operations to prevent race conditions:
 /// - prepared-NNNN.dat: Readonly pool for GET/STAT operations (never deleted)
 /// - deletable-NNNN.dat: Consumable pool for DELETE operations
+/// 
+/// v0.7.0+: Returns TreeManifest when directory_structure is configured
 pub async fn prepare_objects(
     config: &crate::config::PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>
-) -> anyhow::Result<Vec<PreparedObject>> {
+) -> anyhow::Result<(Vec<PreparedObject>, Option<TreeManifest>)> {
     use crate::config::FillPattern;
     use crate::size_generator::SizeGenerator;
     
@@ -444,8 +446,37 @@ pub async fn prepare_objects(
         }
     }
     
+    // v0.7.0: Create directory tree if configured
+    let tree_manifest = if config.directory_structure.is_some() {
+        info!("Creating directory tree structure...");
+        // For now, use agent_id=0, num_agents=1 (distributed config integration is TODO)
+        // This will be properly extracted from distributed config in a future update
+        let agent_id = 0;
+        let num_agents = 1;
+        
+        // Need to extract base_uri from ensure_objects (first entry)
+        let base_uri = config.ensure_objects.first()
+            .map(|spec| spec.base_uri.as_str())
+            .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
+        
+        let manifest = create_directory_tree(
+            config,
+            agent_id,
+            num_agents,
+            base_uri
+        ).await?;
+        
+        info!("Directory tree created: {} total directories",
+            manifest.all_directories.len()
+        );
+        
+        Some(manifest)
+    } else {
+        None
+    };
+    
     info!("Prepare complete: {} objects ready", all_prepared.len());
-    Ok(all_prepared)
+    Ok((all_prepared, tree_manifest))
 }
 
 /// Cleanup prepared objects
@@ -522,6 +553,466 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Res
     
     pb.finish_with_message(format!("deleted {} objects", delete_count));
     Ok(())
+}
+
+/// Create directory tree structure from PrepareConfig
+/// 
+/// This function creates the hierarchical directory tree and populates it with files.
+/// CRITICAL: Uses global file indexing to avoid rdf-bench collision bug (v2025.10.0 fix)
+/// 
+/// # Arguments
+/// * `config` - PrepareConfig containing directory_structure
+/// * `agent_id` - This agent's ID (0-indexed), used for modulo distribution
+/// * `num_agents` - Total number of agents creating the tree
+/// * `base_uri` - Base URI where tree will be created (e.g., "file:///tmp/test/")
+/// 
+/// # Returns
+/// TreeManifest with all paths and agent assignments
+pub async fn create_directory_tree(
+    config: &crate::config::PrepareConfig,
+    agent_id: usize,
+    num_agents: usize,
+    base_uri: &str,
+) -> anyhow::Result<crate::directory_tree::TreeManifest> {
+    use crate::directory_tree::{DirectoryTree, TreeManifest};
+    
+    let dir_config = config.directory_structure.as_ref()
+        .ok_or_else(|| anyhow!("No directory_structure specified in PrepareConfig"))?;
+    
+    info!("Creating directory tree: width={}, depth={}, files_per_dir={}, distribution={}", 
+        dir_config.width, dir_config.depth, dir_config.files_per_dir, dir_config.distribution);
+    
+    // 1. Generate tree structure
+    let tree = DirectoryTree::new(dir_config.clone())
+        .context("Failed to create DirectoryTree")?;
+    
+    // 2. Create manifest with agent assignments
+    let mut manifest = TreeManifest::from_tree(&tree);
+    manifest.assign_agents(num_agents);
+    
+    info!("Tree structure: {} directories, {} files total", 
+        manifest.total_dirs, manifest.total_files);
+    
+    if num_agents > 1 {
+        let my_dirs = manifest.get_agent_dirs(agent_id);
+        info!("Agent {}/{}: Assigned {} directories", 
+            agent_id, num_agents, my_dirs.len());
+    }
+    
+    // 3. Create ObjectStore for this base URI
+    let store = create_store_for_uri(base_uri)?;
+    
+    // 4. Get directories this agent should create
+    let dirs_to_create = if num_agents == 1 {
+        // Single agent - create all directories
+        manifest.all_directories.clone()
+    } else {
+        // Multiple agents - only create assigned directories
+        manifest.get_agent_dirs(agent_id)
+    };
+    
+    // 5. Create directories
+    if !dirs_to_create.is_empty() {
+        // Determine if backend requires explicit directory creation
+        // Object storage (S3/Azure/GCS) doesn't need mkdir - directories are implicit in object keys
+        // File systems (file://, direct://) need explicit mkdir
+        let needs_mkdir = base_uri.starts_with("file://") || base_uri.starts_with("direct://");
+        
+        if needs_mkdir {
+            info!("Creating {} directories...", dirs_to_create.len());
+            let pb = ProgressBar::new(dirs_to_create.len() as u64);
+            pb.set_style(ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
+            )?);
+            
+            for dir_path in &dirs_to_create {
+                let full_uri = if base_uri.ends_with('/') {
+                    format!("{}{}", base_uri, dir_path)
+                } else {
+                    format!("{}/{}", base_uri, dir_path)
+                };
+                
+                store.mkdir(&full_uri).await
+                    .with_context(|| format!("Failed to create directory: {}", full_uri))?;
+                pb.inc(1);
+            }
+            
+            pb.finish_with_message("directories created");
+        } else {
+            info!("Skipping directory creation for object storage (directories are implicit in object keys)");
+        }
+    }
+    
+    // 6. Create files if specified
+    if manifest.files_per_dir > 0 {
+        // CRITICAL: Use global file indexing to avoid rdf-bench collision bug
+        // Each file gets a unique global index, then modulo distribution assigns to agents
+        
+        // Get list of directories that have files (in consistent order from manifest)
+        let dirs_with_files: Vec<&String> = manifest.file_ranges
+            .iter()
+            .map(|(dir, _)| dir)
+            .collect();
+        let total_files = manifest.total_files;
+        
+        info!("Creating {} files across {} directories...", 
+            total_files, dirs_with_files.len());
+        
+        // Get file generation configuration from ensure_objects (if configured)
+        // Use same pattern as regular prepare_objects for consistency
+        let (size_spec, fill_pattern, dedup_factor, compress_factor) = 
+            if let Some(ensure_spec) = config.ensure_objects.first() {
+                (
+                    ensure_spec.get_size_spec(),
+                    ensure_spec.fill,
+                    ensure_spec.dedup_factor,
+                    ensure_spec.compress_factor,
+                )
+            } else {
+                // Default: 1KB fixed size, zero fill, no dedup/compression
+                use crate::size_generator::SizeSpec;
+                (SizeSpec::Fixed(1024), crate::config::FillPattern::Zero, 1, 1)
+            };
+        
+        // Create size generator
+        use crate::size_generator::SizeGenerator;
+        let size_generator = SizeGenerator::new(&size_spec)
+            .context("Failed to create size generator for tree files")?;
+        
+        info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 
+            size_generator.description(), fill_pattern, dedup_factor, compress_factor);
+        
+        let pb = ProgressBar::new(total_files as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
+        )?);
+        
+        let mut global_file_idx = 0usize;
+        
+        for dir_path in dirs_with_files {
+            let dir_uri = if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, dir_path)
+            } else {
+                format!("{}/{}", base_uri, dir_path)
+            };
+            
+            // Create files_per_dir files in this directory
+            for _local_idx in 0..manifest.files_per_dir {
+                // CORRECT PATTERN: Check if this global file index belongs to this agent
+                let assigned_agent = global_file_idx % num_agents;
+                
+                if assigned_agent == agent_id {
+                    // This file belongs to us - create it
+                    let file_name = manifest.get_file_name(global_file_idx);
+                    let file_uri = format!("{}/{}", dir_uri, file_name);
+                    
+                    // Generate file data using EXACT same pattern as regular prepare_objects
+                    let size = size_generator.generate();
+                    let data = match fill_pattern {
+                        crate::config::FillPattern::Zero => vec![0u8; size as usize],
+                        crate::config::FillPattern::Random => {
+                            s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                        }
+                    };
+                    
+                    store.put(&file_uri, &data).await
+                        .with_context(|| format!("Failed to create file: {}", file_uri))?;
+                    
+                    pb.inc(1);
+                }
+                
+                // CRITICAL: Always increment global index, even if we skip this file
+                global_file_idx += 1;
+            }
+        }
+        
+        pb.finish_with_message(format!("files created (agent {}/{})", agent_id, num_agents));
+    }
+    
+    info!("Directory tree creation complete");
+    Ok(manifest)
+}
+
+// ============================================================================
+// Path Selection for Directory-based Workloads
+// ============================================================================
+
+use crate::config::PathSelectionStrategy;
+use crate::directory_tree::TreeManifest;
+
+/// Path selector for directory-based workload operations
+/// 
+/// **IMPORTANT**: PathSelector is ONLY used when directory_structure is configured.
+/// For simple mkdir/rmdir throughput testing without a tree, use random naming directly.
+/// 
+/// Implements 4 selection strategies that control contention level:
+/// - Random: All agents pick any directory from tree (max contention)
+/// - Partitioned: Agents prefer assigned dirs but can use others (medium contention)
+/// - Exclusive: Agents only use assigned dirs (minimal contention)
+/// - Weighted: Probabilistic mix based on partition_overlap
+#[derive(Clone)]
+pub struct PathSelector {
+    /// Directory manifest with all paths (REQUIRED - PathSelector doesn't exist without tree)
+    manifest: TreeManifest,
+    
+    /// This agent's ID (0-indexed)
+    agent_id: usize,
+    
+    /// Total number of agents (used for validation)
+    num_agents: usize,
+    
+    /// Path selection strategy
+    strategy: PathSelectionStrategy,
+    
+    /// Overlap probability for weighted mode (0.0 = exclusive, 1.0 = random)
+    partition_overlap: f64,
+}
+
+impl PathSelector {
+    /// Create a new path selector for structured directory testing
+    /// 
+    /// # Arguments
+    /// - `manifest`: TreeManifest with directory structure (REQUIRED)
+    /// - `agent_id`: This agent's ID (0-indexed)
+    /// - `num_agents`: Total number of agents
+    /// - `strategy`: Path selection strategy
+    /// - `partition_overlap`: Overlap probability for weighted mode
+    pub fn new(
+        manifest: TreeManifest,
+        agent_id: usize,
+        num_agents: usize,
+        strategy: PathSelectionStrategy,
+        partition_overlap: f64,
+    ) -> Self {
+        // Validate agent configuration
+        if num_agents == 0 {
+            warn!("PathSelector created with num_agents=0, setting to 1");
+        }
+        
+        if agent_id >= num_agents && num_agents > 0 {
+            warn!("PathSelector: agent_id ({}) >= num_agents ({}), path selection may not work correctly", 
+                agent_id, num_agents);
+        }
+        
+        Self {
+            manifest,
+            agent_id,
+            num_agents,
+            strategy,
+            partition_overlap,
+        }
+    }
+    
+    /// Select a directory path based on the configured strategy
+    /// 
+    /// Always returns Some() since manifest is guaranteed to exist
+    pub fn select_directory(&self) -> String {
+        if self.manifest.all_directories.is_empty() {
+            // Shouldn't happen with valid TreeManifest, but handle gracefully
+            warn!("PathSelector has empty manifest - this indicates a bug");
+            return "fallback_dir".to_string();
+        }
+        
+        match self.strategy {
+            PathSelectionStrategy::Random => self.select_random(),
+            PathSelectionStrategy::Partitioned => self.select_partitioned(),
+            PathSelectionStrategy::Exclusive => self.select_exclusive(),
+            PathSelectionStrategy::Weighted => self.select_weighted(),
+        }
+    }
+    
+    /// Random: Pick any directory uniformly from the tree
+    fn select_random(&self) -> String {
+        let mut rng = rng();
+        let idx = rng.random_range(0..self.manifest.all_directories.len());
+        self.manifest.all_directories[idx].clone()
+    }
+    
+    /// Partitioned: Prefer assigned directories, but can pick others
+    /// Uses 70/30 split to reduce contention while allowing flexibility
+    fn select_partitioned(&self) -> String {
+        let mut rng = rng();
+        
+        // 70% chance to pick from assigned directories
+        // 30% chance to pick from any directory
+        if rng.random::<f64>() < 0.7 {
+            // Pick from assigned directories
+            let assigned = self.manifest.get_agent_dirs(self.agent_id);
+            if !assigned.is_empty() {
+                let idx = rng.random_range(0..assigned.len());
+                return assigned[idx].clone();
+            }
+        }
+        
+        // Fall back to random selection
+        self.select_random()
+    }
+    
+    /// Exclusive: Only pick from assigned directories
+    /// Minimal contention - each agent has its own namespace
+    fn select_exclusive(&self) -> String {
+        let assigned = self.manifest.get_agent_dirs(self.agent_id);
+        
+        if assigned.is_empty() {
+            warn!("Agent {}/{} has no assigned directories in exclusive mode (total dirs: {}), falling back to random", 
+                self.agent_id, self.num_agents, self.manifest.all_directories.len());
+            return self.select_random();
+        }
+        
+        let mut rng = rng();
+        let idx = rng.random_range(0..assigned.len());
+        assigned[idx].clone()
+    }
+    
+    /// Weighted: Probabilistic mix based on partition_overlap
+    /// - overlap=0.0: Exclusive (0% from other agents)
+    /// - overlap=0.3: 30% from other agents, 70% from assigned
+    /// - overlap=1.0: Random (100% from any directory)
+    fn select_weighted(&self) -> String {
+        let mut rng = rng();
+        
+        let use_assigned_probability = 1.0 - self.partition_overlap;
+        
+        if rng.random::<f64>() < use_assigned_probability {
+            // Pick from assigned directories
+            let assigned = self.manifest.get_agent_dirs(self.agent_id);
+            if !assigned.is_empty() {
+                let idx = rng.random_range(0..assigned.len());
+                return assigned[idx].clone();
+            }
+        }
+        
+        // Pick from any directory (not assigned to this agent)
+        // This creates controlled contention
+        let all_dirs = &self.manifest.all_directories;
+        let assigned_dirs = self.manifest.get_agent_dirs(self.agent_id);
+        let assigned_set: std::collections::HashSet<_> = assigned_dirs.iter().collect();
+        
+        let other_dirs: Vec<_> = all_dirs.iter()
+            .filter(|d| !assigned_set.contains(d))
+            .collect();
+        
+        if !other_dirs.is_empty() {
+            let idx = rng.random_range(0..other_dirs.len());
+            other_dirs[idx].clone()
+        } else {
+            // No other dirs available, use assigned
+            self.select_exclusive()
+        }
+    }
+    
+    /// Select a file path (directory + file) based on strategy
+    /// 
+    /// Returns full relative path: "d1_w1.dir/d2_w1.dir/d3_w1.dir/file_00001.dat"
+    /// This is the primary method for GET/PUT/STAT/DELETE operations
+    pub fn select_file(&self) -> String {
+        // 1. Select directory using existing strategy
+        let dir = self.select_directory_with_files();
+        
+        // 2. Pick a file within that directory using file ranges
+        // Get file range for this directory
+        if let Some((start_idx, end_idx)) = self.manifest.get_file_range(&dir) {
+            if end_idx > start_idx {
+                // Pick random file in range
+                let mut rng = rng();
+                let global_idx = rng.random_range(*start_idx..*end_idx);
+                // Use get_file_path which returns directory + file based on global index
+                if let Some(path) = self.manifest.get_file_path(global_idx) {
+                    return path;
+                }
+            }
+        }
+        
+        // Fallback (shouldn't happen with proper config)
+        warn!("Directory {} has no files in manifest", dir);
+        if dir.is_empty() {
+            "fallback_file_00000.dat".to_string()
+        } else {
+            format!("{}/fallback_file_00000.dat", dir)
+        }
+    }
+    
+    /// Select a directory that has files (respects distribution strategy)
+    /// Used when operation REQUIRES files (GET/STAT/DELETE)
+    pub fn select_directory_with_files(&self) -> String {
+        // Filter to directories that actually have files
+        let dirs_with_files: Vec<&String> = self.manifest.file_ranges
+            .iter()
+            .map(|(dir, _)| dir)
+            .collect();
+        
+        if dirs_with_files.is_empty() {
+            warn!("No directories with files in manifest");
+            return self.select_directory();
+        }
+        
+        // Apply strategy to filtered list
+        match self.strategy {
+            PathSelectionStrategy::Random => {
+                let mut rng = rng();
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Exclusive => {
+                // Pick from assigned directories that have files
+                let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                let assigned_with_files: Vec<String> = assigned.into_iter()
+                    .filter(|d| self.manifest.get_file_range(d).is_some())
+                    .collect();
+                    
+                if assigned_with_files.is_empty() {
+                    // Fallback to any directory with files
+                    let mut rng = rng();
+                    let idx = rng.random_range(0..dirs_with_files.len());
+                    return dirs_with_files[idx].clone();
+                }
+                
+                let mut rng = rng();
+                let idx = rng.random_range(0..assigned_with_files.len());
+                assigned_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Partitioned => {
+                let mut rng = rng();
+                
+                // 70% chance to pick from assigned directories with files
+                if rng.random::<f64>() < 0.7 {
+                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                    let assigned_with_files: Vec<String> = assigned.into_iter()
+                        .filter(|d| self.manifest.get_file_range(d).is_some())
+                        .collect();
+                    
+                    if !assigned_with_files.is_empty() {
+                        let idx = rng.random_range(0..assigned_with_files.len());
+                        return assigned_with_files[idx].clone();
+                    }
+                }
+                
+                // Fall back to random from all dirs with files
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
+            PathSelectionStrategy::Weighted => {
+                let mut rng = rng();
+                let use_assigned_probability = 1.0 - self.partition_overlap;
+                
+                if rng.random::<f64>() < use_assigned_probability {
+                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
+                    let assigned_with_files: Vec<String> = assigned.into_iter()
+                        .filter(|d| self.manifest.get_file_range(d).is_some())
+                        .collect();
+                    
+                    if !assigned_with_files.is_empty() {
+                        let idx = rng.random_range(0..assigned_with_files.len());
+                        return assigned_with_files[idx].clone();
+                    }
+                }
+                
+                // Pick from any directory with files
+                let idx = rng.random_range(0..dirs_with_files.len());
+                dirs_with_files[idx].clone()
+            }
+        }
+    }
 }
 
 /// Verify that prepared objects exist and are accessible
@@ -865,6 +1356,39 @@ async fn delete_object_with_config(
     Ok(())
 }
 
+/// Internal MKDIR operation with config support (for filesystem backends)
+async fn mkdir_with_config(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("MKDIR operation (with config) starting for URI: {}", uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.mkdir(uri).await
+        .with_context(|| format!("Failed to create directory at URI: {}", uri))?;
+    
+    debug!("MKDIR operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
+/// Internal RMDIR operation with config support (for filesystem backends)
+async fn rmdir_with_config(
+    uri: &str,
+    recursive: bool,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<()> {
+    debug!("RMDIR operation (with config, recursive={}) starting for URI: {}", recursive, uri);
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    
+    store.rmdir(uri, recursive).await
+        .with_context(|| format!("Failed to remove directory at URI: {}", uri))?;
+    
+    debug!("RMDIR operation completed successfully for URI: {}", uri);
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // NON-LOGGING variants for replay (avoid logging replay operations)
 // -----------------------------------------------------------------------------
@@ -1004,7 +1528,7 @@ impl Default for WorkerStats {
 }
 
 /// Public entry: run a config and print a summary-like struct back.
-pub async fn run(cfg: &Config) -> Result<Summary> {
+pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Summary> {
     info!("Starting workload execution: duration={:?}, concurrency={}", cfg.duration, cfg.concurrency);
     
     let start = Instant::now();
@@ -1020,6 +1544,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     }
 
     // Pre-resolve GET, DELETE, and STAT sources once
+    // SKIP pre-resolution when using directory tree mode (path_selector handles selection)
     info!("Pre-resolving operation patterns for {} operations", cfg.workload.len());
     
     // Count operations that need resolution
@@ -1036,13 +1561,15 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
     }
     
     let total_patterns = get_count + delete_count + stat_count;
-    if total_patterns > 0 {
+    
+    // Skip URI pre-resolution when in directory tree mode
+    // PathSelector will dynamically select files from the tree
+    let mut pre = PreResolved::default();
+    if tree_manifest.is_none() && total_patterns > 0 {
         println!("Resolving {} operation patterns ({} GET, {} DELETE, {} STAT)...", 
                  total_patterns, get_count, delete_count, stat_count);
-    }
-    
-    let mut pre = PreResolved::default();
-    for wo in &cfg.workload {
+                 
+        for wo in &cfg.workload {
         match &wo.spec {
             OpSpec::Get { .. } => {
                 let original_uri = cfg.get_uri(&wo.spec);
@@ -1144,6 +1671,12 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
             }
             _ => {} // PUT and LIST don't need pre-resolution
         }
+        }
+    } else if tree_manifest.is_some() {
+        // Directory tree mode: No pre-resolution needed
+        // PathSelector will dynamically select files from the tree at runtime
+        println!("Directory tree mode: Using PathSelector for dynamic file selection");
+        info!("Skipping URI pre-resolution (tree mode with {} patterns)", total_patterns);
     }
 
     // Weighted chooser
@@ -1195,6 +1728,34 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         }
     });
     
+    // Create PathSelector for directory-based operations (v0.7.0)
+    // MKDIR/RMDIR operations REQUIRE a TreeManifest - they only make sense with directory structure
+    // If user wants to test mkdir/rmdir, they MUST configure directory_structure in prepare phase
+    let path_selector: Option<Arc<PathSelector>> = if let Some(manifest) = tree_manifest {
+        // Extract agent_id, num_agents, and path_selection strategy from distributed config
+        // Default to single-agent mode with Random strategy if not configured
+        let (agent_id, num_agents, strategy, partition_overlap) = if let Some(ref dist) = cfg.distributed {
+            let num_agents = dist.agents.len();
+            // TODO: Need mechanism to identify which agent this is (env var? command line flag?)
+            // For now, default to agent 0 (coordinator) for single-process testing
+            let agent_id = 0;
+            let strategy = dist.path_selection.clone();
+            let overlap = dist.partition_overlap;
+            (agent_id, num_agents, strategy, overlap)
+        } else {
+            // Single-agent mode: use Random strategy (all directories available)
+            (0, 1, PathSelectionStrategy::Random, 0.3)
+        };
+        
+        info!("Creating PathSelector: strategy={:?}, agent_id={}, num_agents={}, {} total dirs",
+            strategy, agent_id, num_agents, manifest.all_directories.len()
+        );
+        
+        Some(Arc::new(PathSelector::new(manifest, agent_id, num_agents, strategy, partition_overlap)))
+    } else {
+        None
+    };
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
@@ -1203,6 +1764,7 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
         let pre = pre.clone();
         let cfg = cfg.clone();
         let separate_pools = needs_separate_pools;  // Clone flag for workers
+        let path_selector = path_selector.clone();  // Clone PathSelector for this worker
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1226,12 +1788,26 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
 
                 match op {
                     OpSpec::Get { .. } => {
-                        // Get resolved URI from config - rewrite for mixed workloads if needed
-                        let original_uri = cfg.get_uri(op);
-                        let uri = rewrite_pattern_for_pool(&original_uri, false, separate_pools);
-                        
-                        // Pick full URI from pre-resolved list
-                        let full_uri = {
+                        // GET operation: Use PathSelector if available (directory tree mode),
+                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        let full_uri = if let Some(ref selector) = path_selector {
+                            // Directory tree mode: Select file from tree
+                            let file_path = selector.select_file();
+                            // In tree mode, use target directly (path: "/" is ignored)
+                            let base_uri = cfg.target.as_ref()
+                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            
+                            // Build full URI for the specific file
+                            if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, file_path)
+                            } else {
+                                format!("{}/{}", base_uri, file_path)
+                            }
+                        } else {
+                            // Legacy mode: Pick from pre-resolved list
+                            let original_uri = cfg.get_uri(op);
+                            let uri = rewrite_pattern_for_pool(&original_uri, false, separate_pools);
+                            
                             let src = pre.get_for_uri(&uri).unwrap();
                             let mut r = rng();
                             let uri_idx = r.random_range(0..src.full_uris.len());
@@ -1253,17 +1829,53 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.get_bins.add(bytes.len() as u64);
                     }
                     OpSpec::Put { dedup_factor, compress_factor, .. } => {
-                        // Get base URI and size spec from config
-                        let (base_uri, size_spec) = cfg.get_put_size_spec(op);
-                        
-                        // Generate object size using size generator
-                        use crate::size_generator::SizeGenerator;
-                        let size_generator = SizeGenerator::new(&size_spec)?;
-                        let sz = size_generator.generate();
-                        
-                        let key = {
-                            let mut r = rng();
-                            format!("obj_{}", r.random::<u64>())
+                        // PUT operation: Use PathSelector if available (directory tree mode),
+                        // otherwise use random key generation (legacy mode)
+                        //
+                        // Tree mode: Overwrite/update existing file in tree structure
+                        // Legacy mode: Create new object with random name
+                        let (full_uri, sz) = if let Some(ref selector) = path_selector {
+                            // Directory tree mode: Select EXISTING file from tree to overwrite
+                            let file_path = selector.select_file();
+                            let (_base_uri, size_spec) = cfg.get_put_size_spec(op);
+                            
+                            // Generate size for this write
+                            use crate::size_generator::SizeGenerator;
+                            let size_generator = SizeGenerator::new(&size_spec)?;
+                            let sz = size_generator.generate();
+                            
+                            // In tree mode, use target directly (path from op is ignored)
+                            let base_uri = cfg.target.as_ref()
+                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            
+                            // Build full URI for the existing file
+                            let full_uri = if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, file_path)
+                            } else {
+                                format!("{}/{}", base_uri, file_path)
+                            };
+                            
+                            (full_uri, sz)
+                        } else {
+                            // Legacy mode: Create new object with random name
+                            let (base_uri, size_spec) = cfg.get_put_size_spec(op);
+                            
+                            use crate::size_generator::SizeGenerator;
+                            let size_generator = SizeGenerator::new(&size_spec)?;
+                            let sz = size_generator.generate();
+                            
+                            let key = {
+                                let mut r = rng();
+                                format!("obj_{}", r.random::<u64>())
+                            };
+                            
+                            let full_uri = if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, key)
+                            } else {
+                                format!("{}/{}", base_uri, key)
+                            };
+                            
+                            (full_uri, sz)
                         };
                         
                         // Generate data using s3dlio's controlled data generation
@@ -1272,13 +1884,6 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                             *dedup_factor,
                             *compress_factor
                         );
-
-                        // Build full URI for the specific object
-                        let full_uri = if base_uri.ends_with('/') {
-                            format!("{}{}", base_uri, key)
-                        } else {
-                            format!("{}/{}", base_uri, key)
-                        };
 
                         let t0 = Instant::now();
                         put_object_with_config(
@@ -1309,11 +1914,26 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Stat { .. } => {
-                        // Get pattern URI - rewrite for mixed workloads if needed
-                        let original_pattern = cfg.get_meta_uri(op);
-                        let pattern = rewrite_pattern_for_pool(&original_pattern, false, separate_pools);
-                        
-                        let full_uri = {
+                        // STAT operation: Use PathSelector if available (directory tree mode),
+                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        let full_uri = if let Some(ref selector) = path_selector {
+                            // Directory tree mode: Select file from tree
+                            let file_path = selector.select_file();
+                            // In tree mode, use target directly (path from op is ignored)
+                            let base_uri = cfg.target.as_ref()
+                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            
+                            // Build full URI for the specific file
+                            if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, file_path)
+                            } else {
+                                format!("{}/{}", base_uri, file_path)
+                            }
+                        } else {
+                            // Legacy mode: Pick from pre-resolved list
+                            let original_pattern = cfg.get_meta_uri(op);
+                            let pattern = rewrite_pattern_for_pool(&original_pattern, false, separate_pools);
+                            
                             let src = pre.stat_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for STAT pattern: {}", pattern))?;
                             let mut r = rng();
@@ -1331,11 +1951,26 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.meta_bins.add(0);
                     }
                     OpSpec::Delete { .. } => {
-                        // Get pattern URI - rewrite for mixed workloads if needed
-                        let original_pattern = cfg.get_meta_uri(op);
-                        let pattern = rewrite_pattern_for_pool(&original_pattern, true, separate_pools);
-                        
-                        let full_uri = {
+                        // DELETE operation: Use PathSelector if available (directory tree mode),
+                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        let full_uri = if let Some(ref selector) = path_selector {
+                            // Directory tree mode: Select file from tree
+                            let file_path = selector.select_file();
+                            // In tree mode, use target directly (path from op is ignored)
+                            let base_uri = cfg.target.as_ref()
+                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            
+                            // Build full URI for the specific file
+                            if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, file_path)
+                            } else {
+                                format!("{}/{}", base_uri, file_path)
+                            }
+                        } else {
+                            // Legacy mode: Pick from pre-resolved list
+                            let original_pattern = cfg.get_meta_uri(op);
+                            let pattern = rewrite_pattern_for_pool(&original_pattern, true, separate_pools);
+                            
                             let src = pre.delete_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for DELETE pattern: {}", pattern))?;
                             let mut r = rng();
@@ -1354,6 +1989,83 @@ pub async fn run(cfg: &Config) -> Result<Summary> {
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
                         ws.meta_ops += 1;
                         // Delete operations don't transfer data
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Mkdir { .. } => {
+                        // MKDIR requires PathSelector with TreeManifest
+                        // These operations only make sense with a structured directory tree
+                        let dir_name = if let Some(ref selector) = path_selector {
+                            selector.select_directory()
+                        } else {
+                            // No TreeManifest available - this is a configuration error
+                            return Err(anyhow!(
+                                "MKDIR operation requires directory_structure in prepare config. \
+                                 MKDIR/RMDIR are only for testing structured directory trees. \
+                                 Configure prepare.directory_structure with width/depth/files_per_dir."
+                            ));
+                        };
+                        
+                        // In tree mode, use target directly (path from op is ignored)
+                        let base_uri = cfg.target.as_ref()
+                            .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                        
+                        // Build full URI for the specific directory
+                        let full_uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, dir_name)
+                        } else {
+                            format!("{}/{}", base_uri, dir_name)
+                        };
+
+                        let t0 = Instant::now();
+                        mkdir_with_config(
+                            &full_uri,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
+                        let duration = t0.elapsed();
+
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
+                        ws.meta_ops += 1;
+                        // Mkdir operations don't transfer data
+                        ws.meta_bins.add(0);
+                    }
+                    OpSpec::Rmdir { recursive, .. } => {
+                        // RMDIR requires PathSelector with TreeManifest
+                        // These operations only make sense with a structured directory tree
+                        let dir_name = if let Some(ref selector) = path_selector {
+                            selector.select_directory()
+                        } else {
+                            // No TreeManifest available - this is a configuration error
+                            return Err(anyhow!(
+                                "RMDIR operation requires directory_structure in prepare config. \
+                                 MKDIR/RMDIR are only for testing structured directory trees. \
+                                 Configure prepare.directory_structure with width/depth/files_per_dir."
+                            ));
+                        };
+                        
+                        // In tree mode, use target directly (path from op is ignored)
+                        let base_uri = cfg.target.as_ref()
+                            .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                        
+                        // Build full URI for the specific directory
+                        let full_uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, dir_name)
+                        } else {
+                            format!("{}/{}", base_uri, dir_name)
+                        };
+
+                        let t0 = Instant::now();
+                        rmdir_with_config(
+                            &full_uri,
+                            *recursive,
+                            cfg.range_engine.as_ref(),
+                            cfg.page_cache_mode,
+                        ).await?;
+                        let duration = t0.elapsed();
+
+                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
+                        ws.meta_ops += 1;
+                        // Rmdir operations don't transfer data
                         ws.meta_bins.add(0);
                     }
                 }

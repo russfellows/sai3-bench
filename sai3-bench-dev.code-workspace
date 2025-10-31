@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "name": "sai3-bench",
+      "path": "."
+    },
+    {
+      "name": "s3dlio",
+      "path": "../s3dlio"
+    }
+  ],
+  "settings": {
+    "rust-analyzer.checkOnSave.allTargets": true,
+    "files.exclude": {
+      "**/target": true
+    }
+  }
+}
