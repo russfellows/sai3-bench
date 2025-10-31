@@ -1698,6 +1698,20 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         }
     }
 
+    // Create rate controller (v0.7.1)
+    use crate::rate_controller::OptionalRateController;
+    let rate_controller = Arc::new(OptionalRateController::new(
+        cfg.io_rate.clone(), 
+        cfg.concurrency
+    ));
+    
+    if rate_controller.is_enabled() {
+        if let Some(ref rate_cfg) = cfg.io_rate {
+            info!("Rate control enabled: target {:?} IOPS, distribution {:?}", 
+                rate_cfg.iops, rate_cfg.distribution);
+        }
+    }
+
     // Spawn workers
     info!("Spawning {} worker tasks", cfg.concurrency);
     println!("Starting execution ({}s duration, {} concurrent workers)...", cfg.duration.as_secs(), cfg.concurrency);
@@ -1765,6 +1779,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let cfg = cfg.clone();
         let separate_pools = needs_separate_pools;  // Clone flag for workers
         let path_selector = path_selector.clone();  // Clone PathSelector for this worker
+        let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1780,6 +1795,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     let mut r = rng();
                     chooser.sample(&mut r)
                 };
+
+                // Apply rate control throttling (v0.7.1)
+                // This should happen BEFORE acquiring the operation-specific permit
+                // to ensure we're controlling the rate of operation STARTS, not queued operations
+                rate_controller.wait().await;
 
                 // Acquire permit for this specific operation
                 let _p = op_sems[idx].acquire().await.unwrap();

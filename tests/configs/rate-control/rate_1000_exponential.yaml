@@ -1,0 +1,23 @@
+# Rate control test: 1000 IOPS with exponential distribution
+# Purpose: Verify basic rate limiting with realistic Poisson arrivals
+# Expected: ~1000 IOPS ±5% (950-1050 IOPS)
+
+duration: 10s
+concurrency: 8
+
+# NEW v0.7.1: I/O rate control
+io_rate:
+  iops: 1000
+  distribution: exponential
+
+target: "file:///tmp/sai3bench-rate-test"
+
+prepare:
+  objects: 100
+  object_size: 4096
+  pattern: "data/obj-{}"
+
+workload:
+  - weight: 100
+    op: get
+    path: "data/"

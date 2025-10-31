@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.1-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-101%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -264,6 +264,23 @@ Pre-built scripts for rapid deployment:
 - [Cloud Scripts Guide](scripts/README.md) - GCP automation and templates
 
 ## ⚙️ Key Features
+
+### I/O Rate Control (v0.7.1)
+Throttle operation start rate with realistic arrival patterns:
+```yaml
+io_rate:
+  iops: 1000              # Target operations per second
+  distribution: exponential  # Poisson arrivals (realistic)
+                             # or "uniform" (fixed intervals)
+                             # or "deterministic" (precise timing)
+```
+- **Inspired by rdf-bench**: Similar to `iorate=` parameter with enhanced distributions
+- **Three distribution types**: Exponential (Poisson), Uniform (fixed), Deterministic (precise)
+- **Drift compensation**: tokio::time::Interval for uniform distribution accuracy
+- **Zero overhead when disabled**: Optional wrapper for maximum performance
+- **Per-worker division**: Target IOPS automatically split across concurrent workers
+
+See [I/O Rate Control Guide](docs/IO_RATE_CONTROL_GUIDE.md) for detailed usage and examples.
 
 ### TSV Export with Aggregate Rows
 Machine-readable output with per-bucket and aggregate summary rows:
