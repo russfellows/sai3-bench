@@ -757,8 +757,75 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
         println!("│ Objects will be created BEFORE test execution");
         println!("│");
         
+        // Directory tree structure (if configured)
+        if let Some(ref dir_config) = prepare.directory_structure {
+            use sai3_bench::directory_tree::{DirectoryTree, TreeManifest};
+            
+            println!("│ 📁 Directory Tree Structure:");
+            println!("│   Width:            {} subdirectories per level", dir_config.width);
+            println!("│   Depth:            {} levels", dir_config.depth);
+            println!("│   Files/Dir:        {} files per directory", dir_config.files_per_dir);
+            println!("│   Distribution:     {} ({}", dir_config.distribution,
+                if dir_config.distribution == "bottom" { "files only in leaf directories" } 
+                else { "files at every level" });
+            println!("│   Directory Mask:   {}", dir_config.dir_mask);
+            println!("│");
+            
+            // Calculate totals using DirectoryTree
+            let tree = DirectoryTree::new(dir_config.clone())
+                .context("Failed to create directory tree for dry-run analysis")?;
+            let manifest = TreeManifest::from_tree(&tree);
+            
+            println!("│ 📊 Calculated Tree Metrics:");
+            println!("│   Total Directories:  {}", manifest.total_dirs);
+            println!("│   Total Files:        {}", manifest.total_files);
+            
+            // Calculate total data size
+            let total_bytes = if manifest.total_files > 0 {
+                // Use file size spec from ensure_objects if available
+                let avg_bytes = if let Some(ref obj_spec) = prepare.ensure_objects.first() {
+                    if let Some(ref size_spec) = obj_spec.size_spec {
+                        let generator = SizeGenerator::new(size_spec)?;
+                        generator.expected_mean()
+                    } else if let (Some(min), Some(max)) = (obj_spec.min_size, obj_spec.max_size) {
+                        (min + max) / 2
+                    } else {
+                        1024 // Default 1KB
+                    }
+                } else {
+                    1024 // Default 1KB
+                };
+                
+                manifest.total_files as u64 * avg_bytes
+            } else {
+                0
+            };
+            
+            // Format bytes in human-readable format
+            let (size_val, size_unit) = if total_bytes >= 1024 * 1024 * 1024 * 1024 {
+                (total_bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0), "TiB")
+            } else if total_bytes >= 1024 * 1024 * 1024 {
+                (total_bytes as f64 / (1024.0 * 1024.0 * 1024.0), "GiB")
+            } else if total_bytes >= 1024 * 1024 {
+                (total_bytes as f64 / (1024.0 * 1024.0), "MiB")
+            } else if total_bytes >= 1024 {
+                (total_bytes as f64 / 1024.0, "KiB")
+            } else {
+                (total_bytes as f64, "B")
+            };
+            
+            println!("│   Total Data Size:    {} bytes ({:.2} {})", 
+                total_bytes, size_val, size_unit);
+            println!("│");
+        }
+        
         for (idx, spec) in prepare.ensure_objects.iter().enumerate() {
-            println!("│ Section {}:", idx + 1);
+            if prepare.directory_structure.is_some() && spec.count == 0 {
+                // Skip showing flat object sections when using directory tree and count is 0
+                continue;
+            }
+            
+            println!("│ Flat Objects Section {}:", idx + 1);
             println!("│   URI:              {}", spec.base_uri);
             println!("│   Count:            {} objects", spec.count);
             

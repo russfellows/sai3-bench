@@ -52,9 +52,6 @@ async fn test_single_agent_creates_all() -> Result<()> {
 /// Test multiple agents create non-overlapping files (CRITICAL: rdf-bench bug test)
 #[tokio::test]
 async fn test_multi_agent_no_collision() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let base_uri = format!("file://{}", temp_dir.path().display());
-    
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,

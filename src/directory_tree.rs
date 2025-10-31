@@ -223,13 +223,6 @@ impl DirectoryTree {
     pub fn config(&self) -> &DirectoryStructureConfig {
         &self.config
     }
-    
-    /// Get directories that should contain files
-    pub fn file_directories(&self) -> Vec<&DirectoryNode> {
-        self.directories.values()
-            .filter(|node| node.has_files)
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -294,9 +287,12 @@ mod tests {
         assert_eq!(tree.total_files(), 20);
         
         // Verify only bottom level has files
-        let file_dirs = tree.file_directories();
-        assert_eq!(file_dirs.len(), 4);  // Only 4 dirs at depth 2
-        assert!(file_dirs.iter().all(|d| d.depth == 2));
+        let manifest = TreeManifest::from_tree(&tree);
+        assert_eq!(manifest.file_ranges.len(), 4);  // Only 4 dirs at depth 2 have files
+        // Check that all dirs with files are at depth 2 (have 1 slash)
+        for (dir_path, _) in &manifest.file_ranges {
+            assert_eq!(dir_path.matches('/').count(), 1, "Dir {} should be at depth 2", dir_path);
+        }
     }
     
     #[test]
@@ -317,8 +313,8 @@ mod tests {
         assert_eq!(tree.total_files(), 30);
         
         // Verify all directories have files
-        let file_dirs = tree.file_directories();
-        assert_eq!(file_dirs.len(), 6);  // All 6 directories
+        let manifest = TreeManifest::from_tree(&tree);
+        assert_eq!(manifest.file_ranges.len(), 6);  // All 6 directories should have files
     }
     
     #[test]
@@ -472,11 +468,14 @@ mod tests {
             }
         }
         
-        // Verify file_directories() returns only depth 3
-        let file_dirs = tree.file_directories();
-        assert_eq!(file_dirs.len(), 27, "Should have exactly 27 directories with files");
-        assert!(file_dirs.iter().all(|d| d.depth == 3), 
-            "All file directories should be at depth 3");
+        // Verify manifest shows only depth 3 directories have files
+        let manifest = TreeManifest::from_tree(&tree);
+        assert_eq!(manifest.file_ranges.len(), 27, "Should have exactly 27 directories with files");
+        for (dir_path, _) in &manifest.file_ranges {
+            assert_eq!(dir_path.matches('/').count(), 2, 
+                "All file directories should be at depth 3 (2 slashes), but {} has {}", 
+                dir_path, dir_path.matches('/').count());
+        }
     }
     
     #[test]
@@ -506,14 +505,14 @@ mod tests {
                 key, node.depth);
         }
         
-        // Verify file_directories() returns all directories
-        let file_dirs = tree.file_directories();
-        assert_eq!(file_dirs.len(), 14, "All 14 directories should have files");
+        // Verify manifest shows all directories have files
+        let manifest = TreeManifest::from_tree(&tree);
+        assert_eq!(manifest.file_ranges.len(), 14, "All 14 directories should have files");
         
         // Verify representation across all levels
-        let level1_with_files = file_dirs.iter().filter(|d| d.depth == 1).count();
-        let level2_with_files = file_dirs.iter().filter(|d| d.depth == 2).count();
-        let level3_with_files = file_dirs.iter().filter(|d| d.depth == 3).count();
+        let level1_with_files = manifest.file_ranges.iter().filter(|(p, _)| p.matches('/').count() == 0).count();
+        let level2_with_files = manifest.file_ranges.iter().filter(|(p, _)| p.matches('/').count() == 1).count();
+        let level3_with_files = manifest.file_ranges.iter().filter(|(p, _)| p.matches('/').count() == 2).count();
         
         assert_eq!(level1_with_files, 2, "Level 1 should have 2 dirs with files");
         assert_eq!(level2_with_files, 4, "Level 2 should have 4 dirs with files");
@@ -551,11 +550,11 @@ pub struct TreeManifest {
     /// Distribution strategy: "bottom" or "all"
     pub distribution: String,
     
-    /// File index ranges per directory: HashMap<dir_path, (start_idx, end_idx)>
-    /// Enables fast file selection: "which files live in this directory?"
-    /// Example: {"d1_w1.dir/d2_w1.dir": (0, 100), "d1_w1.dir/d2_w2.dir": (100, 200)}
+    /// File index ranges per directory: Vec<(dir_path, (start_idx, end_idx))>
+    /// Stored in same order as all_directories for consistency
+    /// Example: [("d1_w1.dir/d2_w1.dir", (0, 5)), ("d1_w1.dir/d2_w2.dir", (5, 10))]
     #[serde(default)]
-    pub file_ranges: HashMap<String, (usize, usize)>,
+    pub file_ranges: Vec<(String, (usize, usize))>,
 }
 
 impl TreeManifest {
@@ -572,7 +571,7 @@ impl TreeManifest {
             total_files: tree.total_files,
             files_per_dir: tree.config.files_per_dir,
             distribution: tree.config.distribution.clone(),
-            file_ranges: HashMap::new(),
+            file_ranges: Vec::new(),
         };
         
         // Compute file ranges immediately
@@ -609,7 +608,7 @@ impl TreeManifest {
             if should_have_files && self.files_per_dir > 0 {
                 let start_idx = global_idx;
                 let end_idx = global_idx + self.files_per_dir;
-                self.file_ranges.insert(dir_path.clone(), (start_idx, end_idx));
+                self.file_ranges.push((dir_path.clone(), (start_idx, end_idx)));
                 global_idx = end_idx;
             }
         }
@@ -624,11 +623,20 @@ impl TreeManifest {
         format!("file_{:08}.dat", global_idx)
     }
     
+    /// Helper: Look up file range for a specific directory
+    /// Returns None if directory has no files
+    pub fn get_file_range(&self, dir_path: &str) -> Option<&(usize, usize)> {
+        self.file_ranges
+            .iter()
+            .find(|(path, _)| path == dir_path)
+            .map(|(_, range)| range)
+    }
+    
     /// Get full relative path for a global file index
     /// Returns: "d1_w1.dir/d2_w1.dir/file_00000000.dat"
     /// Returns None if global_idx is out of range
     pub fn get_file_path(&self, global_idx: usize) -> Option<String> {
-        // Find which directory this file belongs to
+        // Iterate file_ranges in order (matches creation order)
         for (dir_path, (start, end)) in &self.file_ranges {
             if global_idx >= *start && global_idx < *end {
                 let file_name = self.get_file_name(global_idx);
@@ -641,7 +649,7 @@ impl TreeManifest {
     /// Get list of all files in a specific directory
     /// Returns empty vec if directory has no files
     pub fn get_files_in_directory(&self, dir_path: &str) -> Vec<String> {
-        if let Some((start, end)) = self.file_ranges.get(dir_path) {
+        if let Some((start, end)) = self.get_file_range(dir_path) {
             (*start..*end)
                 .map(|idx| self.get_file_name(idx))
                 .collect()

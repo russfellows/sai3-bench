@@ -1,5 +1,40 @@
 # sai3-bench AI Agent Guide
 
+## Critical Build and Debug Instructions
+
+**IMPORTANT**: When running `cargo build` or `cargo test`, do NOT pipe output to `head` or `tail`. The user needs to see the ENTIRE output, including all warnings and errors. Run build commands without filtering:
+```bash
+# CORRECT:
+cargo build --release
+cargo test
+
+# WRONG:
+cargo build --release 2>&1 | head -100
+cargo build --release 2>&1 | tail -50
+```
+
+**DEBUGGING RULE**: When troubleshooting issues or investigating unexpected behavior, **ALWAYS** use the verbose flags **BEFORE** other CLI options:
+```bash
+# CORRECT - verbose flags MUST come BEFORE subcommands:
+./target/release/sai3-bench -v run --config <config>     # Basic verbosity
+./target/release/sai3-bench -vv run --config <config>    # More verbose (RECOMMENDED)
+./target/release/sai3-bench -vvv run --config <config>   # Maximum verbosity
+
+# WRONG - verbose flags after subcommand won't work:
+./target/release/sai3-bench run --config <config> -vv    # ERROR: unexpected argument
+
+# NEVER use RUST_LOG - use the built-in -v/-vv/-vvv flags instead
+```
+
+The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
+- Object store initialization and backend detection
+- Directory creation operations
+- File operations and paths
+- Error details and stack traces
+- Timing information
+
+**Use `-vv` as the default for all debugging sessions. Remember: flags BEFORE subcommands!**
+
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 

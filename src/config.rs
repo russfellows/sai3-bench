@@ -242,7 +242,7 @@ fn default_max_size() -> u64 {
 }
 
 fn default_fill() -> FillPattern { 
-    FillPattern::Zero 
+    FillPattern::Random 
 }
 
 fn default_dedup_factor() -> usize {

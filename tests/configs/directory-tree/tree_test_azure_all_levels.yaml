@@ -1,0 +1,71 @@
+# Directory Tree Test - Azure Blob Storage (All Levels Distribution)
+# 
+# Purpose: Tests directory tree with files at ALL levels (not just leaf directories)
+#
+# Configuration:
+#   - Structure: 3-way tree, 2 levels deep (12 total directories)
+#   - Files: 5 files per directory at ALL levels = 60 total files
+#   - Distribution: all (files at every level, not just leaf directories)
+#   - Size: Uniform 4-16 KB
+#   - Fill: random (realistic data)
+#   - Workload: GET (60%), PUT (30%), STAT (10%)
+#
+# Directory Structure:
+#   Root (5 files)
+#   ├── d1_w1/ (5 files)
+#   │   ├── d2_w1/ (5 files)
+#   │   ├── d2_w2/ (5 files)
+#   │   └── d2_w3/ (5 files)
+#   ├── d1_w2/ (5 files)
+#   │   ├── d2_w1/ (5 files)
+#   │   ├── d2_w2/ (5 files)
+#   │   └── d2_w3/ (5 files)
+#   └── d1_w3/ (5 files)
+#       ├── d2_w1/ (5 files)
+#       ├── d2_w2/ (5 files)
+#       └── d2_w3/ (5 files)
+#
+# Total: 12 directories × 5 files = 60 files
+
+version: 1
+duration: 20s
+concurrency: 8
+target: "az://egiazurestore1/s3dlio/sai3-test-tree-all-levels"
+
+prepare:
+  directory_structure:
+    width: 3              # 3 subdirectories at each level
+    depth: 2              # 2 levels deep  
+    files_per_dir: 5      # 5 files per directory (at ALL levels)
+    distribution: "all"   # Files at EVERY level (root + intermediate + leaf)
+    dir_mask: "sai3.d%d_w%d"
+  file_size:
+    dist: "uniform"
+    min: 4096            # 4 KB
+    max: 16384           # 16 KB
+  fill: "random"         # Realistic random data for tree files
+  dedup_factor: 2
+  compress_factor: 2
+  
+  ensure_objects:
+    - base_uri: "az://egiazurestore1/s3dlio/sai3-test-tree-all-levels"
+      count: 0            # No flat objects, only tree files
+      fill: "random"     # Random fill (not zero!)
+      dedup_factor: 2
+      compress_factor: 2
+
+workload:
+  - op: get
+    path: "/"
+    weight: 60
+  
+  - op: put
+    path: "/"
+    object_size: 8192     # Fixed 8KB 
+    dedup_factor: 2
+    compress_factor: 2
+    weight: 30
+  
+  - op: stat
+    path: "/"
+    weight: 10
