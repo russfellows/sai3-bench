@@ -1,8 +1,8 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.6.11-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-41%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-101%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
@@ -11,11 +11,13 @@ A comprehensive storage performance testing tool supporting multiple backends th
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
-2. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
-3. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
-4. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
-5. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
-6. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
+2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing (new in v0.7.0)
+3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends (new in v0.7.0)
+4. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
+5. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
+6. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
+7. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
+8. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
 
 ## 🎯 Supported Storage Backends
 
@@ -28,6 +30,46 @@ All operations work identically across protocols - just change the URI scheme:
 - **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API
 
 See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides.
+
+## 🌳 Directory Tree Workloads (v0.7.0)
+
+Test realistic shared filesystem scenarios with configurable directory hierarchies:
+
+```yaml
+directory_tree:
+  width: 3              # Subdirectories per level
+  depth: 2              # Tree depth (2 = 3 + 9 directories)
+  files_per_dir: 10     # Files per directory
+  distribution: bottom  # "bottom" (leaf only) or "all" (every level)
+  
+  size:
+    type: uniform       # or "lognormal", "fixed"
+    min_size_kb: 4
+    max_size_kb: 16
+  
+  fill: random          # "random" (default), "zero", or "sequential"
+  dedup_factor: 1       # Compression/dedup testing
+  compress_factor: 1
+```
+
+**Key Features:**
+- **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
+- **Multi-level distributions**: Place files only in leaves (`bottom`) or at all levels (`all`)
+- **Cloud storage compatible**: Works seamlessly with S3, Azure Blob, GCS (implicit directories)
+- **Distributed coordination**: TreeManifest ensures collision-free file numbering across agents
+- **Realistic data**: Random fill default provides compression-resistant patterns
+
+**Example:**
+```bash
+# Validate configuration with enhanced dry-run
+./sai3-bench run --config tree-test.yaml --dry-run
+# Output: Total Directories: 12, Total Files: 60, Total Data: 600 KiB
+
+# Run workload on Azure Blob Storage
+./sai3-bench run --config tree-test.yaml
+```
+
+See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for examples.
 
 ## 📦 Architecture & Binaries
 
