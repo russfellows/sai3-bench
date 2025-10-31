@@ -39,6 +39,12 @@ pub struct Config {
     /// Enables automated SSH deployment, per-agent customization, and coordinated execution
     #[serde(default)]
     pub distributed: Option<DistributedConfig>,
+    
+    /// Optional I/O rate control (v0.7.1+)
+    /// Controls the rate at which operations are issued (not their completion rate)
+    /// Default: None (unlimited throughput - current behavior)
+    #[serde(default)]
+    pub io_rate: Option<IoRateConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -802,4 +808,127 @@ pub enum PathSelectionStrategy {
     Exclusive,
     /// Probabilistic mix controlled by partition_overlap parameter
     Weighted,
+}
+
+// ============================================================================
+// I/O Rate Control Configuration (v0.7.1+)
+// ============================================================================
+
+/// I/O rate control configuration (v0.7.1)
+/// 
+/// Controls the rate at which operations are issued to storage backends.
+/// Inspired by rdf-bench's iorate= parameter but adapted for sai3-bench's
+/// async architecture.
+/// 
+/// # Example
+/// ```yaml
+/// io_rate:
+///   iops: 1000                 # Target 1000 IOPS total
+///   distribution: exponential  # Realistic Poisson arrivals
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct IoRateConfig {
+    /// Target operations per second (IOPS)
+    /// 
+    /// Special values:
+    /// - 0 or "max": No rate limiting (maximum throughput)
+    /// - Numeric value: Target IOPS (e.g., 1000, 5000, 10000)
+    /// 
+    /// The target rate is distributed evenly across all concurrent workers.
+    #[serde(deserialize_with = "deserialize_iops")]
+    pub iops: IopsTarget,
+    
+    /// Inter-arrival time distribution (default: exponential)
+    /// 
+    /// - exponential: Poisson arrivals (realistic, default)
+    /// - uniform: Fixed intervals between operations
+    /// - deterministic: Precise timing (testing/debugging only)
+    #[serde(default = "default_distribution")]
+    pub distribution: ArrivalDistribution,
+}
+
+/// IOPS target specification
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IopsTarget {
+    /// No rate limiting - run at maximum throughput
+    Max,
+    /// Fixed IOPS target (distributed across workers)
+    Fixed(u64),
+}
+
+/// Inter-arrival time distribution type
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArrivalDistribution {
+    /// Exponential distribution (Poisson arrivals) - realistic
+    Exponential,
+    /// Uniform distribution (fixed intervals) - synthetic
+    Uniform,
+    /// Deterministic timing (precise intervals) - testing only
+    Deterministic,
+}
+
+fn default_distribution() -> ArrivalDistribution {
+    ArrivalDistribution::Exponential
+}
+
+/// Custom deserializer for IOPS target
+/// Accepts:
+/// - "max" (string) -> IopsTarget::Max
+/// - 0 (number) -> IopsTarget::Max
+/// - positive integer -> IopsTarget::Fixed(n)
+fn deserialize_iops<'de, D>(deserializer: D) -> Result<IopsTarget, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct IopsVisitor;
+
+    impl<'de> Visitor<'de> for IopsVisitor {
+        type Value = IopsTarget;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a positive integer, 0, or \"max\"")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value == 0 {
+                Ok(IopsTarget::Max)
+            } else {
+                Ok(IopsTarget::Fixed(value))
+            }
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value <= 0 {
+                Ok(IopsTarget::Max)
+            } else {
+                Ok(IopsTarget::Fixed(value as u64))
+            }
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value == "max" || value == "MAX" {
+                Ok(IopsTarget::Max)
+            } else {
+                value
+                    .parse::<u64>()
+                    .map(|n| if n == 0 { IopsTarget::Max } else { IopsTarget::Fixed(n) })
+                    .map_err(|_| E::custom(format!("invalid IOPS value: {}", value)))
+            }
+        }
+    }
+
+    deserializer.deserialize_any(IopsVisitor)
 }

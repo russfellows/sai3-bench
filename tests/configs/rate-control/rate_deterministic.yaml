@@ -1,0 +1,23 @@
+# Rate control test: Deterministic distribution
+# Purpose: Verify precise timing mode (for testing/debugging)
+# Expected: Very precise timing, minimal jitter
+
+duration: 10s
+concurrency: 4
+
+# NEW v0.7.1: Deterministic distribution for precise timing
+io_rate:
+  iops: 1000
+  distribution: deterministic
+
+target: "file:///tmp/sai3bench-rate-test"
+
+prepare:
+  objects: 100
+  object_size: 4096
+  pattern: "data/obj-{}"
+
+workload:
+  - weight: 100
+    op: get
+    path: "data/"

@@ -1,0 +1,23 @@
+# Rate control test: Unlimited throughput (max)
+# Purpose: Verify no throttling when iops=max
+# Expected: Maximum throughput (no rate limiting)
+
+duration: 10s
+concurrency: 16
+
+# NEW v0.7.1: Disabled rate control (max throughput)
+io_rate:
+  iops: max
+  distribution: exponential
+
+target: "file:///tmp/sai3bench-rate-test"
+
+prepare:
+  objects: 100
+  object_size: 4096
+  pattern: "data/obj-{}"
+
+workload:
+  - weight: 100
+    op: get
+    path: "data/"

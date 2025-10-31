@@ -2,6 +2,118 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.1] - 2025-10-31
+
+### ⚡ I/O Rate Control
+
+**Enhancement release**: Adds comprehensive I/O rate control capabilities to throttle operation start rates with realistic arrival patterns. Inspired by rdf-bench's `iorate=` parameter with enhanced distribution options and modern async Rust implementation.
+
+#### New Features
+
+- **I/O Rate Control** - Control the rate at which operations are started (not completed)
+  - **Three distribution types**:
+    - `exponential`: Poisson arrivals (realistic production patterns with natural variance)
+    - `uniform`: Fixed intervals with drift compensation via `tokio::time::Interval`
+    - `deterministic`: Precise timing with manual drift tracking
+  - **Flexible IOPS targets**: Numeric values, `max` (unlimited), or `0` (same as max)
+  - **Per-worker division**: Target IOPS automatically split across concurrent workers
+  - **Zero overhead when disabled**: OptionalRateController wrapper provides passthrough
+  - **Async-aware implementation**: Uses `tokio::sync::Mutex` and `StdRng` for thread safety
+
+- **Configuration Syntax**:
+  ```yaml
+  io_rate:
+    iops: 1000              # Target operations per second
+    distribution: exponential  # or "uniform" or "deterministic"
+  ```
+
+- **Accuracy Characteristics**:
+  - Target range: < 5,000 IOPS per workload for ±5% accuracy
+  - Timer granularity: ~1 millisecond (tokio timer resolution)
+  - Uniform distribution uses `tokio::time::Interval` for better drift compensation
+  - Exponential distribution variance masks timer inaccuracy (feature, not bug)
+
+#### Implementation Details
+
+- **New module**: `src/rate_controller.rs` (355 lines)
+  - `RateController` - Core rate control logic with inter-arrival calculations
+  - `OptionalRateController` - Zero-overhead wrapper for conditional throttling
+  - Uses `tokio::time::Interval` for uniform distribution (drift compensation)
+  - Uses `tokio::time::sleep()` for exponential and deterministic distributions
+  - Thread-safe RNG: `StdRng` instead of thread-local `ThreadRng`
+
+- **Workload integration**: `src/workload.rs`
+  - Rate controller created before worker spawn
+  - Cloned to each worker via `Arc`
+  - `rate_controller.wait().await` called before operation selection
+  - Throttles operation **starts**, not completions
+
+- **Configuration support**: `src/config.rs`
+  - New `IoRateConfig` struct with `iops` and `distribution` fields
+  - `IopsTarget` enum: `Max` or `Fixed(u64)`
+  - `ArrivalDistribution` enum: `Exponential`, `Uniform`, `Deterministic`
+  - Custom deserializer accepts "max", 0, or numeric IOPS values
+
+#### Testing & Validation
+
+- **9 new integration tests** in `tests/rate_control_tests.rs`:
+  - Zero overhead verification (max IOPS < 10ms for 1000 no-ops)
+  - Optional controller disabled behavior
+  - Inter-arrival calculations (3 test cases)
+  - Uniform distribution timing consistency (80-120ms for 100ms target)
+  - Deterministic operation tracking
+  - Exponential distribution variability
+  - Multi-worker Arc sharing
+  - IOPS target parsing
+  - Distribution type storage
+
+- **4 example configurations** in `tests/configs/rate-control/`:
+  - `rate_1000_exponential.yaml` - Realistic 1K IOPS with Poisson arrivals
+  - `rate_5000_uniform.yaml` - Steady 5K IOPS with fixed intervals
+  - `rate_max.yaml` - Maximum throughput (no throttling)
+  - `rate_deterministic.yaml` - Precise 1K IOPS with drift compensation
+
+- **All tests passing**: 52 total (9 rate control + 43 existing library tests)
+
+#### Documentation
+
+- **New guide**: `docs/IO_RATE_CONTROL_GUIDE.md`
+  - Complete usage examples for all distribution types
+  - Comparison with rdf-bench `iorate=` parameter
+  - Performance characteristics and accuracy notes
+  - Troubleshooting common issues
+  - Architecture and implementation details
+  - Best practices and future enhancements
+
+- **Updated README.md**:
+  - New "I/O Rate Control" section in Key Features
+  - Example configuration snippets
+  - Link to comprehensive guide
+
+#### Comparison with rdf-bench
+
+| Feature | rdf-bench | sai3-bench v0.7.1 |
+|---------|-----------|-------------------|
+| Basic rate control | ✅ `iorate=1000` | ✅ `iops: 1000` |
+| Unlimited throughput | ✅ `iorate=max` | ✅ `iops: max` |
+| Distribution types | ❌ Fixed only | ✅ Exponential, Uniform, Deterministic |
+| Poisson arrivals | ❌ | ✅ Exponential distribution |
+| Drift compensation | ❌ | ✅ Interval-based (uniform) |
+| Per-worker division | ✅ | ✅ |
+| Zero overhead | ✅ | ✅ |
+
+**Migration from rdf-bench**:
+- `iorate=1000` → `io_rate: { iops: 1000, distribution: uniform }`
+- `iorate=max` → `io_rate: { iops: max }` (distribution ignored)
+- Poisson arrivals: Use `distribution: exponential` (new capability)
+
+#### Technical Improvements
+
+- **Async-aware interior mutability**: Uses `tokio::sync::Mutex` for Interval access
+- **Send-safe RNG**: `StdRng` with `seed_from_u64(rand::random())` instead of thread-local
+- **Tokio runtime requirements**: Tests creating Interval instances use `#[tokio::test]`
+- **Clean compilation**: Zero warnings in sai3-bench code
+
 ## [0.7.0] - 2025-10-31
 
 ### 🌳 Directory Tree Workloads & Filesystem Testing
