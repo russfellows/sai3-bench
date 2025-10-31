@@ -2,6 +2,193 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.0] - 2025-10-31
+
+### 🌳 Directory Tree Workloads & Filesystem Testing
+
+**Major feature release**: Comprehensive filesystem testing capabilities with directory tree workloads and nested path support for both traditional filesystems and object storage. Includes operations for directory management (MKDIR, RMDIR), path enumeration (LIST), metadata queries (STAT), and cleanup (DELETE) across all storage backends.
+
+#### New Features
+
+- **Directory Tree Workloads** - Hierarchical filesystem structure generation
+  - Configurable tree dimensions: `width` (subdirs per level) × `depth` (tree levels)
+  - Multiple distribution strategies:
+    - `bottom`: Files only in leaf directories (traditional pattern)
+    - `all`: Files at every level (root + intermediate + leaf)
+  - Flexible size specifications: `uniform`, `lognormal`, `fixed`
+  - Random fill default for realistic compression-resistant data
+  - Full cloud storage compatibility (S3, Azure Blob, GCS)
+  
+- **Enhanced `--dry-run` Output** - Comprehensive pre-execution validation
+  - Total directories count
+  - Total files count
+  - Total data size (bytes + human-readable: TiB/GiB/MiB/KiB/B)
+  - Accurate calculations using TreeManifest and SizeGenerator
+  - Example: `Total Directories: 12, Total Files: 60, Total Data: 600 KiB (614400 bytes)`
+
+- **Filesystem Operations** - Full support for nested paths and directory operations
+  - **Directory management**: MKDIR (create), RMDIR (remove) for filesystem backends
+  - **Path enumeration**: LIST operations with prefix filtering (all backends)
+  - **Metadata queries**: STAT operations for object metadata (all backends)
+  - **Cleanup operations**: DELETE for files and objects (all backends)
+  - **Nested path support**: Works with both real directories (file://) and key prefixes (s3://, az://, gs://)
+  - Conditional mkdir: Automatically skips for object storage (implicit directories)
+  - Cloud metadata trait with backend-specific implementations
+
+- **PathSelector** - Dynamic file selection during workload execution
+  - Weighted random selection across directory tree
+  - GET/PUT/STAT operation support
+  - Distributed coordination with TreeManifest
+  - Collision-free file numbering across agents
+
+- **Distributed Tree Coordination** - TreeManifest for multi-agent consistency
+  - Shared directory structure across distributed agents
+  - Per-agent file ranges prevent collisions
+  - Serializable manifest for gRPC transmission
+  - Accurate total tracking: directories, files, data size
+
+#### Configuration Changes
+
+- **Default fill type changed**: Zero → Random
+  - **Breaking Change**: Configs without explicit `fill:` now use random data
+  - **Rationale**: Random fill provides more realistic testing (compression-resistant)
+  - **Migration**: Add `fill: zero` to configs if zero fill required
+  
+- **New config section**: `directory_tree`
+  ```yaml
+  directory_tree:
+    width: 3              # Subdirectories per level
+    depth: 2              # Tree depth
+    files_per_dir: 10     # Files per directory
+    distribution: bottom  # "bottom" or "all"
+    size:
+      type: uniform
+      min_size_kb: 4
+      max_size_kb: 16
+    fill: random          # "random" (default), "zero", "sequential"
+  ```
+
+#### Testing & Validation
+
+- **101 total tests** (+40 from v0.6.11) - All passing
+  - 38 lib tests (core functionality)
+  - 30 directory tree creation tests (new)
+  - 8 distributed config tests
+  - 8 controller simulation tests
+  - 6 streaming replay tests
+  - 8 GCS backend tests
+  - 2 utility tests
+  - 1 gRPC test
+
+- **Azure Blob Storage validation**:
+  - Bottom distribution: 90 files in 9 leaf directories (~11.64 ops/s)
+  - All-levels distribution: 60 files across 12 directories (~11.04 ops/s)
+  - Performance: GET ~900ms, PUT ~450ms, STAT ~430ms
+  - Verified with s3-cli ls command (correct hierarchical structure)
+
+- **Comprehensive test configurations** (9 new configs in `tests/configs/directory-tree/`):
+  - `tree_test_basic.yaml` - Simple 2×2 tree
+  - `tree_test_bottom.yaml` - Bottom distribution (leaf only)
+  - `tree_test_all_levels.yaml` - All-levels distribution
+  - `tree_test_fixed_size.yaml` - Fixed size files
+  - `tree_test_lognormal.yaml` - Lognormal distribution
+  - `tree_test_io_operations.yaml` - Operation mix testing
+  - `tree_test_azure_blob.yaml` - Azure Blob example (tested)
+  - `tree_test_azure_all_levels.yaml` - Azure all-levels (tested)
+  - `tree_test_s3_example.yaml` - S3 template
+
+- **Metadata test configurations** (6 new configs):
+  - `metadata_simple.yaml` - Basic operations
+  - `metadata_file_test.yaml` - File-based testing
+  - `metadata_stress_test.yaml` - Stress testing
+  - `mkdir_put_race_test.yaml` - Race conditions
+  - `mkdir_rmdir_race_test.yaml` - Create/delete races
+  - `rmdir_nonempty_test.yaml` - Non-empty handling
+
+#### Implementation Details
+
+- **New modules**:
+  - `src/directory_tree.rs` (824 lines) - Core tree generation, PathSelector, TreeManifest
+  - `src/cloud_metadata.rs` (382 lines) - Unified metadata trait, backend implementations
+
+- **Enhanced modules**:
+  - `src/workload.rs` (+798 lines) - Metadata ops integration, tree workload execution
+  - `src/config.rs` (+116 lines) - DirectoryTreeConfig, DataFillType enum
+  - `src/main.rs` (+90 lines) - Enhanced dry-run with metrics
+
+- **Backend compatibility**:
+  | Backend | MKDIR | RMDIR | LIST | STAT | DELETE | Tree Workloads |
+  |---------|-------|-------|------|------|--------|----------------|
+  | file:// | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ Tested |
+  | direct:// | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ Compatible |
+  | s3:// | ⚠️ Skip | ⚠️ Skip | ✅ | ✅ | ✅ | ✅ Compatible |
+  | az:// | ⚠️ Skip | ⚠️ Skip | ✅ | ✅ | ✅ | ✅ **TESTED** |
+  | gs:// | ⚠️ Skip | ⚠️ Skip | ✅ | ✅ | ✅ | ✅ Compatible |
+
+  *⚠️ Skip = Implicit directories (no mkdir needed)*
+
+#### Documentation
+
+- **New documentation** (5,800+ lines):
+  - `docs/PHASE1_METADATA_OPERATIONS.md` (598 lines) - Metadata design
+  - `docs/PHASE_2B_FILE_INTEGRATION_PLAN.md` (684 lines) - PathSelector design
+  - `docs/DIRECTORY_TREE_SHARED_FILESYSTEM_DESIGN.md` (488 lines) - Tree design
+  - `docs/RDF_BENCH_ANALYSIS.md` (732 lines) - Collision avoidance analysis
+  - `docs/BLOCK_IO_IMPLEMENTATION_PLAN.md` (855 lines) - Future direct I/O
+  - `docs/v0.7.0-gap-analysis.md` (395 lines) - Gap analysis & roadmap
+  - `tests/configs/directory-tree/README.md` (252 lines) - Testing guide
+
+- **Updated `.github/copilot-instructions.md`** (+161 lines):
+  - **Critical debugging rule**: Verbose flags (-v/-vv/-vvv) MUST come BEFORE subcommands
+  - Never use RUST_LOG, use built-in verbosity flags
+  - Zero warnings policy reinforcement
+
+#### Bug Fixes
+
+- **rdf-bench collision bug**: Fixed file numbering in distributed mode
+  - Analysis documented in `docs/RDF_BENCH_ANALYSIS.md`
+  - TreeManifest ensures collision-free numbering across agents
+  - Per-agent file ranges with proper offset calculation
+
+#### Performance
+
+- **Azure Blob Storage** (tested with 60-90 file hierarchies):
+  - Overall throughput: 11-12 ops/s
+  - GET latency: mean ~900ms, p50 ~915ms, p95 ~1040ms
+  - PUT latency: mean ~450ms, p50 ~430ms, p95 ~620ms
+  - STAT latency: mean ~430ms, p50 ~430ms, p95 ~520ms
+
+#### Breaking Changes
+
+1. **Default fill type**: Zero → Random
+   - Impact: Configs without explicit `fill:` will use random data
+   - Migration: Add `fill: zero` if zero fill required
+
+2. **Object storage mkdir behavior**: Now skips mkdir for s3://, az://, gs://
+   - Impact: Slight performance improvement for cloud storage
+   - Benefit: Eliminates unnecessary API calls
+
+#### Migration Guide
+
+**For existing configs:**
+1. Review fill type - add `fill: zero` if needed
+2. No action needed for operation mix, sizes, concurrency
+
+**For new directory tree workloads:**
+1. Start with `tests/configs/directory-tree/tree_test_basic.yaml`
+2. Test with `--dry-run` to validate structure
+3. Review [Directory Tree README](../tests/configs/directory-tree/README.md)
+
+#### Statistics
+
+- **Total changes**: 9,884 insertions, 81 deletions across 49 files
+- **18 commits** in feature branch
+- **101 tests passing** (100% pass rate)
+- **Zero compiler warnings**
+- **3 backends validated**: file://, direct://, az://
+
+---
+
 ## [0.6.11] - 2025-10-20
 
 ### � SSH-Automated Distributed Testing
