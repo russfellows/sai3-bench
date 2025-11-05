@@ -142,6 +142,25 @@ fn default_concurrency() -> usize {
     32  // Higher default for better throughput
 }
 
+/// Strategy for executing prepare phase with multiple ensure_objects entries
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PrepareStrategy {
+    /// Process each ensure_objects entry sequentially (one size at a time)
+    /// Default behavior: predictable, separate progress bars per size
+    Sequential,
+    
+    /// Process all ensure_objects entries in parallel (all sizes interleaved)
+    /// Better throughput: unified progress bar, better storage pipeline utilization
+    Parallel,
+}
+
+impl Default for PrepareStrategy {
+    fn default() -> Self {
+        PrepareStrategy::Sequential
+    }
+}
+
 /// Prepare configuration for pre-populating objects before testing
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PrepareConfig {
@@ -162,6 +181,12 @@ pub struct PrepareConfig {
     /// When specified, creates deterministic hierarchical directory structure before workload
     #[serde(default)]
     pub directory_structure: Option<crate::directory_tree::DirectoryStructureConfig>,
+    
+    /// Strategy for executing prepare phase (v0.7.2+)
+    /// - sequential: Process each ensure_objects entry one at a time (default, backward compatible)
+    /// - parallel: Interleave all ensure_objects entries for maximum throughput
+    #[serde(default)]
+    pub prepare_strategy: PrepareStrategy,
 }
 
 /// Specification for ensuring objects exist

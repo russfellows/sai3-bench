@@ -288,12 +288,13 @@ pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_p
 /// - deletable-NNNN.dat: Consumable pool for DELETE operations
 /// 
 /// v0.7.0+: Returns TreeManifest when directory_structure is configured
+/// 
+/// v0.7.2+: Supports prepare_strategy for sequential vs parallel execution
 pub async fn prepare_objects(
     config: &crate::config::PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>
 ) -> anyhow::Result<(Vec<PreparedObject>, Option<TreeManifest>)> {
-    use crate::config::FillPattern;
-    use crate::size_generator::SizeGenerator;
+    use crate::config::PrepareStrategy;
     
     // Detect if we need separate readonly and deletable pools
     let (has_delete, has_readonly) = if let Some(wl) = workload {
@@ -307,6 +308,31 @@ pub async fn prepare_objects(
     if needs_separate_pools {
         info!("Mixed workload detected with DELETE + (GET|STAT): Creating separate readonly and deletable object pools");
     }
+    
+    // Choose execution strategy based on config
+    let all_prepared = match config.prepare_strategy {
+        PrepareStrategy::Sequential => {
+            info!("Using sequential prepare strategy (one size group at a time)");
+            prepare_sequential(config, needs_separate_pools).await?
+        }
+        PrepareStrategy::Parallel => {
+            info!("Using parallel prepare strategy (all sizes interleaved)");
+            prepare_parallel(config, needs_separate_pools).await?
+        }
+    };
+    
+    // Create directory tree if configured and return final result
+    finalize_prepare_with_tree(config, all_prepared).await
+}
+
+/// Sequential prepare strategy: Process each ensure_objects entry one at a time
+/// This is the original behavior - predictable, separate progress bars per size
+async fn prepare_sequential(
+    config: &crate::config::PrepareConfig,
+    needs_separate_pools: bool
+) -> anyhow::Result<Vec<PreparedObject>> {
+    use crate::config::FillPattern;
+    use crate::size_generator::SizeGenerator;
     
     let mut all_prepared = Vec::new();
     
@@ -446,6 +472,235 @@ pub async fn prepare_objects(
         }
     }
     
+    Ok(all_prepared)
+}
+
+/// Parallel prepare strategy: Interleave all ensure_objects entries for maximum throughput
+/// Creates all file sizes concurrently with better storage pipeline utilization
+/// 
+/// v0.7.2: Shuffles tasks to ensure each directory receives a mix of all file sizes
+/// rather than clustering sizes together (all 32KB, then all 64KB, etc.)
+async fn prepare_parallel(
+    config: &crate::config::PrepareConfig,
+    needs_separate_pools: bool
+) -> anyhow::Result<Vec<PreparedObject>> {
+    use crate::config::FillPattern;
+    use crate::size_generator::SizeGenerator;
+    use tokio::sync::Semaphore;
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use std::sync::Arc;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    
+    // Structure to hold task information BEFORE URI assignment
+    struct TaskSpec {
+        size: u64,
+        store_uri: String,
+        fill: FillPattern,
+        dedup: usize,
+        compress: usize,
+        prefix: String,  // "prepared" or "deletable"
+    }
+    
+    // Structure to hold complete task with URI
+    struct PrepareTask {
+        uri: String,
+        size: u64,
+        store_uri: String,
+        fill: FillPattern,
+        dedup: usize,
+        compress: usize,
+    }
+    
+    // Collect all task specs (without URIs) from all ensure_objects entries
+    let mut task_specs: Vec<TaskSpec> = Vec::new();
+    let mut total_to_create: u64 = 0;
+    let mut existing_count_per_pool: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
+    
+    // Determine which pool(s) to create based on workload requirements
+    let pools_to_create = if needs_separate_pools {
+        vec![("prepared", true), ("deletable", false)]  // (prefix, is_readonly)
+    } else {
+        vec![("prepared", false)]  // Single pool (backward compatible)
+    };
+    
+    // Phase 1: List existing objects and build task specs for all sizes
+    for spec in &config.ensure_objects {
+        for (prefix, is_readonly) in &pools_to_create {
+            let pool_desc = if needs_separate_pools {
+                if *is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
+            } else {
+                ""
+            };
+            
+            info!("Checking{}: {} at {}", pool_desc, spec.count, spec.base_uri);
+            
+            let store = create_store_for_uri(&spec.base_uri)?;
+            
+            // List existing objects with this prefix
+            let list_pattern = if spec.base_uri.ends_with('/') {
+                format!("{}{}-", spec.base_uri, prefix)
+            } else {
+                format!("{}/{}-", spec.base_uri, prefix)
+            };
+            
+            let existing = store.list(&list_pattern, true).await
+                .context("Failed to list existing objects")?;
+            
+            let existing_count = existing.len() as u64;
+            info!("  Found {} existing {} objects", existing_count, prefix);
+            
+            // Store existing count for this pool
+            let pool_key = (spec.base_uri.clone(), prefix.to_string());
+            existing_count_per_pool.insert(pool_key.clone(), existing_count);
+            
+            // Calculate how many to create
+            let to_create = if existing_count >= spec.count {
+                info!("  Sufficient {} objects already exist", prefix);
+                0
+            } else {
+                spec.count - existing_count
+            };
+            
+            // Generate task specs (sizes but no URIs yet) for missing objects
+            if to_create > 0 {
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
+                    to_create, prefix, size_generator.description(), spec.fill, 
+                    spec.dedup_factor, spec.compress_factor);
+                
+                // Generate all sizes for this spec
+                for _ in 0..to_create {
+                    let size = size_generator.generate();
+                    
+                    task_specs.push(TaskSpec {
+                        size,
+                        store_uri: spec.base_uri.clone(),
+                        fill: spec.fill,
+                        dedup: spec.dedup_factor,
+                        compress: spec.compress_factor,
+                        prefix: prefix.to_string(),
+                    });
+                }
+                
+                total_to_create += to_create;
+            }
+        }
+    }
+    
+    if task_specs.is_empty() {
+        info!("All objects already exist, no preparation needed");
+        return Ok(Vec::new());
+    }
+    
+    // Phase 2: Shuffle task specs to mix sizes across directories
+    // Use StdRng which is Send-safe for async contexts
+    info!("Shuffling {} tasks to distribute sizes evenly across directories", task_specs.len());
+    let mut rng = rand::rngs::StdRng::seed_from_u64(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs());
+    task_specs.shuffle(&mut rng);
+    
+    // Phase 3: Assign sequential URIs to shuffled tasks
+    // Track next index per (base_uri, prefix) combination
+    let mut next_index_per_pool: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
+    for (key, existing_count) in &existing_count_per_pool {
+        next_index_per_pool.insert(key.clone(), *existing_count);
+    }
+    
+    let mut all_tasks: Vec<PrepareTask> = Vec::with_capacity(task_specs.len());
+    for spec in task_specs {
+        let pool_key = (spec.store_uri.clone(), spec.prefix.clone());
+        let idx = next_index_per_pool.get_mut(&pool_key).unwrap();
+        
+        let key = format!("{}-{:08}.dat", spec.prefix, *idx);
+        let uri = if spec.store_uri.ends_with('/') {
+            format!("{}{}", spec.store_uri, key)
+        } else {
+            format!("{}/{}", spec.store_uri, key)
+        };
+        
+        all_tasks.push(PrepareTask {
+            uri,
+            size: spec.size,
+            store_uri: spec.store_uri,
+            fill: spec.fill,
+            dedup: spec.dedup,
+            compress: spec.compress,
+        });
+        
+        *idx += 1;
+    }
+    
+    // Phase 4: Execute all tasks in parallel with unified progress bar
+    info!("Creating {} total objects in parallel (sizes shuffled for even distribution)", total_to_create);
+    
+    let concurrency = 32; // Match sequential strategy
+    let pb = ProgressBar::new(total_to_create);
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+    )?);
+    pb.set_message(format!("parallel prepare with {} workers", concurrency));
+    
+    let sem = Arc::new(Semaphore::new(concurrency));
+    let mut futs = FuturesUnordered::new();
+    let pb_clone = pb.clone();
+    
+    for task in all_tasks {
+        let sem2 = sem.clone();
+        let pb2 = pb_clone.clone();
+        
+        futs.push(tokio::spawn(async move {
+            let _permit = sem2.acquire_owned().await.unwrap();
+            
+            // Generate data using s3dlio's controlled data generation
+            let data = match task.fill {
+                FillPattern::Zero => vec![0u8; task.size as usize],
+                FillPattern::Random => {
+                    s3dlio::generate_controlled_data(task.size as usize, task.dedup, task.compress)
+                }
+            };
+            
+            // Create store instance for this task
+            let store = create_store_for_uri(&task.store_uri)?;
+            
+            // PUT object
+            store.put(&task.uri, &data).await
+                .with_context(|| format!("Failed to PUT {}", task.uri))?;
+            
+            pb2.inc(1);
+            
+            Ok::<(String, u64), anyhow::Error>((task.uri, task.size))
+        }));
+    }
+    
+    // Collect results as they complete
+    let mut all_prepared = Vec::with_capacity(total_to_create as usize);
+    while let Some(result) = futs.next().await {
+        let (uri, size) = result
+            .context("Task join error")??;
+        
+        all_prepared.push(PreparedObject {
+            uri,
+            size,
+            created: true,
+        });
+    }
+    
+    pb.finish_with_message(format!("created {} objects (all sizes)", total_to_create));
+    
+    Ok(all_prepared)
+}
+
+/// Continue with directory tree creation after prepare strategy completes
+async fn finalize_prepare_with_tree(
+    config: &crate::config::PrepareConfig,
+    all_prepared: Vec<PreparedObject>
+) -> anyhow::Result<(Vec<PreparedObject>, Option<TreeManifest>)> {
     // v0.7.0: Create directory tree if configured
     let tree_manifest = if config.directory_structure.is_some() {
         info!("Creating directory tree structure...");

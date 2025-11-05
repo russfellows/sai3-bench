@@ -19,11 +19,11 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 
-# s3dlio (version 0.9.11 - directory operations for mkdir/rmdir support)
+# s3dlio (version 0.9.12 - GCS factory fixes)
 # Use git tag for standalone builds (no local s3dlio directory required)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.11" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.11" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.12" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.12" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

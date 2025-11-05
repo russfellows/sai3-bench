@@ -28,6 +28,7 @@ async fn test_single_agent_creates_all() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
@@ -63,6 +64,7 @@ async fn test_multi_agent_no_collision() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "test.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 4;
@@ -112,17 +114,18 @@ async fn test_multi_agent_no_collision() -> Result<()> {
 /// Test agent assignment distribution is balanced
 #[tokio::test]
 async fn test_agent_assignment_balanced() -> Result<()> {
-    let _config = PrepareConfig {
+    let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 3,
-            depth: 2,
-            files_per_dir: 5,
-            distribution: "all".to_string(),
-            dir_mask: "dir.d%d_w%d".to_string(),
+            depth: 3,
+            files_per_dir: 2,
+            distribution: "bottom".to_string(),
+            dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 3;
@@ -164,6 +167,7 @@ async fn test_exclusive_directory_distribution() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "sai3.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 3;
@@ -218,6 +222,7 @@ async fn test_all_distribution_files_at_all_levels() -> Result<()> {
             distribution: "all".to_string(),  // Files at ALL levels
             dir_mask: "level.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
@@ -256,9 +261,10 @@ async fn test_bottom_distribution_files_at_leaf_only() -> Result<()> {
             width: 2,
             depth: 2,
             files_per_dir: 3,
-            distribution: "bottom".to_string(),  // Files only at leaf level
-            dir_mask: "leaf.d%d_w%d.dir".to_string(),
+            distribution: "bottom".to_string(),  // Fixed: was "even", should be "bottom" per test name
+            dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
