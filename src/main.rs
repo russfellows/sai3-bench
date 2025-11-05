@@ -1071,17 +1071,36 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
             println!("{}", prepared_msg);
             results_dir.write_console(&prepared_msg)?;
             
-            // Print prepare metrics summary
+            // Print prepare performance summary
             if prepare_metrics.put.ops > 0 {
-                let put_summary = format!("  PUT: {} ops, {} bytes, mean={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
-                    prepare_metrics.put.ops, prepare_metrics.put.bytes,
+                let put_ops_s = prepare_metrics.put.ops as f64 / prepare_metrics.wall_seconds;
+                let put_mib_s = (prepare_metrics.put.bytes as f64 / 1_048_576.0) / prepare_metrics.wall_seconds;
+                
+                let perf_header = "\nPrepare Performance:";
+                println!("{}", perf_header);
+                results_dir.write_console(perf_header)?;
+                
+                let ops_msg = format!("  Total ops: {} ({:.2} ops/s)", prepare_metrics.put.ops, put_ops_s);
+                println!("{}", ops_msg);
+                results_dir.write_console(&ops_msg)?;
+                
+                let bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", prepare_metrics.put.bytes, prepare_metrics.put.bytes as f64 / 1_048_576.0);
+                println!("{}", bytes_msg);
+                results_dir.write_console(&bytes_msg)?;
+                
+                let throughput_msg = format!("  Throughput: {:.2} MiB/s", put_mib_s);
+                println!("{}", throughput_msg);
+                results_dir.write_console(&throughput_msg)?;
+                
+                let latency_msg = format!("  Latency: mean={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
                     prepare_metrics.put.mean_us as f64 / 1000.0,
                     prepare_metrics.put.p50_us as f64 / 1000.0,
                     prepare_metrics.put.p95_us as f64 / 1000.0,
                     prepare_metrics.put.p99_us as f64 / 1000.0);
-                println!("{}", put_summary);
-                results_dir.write_console(&put_summary)?;
+                println!("{}", latency_msg);
+                results_dir.write_console(&latency_msg)?;
             }
+            
             if prepare_metrics.mkdir_count > 0 {
                 let mkdir_summary = format!("  MKDIR: {} directories created", prepare_metrics.mkdir_count);
                 println!("{}", mkdir_summary);

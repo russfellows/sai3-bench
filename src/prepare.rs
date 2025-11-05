@@ -13,6 +13,7 @@
 use anyhow::{anyhow, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
@@ -239,12 +240,60 @@ async fn prepare_sequential(
                     to_create, prefix, concurrency, size_generator.description(), spec.fill, 
                     spec.dedup_factor, spec.compress_factor);
                 
+                // Create atomic counters for live stats
+                let live_ops = Arc::new(AtomicU64::new(0));
+                let live_bytes = Arc::new(AtomicU64::new(0));
+                
                 // Create progress bar for preparation
                 let pb = ProgressBar::new(to_create);
                 pb.set_style(ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
                 )?);
-                pb.set_message(format!("preparing {} with {} workers", prefix, concurrency));
+                pb.set_message(format!("{} workers (starting...)", concurrency));
+                
+                // Start live stats monitoring task
+                let pb_monitor = pb.clone();
+                let ops_monitor = live_ops.clone();
+                let bytes_monitor = live_bytes.clone();
+                let monitor_handle = tokio::spawn(async move {
+                    let mut last_ops = 0u64;
+                    let mut last_bytes = 0u64;
+                    let mut last_time = Instant::now();
+                    
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        
+                        // Break when all objects created
+                        if pb_monitor.position() >= pb_monitor.length().unwrap_or(u64::MAX) {
+                            break;
+                        }
+                        
+                        let elapsed = last_time.elapsed();
+                        if elapsed.as_secs_f64() >= 0.5 {
+                            let current_ops = ops_monitor.load(Ordering::Relaxed);
+                            let current_bytes = bytes_monitor.load(Ordering::Relaxed);
+                            
+                            let ops_delta = current_ops.saturating_sub(last_ops);
+                            let bytes_delta = current_bytes.saturating_sub(last_bytes);
+                            let time_delta = elapsed.as_secs_f64();
+                            
+                            if ops_delta > 0 {
+                                let ops_per_sec = ops_delta as f64 / time_delta;
+                                let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                                let avg_latency_ms = (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64;
+                                
+                                pb_monitor.set_message(format!(
+                                    "{} workers | {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                                    concurrency, ops_per_sec, mib_per_sec, avg_latency_ms
+                                ));
+                            }
+                            
+                            last_ops = current_ops;
+                            last_bytes = current_bytes;
+                            last_time = Instant::now();
+                        }
+                    }
+                });
                 
                 // Pre-generate all URIs and sizes for parallel execution
                 let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
@@ -271,6 +320,8 @@ async fn prepare_sequential(
                     let dedup = spec.dedup_factor;
                     let compress = spec.compress_factor;
                     let pb2 = pb_clone.clone();
+                    let ops_counter = live_ops.clone();
+                    let bytes_counter = live_bytes.clone();
                     
                     futs.push(tokio::spawn(async move {
                         let _permit = sem2.acquire_owned().await.unwrap();
@@ -291,6 +342,10 @@ async fn prepare_sequential(
                         store.put(&uri, &data).await
                             .with_context(|| format!("Failed to PUT {}", uri))?;
                         let latency_us = put_start.elapsed().as_micros() as u64;
+                        
+                        // Update live counters
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(size, Ordering::Relaxed);
                         
                         pb2.inc(1);
                         
@@ -317,6 +372,9 @@ async fn prepare_sequential(
                         created: true,
                     });
                 }
+                
+                // Wait for monitoring task to complete cleanly
+                monitor_handle.await.ok();
                 
                 pb.finish_with_message(format!("created {} {} objects", to_create, prefix));
                 
@@ -491,11 +549,60 @@ async fn prepare_parallel(
     info!("Creating {} total objects in parallel (sizes shuffled for even distribution)", total_to_create);
     
     let concurrency = 32; // Match sequential strategy
+    
+    // Create atomic counters for live stats
+    let live_ops = Arc::new(AtomicU64::new(0));
+    let live_bytes = Arc::new(AtomicU64::new(0));
+    
     let pb = ProgressBar::new(total_to_create);
     pb.set_style(ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
     )?);
-    pb.set_message(format!("parallel prepare with {} workers", concurrency));
+    pb.set_message(format!("{} workers (starting...)", concurrency));
+    
+    // Start live stats monitoring task
+    let pb_monitor = pb.clone();
+    let ops_monitor = live_ops.clone();
+    let bytes_monitor = live_bytes.clone();
+    let monitor_handle = tokio::spawn(async move {
+        let mut last_ops = 0u64;
+        let mut last_bytes = 0u64;
+        let mut last_time = Instant::now();
+        
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            // Break when all objects created
+            if pb_monitor.position() >= pb_monitor.length().unwrap_or(u64::MAX) {
+                break;
+            }
+            
+            let elapsed = last_time.elapsed();
+            if elapsed.as_secs_f64() >= 0.5 {
+                let current_ops = ops_monitor.load(Ordering::Relaxed);
+                let current_bytes = bytes_monitor.load(Ordering::Relaxed);
+                
+                let ops_delta = current_ops.saturating_sub(last_ops);
+                let bytes_delta = current_bytes.saturating_sub(last_bytes);
+                let time_delta = elapsed.as_secs_f64();
+                
+                if ops_delta > 0 {
+                    let ops_per_sec = ops_delta as f64 / time_delta;
+                    let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                    let avg_latency_ms = (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64;
+                    
+                    pb_monitor.set_message(format!(
+                        "{} workers | {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                        concurrency, ops_per_sec, mib_per_sec, avg_latency_ms
+                    ));
+                }
+                
+                last_ops = current_ops;
+                last_bytes = current_bytes;
+                last_time = Instant::now();
+            }
+        }
+    });
     
     let sem = Arc::new(Semaphore::new(concurrency));
     let mut futs = FuturesUnordered::new();
@@ -504,6 +611,8 @@ async fn prepare_parallel(
     for task in all_tasks {
         let sem2 = sem.clone();
         let pb2 = pb_clone.clone();
+        let ops_counter = live_ops.clone();
+        let bytes_counter = live_bytes.clone();
         
         futs.push(tokio::spawn(async move {
             let _permit = sem2.acquire_owned().await.unwrap();
@@ -524,6 +633,10 @@ async fn prepare_parallel(
             store.put(&task.uri, &data).await
                 .with_context(|| format!("Failed to PUT {}", task.uri))?;
             let latency_us = put_start.elapsed().as_micros() as u64;
+            
+            // Update live counters
+            ops_counter.fetch_add(1, Ordering::Relaxed);
+            bytes_counter.fetch_add(task.size, Ordering::Relaxed);
             
             pb2.inc(1);
             
@@ -550,6 +663,9 @@ async fn prepare_parallel(
             created: true,
         });
     }
+    
+    // Wait for monitoring task to complete cleanly
+    monitor_handle.await.ok();
     
     pb.finish_with_message(format!("created {} objects (all sizes)", total_to_create));
     
