@@ -2,7 +2,7 @@
 //! Tests for distributed configuration parsing and validation
 
 use anyhow::Result;
-use sai3_bench::config::{Config, DistributedConfig, AgentConfig};
+use sai3_bench::config::Config;
 
 #[test]
 fn test_parse_distributed_config_basic() -> Result<()> {

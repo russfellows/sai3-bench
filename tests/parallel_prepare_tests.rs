@@ -397,9 +397,6 @@ async fn test_files_created_correctly() -> Result<()> {
 /// Test that parallel strategy distributes sizes across directory tree (not clustered)
 #[tokio::test]
 async fn test_parallel_directory_distribution() -> Result<()> {
-    use sai3_bench::directory_tree::DirectoryStructureConfig;
-    use std::path::Path;
-    
     let temp_dir = TempDir::new()?;
     let base_path = temp_dir.path().to_str().unwrap();
     let base_uri = format!("file://{}/", base_path);
