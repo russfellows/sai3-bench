@@ -265,6 +265,19 @@ impl Agent for AgentSvc {
                 info!("  MKDIR: {} directories created", prepare_metrics.mkdir_count);
             }
             
+            // Export prepare metrics to TSV if any operations were performed
+            if prepare_metrics.put.ops > 0 {
+                use sai3_bench::tsv_export::TsvExporter;
+                let results_dir = std::path::Path::new("./sai3-agent-results");
+                std::fs::create_dir_all(results_dir).ok();
+                let prepare_tsv_path = results_dir.join("prepare_results.tsv");
+                let exporter = TsvExporter::with_path(&prepare_tsv_path)
+                    .map_err(|e| Status::internal(format!("Failed to create prepare TSV exporter: {}", e)))?;
+                exporter.export_prepare_metrics(&prepare_metrics)
+                    .map_err(|e| Status::internal(format!("Failed to export prepare metrics: {}", e)))?;
+                info!("Prepare metrics exported to: {}", prepare_tsv_path.display());
+            }
+            
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                 let delay_secs = prepare_config.post_prepare_delay;

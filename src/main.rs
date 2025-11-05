@@ -1088,6 +1088,18 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
                 results_dir.write_console(&mkdir_summary)?;
             }
             
+            // Export prepare metrics to TSV
+            if prepare_metrics.put.ops > 0 {
+                use sai3_bench::tsv_export::TsvExporter;
+                let prepare_tsv_path = results_dir.prepare_tsv_path();
+                let exporter = TsvExporter::with_path(&prepare_tsv_path)?;
+                exporter.export_prepare_metrics(&prepare_metrics)?;
+                
+                let export_msg = format!("Prepare metrics exported to: {}", prepare_tsv_path.display());
+                println!("{}", export_msg);
+                results_dir.write_console(&export_msg)?;
+            }
+            
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                 let delay_secs = prepare_config.post_prepare_delay;

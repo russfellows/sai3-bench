@@ -134,7 +134,12 @@ impl ResultsDir {
 
     /// Get the path for the TSV results file
     pub fn tsv_path(&self) -> PathBuf {
-        self.path.join("results.tsv")
+        self.path.join("workload_results.tsv")
+    }
+
+    /// Get the path for the prepare phase TSV results file
+    pub fn prepare_tsv_path(&self) -> PathBuf {
+        self.path.join("prepare_results.tsv")
     }
 
     /// Get the path for console log
