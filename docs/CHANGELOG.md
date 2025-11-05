@@ -2,6 +2,122 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.2] - 2025-11-04
+
+### 📊 Prepare Phase Metrics & Live Performance Stats
+
+**Enhancement release**: Adds comprehensive metrics collection, live performance monitoring, and configurable prepare strategies. The prepare phase now provides real-time feedback during execution and detailed performance summaries matching the workload phase format.
+
+#### New Features
+
+- **Live Performance Stats** - Real-time visibility during prepare execution
+  - **Progress bar enhancements**: Shows workers, ops/s, MiB/s, and average latency
+  - **Updates every 0.5s**: Non-intrusive monitoring with minimal overhead
+  - **Example output**: `32 workers | 464 ops/s | 487.0 MiB/s | avg 58.2ms`
+  - **Atomic counters**: Lock-free `AtomicU64` tracking for ops and bytes
+  - **Applied to both strategies**: Sequential and parallel prepare modes
+  - **Clean shutdown**: Monitor tasks properly await completion
+
+- **Performance Summary** - Comprehensive post-execution statistics
+  ```
+  Prepare Performance:
+    Total ops: 5000 (3709.58 ops/s)
+    Total bytes: 5242880000 (5000.00 MiB)
+    Throughput: 3709.58 MiB/s
+    Latency: mean=6.09ms, p50=4.11ms, p95=16.91ms, p99=42.49ms
+  ```
+  - **Matches workload format**: Consistent reporting across all phases
+  - **TSV export**: Machine-readable metrics in `prepare_results.tsv`
+
+- **Configurable Prepare Strategies** - Choose between sequential and parallel modes
+  - **Sequential Strategy** (default):
+    - Processes each `ensure_objects` entry in order
+    - Creates all objects for first entry, then second, etc.
+    - Predictable ordering: `obj-00000000.dat`, `obj-00000001.dat`, ...
+    - Best for ordered workload requirements
+    
+  - **Parallel Strategy** (opt-in via `prepare_strategy: parallel`):
+    - Interleaves all `ensure_objects` entries for maximum throughput
+    - Shuffles sizes across directories to avoid clustering
+    - Better storage pipeline utilization
+    - Example: Mixed 32KB, 1MB, 4MB objects in each directory
+    
+  - **Configuration**:
+    ```yaml
+    prepare:
+      prepare_strategy: parallel  # or "sequential" (default)
+      ensure_objects:
+        - base_uri: "s3://bucket/data/"
+          count: 1000
+          size_spec: {uniform: {min: 1KB, max: 1MB}}
+    ```
+
+- **PrepareMetrics Structure** - Complete metrics collection for prepare operations
+  - **HDR Histogram Support**: 9 size buckets (zero, 512B, 4KiB, 32KiB, 256KiB, 1MiB, 16MiB, 128MiB, >128MiB)
+  - **Per-operation timing**: Microsecond-level latency tracking for PUT operations
+  - **Size-bucketed statistics**: Operation counts and throughput per size bucket
+  - **Aggregate metrics**: ops, bytes, mean/p50/p95/p99 latencies
+  - **Directory tracking**: mkdir operation counts
+  - **Object accounting**: created vs existed counts
+  - **Strategy awareness**: Tracks Sequential vs Parallel prepare mode
+
+#### Implementation Details
+
+- **Live stats architecture**:
+  - `Arc<AtomicU64>` for `live_ops` and `live_bytes` (Relaxed ordering)
+  - Background monitoring task spawned with progress bar
+  - Calculates ops/s, MiB/s, avg latency from deltas every 0.5s
+  - Monitor exits when progress reaches completion (`position >= length`)
+  - Main task awaits monitor handle before finishing
+
+- **New module additions**: `src/prepare.rs`
+  - `PrepareMetrics` struct with OpAgg, SizeBins, OpHists fields
+  - `compute_op_agg()` helper to extract percentiles from histograms
+  - `prepare_sequential()` - Original ordered strategy with live stats
+  - `prepare_parallel()` - New interleaved strategy with size shuffling
+  - Instrumentation in both strategies for real-time monitoring
+  - Per-PUT operation timing: `Instant::now()` → `elapsed().as_micros()`
+  - Histogram recording: `metrics.put_hists.record(bucket_index(size), Duration::from_micros(latency_us))`
+  - Directory creation tracking in `create_directory_tree()`
+
+- **API Changes**:
+  - `prepare_objects()` return type: `(Vec<PreparedObject>, Option<TreeManifest>)` → `(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)`
+  - All callers updated: `main.rs`, `agent.rs`, test files
+  - TSV export: New `export_prepare_metrics()` function
+  - Results files: `workload_results.tsv` and `prepare_results.tsv`
+
+- **Refactoring** (prior work in this release):
+  - Split `workload.rs` (2554 lines) into `prepare.rs` (1074 lines) + `workload.rs` (1501 lines)
+  - Improved code organization for prepare vs execution phases
+
+#### Testing & Validation
+
+- **124 tests passing** (unchanged count, all updated for new API)
+- **Test coverage**:
+  - Updated `parallel_prepare_tests.rs` (8 tests) including parallel strategy validation
+  - Updated `directory_tree_creation_tests.rs` (6 tests) to pass `PrepareMetrics` parameter
+  - Fixed `test_agent_assignment_balanced` to test actual implementation
+  - Verified both sequential and parallel strategies with size distribution tests
+
+- **Zero warnings**: Clean compilation in both debug and release builds (removed unused imports from test files)
+
+#### Performance Impact
+
+- **Negligible overhead**: 
+  - Atomic operations use Relaxed ordering for minimal contention
+  - Metrics collection uses thread-local histograms
+  - Monitor task sleeps 100ms between checks
+  - Stats calculation only every 0.5s
+- **No blocking**: All timing is non-intrusive `Instant::elapsed()` calls
+- **Memory efficient**: HDR histograms use compressed storage
+
+#### User Experience Improvements
+
+- **Before**: Only saw "objects (464/s)" during prepare - no throughput or latency visibility
+- **After**: Full performance insight matching workload execution
+- **Consistency**: Same metrics format across prepare, workload, and cleanup phases
+- **Debugging**: Immediately see if storage is slow, workers are underutilized, or sizes cause issues
+
 ## [0.7.1] - 2025-10-31
 
 ### ⚡ I/O Rate Control

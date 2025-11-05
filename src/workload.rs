@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
@@ -13,7 +14,8 @@ use rand::distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 
 use std::time::{Duration, Instant};
-use crate::config::{Config, OpSpec};
+use crate::config::{Config, OpSpec, PathSelectionStrategy};
+use crate::directory_tree::TreeManifest;
 
 use std::collections::HashMap;
 use crate::bucket_index;
@@ -25,6 +27,12 @@ use s3dlio::object_store::{
 use s3dlio::file_store::{FileSystemObjectStore, FileSystemConfig};
 use s3dlio::PageCacheMode as S3dlioPageCacheMode;
 use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
+
+// Re-export prepare module functions for convenience
+pub use crate::prepare::{
+    prepare_objects, cleanup_prepared_objects, verify_prepared_objects,
+    PathSelector, PreparedObject,
+};
 
 // -----------------------------------------------------------------------------
 // Chunked read configuration for optimal direct:// performance
@@ -228,14 +236,6 @@ pub fn finalize_operation_logger() -> anyhow::Result<()> {
 // Prepare/Pre-population Support (Warp Parity - Phase 1)
 // -----------------------------------------------------------------------------
 
-/// Information about a prepared object
-#[derive(Debug, Clone)]
-pub struct PreparedObject {
-    pub uri: String,
-    pub size: u64,
-    pub created: bool,  // True if we created it, false if it already existed
-}
-
 /// Detect if workload requires separate readonly and deletable object pools
 /// Returns (has_delete, has_readonly) where readonly = GET or STAT operations
 pub fn detect_pool_requirements(workload: &[crate::config::WeightedOp]) -> (bool, bool) {
@@ -282,803 +282,6 @@ pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_p
 
 /// Execute prepare step: ensure objects exist for testing
 /// 
-/// v0.5.7+: Automatically creates separate object pools when workload contains
-/// both DELETE and (GET|STAT) operations to prevent race conditions:
-/// - prepared-NNNN.dat: Readonly pool for GET/STAT operations (never deleted)
-/// - deletable-NNNN.dat: Consumable pool for DELETE operations
-/// 
-/// v0.7.0+: Returns TreeManifest when directory_structure is configured
-pub async fn prepare_objects(
-    config: &crate::config::PrepareConfig,
-    workload: Option<&[crate::config::WeightedOp]>
-) -> anyhow::Result<(Vec<PreparedObject>, Option<TreeManifest>)> {
-    use crate::config::FillPattern;
-    use crate::size_generator::SizeGenerator;
-    
-    // Detect if we need separate readonly and deletable pools
-    let (has_delete, has_readonly) = if let Some(wl) = workload {
-        detect_pool_requirements(wl)
-    } else {
-        (false, false)
-    };
-    
-    let needs_separate_pools = has_delete && has_readonly;
-    
-    if needs_separate_pools {
-        info!("Mixed workload detected with DELETE + (GET|STAT): Creating separate readonly and deletable object pools");
-    }
-    
-    let mut all_prepared = Vec::new();
-    
-    for spec in &config.ensure_objects {
-        // Determine which pool(s) to create based on workload requirements
-        let pools_to_create = if needs_separate_pools {
-            vec![("prepared", true), ("deletable", false)]  // (prefix, is_readonly)
-        } else {
-            vec![("prepared", false)]  // Single pool (backward compatible)
-        };
-        
-        for (prefix, is_readonly) in pools_to_create {
-            let pool_desc = if needs_separate_pools {
-                if is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
-            } else {
-                ""
-            };
-            
-            info!("Preparing objects{}: {} at {}", pool_desc, spec.count, spec.base_uri);
-            
-            let store = create_store_for_uri(&spec.base_uri)?;
-            
-            // 1. List existing objects with this prefix
-            let list_pattern = if spec.base_uri.ends_with('/') {
-                format!("{}{}-", spec.base_uri, prefix)
-            } else {
-                format!("{}/{}-", spec.base_uri, prefix)
-            };
-            
-            let existing = store.list(&list_pattern, true).await
-                .context("Failed to list existing objects")?;
-            
-            let existing_count = existing.len() as u64;
-            info!("  Found {} existing {} objects", existing_count, prefix);
-            
-            // 2. Calculate how many to create
-            let to_create = if existing_count >= spec.count {
-                info!("  Sufficient {} objects already exist", prefix);
-                0
-            } else {
-                spec.count - existing_count
-            };
-            
-            // 3. Create missing objects
-            if to_create > 0 {
-                use tokio::sync::Semaphore;
-                use futures::stream::{FuturesUnordered, StreamExt};
-                use std::sync::Arc;
-                
-                // Create size generator from spec
-                let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
-                    .context("Failed to create size generator")?;
-                
-                // Determine concurrency for prepare (use 32 like default workload concurrency)
-                let concurrency = 32;
-                
-                info!("  Creating {} additional {} objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
-                    to_create, prefix, concurrency, size_generator.description(), spec.fill, 
-                    spec.dedup_factor, spec.compress_factor);
-                
-                // Create progress bar for preparation
-                let pb = ProgressBar::new(to_create);
-                pb.set_style(ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
-                )?);
-                pb.set_message(format!("preparing {} with {} workers", prefix, concurrency));
-                
-                // Pre-generate all URIs and sizes for parallel execution
-                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
-                for i in 0..to_create {
-                    let key = format!("{}-{:08}.dat", prefix, existing_count + i);
-                    let uri = if spec.base_uri.ends_with('/') {
-                        format!("{}{}", spec.base_uri, key)
-                    } else {
-                        format!("{}/{}", spec.base_uri, key)
-                    };
-                    let size = size_generator.generate();
-                    tasks.push((uri, size));
-                }
-                
-                // Execute PUT operations in parallel with semaphore-controlled concurrency
-                let sem = Arc::new(Semaphore::new(concurrency));
-                let mut futs = FuturesUnordered::new();
-                let pb_clone = pb.clone();
-                
-                for (uri, size) in tasks {
-                    let sem2 = sem.clone();
-                    let store_uri = spec.base_uri.clone();
-                    let fill = spec.fill;
-                    let dedup = spec.dedup_factor;
-                    let compress = spec.compress_factor;
-                    let pb2 = pb_clone.clone();
-                    
-                    futs.push(tokio::spawn(async move {
-                        let _permit = sem2.acquire_owned().await.unwrap();
-                        
-                        // Generate data using s3dlio's controlled data generation
-                        let data = match fill {
-                            FillPattern::Zero => vec![0u8; size as usize],
-                            FillPattern::Random => {
-                                s3dlio::generate_controlled_data(size as usize, dedup, compress)
-                            }
-                        };
-                        
-                        // Create store instance for this task
-                        let store = create_store_for_uri(&store_uri)?;
-                        
-                        // PUT object
-                        store.put(&uri, &data).await
-                            .with_context(|| format!("Failed to PUT {}", uri))?;
-                        
-                        pb2.inc(1);
-                        
-                        Ok::<(String, u64), anyhow::Error>((uri, size))
-                    }));
-                }
-                
-                // Collect results as they complete
-                let mut created_objects = Vec::with_capacity(to_create as usize);
-                while let Some(result) = futs.next().await {
-                    let (uri, size) = result
-                        .context("Task join error")??;
-                    
-                    created_objects.push(PreparedObject {
-                        uri,
-                        size,
-                        created: true,
-                    });
-                }
-                
-                pb.finish_with_message(format!("created {} {} objects", to_create, prefix));
-                
-                // Add created objects to all_prepared
-                all_prepared.extend(created_objects);
-            }
-        }
-    }
-    
-    // v0.7.0: Create directory tree if configured
-    let tree_manifest = if config.directory_structure.is_some() {
-        info!("Creating directory tree structure...");
-        // For now, use agent_id=0, num_agents=1 (distributed config integration is TODO)
-        // This will be properly extracted from distributed config in a future update
-        let agent_id = 0;
-        let num_agents = 1;
-        
-        // Need to extract base_uri from ensure_objects (first entry)
-        let base_uri = config.ensure_objects.first()
-            .map(|spec| spec.base_uri.as_str())
-            .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
-        
-        let manifest = create_directory_tree(
-            config,
-            agent_id,
-            num_agents,
-            base_uri
-        ).await?;
-        
-        info!("Directory tree created: {} total directories",
-            manifest.all_directories.len()
-        );
-        
-        Some(manifest)
-    } else {
-        None
-    };
-    
-    info!("Prepare complete: {} objects ready", all_prepared.len());
-    Ok((all_prepared, tree_manifest))
-}
-
-/// Cleanup prepared objects
-pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> anyhow::Result<()> {
-    if objects.is_empty() {
-        return Ok(());
-    }
-    
-    use tokio::sync::Semaphore;
-    use futures::stream::{FuturesUnordered, StreamExt};
-    use std::sync::Arc;
-    
-    let to_delete: Vec<_> = objects.iter()
-        .filter(|obj| obj.created)
-        .collect();
-    
-    if to_delete.is_empty() {
-        info!("No objects to clean up");
-        return Ok(());
-    }
-    
-    let delete_count = to_delete.len();
-    
-    // Use same concurrency as prepare stage (32 workers)
-    let concurrency = 32;
-    info!("Cleaning up {} prepared objects with {} workers", delete_count, concurrency);
-    
-    // Create progress bar for cleanup
-    let pb = ProgressBar::new(delete_count as u64);
-    pb.set_style(ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
-    )?);
-    pb.set_message(format!("cleaning up with {} workers", concurrency));
-    
-    // Execute DELETE operations in parallel with semaphore-controlled concurrency
-    let sem = Arc::new(Semaphore::new(concurrency));
-    let mut futs = FuturesUnordered::new();
-    let pb_clone = pb.clone();
-    
-    for obj in to_delete {
-        let sem2 = sem.clone();
-        let pb2 = pb_clone.clone();
-        let uri = obj.uri.clone();
-        
-        futs.push(tokio::spawn(async move {
-            let _permit = sem2.acquire_owned().await.unwrap();
-            
-            // Create store and delete object
-            // Note: We intentionally don't fail the entire cleanup if a single delete fails
-            // Instead, we log warnings and continue with remaining deletions
-            match create_store_for_uri(&uri) {
-                Ok(store) => {
-                    if let Err(e) = store.delete(&uri).await {
-                        tracing::warn!("Failed to delete {}: {}", uri, e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create store for {}: {}", uri, e);
-                }
-            }
-            
-            pb2.inc(1);
-        }));
-    }
-    
-    // Wait for all deletion tasks to complete
-    // Tasks don't return errors (they log warnings instead), so we just need to detect panics
-    while let Some(res) = futs.next().await {
-        if let Err(e) = res {
-            tracing::error!("Cleanup task panicked: {}", e);
-            // Continue with remaining tasks even if one panicked
-        }
-    }
-    
-    pb.finish_with_message(format!("deleted {} objects", delete_count));
-    Ok(())
-}
-
-/// Create directory tree structure from PrepareConfig
-/// 
-/// This function creates the hierarchical directory tree and populates it with files.
-/// CRITICAL: Uses global file indexing to avoid rdf-bench collision bug (v2025.10.0 fix)
-/// 
-/// # Arguments
-/// * `config` - PrepareConfig containing directory_structure
-/// * `agent_id` - This agent's ID (0-indexed), used for modulo distribution
-/// * `num_agents` - Total number of agents creating the tree
-/// * `base_uri` - Base URI where tree will be created (e.g., "file:///tmp/test/")
-/// 
-/// # Returns
-/// TreeManifest with all paths and agent assignments
-pub async fn create_directory_tree(
-    config: &crate::config::PrepareConfig,
-    agent_id: usize,
-    num_agents: usize,
-    base_uri: &str,
-) -> anyhow::Result<crate::directory_tree::TreeManifest> {
-    use crate::directory_tree::{DirectoryTree, TreeManifest};
-    
-    let dir_config = config.directory_structure.as_ref()
-        .ok_or_else(|| anyhow!("No directory_structure specified in PrepareConfig"))?;
-    
-    info!("Creating directory tree: width={}, depth={}, files_per_dir={}, distribution={}", 
-        dir_config.width, dir_config.depth, dir_config.files_per_dir, dir_config.distribution);
-    
-    // 1. Generate tree structure
-    let tree = DirectoryTree::new(dir_config.clone())
-        .context("Failed to create DirectoryTree")?;
-    
-    // 2. Create manifest with agent assignments
-    let mut manifest = TreeManifest::from_tree(&tree);
-    manifest.assign_agents(num_agents);
-    
-    info!("Tree structure: {} directories, {} files total", 
-        manifest.total_dirs, manifest.total_files);
-    
-    if num_agents > 1 {
-        let my_dirs = manifest.get_agent_dirs(agent_id);
-        info!("Agent {}/{}: Assigned {} directories", 
-            agent_id, num_agents, my_dirs.len());
-    }
-    
-    // 3. Create ObjectStore for this base URI
-    let store = create_store_for_uri(base_uri)?;
-    
-    // 4. Get directories this agent should create
-    let dirs_to_create = if num_agents == 1 {
-        // Single agent - create all directories
-        manifest.all_directories.clone()
-    } else {
-        // Multiple agents - only create assigned directories
-        manifest.get_agent_dirs(agent_id)
-    };
-    
-    // 5. Create directories
-    if !dirs_to_create.is_empty() {
-        // Determine if backend requires explicit directory creation
-        // Object storage (S3/Azure/GCS) doesn't need mkdir - directories are implicit in object keys
-        // File systems (file://, direct://) need explicit mkdir
-        let needs_mkdir = base_uri.starts_with("file://") || base_uri.starts_with("direct://");
-        
-        if needs_mkdir {
-            info!("Creating {} directories...", dirs_to_create.len());
-            let pb = ProgressBar::new(dirs_to_create.len() as u64);
-            pb.set_style(ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
-            )?);
-            
-            for dir_path in &dirs_to_create {
-                let full_uri = if base_uri.ends_with('/') {
-                    format!("{}{}", base_uri, dir_path)
-                } else {
-                    format!("{}/{}", base_uri, dir_path)
-                };
-                
-                store.mkdir(&full_uri).await
-                    .with_context(|| format!("Failed to create directory: {}", full_uri))?;
-                pb.inc(1);
-            }
-            
-            pb.finish_with_message("directories created");
-        } else {
-            info!("Skipping directory creation for object storage (directories are implicit in object keys)");
-        }
-    }
-    
-    // 6. Create files if specified
-    if manifest.files_per_dir > 0 {
-        // CRITICAL: Use global file indexing to avoid rdf-bench collision bug
-        // Each file gets a unique global index, then modulo distribution assigns to agents
-        
-        // Get list of directories that have files (in consistent order from manifest)
-        let dirs_with_files: Vec<&String> = manifest.file_ranges
-            .iter()
-            .map(|(dir, _)| dir)
-            .collect();
-        let total_files = manifest.total_files;
-        
-        info!("Creating {} files across {} directories...", 
-            total_files, dirs_with_files.len());
-        
-        // Get file generation configuration from ensure_objects (if configured)
-        // Use same pattern as regular prepare_objects for consistency
-        let (size_spec, fill_pattern, dedup_factor, compress_factor) = 
-            if let Some(ensure_spec) = config.ensure_objects.first() {
-                (
-                    ensure_spec.get_size_spec(),
-                    ensure_spec.fill,
-                    ensure_spec.dedup_factor,
-                    ensure_spec.compress_factor,
-                )
-            } else {
-                // Default: 1KB fixed size, zero fill, no dedup/compression
-                use crate::size_generator::SizeSpec;
-                (SizeSpec::Fixed(1024), crate::config::FillPattern::Zero, 1, 1)
-            };
-        
-        // Create size generator
-        use crate::size_generator::SizeGenerator;
-        let size_generator = SizeGenerator::new(&size_spec)
-            .context("Failed to create size generator for tree files")?;
-        
-        info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 
-            size_generator.description(), fill_pattern, dedup_factor, compress_factor);
-        
-        let pb = ProgressBar::new(total_files as u64);
-        pb.set_style(ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
-        )?);
-        
-        let mut global_file_idx = 0usize;
-        
-        for dir_path in dirs_with_files {
-            let dir_uri = if base_uri.ends_with('/') {
-                format!("{}{}", base_uri, dir_path)
-            } else {
-                format!("{}/{}", base_uri, dir_path)
-            };
-            
-            // Create files_per_dir files in this directory
-            for _local_idx in 0..manifest.files_per_dir {
-                // CORRECT PATTERN: Check if this global file index belongs to this agent
-                let assigned_agent = global_file_idx % num_agents;
-                
-                if assigned_agent == agent_id {
-                    // This file belongs to us - create it
-                    let file_name = manifest.get_file_name(global_file_idx);
-                    let file_uri = format!("{}/{}", dir_uri, file_name);
-                    
-                    // Generate file data using EXACT same pattern as regular prepare_objects
-                    let size = size_generator.generate();
-                    let data = match fill_pattern {
-                        crate::config::FillPattern::Zero => vec![0u8; size as usize],
-                        crate::config::FillPattern::Random => {
-                            s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
-                        }
-                    };
-                    
-                    store.put(&file_uri, &data).await
-                        .with_context(|| format!("Failed to create file: {}", file_uri))?;
-                    
-                    pb.inc(1);
-                }
-                
-                // CRITICAL: Always increment global index, even if we skip this file
-                global_file_idx += 1;
-            }
-        }
-        
-        pb.finish_with_message(format!("files created (agent {}/{})", agent_id, num_agents));
-    }
-    
-    info!("Directory tree creation complete");
-    Ok(manifest)
-}
-
-// ============================================================================
-// Path Selection for Directory-based Workloads
-// ============================================================================
-
-use crate::config::PathSelectionStrategy;
-use crate::directory_tree::TreeManifest;
-
-/// Path selector for directory-based workload operations
-/// 
-/// **IMPORTANT**: PathSelector is ONLY used when directory_structure is configured.
-/// For simple mkdir/rmdir throughput testing without a tree, use random naming directly.
-/// 
-/// Implements 4 selection strategies that control contention level:
-/// - Random: All agents pick any directory from tree (max contention)
-/// - Partitioned: Agents prefer assigned dirs but can use others (medium contention)
-/// - Exclusive: Agents only use assigned dirs (minimal contention)
-/// - Weighted: Probabilistic mix based on partition_overlap
-#[derive(Clone)]
-pub struct PathSelector {
-    /// Directory manifest with all paths (REQUIRED - PathSelector doesn't exist without tree)
-    manifest: TreeManifest,
-    
-    /// This agent's ID (0-indexed)
-    agent_id: usize,
-    
-    /// Total number of agents (used for validation)
-    num_agents: usize,
-    
-    /// Path selection strategy
-    strategy: PathSelectionStrategy,
-    
-    /// Overlap probability for weighted mode (0.0 = exclusive, 1.0 = random)
-    partition_overlap: f64,
-}
-
-impl PathSelector {
-    /// Create a new path selector for structured directory testing
-    /// 
-    /// # Arguments
-    /// - `manifest`: TreeManifest with directory structure (REQUIRED)
-    /// - `agent_id`: This agent's ID (0-indexed)
-    /// - `num_agents`: Total number of agents
-    /// - `strategy`: Path selection strategy
-    /// - `partition_overlap`: Overlap probability for weighted mode
-    pub fn new(
-        manifest: TreeManifest,
-        agent_id: usize,
-        num_agents: usize,
-        strategy: PathSelectionStrategy,
-        partition_overlap: f64,
-    ) -> Self {
-        // Validate agent configuration
-        if num_agents == 0 {
-            warn!("PathSelector created with num_agents=0, setting to 1");
-        }
-        
-        if agent_id >= num_agents && num_agents > 0 {
-            warn!("PathSelector: agent_id ({}) >= num_agents ({}), path selection may not work correctly", 
-                agent_id, num_agents);
-        }
-        
-        Self {
-            manifest,
-            agent_id,
-            num_agents,
-            strategy,
-            partition_overlap,
-        }
-    }
-    
-    /// Select a directory path based on the configured strategy
-    /// 
-    /// Always returns Some() since manifest is guaranteed to exist
-    pub fn select_directory(&self) -> String {
-        if self.manifest.all_directories.is_empty() {
-            // Shouldn't happen with valid TreeManifest, but handle gracefully
-            warn!("PathSelector has empty manifest - this indicates a bug");
-            return "fallback_dir".to_string();
-        }
-        
-        match self.strategy {
-            PathSelectionStrategy::Random => self.select_random(),
-            PathSelectionStrategy::Partitioned => self.select_partitioned(),
-            PathSelectionStrategy::Exclusive => self.select_exclusive(),
-            PathSelectionStrategy::Weighted => self.select_weighted(),
-        }
-    }
-    
-    /// Random: Pick any directory uniformly from the tree
-    fn select_random(&self) -> String {
-        let mut rng = rng();
-        let idx = rng.random_range(0..self.manifest.all_directories.len());
-        self.manifest.all_directories[idx].clone()
-    }
-    
-    /// Partitioned: Prefer assigned directories, but can pick others
-    /// Uses 70/30 split to reduce contention while allowing flexibility
-    fn select_partitioned(&self) -> String {
-        let mut rng = rng();
-        
-        // 70% chance to pick from assigned directories
-        // 30% chance to pick from any directory
-        if rng.random::<f64>() < 0.7 {
-            // Pick from assigned directories
-            let assigned = self.manifest.get_agent_dirs(self.agent_id);
-            if !assigned.is_empty() {
-                let idx = rng.random_range(0..assigned.len());
-                return assigned[idx].clone();
-            }
-        }
-        
-        // Fall back to random selection
-        self.select_random()
-    }
-    
-    /// Exclusive: Only pick from assigned directories
-    /// Minimal contention - each agent has its own namespace
-    fn select_exclusive(&self) -> String {
-        let assigned = self.manifest.get_agent_dirs(self.agent_id);
-        
-        if assigned.is_empty() {
-            warn!("Agent {}/{} has no assigned directories in exclusive mode (total dirs: {}), falling back to random", 
-                self.agent_id, self.num_agents, self.manifest.all_directories.len());
-            return self.select_random();
-        }
-        
-        let mut rng = rng();
-        let idx = rng.random_range(0..assigned.len());
-        assigned[idx].clone()
-    }
-    
-    /// Weighted: Probabilistic mix based on partition_overlap
-    /// - overlap=0.0: Exclusive (0% from other agents)
-    /// - overlap=0.3: 30% from other agents, 70% from assigned
-    /// - overlap=1.0: Random (100% from any directory)
-    fn select_weighted(&self) -> String {
-        let mut rng = rng();
-        
-        let use_assigned_probability = 1.0 - self.partition_overlap;
-        
-        if rng.random::<f64>() < use_assigned_probability {
-            // Pick from assigned directories
-            let assigned = self.manifest.get_agent_dirs(self.agent_id);
-            if !assigned.is_empty() {
-                let idx = rng.random_range(0..assigned.len());
-                return assigned[idx].clone();
-            }
-        }
-        
-        // Pick from any directory (not assigned to this agent)
-        // This creates controlled contention
-        let all_dirs = &self.manifest.all_directories;
-        let assigned_dirs = self.manifest.get_agent_dirs(self.agent_id);
-        let assigned_set: std::collections::HashSet<_> = assigned_dirs.iter().collect();
-        
-        let other_dirs: Vec<_> = all_dirs.iter()
-            .filter(|d| !assigned_set.contains(d))
-            .collect();
-        
-        if !other_dirs.is_empty() {
-            let idx = rng.random_range(0..other_dirs.len());
-            other_dirs[idx].clone()
-        } else {
-            // No other dirs available, use assigned
-            self.select_exclusive()
-        }
-    }
-    
-    /// Select a file path (directory + file) based on strategy
-    /// 
-    /// Returns full relative path: "d1_w1.dir/d2_w1.dir/d3_w1.dir/file_00001.dat"
-    /// This is the primary method for GET/PUT/STAT/DELETE operations
-    pub fn select_file(&self) -> String {
-        // 1. Select directory using existing strategy
-        let dir = self.select_directory_with_files();
-        
-        // 2. Pick a file within that directory using file ranges
-        // Get file range for this directory
-        if let Some((start_idx, end_idx)) = self.manifest.get_file_range(&dir) {
-            if end_idx > start_idx {
-                // Pick random file in range
-                let mut rng = rng();
-                let global_idx = rng.random_range(*start_idx..*end_idx);
-                // Use get_file_path which returns directory + file based on global index
-                if let Some(path) = self.manifest.get_file_path(global_idx) {
-                    return path;
-                }
-            }
-        }
-        
-        // Fallback (shouldn't happen with proper config)
-        warn!("Directory {} has no files in manifest", dir);
-        if dir.is_empty() {
-            "fallback_file_00000.dat".to_string()
-        } else {
-            format!("{}/fallback_file_00000.dat", dir)
-        }
-    }
-    
-    /// Select a directory that has files (respects distribution strategy)
-    /// Used when operation REQUIRES files (GET/STAT/DELETE)
-    pub fn select_directory_with_files(&self) -> String {
-        // Filter to directories that actually have files
-        let dirs_with_files: Vec<&String> = self.manifest.file_ranges
-            .iter()
-            .map(|(dir, _)| dir)
-            .collect();
-        
-        if dirs_with_files.is_empty() {
-            warn!("No directories with files in manifest");
-            return self.select_directory();
-        }
-        
-        // Apply strategy to filtered list
-        match self.strategy {
-            PathSelectionStrategy::Random => {
-                let mut rng = rng();
-                let idx = rng.random_range(0..dirs_with_files.len());
-                dirs_with_files[idx].clone()
-            }
-            PathSelectionStrategy::Exclusive => {
-                // Pick from assigned directories that have files
-                let assigned = self.manifest.get_agent_dirs(self.agent_id);
-                let assigned_with_files: Vec<String> = assigned.into_iter()
-                    .filter(|d| self.manifest.get_file_range(d).is_some())
-                    .collect();
-                    
-                if assigned_with_files.is_empty() {
-                    // Fallback to any directory with files
-                    let mut rng = rng();
-                    let idx = rng.random_range(0..dirs_with_files.len());
-                    return dirs_with_files[idx].clone();
-                }
-                
-                let mut rng = rng();
-                let idx = rng.random_range(0..assigned_with_files.len());
-                assigned_with_files[idx].clone()
-            }
-            PathSelectionStrategy::Partitioned => {
-                let mut rng = rng();
-                
-                // 70% chance to pick from assigned directories with files
-                if rng.random::<f64>() < 0.7 {
-                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
-                    let assigned_with_files: Vec<String> = assigned.into_iter()
-                        .filter(|d| self.manifest.get_file_range(d).is_some())
-                        .collect();
-                    
-                    if !assigned_with_files.is_empty() {
-                        let idx = rng.random_range(0..assigned_with_files.len());
-                        return assigned_with_files[idx].clone();
-                    }
-                }
-                
-                // Fall back to random from all dirs with files
-                let idx = rng.random_range(0..dirs_with_files.len());
-                dirs_with_files[idx].clone()
-            }
-            PathSelectionStrategy::Weighted => {
-                let mut rng = rng();
-                let use_assigned_probability = 1.0 - self.partition_overlap;
-                
-                if rng.random::<f64>() < use_assigned_probability {
-                    let assigned = self.manifest.get_agent_dirs(self.agent_id);
-                    let assigned_with_files: Vec<String> = assigned.into_iter()
-                        .filter(|d| self.manifest.get_file_range(d).is_some())
-                        .collect();
-                    
-                    if !assigned_with_files.is_empty() {
-                        let idx = rng.random_range(0..assigned_with_files.len());
-                        return assigned_with_files[idx].clone();
-                    }
-                }
-                
-                // Pick from any directory with files
-                let idx = rng.random_range(0..dirs_with_files.len());
-                dirs_with_files[idx].clone()
-            }
-        }
-    }
-}
-
-/// Verify that prepared objects exist and are accessible
-pub async fn verify_prepared_objects(config: &crate::config::PrepareConfig) -> anyhow::Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-    
-    info!("Starting verification of prepared objects");
-    
-    for spec in &config.ensure_objects {
-        let store = create_store_for_uri(&spec.base_uri)?;
-        
-        // List existing objects
-        info!("Verifying objects at {}", spec.base_uri);
-        let existing = store.list(&spec.base_uri, true).await
-            .context("Failed to list objects during verification")?;
-        
-        let found_count = existing.len();
-        let expected_count = spec.count as usize;
-        
-        if found_count < expected_count {
-            bail!("Verification failed: Found {} objects but expected {} at {}",
-                  found_count, expected_count, spec.base_uri);
-        }
-        
-        info!("Found {}/{} objects, verifying accessibility...", found_count, expected_count);
-        
-        // Verify accessibility by attempting to stat each object
-        let pb = ProgressBar::new(expected_count as u64);
-        pb.set_style(ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} verified {msg}"
-        )?);
-        
-        let mut accessible_count = 0;
-        let mut inaccessible = Vec::new();
-        
-        for uri in existing.iter().take(expected_count) {
-            match stat_object_multi_backend(uri).await {
-                Ok(_metadata) => {
-                    accessible_count += 1;
-                    pb.inc(1);
-                }
-                Err(e) => {
-                    inaccessible.push(format!("{}: {}", uri, e));
-                    pb.inc(1);
-                }
-            }
-        }
-        
-        pb.finish_and_clear();
-        
-        if !inaccessible.is_empty() {
-            eprintln!("\nInaccessible objects:");
-            for issue in &inaccessible {
-                eprintln!("  ✗ {}", issue);
-            }
-            bail!("Verification failed: {}/{} objects accessible at {}",
-                  accessible_count, expected_count, spec.base_uri);
-        }
-        
-        println!("✓ {}/{} objects verified and accessible at {}", 
-                 accessible_count, expected_count, spec.base_uri);
-        info!("Verification successful: {}/{} objects", accessible_count, expected_count);
-    }
-    
-    Ok(())
-}
 
 /// Helper to build full URI from components for different backends
 pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
@@ -1451,7 +654,7 @@ pub struct SizeBins {
 }
 
 impl SizeBins {
-    fn add(&mut self, size_bytes: u64) {
+    pub fn add(&mut self, size_bytes: u64) {
         let b = bucket_index(size_bytes as usize);
         let e = self.by_bucket.entry(b).or_insert((0, 0));
         e.0 += 1;
@@ -1716,6 +919,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     info!("Spawning {} worker tasks", cfg.concurrency);
     println!("Starting execution ({}s duration, {} concurrent workers)...", cfg.duration.as_secs(), cfg.concurrency);
     
+    // Create shared atomic counters for live progress stats
+    let live_ops = Arc::new(AtomicU64::new(0));
+    let live_bytes = Arc::new(AtomicU64::new(0));
+    
     // Create progress bar for time-based execution
     let pb = ProgressBar::new(cfg.duration.as_secs());
     pb.set_style(ProgressStyle::with_template(
@@ -1723,12 +930,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     )?);
     pb.set_message(format!("running with {} workers", cfg.concurrency));
     
-    // Spawn progress monitoring task
+    // Spawn progress monitoring task with live stats
     let pb_clone = pb.clone();
     let duration = cfg.duration;
+    let concurrency = cfg.concurrency;  // Copy value for closure
+    let ops_clone = live_ops.clone();
+    let bytes_clone = live_bytes.clone();
     let progress_handle = tokio::spawn(async move {
         let progress_start = Instant::now();
         let update_interval = Duration::from_millis(100); // Update every 100ms
+        let mut last_ops = 0u64;
+        let mut last_bytes = 0u64;
+        let mut last_update = progress_start;
         
         loop {
             let elapsed = progress_start.elapsed();
@@ -1738,6 +951,37 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
             }
             
             pb_clone.set_position(elapsed.as_secs());
+            
+            // Calculate live stats
+            let now = Instant::now();
+            let current_ops = ops_clone.load(Ordering::Relaxed);
+            let current_bytes = bytes_clone.load(Ordering::Relaxed);
+            let time_delta = now.duration_since(last_update).as_secs_f64();
+            
+            if time_delta >= 0.5 {  // Update stats display every 0.5s
+                let ops_delta = current_ops.saturating_sub(last_ops);
+                let bytes_delta = current_bytes.saturating_sub(last_bytes);
+                
+                let ops_per_sec = ops_delta as f64 / time_delta;
+                let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                
+                // Calculate average latency (very rough estimate)
+                let avg_latency_ms = if ops_per_sec > 0.0 {
+                    (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64
+                } else {
+                    0.0
+                };
+                
+                pb_clone.set_message(format!(
+                    "{} workers | {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                    concurrency, ops_per_sec, mib_per_sec, avg_latency_ms
+                ));
+                
+                last_ops = current_ops;
+                last_bytes = current_bytes;
+                last_update = now;
+            }
+            
             tokio::time::sleep(update_interval).await;
         }
     });
@@ -1780,6 +1024,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let separate_pools = needs_separate_pools;  // Clone flag for workers
         let path_selector = path_selector.clone();  // Clone PathSelector for this worker
         let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
+        let ops_counter = live_ops.clone();  // Clone atomic counter for live stats
+        let bytes_counter = live_bytes.clone();  // Clone atomic counter for live stats
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1847,6 +1093,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.get_ops += 1;
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     }
                     OpSpec::Put { dedup_factor, compress_factor, .. } => {
                         // PUT operation: Use PathSelector if available (directory tree mode),
@@ -1919,6 +1169,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.put_ops += 1;
                         ws.put_bytes += sz;
                         ws.put_bins.add(sz);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(sz, Ordering::Relaxed);
                     }
                     OpSpec::List { .. } => {
                         // Get resolved URI from config
@@ -1932,6 +1186,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // List operations don't transfer data, just metadata
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Stat { .. } => {
                         // STAT operation: Use PathSelector if available (directory tree mode),
@@ -1969,6 +1226,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Stat operations don't transfer data, just metadata about the size
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Delete { .. } => {
                         // DELETE operation: Use PathSelector if available (directory tree mode),
@@ -2010,6 +1270,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Delete operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Mkdir { .. } => {
                         // MKDIR requires PathSelector with TreeManifest
@@ -2048,6 +1311,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Mkdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Rmdir { recursive, .. } => {
                         // RMDIR requires PathSelector with TreeManifest
@@ -2087,6 +1353,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Rmdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

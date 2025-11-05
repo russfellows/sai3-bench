@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use sai3_bench::config::Config;
-use std::collections::HashMap;
 
 #[test]
 fn test_agent_address_resolution() -> Result<()> {

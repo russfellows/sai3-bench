@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::metrics::{OpHists, BUCKET_LABELS};
+use crate::prepare::PrepareMetrics;
 use crate::workload::SizeBins;
 
 /// TSV exporter for benchmark results
@@ -178,6 +179,50 @@ impl TsvExporter {
         );
 
         rows.push((bucket_idx, row));
+
+        Ok(())
+    }
+
+    /// Export prepare phase metrics to TSV file
+    pub fn export_prepare_metrics(&self, metrics: &PrepareMetrics) -> Result<()> {
+        let mut f = File::create(&self.output_path)
+            .with_context(|| format!("Failed to create {}", self.output_path.display()))?;
+
+        // Write header
+        writeln!(
+            f,
+            "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount"
+        )?;
+
+        // Collect all rows
+        let mut rows = Vec::new();
+        
+        // PUT operations (per-bucket)
+        self.collect_op_buckets(
+            &mut rows,
+            "PUT",
+            &metrics.put_hists,
+            &metrics.put_bins,
+            metrics.wall_seconds,
+        )?;
+
+        // PUT aggregate (all buckets combined)
+        self.collect_aggregate_row(
+            &mut rows,
+            "PUT",
+            99,  // bucket_idx for sorting
+            &metrics.put_hists,
+            &metrics.put_bins,
+            metrics.wall_seconds,
+        )?;
+
+        // Sort by bucket_idx
+        rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
+
+        // Write sorted rows
+        for (_, row) in rows {
+            writeln!(f, "{}", row)?;
+        }
 
         Ok(())
     }

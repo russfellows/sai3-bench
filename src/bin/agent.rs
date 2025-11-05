@@ -245,13 +245,47 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
                     Status::internal(format!("Prepare phase failed: {}", e))
                 })?;
-            info!("Prepared {} objects", prepared.len());
+            info!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
+                prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
+            
+            // Print prepare performance summary
+            if prepare_metrics.put.ops > 0 {
+                let put_ops_s = prepare_metrics.put.ops as f64 / prepare_metrics.wall_seconds;
+                let put_mib_s = (prepare_metrics.put.bytes as f64 / 1_048_576.0) / prepare_metrics.wall_seconds;
+                
+                info!("Prepare Performance:");
+                info!("  Total ops: {} ({:.2} ops/s)", prepare_metrics.put.ops, put_ops_s);
+                info!("  Total bytes: {} ({:.2} MiB)", prepare_metrics.put.bytes, prepare_metrics.put.bytes as f64 / 1_048_576.0);
+                info!("  Throughput: {:.2} MiB/s", put_mib_s);
+                info!("  Latency: mean={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
+                    prepare_metrics.put.mean_us as f64 / 1000.0,
+                    prepare_metrics.put.p50_us as f64 / 1000.0,
+                    prepare_metrics.put.p95_us as f64 / 1000.0,
+                    prepare_metrics.put.p99_us as f64 / 1000.0);
+            }
+            
+            if prepare_metrics.mkdir_count > 0 {
+                info!("  MKDIR: {} directories created", prepare_metrics.mkdir_count);
+            }
+            
+            // Export prepare metrics to TSV if any operations were performed
+            if prepare_metrics.put.ops > 0 {
+                use sai3_bench::tsv_export::TsvExporter;
+                let results_dir = std::path::Path::new("./sai3-agent-results");
+                std::fs::create_dir_all(results_dir).ok();
+                let prepare_tsv_path = results_dir.join("prepare_results.tsv");
+                let exporter = TsvExporter::with_path(&prepare_tsv_path)
+                    .map_err(|e| Status::internal(format!("Failed to create prepare TSV exporter: {}", e)))?;
+                exporter.export_prepare_metrics(&prepare_metrics)
+                    .map_err(|e| Status::internal(format!("Failed to export prepare metrics: {}", e)))?;
+                info!("Prepare metrics exported to: {}", prepare_tsv_path.display());
+            }
             
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {

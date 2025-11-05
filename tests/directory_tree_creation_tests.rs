@@ -7,7 +7,7 @@
 use anyhow::Result;
 use sai3_bench::config::PrepareConfig;
 use sai3_bench::directory_tree::DirectoryStructureConfig;
-use sai3_bench::workload::create_directory_tree;
+use sai3_bench::prepare::{create_directory_tree, PrepareMetrics};
 use std::collections::HashSet;
 use tempfile::TempDir;
 
@@ -28,9 +28,11 @@ async fn test_single_agent_creates_all() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
-    let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
+    let mut metrics = PrepareMetrics::default();
+    let manifest = create_directory_tree(&config, 0, 1, &base_uri, &mut metrics).await?;
     
     // Verify directory count: 2 + 4 = 6 directories
     assert_eq!(manifest.total_dirs, 6);
@@ -63,6 +65,7 @@ async fn test_multi_agent_no_collision() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "test.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 4;
@@ -73,7 +76,8 @@ async fn test_multi_agent_no_collision() -> Result<()> {
         let temp_agent_dir = TempDir::new()?;
         let agent_base_uri = format!("file://{}", temp_agent_dir.path().display());
         
-        let manifest = create_directory_tree(&config, agent_id, num_agents, &agent_base_uri).await?;
+        let mut metrics = PrepareMetrics::default();
+        let manifest = create_directory_tree(&config, agent_id, num_agents, &agent_base_uri, &mut metrics).await?;
         
         // Total files should be 4 leaf dirs * 10 files = 40
         assert_eq!(manifest.total_files, 40);
@@ -112,35 +116,49 @@ async fn test_multi_agent_no_collision() -> Result<()> {
 /// Test agent assignment distribution is balanced
 #[tokio::test]
 async fn test_agent_assignment_balanced() -> Result<()> {
-    let _config = PrepareConfig {
+    let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 3,
             depth: 2,
-            files_per_dir: 5,
-            distribution: "all".to_string(),
-            dir_mask: "dir.d%d_w%d".to_string(),
+            files_per_dir: 6,
+            distribution: "bottom".to_string(),
+            dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 3;
-    let mut file_counts = vec![0; num_agents];
     
-    // Total: 3 + 9 = 12 directories, 12 * 5 = 60 files
-    let total_files = 60;
+    // Calculate expected distribution:
+    // Depth 1: 3 dirs, Depth 2: 9 dirs (total 12 dirs)
+    // With "bottom" distribution: only 9 leaf dirs get files
+    // Total files: 9 * 6 = 54 files
+    // Each agent: 54 / 3 = 18 files
     
-    // Simulate global file distribution
-    for global_idx in 0..total_files {
-        let assigned_agent = global_idx % num_agents;
-        file_counts[assigned_agent] += 1;
+    // Create manifests for each agent to verify actual distribution
+    let mut agent_file_counts = vec![0; num_agents];
+    
+    for agent_id in 0..num_agents {
+        let temp_dir = TempDir::new()?;
+        let base_uri = format!("file://{}", temp_dir.path().display());
+        let mut metrics = PrepareMetrics::default();
+        let manifest = create_directory_tree(&config, agent_id, num_agents, &base_uri, &mut metrics).await?;
+        
+        // Count files created by this agent
+        let files = list_files_recursive(temp_dir.path())?;
+        agent_file_counts[agent_id] = files.len();
+        
+        // Verify manifest reports correct total
+        assert_eq!(manifest.total_files, 54, "Total files should be 54");
     }
     
-    // Each agent should get exactly 20 files (60 / 3)
-    for (agent_id, count) in file_counts.iter().enumerate() {
-        assert_eq!(*count, 20, 
-            "Agent {} should create 20 files, got {}", 
+    // Verify balanced distribution: each agent gets 18 files
+    for (agent_id, count) in agent_file_counts.iter().enumerate() {
+        assert_eq!(*count, 18, 
+            "Agent {} should create 18 files (54 total / 3 agents), got {}", 
             agent_id, count);
     }
     
@@ -164,16 +182,19 @@ async fn test_exclusive_directory_distribution() -> Result<()> {
             distribution: "bottom".to_string(),
             dir_mask: "sai3.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
     let num_agents = 3;
     
     // Agent 0 creates its assigned directories
-    let manifest0 = create_directory_tree(&config, 0, num_agents, &base_uri).await?;
+    let mut metrics0 = PrepareMetrics::default();
+    let manifest0 = create_directory_tree(&config, 0, num_agents, &base_uri, &mut metrics0).await?;
     let dirs0 = manifest0.get_agent_dirs(0);
     
     // Agent 1 creates its assigned directories (different subset)
-    let manifest1 = create_directory_tree(&config, 1, num_agents, &base_uri).await?;
+    let mut metrics1 = PrepareMetrics::default();
+    let manifest1 = create_directory_tree(&config, 1, num_agents, &base_uri, &mut metrics1).await?;
     let dirs1 = manifest1.get_agent_dirs(1);
     
     // Verify no overlap in assignments
@@ -218,9 +239,11 @@ async fn test_all_distribution_files_at_all_levels() -> Result<()> {
             distribution: "all".to_string(),  // Files at ALL levels
             dir_mask: "level.d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
-    let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
+    let mut metrics = PrepareMetrics::default();
+    let manifest = create_directory_tree(&config, 0, 1, &base_uri, &mut metrics).await?;
     
     // 6 directories (2 + 4) * 2 files = 12 files
     assert_eq!(manifest.total_files, 12);
@@ -256,12 +279,14 @@ async fn test_bottom_distribution_files_at_leaf_only() -> Result<()> {
             width: 2,
             depth: 2,
             files_per_dir: 3,
-            distribution: "bottom".to_string(),  // Files only at leaf level
-            dir_mask: "leaf.d%d_w%d.dir".to_string(),
+            distribution: "bottom".to_string(),  // Fixed: was "even", should be "bottom" per test name
+            dir_mask: "d%d_w%d.dir".to_string(),
         }),
+        prepare_strategy: Default::default(),
     };
     
-    let manifest = create_directory_tree(&config, 0, 1, &base_uri).await?;
+    let mut metrics = PrepareMetrics::default();
+    let manifest = create_directory_tree(&config, 0, 1, &base_uri, &mut metrics).await?;
     
     // Only 4 leaf directories * 3 files = 12 files
     assert_eq!(manifest.total_files, 12);

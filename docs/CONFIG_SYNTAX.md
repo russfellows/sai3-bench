@@ -332,10 +332,16 @@ List all objects in a directory/prefix.
 
 ## Prepare Stage
 
-The prepare stage creates baseline objects before the workload begins.
+The prepare stage creates baseline objects before the workload begins. It supports two strategies for object creation: **sequential** (default) and **parallel**.
+
+### Configuration Options
 
 ```yaml
 prepare:
+  # Prepare strategy: controls how objects are created
+  # Values: sequential (default), parallel
+  prepare_strategy: parallel  # Optional, defaults to "sequential"
+  
   # Delay after prepare completes (seconds) - for cloud storage eventual consistency
   # Default: 0 (no delay)
   # Recommended: 2-5 for cloud storage (S3, GCS, Azure)
@@ -350,10 +356,82 @@ prepare:
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test
+```
 
-# You can prepare multiple object sets:
+### Prepare Strategies
+
+#### Sequential Strategy (Default)
+Processes each `ensure_objects` entry in order. Creates all objects for the first entry, then moves to the second, etc.
+
+**Characteristics**:
+- **Predictable ordering**: Objects are numbered sequentially within each entry
+- **Deterministic**: Same config always produces same order
+- **Best for**: Workloads requiring specific object ordering or when debugging
+
+**Example**:
+```yaml
 prepare:
-  post_prepare_delay: 3      # Wait 3 seconds after creating objects
+  prepare_strategy: sequential  # Default, can be omitted
+  ensure_objects:
+    - base_uri: "s3://bucket/small/"
+      count: 100
+      size_spec: {fixed: 32KB}
+    - base_uri: "s3://bucket/large/"
+      count: 50
+      size_spec: {fixed: 1MB}
+```
+Creates: All 100 small objects first, then all 50 large objects.
+
+#### Parallel Strategy
+Interleaves all `ensure_objects` entries for maximum throughput. Shuffles object sizes across all entries to avoid clustering.
+
+**Characteristics**:
+- **Better throughput**: Better storage pipeline utilization
+- **Size mixing**: Each directory gets a mix of all file sizes
+- **Best for**: Large-scale prepare operations where order doesn't matter
+
+**Example**:
+```yaml
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "s3://bucket/dir1/"
+      count: 1000
+      size_spec: {uniform: {min: 1KB, max: 1MB}}
+    - base_uri: "s3://bucket/dir2/"
+      count: 1000
+      size_spec: {uniform: {min: 1KB, max: 1MB}}
+```
+Creates: Mixes sizes from both entries, avoiding all 32KB objects followed by all 1MB objects.
+
+### Live Performance Monitoring (v0.7.2+)
+
+During prepare execution, you'll see real-time performance statistics:
+
+```
+[00:00:09] [████████] 5000/5000 objects 32 workers | 464 ops/s | 487.0 MiB/s | avg 58.2ms
+```
+
+After completion, a comprehensive performance summary is displayed:
+
+```
+Prepare Performance:
+  Total ops: 5000 (3709.58 ops/s)
+  Total bytes: 5242880000 (5000.00 MiB)
+  Throughput: 3709.58 MiB/s
+  Latency: mean=6.09ms, p50=4.11ms, p95=16.91ms, p99=42.49ms
+```
+
+Metrics are also exported to `prepare_results.tsv` for machine-readable analysis.
+
+### Multiple Object Sets
+
+You can prepare multiple object sets with different characteristics:
+
+```yaml
+prepare:
+  prepare_strategy: parallel      # Use parallel for better throughput
+  post_prepare_delay: 3           # Wait 3 seconds after creating objects
   ensure_objects:
     - base_uri: "gs://bucket/small/"
       count: 10000
@@ -372,7 +450,9 @@ prepare:
 
 The delay only applies if new objects were created. If all objects already existed, no delay occurs.
 
-**Object naming**: Prepare creates objects named `prepared-NNNNNNNN.dat` where N is zero-padded 8-digit number.
+### Object Naming
+
+Prepare creates objects named `prepared-NNNNNNNN.dat` where N is zero-padded 8-digit number.
 
 Examples:
 - `prepared-00000000.dat`
