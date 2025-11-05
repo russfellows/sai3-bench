@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
@@ -918,6 +919,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     info!("Spawning {} worker tasks", cfg.concurrency);
     println!("Starting execution ({}s duration, {} concurrent workers)...", cfg.duration.as_secs(), cfg.concurrency);
     
+    // Create shared atomic counters for live progress stats
+    let live_ops = Arc::new(AtomicU64::new(0));
+    let live_bytes = Arc::new(AtomicU64::new(0));
+    
     // Create progress bar for time-based execution
     let pb = ProgressBar::new(cfg.duration.as_secs());
     pb.set_style(ProgressStyle::with_template(
@@ -925,12 +930,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     )?);
     pb.set_message(format!("running with {} workers", cfg.concurrency));
     
-    // Spawn progress monitoring task
+    // Spawn progress monitoring task with live stats
     let pb_clone = pb.clone();
     let duration = cfg.duration;
+    let concurrency = cfg.concurrency;  // Copy value for closure
+    let ops_clone = live_ops.clone();
+    let bytes_clone = live_bytes.clone();
     let progress_handle = tokio::spawn(async move {
         let progress_start = Instant::now();
         let update_interval = Duration::from_millis(100); // Update every 100ms
+        let mut last_ops = 0u64;
+        let mut last_bytes = 0u64;
+        let mut last_update = progress_start;
         
         loop {
             let elapsed = progress_start.elapsed();
@@ -940,6 +951,37 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
             }
             
             pb_clone.set_position(elapsed.as_secs());
+            
+            // Calculate live stats
+            let now = Instant::now();
+            let current_ops = ops_clone.load(Ordering::Relaxed);
+            let current_bytes = bytes_clone.load(Ordering::Relaxed);
+            let time_delta = now.duration_since(last_update).as_secs_f64();
+            
+            if time_delta >= 0.5 {  // Update stats display every 0.5s
+                let ops_delta = current_ops.saturating_sub(last_ops);
+                let bytes_delta = current_bytes.saturating_sub(last_bytes);
+                
+                let ops_per_sec = ops_delta as f64 / time_delta;
+                let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                
+                // Calculate average latency (very rough estimate)
+                let avg_latency_ms = if ops_per_sec > 0.0 {
+                    (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64
+                } else {
+                    0.0
+                };
+                
+                pb_clone.set_message(format!(
+                    "{} workers | {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                    concurrency, ops_per_sec, mib_per_sec, avg_latency_ms
+                ));
+                
+                last_ops = current_ops;
+                last_bytes = current_bytes;
+                last_update = now;
+            }
+            
             tokio::time::sleep(update_interval).await;
         }
     });
@@ -982,6 +1024,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let separate_pools = needs_separate_pools;  // Clone flag for workers
         let path_selector = path_selector.clone();  // Clone PathSelector for this worker
         let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
+        let ops_counter = live_ops.clone();  // Clone atomic counter for live stats
+        let bytes_counter = live_bytes.clone();  // Clone atomic counter for live stats
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1049,6 +1093,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.get_ops += 1;
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     }
                     OpSpec::Put { dedup_factor, compress_factor, .. } => {
                         // PUT operation: Use PathSelector if available (directory tree mode),
@@ -1121,6 +1169,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.put_ops += 1;
                         ws.put_bytes += sz;
                         ws.put_bins.add(sz);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(sz, Ordering::Relaxed);
                     }
                     OpSpec::List { .. } => {
                         // Get resolved URI from config
@@ -1134,6 +1186,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // List operations don't transfer data, just metadata
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Stat { .. } => {
                         // STAT operation: Use PathSelector if available (directory tree mode),
@@ -1171,6 +1226,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Stat operations don't transfer data, just metadata about the size
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Delete { .. } => {
                         // DELETE operation: Use PathSelector if available (directory tree mode),
@@ -1212,6 +1270,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Delete operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Mkdir { .. } => {
                         // MKDIR requires PathSelector with TreeManifest
@@ -1250,6 +1311,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Mkdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Rmdir { recursive, .. } => {
                         // RMDIR requires PathSelector with TreeManifest
@@ -1289,6 +1353,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Rmdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats for progress bar
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
