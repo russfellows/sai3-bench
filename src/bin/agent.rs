@@ -245,13 +245,25 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
                     Status::internal(format!("Prepare phase failed: {}", e))
                 })?;
-            info!("Prepared {} objects", prepared.len());
+            info!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
+                prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
+            
+            if prepare_metrics.put.ops > 0 {
+                info!("  PUT: {} ops, {} bytes, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
+                    prepare_metrics.put.ops, prepare_metrics.put.bytes,
+                    prepare_metrics.put.p50_us as f64 / 1000.0,
+                    prepare_metrics.put.p95_us as f64 / 1000.0,
+                    prepare_metrics.put.p99_us as f64 / 1000.0);
+            }
+            if prepare_metrics.mkdir_count > 0 {
+                info!("  MKDIR: {} directories created", prepare_metrics.mkdir_count);
+            }
             
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {

@@ -653,7 +653,7 @@ pub struct SizeBins {
 }
 
 impl SizeBins {
-    fn add(&mut self, size_bytes: u64) {
+    pub fn add(&mut self, size_bytes: u64) {
         let b = bucket_index(size_bytes as usize);
         let e = self.by_bucket.entry(b).or_insert((0, 0));
         e.0 += 1;

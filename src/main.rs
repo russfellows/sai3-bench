@@ -1064,11 +1064,29 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
             results_dir.write_console(prepare_header)?;
             
             info!("Executing prepare step");
-            let (prepared, manifest) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
+            let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
             
-            let prepared_msg = format!("Prepared {} objects", prepared.len());
+            let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
+                prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
             println!("{}", prepared_msg);
             results_dir.write_console(&prepared_msg)?;
+            
+            // Print prepare metrics summary
+            if prepare_metrics.put.ops > 0 {
+                let put_summary = format!("  PUT: {} ops, {} bytes, mean={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
+                    prepare_metrics.put.ops, prepare_metrics.put.bytes,
+                    prepare_metrics.put.mean_us as f64 / 1000.0,
+                    prepare_metrics.put.p50_us as f64 / 1000.0,
+                    prepare_metrics.put.p95_us as f64 / 1000.0,
+                    prepare_metrics.put.p99_us as f64 / 1000.0);
+                println!("{}", put_summary);
+                results_dir.write_console(&put_summary)?;
+            }
+            if prepare_metrics.mkdir_count > 0 {
+                let mkdir_summary = format!("  MKDIR: {} directories created", prepare_metrics.mkdir_count);
+                println!("{}", mkdir_summary);
+                results_dir.write_console(&mkdir_summary)?;
+            }
             
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {

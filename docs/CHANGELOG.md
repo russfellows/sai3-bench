@@ -2,6 +2,72 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.2] - 2025-11-04
+
+### 📊 Prepare Phase Metrics
+
+**Enhancement release**: Adds comprehensive metrics collection and reporting for the prepare phase, bringing observability to parity with workload execution. Users can now see PUT operation throughput, latency distribution, and directory creation activity.
+
+#### New Features
+
+- **PrepareMetrics Structure** - Complete metrics collection for prepare operations
+  - **HDR Histogram Support**: 9 size buckets (zero, 512B, 4KiB, 32KiB, 256KiB, 1MiB, 16MiB, 128MiB, >128MiB)
+  - **Per-operation timing**: Microsecond-level latency tracking for PUT operations
+  - **Size-bucketed statistics**: Operation counts and throughput per size bucket
+  - **Aggregate metrics**: ops, bytes, mean/p50/p95/p99 latencies
+  - **Directory tracking**: mkdir operation counts
+  - **Object accounting**: created vs existed counts
+  - **Strategy awareness**: Tracks Sequential vs Parallel prepare mode
+
+- **Console Output** - Human-readable metrics display
+  ```
+  Prepared 327680 objects (327680 created, 0 existed) in 45.23s
+    PUT: 327680 ops, 10737418240 bytes, mean=1.23ms, p50=1.15ms, p95=2.34ms, p99=3.45ms
+    MKDIR: 511 directories created
+  ```
+
+- **Agent Logging** - Structured metrics in agent logs via `tracing::info`
+
+#### Implementation Details
+
+- **New module additions**: `src/prepare.rs`
+  - `PrepareMetrics` struct with OpAgg, SizeBins, OpHists fields
+  - `compute_op_agg()` helper to extract percentiles from histograms
+  - Instrumentation in `prepare_sequential()` and `prepare_parallel()`
+  - Per-PUT operation timing: `Instant::now()` → `elapsed().as_micros()`
+  - Histogram recording: `metrics.put_hists.record(bucket_index(size), Duration::from_micros(latency_us))`
+  - Directory creation tracking in `create_directory_tree()`
+
+- **API Changes**:
+  - `prepare_objects()` return type: `(Vec<PreparedObject>, Option<TreeManifest>)` → `(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)`
+  - All callers updated: `main.rs`, `agent.rs`, test files
+
+- **Refactoring** (prior work in this release):
+  - Split `workload.rs` (2554 lines) into `prepare.rs` (1074 lines) + `workload.rs` (1501 lines)
+  - Improved code organization for prepare vs execution phases
+
+#### Testing & Validation
+
+- **124 tests passing** (unchanged count, all updated for new API)
+- **Test fixes**:
+  - Updated `parallel_prepare_tests.rs` (6 tests) to handle 3-tuple return
+  - Updated `directory_tree_creation_tests.rs` (6 tests) to pass `PrepareMetrics` parameter
+  - Fixed `test_agent_assignment_balanced` to actually test real implementation (was only mathematical simulation)
+
+- **Zero warnings**: Clean compilation in both debug and release builds
+
+#### Performance Impact
+
+- **Negligible overhead**: Metrics collection uses thread-local histograms and atomic operations
+- **No blocking**: All timing is non-intrusive `Instant::elapsed()` calls
+- **Memory efficient**: HDR histograms use compressed storage
+
+#### Future Enhancements
+
+- Potential TSV export integration for machine-readable prepare metrics
+- Possible Summary struct extension for programmatic access
+- Per-operation mkdir latency tracking (currently count-only)
+
 ## [0.7.1] - 2025-10-31
 
 ### ⚡ I/O Rate Control

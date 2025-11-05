@@ -54,7 +54,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         prepare_strategy: PrepareStrategy::Sequential,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     // Should have created 30 objects total
     assert_eq!(objects.len(), 30, "Should create 30 objects");
@@ -124,7 +124,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     // Should have created 60 objects total
     assert_eq!(objects.len(), 60, "Should create 60 objects");
@@ -199,7 +199,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     // Count sizes
     let mut size_counts = HashMap::new();
@@ -333,7 +333,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     assert_eq!(objects.len(), 20, "Should create 20 objects");
     
@@ -381,7 +381,7 @@ async fn test_files_created_correctly() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     // Verify files exist on disk with correct sizes
     for obj in &objects {
@@ -445,7 +445,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
     };
     
-    let (objects, _) = prepare_objects(&prepare_config, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None).await?;
     
     // Should have created 90 objects total
     assert_eq!(objects.len(), 90, "Should create 90 objects");
