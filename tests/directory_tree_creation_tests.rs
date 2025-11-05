@@ -7,7 +7,7 @@
 use anyhow::Result;
 use sai3_bench::config::PrepareConfig;
 use sai3_bench::directory_tree::DirectoryStructureConfig;
-use sai3_bench::workload::create_directory_tree;
+use sai3_bench::prepare::create_directory_tree;
 use std::collections::HashSet;
 use tempfile::TempDir;
 

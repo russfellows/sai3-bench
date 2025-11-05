@@ -6,6 +6,7 @@ pub mod config;
 pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
+pub mod prepare; // Prepare phase: object pre-population and directory trees (v0.7.2+)
 pub mod rate_controller; // I/O rate control (v0.7.1+)
 pub mod replay; // Legacy in-memory replay (v0.4.0)
 pub mod replay_streaming; // New streaming replay (v0.5.0+)
