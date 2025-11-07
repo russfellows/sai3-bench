@@ -130,6 +130,9 @@ pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplaySta
     );
     tasks.push(task);
 
+    // Track previous timestamp for order validation
+    let mut prev_time = first_time;
+
     // Stream remaining operations
     for entry_result in stream_iter {
         let entry = match entry_result {
@@ -145,6 +148,20 @@ pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplaySta
         };
 
         stats.total_operations += 1;
+
+        // Validate chronological order
+        if entry.start < prev_time {
+            let time_delta = prev_time.signed_duration_since(entry.start);
+            warn!(
+                "Out-of-order op-log entry detected during replay: operation #{} has start={}, previous={} (went back by {:?})",
+                stats.total_operations,
+                entry.start,
+                prev_time,
+                time_delta
+            );
+            // Continue anyway - we'll execute immediately (delay will be negative/zero)
+        }
+        prev_time = entry.start;
 
         // Calculate absolute delay from first operation
         let elapsed = entry.start.signed_duration_since(first_time);

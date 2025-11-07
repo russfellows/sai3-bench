@@ -1,23 +1,43 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.2-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-124%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-44%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
+## 🌟 Latest Release - v0.7.4 (November 7, 2025)
+
+**📊 Op-Log Sorting, Validation, and Multi-Process Merge:**
+
+- **Sort Command**: Offline sorting of op-log files with streaming window algorithm
+- **Replay Dry-Run**: Validate op-logs before execution (check sort order, file existence, operation count)
+- **Runtime Validation**: Automatic detection of out-of-order entries during replay with warnings
+- **Multi-Worker Merge**: K-way merge for multi-process op-logs with chronological ordering
+
+```bash
+# Sort unsorted op-log files
+sai3-bench sort --files /tmp/ops.tsv.zst
+
+# Validate before replay
+sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
+```
+
+See [CHANGELOG](docs/CHANGELOG.md#074) for complete details.
+
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
-2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing (new in v0.7.0)
-3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends (new in v0.7.0)
+2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing (v0.7.0)
+3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends (v0.7.0)
 4. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
-5. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
-6. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
-7. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
-8. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
+5. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay (v0.7.4)
+6. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
+7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
+8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
+9. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
 
 ## 🎯 Supported Storage Backends
 

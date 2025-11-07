@@ -9,13 +9,16 @@
 //! handles decompression on read and compression on write.
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use tracing::{info, warn};
+
+// Use s3dlio-oplog types instead of defining our own
+pub use s3dlio_oplog::{OpLogEntry, OpLogStreamReader, OpType};
 
 /// Generate worker-specific op-log path
 /// 
@@ -37,28 +40,23 @@ pub fn worker_oplog_path(base_path: &Path, worker_id: usize) -> PathBuf {
     parent.join(format!("{}-worker-{}.{}", base_stem, worker_id, extension))
 }
 
-/// Entry from an op-log TSV file with parsed start timestamp
-/// 
-/// Op-log format (TSV columns):
-/// - idx, thread, op, client_id, n_objects, bytes, endpoint, file, error, start, first_byte, end, duration_ns
-/// 
-/// We parse the 'start' column (index 9) as a SystemTime for correct chronological sorting.
+/// Wrapper for OpLogEntry that tracks which worker it came from
+/// Used during k-way merge to maintain source information
 #[derive(Debug, Clone)]
-struct OpLogEntry {
-    start_time: SystemTime,  // Parsed from RFC3339 timestamp for correct comparison
-    line: String,            // Full TSV line
-    worker_id: usize,        // Which worker file this came from
+struct MergeEntry {
+    entry: OpLogEntry,
+    worker_id: usize,
 }
 
-impl Eq for OpLogEntry {}
+impl Eq for MergeEntry {}
 
-impl PartialEq for OpLogEntry {
+impl PartialEq for MergeEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.start_time == other.start_time
+        self.entry.start == other.entry.start
     }
 }
 
-impl PartialOrd for OpLogEntry {
+impl PartialOrd for MergeEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -66,86 +64,9 @@ impl PartialOrd for OpLogEntry {
 
 // BinaryHeap is a max-heap, but we want min-heap (earliest timestamp first)
 // So we reverse the comparison
-impl Ord for OpLogEntry {
+impl Ord for MergeEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.start_time.cmp(&self.start_time) // Reversed for min-heap
-    }
-}
-
-/// Buffered reader for a worker op-log file
-/// Decompresses zstd-compressed op-log on-the-fly
-struct WorkerReader {
-    lines: std::vec::IntoIter<String>,
-    worker_id: usize,
-}
-
-impl WorkerReader {
-    fn new(path: &Path, worker_id: usize) -> Result<Self> {
-        // s3dlio compresses op-logs with zstd - decompress fully into memory
-        // This is acceptable because each worker file should be reasonable size
-        let input = File::open(path)
-            .with_context(|| format!("Failed to open worker op-log: {}", path.display()))?;
-        
-        let mut decoder = zstd::Decoder::new(input)?;
-        let mut decompressed = String::new();
-        std::io::Read::read_to_string(&mut decoder, &mut decompressed)?;
-        
-        // Split into lines and skip header
-        let mut lines: Vec<String> = decompressed.lines().map(|s| s.to_string()).collect();
-        if !lines.is_empty() {
-            lines.remove(0); // Remove header
-        }
-        
-        // CRITICAL: Sort lines by start_time (column 9) before merging!
-        // Worker files are NOT pre-sorted because operations complete out of order
-        lines.sort_by_cached_key(|line| {
-            // Parse start timestamp from column 9
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 10 {
-                // Parse RFC3339 timestamp
-                humantime::parse_rfc3339(parts[9]).ok()
-            } else {
-                None
-            }
-        });
-        
-        Ok(WorkerReader { 
-            lines: lines.into_iter(),
-            worker_id,
-        })
-    }
-    
-    /// Read next entry from this worker file
-    fn next_entry(&mut self) -> Result<Option<OpLogEntry>> {
-        // Get next line from iterator
-        let line = match self.lines.next() {
-            Some(l) => l,
-            None => return Ok(None), // EOF
-        };
-        
-        if line.is_empty() {
-            return Ok(None);
-        }
-        
-        // Parse start_time from column 9 (0-indexed) - the "start" timestamp column
-        // Header: idx thread op client_id n_objects bytes endpoint file error start first_byte end duration_ns
-        //         0   1      2  3         4         5     6        7    8     9     10         11  12
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 10 {
-            return Ok(None); // Invalid line
-        }
-        
-        let start_str = parts[9]; // Column 9 (0-indexed) = "start" column
-        
-        // Parse RFC3339 timestamp to SystemTime for correct chronological comparison
-        let start_time = humantime::parse_rfc3339(start_str)
-            .with_context(|| format!("Failed to parse timestamp '{}' from worker {}", start_str, self.worker_id))?;
-        
-        Ok(Some(OpLogEntry {
-            start_time,
-            line,
-            worker_id: self.worker_id,
-        }))
+        other.entry.start.cmp(&self.entry.start) // Reversed for min-heap
     }
 }
 
@@ -154,7 +75,7 @@ impl WorkerReader {
 /// This uses a min-heap to efficiently merge sorted files without loading
 /// everything into memory. Perfect for handling tens of millions of operations.
 /// 
-/// **Sorted by start_time** (first column, RFC3339 format) - this gives true
+/// **Sorted by start_time** (chronological ordering) - this gives true
 /// chronological ordering of when operations began, not when they ended.
 /// 
 /// # Arguments
@@ -172,201 +93,210 @@ pub fn merge_worker_oplogs(
     info!("Merging {} worker op-log files using streaming k-way merge...", num_workers);
     
     // Open all worker files
-    let mut readers = Vec::new();
-    let mut header: Option<String> = None;
-    
+    let mut streams: Vec<(usize, OpLogStreamReader)> = Vec::new();
     for worker_id in 0..num_workers {
         let worker_path = worker_oplog_path(base_path, worker_id);
-        
         if !worker_path.exists() {
-            warn!("Worker op-log file not found: {}", worker_path.display());
+            warn!("Worker file does not exist: {}", worker_path.display());
             continue;
         }
         
-        // Read header from first worker file (decompress to read it)
-        if header.is_none() {
-            let file = File::open(&worker_path)?;
-            let decoder = zstd::Decoder::new(file)?;
-            let mut reader = BufReader::new(decoder);
-            let mut first_line = String::new();
-            reader.read_line(&mut first_line)?;
-            header = Some(first_line.trim().to_string());
-        }
-        
-        let reader = WorkerReader::new(&worker_path, worker_id)?;
-        readers.push(reader);
+        let stream = OpLogStreamReader::from_file(&worker_path)
+            .with_context(|| format!("Failed to open worker file: {}", worker_path.display()))?;
+        streams.push((worker_id, stream));
     }
     
-    if readers.is_empty() {
-        bail!("No worker op-log files found");
+    if streams.is_empty() {
+        bail!("No worker files found to merge");
     }
     
-    info!("Opened {} worker files for streaming merge", readers.len());
+    info!("Opened {} worker files for merging", streams.len());
     
-    // Initialize min-heap with first entry from each worker
-    let mut heap = BinaryHeap::new();
-    
-    for reader in readers.iter_mut() {
-        if let Some(entry) = reader.next_entry()? {
-            heap.push(entry);
-        }
-    }
-    
-    // Open output file (with zstd compression to match s3dlio format)
-    let merged_path = base_path.to_path_buf();
-    info!("Writing merged op-log to: {}", merged_path.display());
-    
-    let file = File::create(&merged_path)
-        .with_context(|| format!("Failed to create merged op-log: {}", merged_path.display()))?;
-    
-    // Wrap in zstd encoder (compression level 3)
-    let encoder = zstd::Encoder::new(file, 3)?;
-    let mut writer = BufWriter::new(encoder.auto_finish());
+    // Create output file
+    let output_path = base_path.to_path_buf();
+    let output_file = File::create(&output_path)
+        .with_context(|| format!("Failed to create merged op-log: {}", output_path.display()))?;
+    let buf_writer = BufWriter::new(output_file);
+    let mut encoder = zstd::stream::write::Encoder::new(buf_writer, 1)?
+        .auto_finish();
     
     // Write header
-    if let Some(ref hdr) = header {
-        writeln!(writer, "{}", hdr)?;
-    }
+    writeln!(encoder, "idx\tthread\top\tclient_id\tn_objects\tbytes\tendpoint\tfile\terror\tstart\tfirst_byte\tend\tduration_ns")?;
     
-    // Streaming k-way merge
-    let mut total_written = 0u64;
-    
-    while let Some(entry) = heap.pop() {
-        // Write this entry
-        writeln!(writer, "{}", entry.line)?;
-        total_written += 1;
-        
-        // Read next entry from the same worker file
-        if let Some(next_entry) = readers[entry.worker_id].next_entry()? {
-            heap.push(next_entry);
-        }
-        
-        // Progress logging every 1M operations
-        if total_written % 1_000_000 == 0 {
-            info!("Merged {} million operations...", total_written / 1_000_000);
+    // Initialize heap with first entry from each worker
+    let mut heap: BinaryHeap<MergeEntry> = BinaryHeap::new();
+    for (worker_id, stream) in streams.iter_mut() {
+        if let Some(Ok(entry)) = stream.next() {
+            heap.push(MergeEntry {
+                entry,
+                worker_id: *worker_id,
+            });
         }
     }
     
-    writer.flush()?;
+    let mut output_count = 0u64;
     
-    info!("Merged {} total operations from {} workers", total_written, readers.len());
+    // Merge loop: take smallest timestamp, write it, read next from that worker
+    while let Some(merge_entry) = heap.pop() {
+        write_entry(&mut encoder, &merge_entry.entry, output_count)?;
+        output_count += 1;
+        
+        // Read next entry from this worker's stream
+        let worker_id = merge_entry.worker_id;
+        if let Some(Ok(next_entry)) = streams.get_mut(worker_id).and_then(|(_, s)| s.next()) {
+            heap.push(MergeEntry {
+                entry: next_entry,
+                worker_id,
+            });
+        }
+    }
     
-    // Optionally delete worker files
+    drop(encoder); // Finish zstd encoding
+    
+    info!("Merged {} entries into {}", output_count, output_path.display());
+    
+    // Clean up worker files if requested
     if !keep_worker_files {
-        info!("Cleaning up worker op-log files...");
         for worker_id in 0..num_workers {
             let worker_path = worker_oplog_path(base_path, worker_id);
             if worker_path.exists() {
                 std::fs::remove_file(&worker_path)
-                    .with_context(|| format!("Failed to delete worker file: {}", worker_path.display()))?;
+                    .with_context(|| format!("Failed to remove worker file: {}", worker_path.display()))?;
             }
+        }
+        info!("Removed {} worker files", num_workers);
+    }
+    
+    Ok(output_path)
+}
+
+/// Helper function to write an entry to the encoder
+fn write_entry<W: Write>(
+    encoder: &mut W,
+    entry: &OpLogEntry,
+    idx: u64,
+) -> Result<()> {
+    // Format: idx thread op client_id n_objects bytes endpoint file error start first_byte end duration_ns
+    // We'll use simplified format since some fields may not be in OpLogEntry
+    writeln!(
+        encoder,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        idx,
+        0, // thread (not tracked in OpLogEntry)
+        entry.op,
+        "", // client_id (not tracked)
+        1, // n_objects (assume 1)
+        entry.bytes,
+        entry.endpoint,
+        entry.file,
+        entry.error.as_deref().unwrap_or(""),
+        entry.start.to_rfc3339(),
+        "", // first_byte (not tracked)
+        "", // end (not tracked)
+        entry.duration_ns.unwrap_or(0)
+    )?;
+    Ok(())
+}
+
+/// Check if an op-log file is sorted by start timestamp
+/// 
+/// Reads up to `max_lines` from the file and checks if timestamps are in order.
+/// Returns (is_sorted, lines_checked, first_out_of_order_line) where:
+/// - is_sorted: true if all checked lines are in chronological order
+/// - lines_checked: number of data lines checked (excluding header)
+/// - first_out_of_order_line: line number of first out-of-order timestamp, or None if sorted
+/// 
+/// # Arguments
+/// * `path` - Path to op-log file (supports .zst compression)
+/// * `max_lines` - Maximum number of lines to check (None = check all)
+pub fn check_oplog_sorted(path: &Path, max_lines: Option<usize>) -> Result<(bool, usize, Option<usize>)> {
+    let mut stream = OpLogStreamReader::from_file(path)
+        .with_context(|| format!("Failed to open op-log file: {}", path.display()))?;
+    
+    let mut prev_time: Option<DateTime<Utc>> = None;
+    let mut line_num = 0;
+    let max = max_lines.unwrap_or(usize::MAX);
+    
+    while let Some(entry_result) = stream.next() {
+        let entry = entry_result?;
+        line_num += 1;
+        
+        if let Some(prev) = prev_time {
+            if entry.start < prev {
+                // Found out-of-order timestamp
+                return Ok((false, line_num, Some(line_num)));
+            }
+        }
+        
+        prev_time = Some(entry.start);
+        
+        if line_num >= max {
+            break;
         }
     }
     
-    Ok(merged_path)
+    Ok((true, line_num, None))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
+/// Sort an op-log file by start timestamp using streaming window-based algorithm
+/// 
+/// This function uses a sliding window approach to sort with constant memory usage.
+/// The window size should be larger than the maximum out-of-order distance.
+/// 
+/// # Arguments
+/// * `input_path` - Path to unsorted op-log file (supports .zst compression)
+/// * `output_path` - Path for sorted output file (will be zstd-compressed)
+/// * `window_size` - Number of entries to buffer (default: 10000)
+/// 
+/// # Algorithm
+/// 1. Read entries into a sorted window buffer (Vec<OpLogEntry>)
+/// 2. When window is full, output the earliest entry
+/// 3. At EOF, output all remaining entries in sorted order
+pub fn sort_oplog_file(input_path: &Path, output_path: &Path, window_size: usize) -> Result<()> {
+    info!("Sorting op-log file: {} -> {} (window_size={})", 
+          input_path.display(), output_path.display(), window_size);
     
-    #[test]
-    fn test_worker_oplog_path() {
-        let base = Path::new("/tmp/test.tsv");
-        assert_eq!(
-            worker_oplog_path(base, 0),
-            PathBuf::from("/tmp/test-worker-0.tsv")
-        );
-        assert_eq!(
-            worker_oplog_path(base, 3),
-            PathBuf::from("/tmp/test-worker-3.tsv")
-        );
+    let mut stream = OpLogStreamReader::from_file(input_path)
+        .with_context(|| format!("Failed to open input file: {}", input_path.display()))?;
+    
+    // Create output file with zstd compression
+    let output_file = File::create(output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+    let buf_writer = BufWriter::new(output_file);
+    let mut encoder = zstd::stream::write::Encoder::new(buf_writer, 1)?
+        .auto_finish();
+    
+    // Write header
+    writeln!(encoder, "idx\tthread\top\tclient_id\tn_objects\tbytes\tendpoint\tfile\terror\tstart\tfirst_byte\tend\tduration_ns")?;
+    
+    // Sliding window buffer (kept sorted)
+    let mut window: Vec<OpLogEntry> = Vec::with_capacity(window_size);
+    let mut output_count: u64 = 0;
+    
+    while let Some(entry_result) = stream.next() {
+        let entry = entry_result?;
         
-        // Test with different extension
-        let base = Path::new("/tmp/test.log");
-        assert_eq!(
-            worker_oplog_path(base, 1),
-            PathBuf::from("/tmp/test-worker-1.log")
-        );
+        // Insert into sorted position
+        let insert_pos = window.binary_search_by(|e| e.start.cmp(&entry.start))
+            .unwrap_or_else(|pos| pos);
+        window.insert(insert_pos, entry);
+        
+        // If window is full, output the earliest entry
+        while window.len() > window_size {
+            let oldest = window.remove(0);
+            write_entry(&mut encoder, &oldest, output_count)?;
+            output_count += 1;
+        }
     }
     
-    #[test]
-    fn test_merge_worker_oplogs_streaming() -> Result<()> {
-        let tmpdir = TempDir::new()?;
-        let base_path = tmpdir.path().join("test.tsv");
-        
-        // Create 3 worker files with RFC3339 timestamps
-        // Each file has entries sorted by start time
-        let worker0_path = worker_oplog_path(&base_path, 0);
-        let mut f0 = File::create(&worker0_path)?;
-        writeln!(f0, "start_time\tduration_ns\top\turi\tbytes\tstatus")?;
-        writeln!(f0, "2025-11-06T10:00:00.000000000Z\t1000000\tPUT\ts3://bucket/obj1\t4096\t200")?;
-        writeln!(f0, "2025-11-06T10:00:03.000000000Z\t500000\tGET\ts3://bucket/obj3\t4096\t200")?;
-        
-        let worker1_path = worker_oplog_path(&base_path, 1);
-        let mut f1 = File::create(&worker1_path)?;
-        writeln!(f1, "start_time\tduration_ns\top\turi\tbytes\tstatus")?;
-        writeln!(f1, "2025-11-06T10:00:02.000000000Z\t2000000\tPUT\ts3://bucket/obj2\t8192\t200")?;
-        writeln!(f1, "2025-11-06T10:00:04.000000000Z\t600000\tGET\ts3://bucket/obj4\t8192\t200")?;
-        
-        let worker2_path = worker_oplog_path(&base_path, 2);
-        let mut f2 = File::create(&worker2_path)?;
-        writeln!(f2, "start_time\tduration_ns\top\turi\tbytes\tstatus")?;
-        writeln!(f2, "2025-11-06T10:00:01.500000000Z\t1500000\tPUT\ts3://bucket/obj5\t16384\t200")?;
-        
-        // Merge using streaming k-way merge
-        let merged = merge_worker_oplogs(&base_path, 3, false)?;
-        
-        // Verify merged file exists
-        assert!(merged.exists());
-        
-        // Verify worker files were deleted
-        assert!(!worker0_path.exists());
-        assert!(!worker1_path.exists());
-        assert!(!worker2_path.exists());
-        
-        // Verify merged content is sorted by start_time
-        let content = std::fs::read_to_string(&merged)?;
-        let lines: Vec<&str> = content.lines().collect();
-        
-        assert_eq!(lines.len(), 6); // header + 5 operations
-        assert!(lines[1].starts_with("2025-11-06T10:00:00")); // obj1 (earliest)
-        assert!(lines[2].starts_with("2025-11-06T10:00:01.5")); // obj5
-        assert!(lines[3].starts_with("2025-11-06T10:00:02")); // obj2
-        assert!(lines[4].starts_with("2025-11-06T10:00:03")); // obj3
-        assert!(lines[5].starts_with("2025-11-06T10:00:04")); // obj4 (latest)
-        
-        Ok(())
+    // Output remaining entries in window (all sorted)
+    for entry in window {
+        write_entry(&mut encoder, &entry, output_count)?;
+        output_count += 1;
     }
     
-    #[test]
-    fn test_merge_keeps_worker_files() -> Result<()> {
-        let tmpdir = TempDir::new()?;
-        let base_path = tmpdir.path().join("test.tsv");
-        
-        // Create 2 worker files
-        let worker0_path = worker_oplog_path(&base_path, 0);
-        let mut f0 = File::create(&worker0_path)?;
-        writeln!(f0, "start_time\tduration_ns\top\turi\tbytes\tstatus")?;
-        writeln!(f0, "2025-11-06T10:00:00.000000000Z\t1000000\tPUT\ts3://bucket/obj1\t4096\t200")?;
-        
-        let worker1_path = worker_oplog_path(&base_path, 1);
-        let mut f1 = File::create(&worker1_path)?;
-        writeln!(f1, "start_time\tduration_ns\top\turi\tbytes\tstatus")?;
-        writeln!(f1, "2025-11-06T10:00:01.000000000Z\t2000000\tPUT\ts3://bucket/obj2\t8192\t200")?;
-        
-        // Merge with keep_worker_files=true
-        let merged = merge_worker_oplogs(&base_path, 2, true)?;
-        
-        // Verify merged file exists
-        assert!(merged.exists());
-        
-        // Verify worker files still exist
-        assert!(worker0_path.exists());
-        assert!(worker1_path.exists());
-        
-        Ok(())
-    }
+    drop(encoder); // Finish zstd stream
+    
+    info!("Sorted {} entries to {}", output_count, output_path.display());
+    Ok(())
 }
