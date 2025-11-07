@@ -8,11 +8,12 @@ build   = "build.rs"
 aws-config = "1"
 aws-sdk-s3 = "1"
 anyhow = "1"
+base64 = "0.22"
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 dotenvy = "0.15"
 futures = "0.3"
-hdrhistogram = "7.5"
+hdrhistogram = { version = "7.5", features = ["serialization"] }
 regex = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { version = "0.1", features = ["log"] }

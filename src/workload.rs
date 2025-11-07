@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
@@ -637,7 +638,7 @@ pub async fn delete_object_no_log(uri: &str) -> anyhow::Result<()> {
 // -----------------------------------------------------------------------------
 // New summary/aggregation types
 // -----------------------------------------------------------------------------
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpAgg {
     pub bytes: u64,
     pub ops: u64,
@@ -647,7 +648,7 @@ pub struct OpAgg {
     pub p99_us: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SizeBins {
     // bucket_index -> (ops, bytes)
     pub by_bucket: HashMap<usize, (u64, u64)>,
@@ -660,12 +661,86 @@ impl SizeBins {
         e.0 += 1;
         e.1 += size_bytes;
     }
-    fn merge_from(&mut self, other: &SizeBins) {
+    
+    pub fn merge_from(&mut self, other: &SizeBins) {
         for (k, (ops, bytes)) in &other.by_bucket {
             let e = self.by_bucket.entry(*k).or_insert((0, 0));
             e.0 += ops;
             e.1 += bytes;
         }
+    }
+}
+
+// Serializable summary for IPC between processes (v0.7.3+)
+// Uses base64-encoded histogram serialization for lossless merging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcSummary {
+    pub wall_seconds: f64,
+    pub total_bytes: u64,
+    pub total_ops: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub get: OpAgg,
+    pub put: OpAgg,
+    pub meta: OpAgg,
+    pub get_bins: SizeBins,
+    pub put_bins: SizeBins,
+    pub meta_bins: SizeBins,
+    
+    // Serialized histograms (base64-encoded v2 format)
+    // Each is Vec<String> with one entry per bucket
+    pub get_hists_serialized: Vec<String>,
+    pub put_hists_serialized: Vec<String>,
+    pub meta_hists_serialized: Vec<String>,
+}
+
+impl IpcSummary {
+    /// Create IpcSummary from Summary, serializing histograms
+    pub fn from_summary(s: &Summary) -> Result<Self> {
+        use hdrhistogram::serialization::Serializer;
+        use hdrhistogram::serialization::V2Serializer;
+        use base64::Engine;
+        
+        let serialize_ophists = |ophists: &crate::metrics::OpHists| -> Result<Vec<String>> {
+            let mut serialized = Vec::new();
+            for i in 0..ophists.buckets.len() {
+                let hist = ophists.buckets[i].lock().unwrap();
+                let mut buf = Vec::new();
+                V2Serializer::new()
+                    .serialize(&*hist, &mut buf)
+                    .context("Failed to serialize histogram")?;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
+                serialized.push(encoded);
+            }
+            Ok(serialized)
+        };
+        
+        Ok(IpcSummary {
+            wall_seconds: s.wall_seconds,
+            total_bytes: s.total_bytes,
+            total_ops: s.total_ops,
+            p50_us: s.p50_us,
+            p95_us: s.p95_us,
+            p99_us: s.p99_us,
+            get: s.get.clone(),
+            put: s.put.clone(),
+            meta: s.meta.clone(),
+            get_bins: s.get_bins.clone(),
+            put_bins: s.put_bins.clone(),
+            meta_bins: s.meta_bins.clone(),
+            get_hists_serialized: serialize_ophists(&s.get_hists)?,
+            put_hists_serialized: serialize_ophists(&s.put_hists)?,
+            meta_hists_serialized: serialize_ophists(&s.meta_hists)?,
+        })
+    }
+}
+
+impl From<&Summary> for IpcSummary {
+    fn from(s: &Summary) -> Self {
+        // Fallback implementation - panics if serialization fails
+        // Use from_summary() for proper error handling
+        Self::from_summary(s).expect("Failed to serialize summary for IPC")
     }
 }
 
