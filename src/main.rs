@@ -1190,8 +1190,38 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
     println!("{}", workload_msg);
     results_dir.write_console(workload_msg)?;
     
-    // Run the workload
-    let summary = rt.block_on(workload::run(&config, tree_manifest))?;
+    // Determine process scaling configuration
+    let num_processes = config.processes
+        .as_ref()
+        .map(|p| p.resolve())
+        .unwrap_or(1); // Default to single process
+    let processing_mode = config.processing_mode;
+    
+    // Run the workload using the configured processing mode
+    let summary = if num_processes > 1 {
+        // Multi-worker execution
+        info!("Using {} mode with {} workers", 
+              match processing_mode {
+                  sai3_bench::config::ProcessingMode::MultiProcess => "MultiProcess",
+                  sai3_bench::config::ProcessingMode::MultiRuntime => "MultiRuntime",
+              },
+              num_processes);
+        
+        match processing_mode {
+            sai3_bench::config::ProcessingMode::MultiProcess => {
+                // Multi-process mode: spawn N child processes
+                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest))?
+            }
+            sai3_bench::config::ProcessingMode::MultiRuntime => {
+                // Multi-runtime mode: spawn N tokio runtimes in threads
+                sai3_bench::multiruntime::run_multiruntime(&config, num_processes, tree_manifest)?
+            }
+        }
+    } else {
+        // Single worker - use traditional execution
+        info!("Single worker mode (processes={})", num_processes);
+        rt.block_on(workload::run(&config, tree_manifest))?
+    };
     
     // Print results
     let results_header = "\n=== Results ===";
