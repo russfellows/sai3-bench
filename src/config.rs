@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use crate::size_generator::SizeSpec;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     /// Total wall time to run (e.g. "60s", "5m"). Defaults to 60s if omitted.
     #[serde(default = "default_duration", with = "humantime_serde")]
@@ -45,9 +45,39 @@ pub struct Config {
     /// Default: None (unlimited throughput - current behavior)
     #[serde(default)]
     pub io_rate: Option<IoRateConfig>,
+    
+    /// Optional multi-process scaling configuration (v0.7.3+)
+    /// Controls how many processes to spawn per endpoint for parallel execution
+    /// Default: None (single process - current behavior)
+    #[serde(default)]
+    pub processes: Option<ProcessScaling>,
+    
+    /// Processing mode for multi-core execution (v0.7.3+)
+    /// Default: MultiRuntime (stays in single process, multiple tokio runtimes)
+    #[serde(default)]
+    pub processing_mode: ProcessingMode,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// Processing mode for parallel execution (v0.7.3+)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingMode {
+    /// Multiple OS processes (true isolation, pipes for IPC)
+    /// Better for: kernel contention measurement, production simulation
+    MultiProcess,
+    
+    /// Multiple tokio runtimes in single process (cleaner, native channels)
+    /// Better for: simplicity, debugging, when OS-level isolation not needed
+    MultiRuntime,
+}
+
+impl Default for ProcessingMode {
+    fn default() -> Self {
+        ProcessingMode::MultiRuntime
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeightedOp {
     pub weight: u32,
     
@@ -59,7 +89,7 @@ pub struct WeightedOp {
     pub spec: OpSpec,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
@@ -143,7 +173,7 @@ fn default_concurrency() -> usize {
 }
 
 /// Strategy for executing prepare phase with multiple ensure_objects entries
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PrepareStrategy {
     /// Process each ensure_objects entry sequentially (one size at a time)
@@ -162,7 +192,7 @@ impl Default for PrepareStrategy {
 }
 
 /// Prepare configuration for pre-populating objects before testing
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PrepareConfig {
     /// Objects to ensure exist before test
     #[serde(default)]
@@ -190,7 +220,7 @@ pub struct PrepareConfig {
 }
 
 /// Specification for ensuring objects exist
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
     pub base_uri: String,
@@ -257,7 +287,7 @@ impl EnsureSpec {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FillPattern {
     Zero,
@@ -509,7 +539,7 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
 /// - High bandwidth available (>1 Gbps)
 /// 
 /// When enabled, set min_split_size to at least 16 MiB to avoid overhead.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RangeEngineConfig {
     /// Enable or disable RangeEngine
     /// Default: false (disabled) - avoids HEAD overhead on typical workloads
@@ -596,7 +626,7 @@ fn default_range_timeout_secs() -> u64 {
 /// page_cache_mode: sequential  # or: random, dontneed, normal, auto
 /// duration: 60
 /// ```
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum PageCacheMode {
     /// Smart default: Sequential for large files, Random for small/range requests
@@ -851,7 +881,7 @@ pub enum PathSelectionStrategy {
 ///   iops: 1000                 # Target 1000 IOPS total
 ///   distribution: exponential  # Realistic Poisson arrivals
 /// ```
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IoRateConfig {
     /// Target operations per second (IOPS)
     /// 
@@ -873,7 +903,7 @@ pub struct IoRateConfig {
 }
 
 /// IOPS target specification
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum IopsTarget {
     /// No rate limiting - run at maximum throughput
     Max,
@@ -882,7 +912,7 @@ pub enum IopsTarget {
 }
 
 /// Inter-arrival time distribution type
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArrivalDistribution {
     /// Exponential distribution (Poisson arrivals) - realistic
@@ -956,4 +986,109 @@ where
     }
 
     deserializer.deserialize_any(IopsVisitor)
+}
+
+/// Multi-process scaling configuration (v0.7.3+)
+/// Controls how many processes to spawn per endpoint for parallel execution
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ProcessScaling {
+    /// Single process mode (default, current behavior)
+    Single,
+    
+    /// Auto-scale to physical CPU cores (not hyperthreads)
+    /// Best for cloud storage (S3/Azure/GCS) with single endpoint
+    Auto,
+    
+    /// Explicit process count
+    /// Useful for manual tuning or on-premises multi-endpoint setups
+    Manual(usize),
+}
+
+impl Default for ProcessScaling {
+    fn default() -> Self {
+        ProcessScaling::Single
+    }
+}
+
+/// Serde deserialization for ProcessScaling
+/// Accepts: "auto", "single", 1, or explicit integer
+impl<'de> Deserialize<'de> for ProcessScaling {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ProcessScalingVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ProcessScalingVisitor {
+            type Value = ProcessScaling;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("\"auto\", \"single\", 1, or a positive integer")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value == 1 {
+                    Ok(ProcessScaling::Single)
+                } else if value > 1 {
+                    Ok(ProcessScaling::Manual(value as usize))
+                } else {
+                    Err(E::custom("processes must be >= 1"))
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value == 1 {
+                    Ok(ProcessScaling::Single)
+                } else if value > 1 {
+                    Ok(ProcessScaling::Manual(value as usize))
+                } else {
+                    Err(E::custom("processes must be >= 1"))
+                }
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "auto" | "Auto" | "AUTO" => Ok(ProcessScaling::Auto),
+                    "single" | "Single" | "SINGLE" | "1" => Ok(ProcessScaling::Single),
+                    _ => {
+                        match value.parse::<usize>() {
+                            Ok(n) if n == 1 => Ok(ProcessScaling::Single),
+                            Ok(n) if n > 1 => Ok(ProcessScaling::Manual(n)),
+                            Ok(_) => Err(E::custom("processes must be >= 1")),
+                            Err(_) => Err(E::custom(format!("invalid process scaling value: {}", value))),
+                        }
+                    }
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ProcessScalingVisitor)
+    }
+}
+
+impl ProcessScaling {
+    /// Resolve the actual number of processes to spawn
+    /// For Auto mode, detects physical CPU cores
+    pub fn resolve(&self) -> usize {
+        match self {
+            ProcessScaling::Single => 1,
+            ProcessScaling::Auto => detect_physical_cores(),
+            ProcessScaling::Manual(n) => *n,
+        }
+    }
+}
+
+/// Detect number of physical CPU cores (not hyperthreads)
+/// Returns 1 if detection fails
+fn detect_physical_cores() -> usize {
+    num_cpus::get_physical().max(1)
 }

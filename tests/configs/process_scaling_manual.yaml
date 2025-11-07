@@ -1,0 +1,12 @@
+duration: 5s
+concurrency: 32
+
+# Test manual process count
+processes: 4
+
+target: "s3://test-bucket/"
+
+workload:
+  - weight: 100
+    op: get
+    path: "data/*.dat"

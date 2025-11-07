@@ -5,10 +5,10 @@
 
 use anyhow::{anyhow, Context, Result};
 use rand_distr::{Distribution, LogNormal, Uniform};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Specification for object sizes - either fixed or distributed
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SizeSpec {
     /// Fixed size in bytes (backward compatible with old object_size field)
@@ -29,7 +29,7 @@ impl SizeSpec {
 }
 
 /// Distribution configuration for object sizes
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SizeDistribution {
     /// Type of distribution
     #[serde(rename = "type")]
@@ -49,7 +49,7 @@ pub struct SizeDistribution {
 }
 
 /// Type of size distribution
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DistributionType {
     /// Uniform distribution (evenly distributed between min and max)
@@ -60,7 +60,7 @@ pub enum DistributionType {
 }
 
 /// Parameters specific to distribution types
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DistributionParams {
     /// Mean size for lognormal distribution (in bytes)
     #[serde(default)]

@@ -2,6 +2,125 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.4] - 2025-11-07
+
+### 📊 Op-Log Sorting, Validation, and Multi-Process Merge
+
+**Enhancement release**: Adds comprehensive operation log management capabilities including offline sorting, chronological order validation, and k-way merge for multi-worker execution. Leverages `s3dlio-oplog` shared types for consistency across the ecosystem.
+
+#### New Features
+
+- **Sort Command** - Offline sorting of op-log files by start timestamp
+  ```bash
+  # Sort single file (creates .sorted.tsv.zst)
+  sai3-bench sort --files /tmp/ops.tsv.zst
+  
+  # Sort multiple worker files
+  sai3-bench sort --files worker-0.tsv.zst worker-1.tsv.zst worker-2.tsv.zst
+  
+  # Sort in-place (overwrite original)
+  sai3-bench sort --files /tmp/ops.tsv.zst --in-place
+  
+  # Custom window size for large files
+  sai3-bench sort --files huge.tsv.zst --window-size 100000
+  ```
+  - **Streaming window algorithm**: Constant memory usage (~2MB for 10K window)
+  - **Configurable window size**: Default 10,000 entries (tune for file size)
+  - **Handles huge files**: Successfully tested with 200K+ entries
+  - **Zstd compression**: Auto-detects `.zst` and compresses output
+  - **Multiple files**: Sort many files in one command
+
+- **Replay Dry-Run** - Validate op-log before execution
+  ```bash
+  sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
+  ```
+  - **Sort order check**: Validates chronological ordering (first 10,000 lines)
+  - **File validation**: Checks existence, readability, and parseability
+  - **Operation count**: Reports total operations to replay
+  - **Target URI validation**: Verifies target backend syntax if provided
+  - **Remap config validation**: Parses and validates YAML remap rules
+  - **Example output**:
+    ```
+    Dry-run mode: Validating replay op-log file...
+      File: /tmp/ops.tsv.zst
+      Checking sort order (first 10,000 lines)...
+      ✓ Op-log is sorted (10000 lines checked)
+      Total operations: 213315
+    ✓ Dry-run validation complete
+    ```
+
+- **Replay Order Validation** - Runtime warnings for out-of-order entries
+  - **Automatic detection**: Monitors timestamp progression during replay
+  - **Tracing warnings**: Uses `tracing::warn!()` for observability
+  - **Non-blocking**: Operations execute immediately even if out of order
+  - **Detailed logging**: Shows current vs. previous timestamp and delta
+  - **Example warning**:
+    ```
+    WARN Out-of-order op-log entry detected during replay: 
+         operation #1523 has start=2025-11-07T07:14:41.275Z, 
+         previous=2025-11-07T07:14:41.280Z (went back by 5ms)
+    ```
+
+- **Multi-Worker Op-Log Merge** - K-way merge for multi-process execution
+  - **Worker-specific paths**: Generates `<base>-worker-0.tsv.zst`, `<base>-worker-1.tsv.zst`, etc.
+  - **Streaming merge**: Min-heap algorithm for memory efficiency
+  - **Chronological ordering**: Merges by start timestamp (true chronological order)
+  - **Cleanup option**: Optionally deletes worker files after merge
+  - **Used internally**: MultiProcess and MultiRuntime modes automatically merge
+  - **Zstd compression**: All worker and merged files are compressed
+
+#### Implementation Details
+
+- **Code reuse**: Now uses `s3dlio_oplog::OpLogEntry` instead of duplicate definition
+  - Consistent types across s3dlio ecosystem
+  - Eliminates maintenance burden of parallel implementations
+  - Uses `chrono::DateTime<Utc>` for timestamp comparison
+  - Leverages `OpLogStreamReader` for streaming
+
+- **New module**: `src/oplog_merge.rs`
+  - `check_oplog_sorted()` - Validates chronological order
+  - `sort_oplog_file()` - Streaming window-based sort
+  - `merge_worker_oplogs()` - K-way merge for multi-worker files
+  - `worker_oplog_path()` - Generates worker-specific paths
+
+- **Performance characteristics**:
+  - **Sort command**: ~1.2μs per entry (tested with 213K entries)
+  - **Window size**: Default 10K entries = ~2MB memory
+  - **Memory scaling**: Constant regardless of file size
+  - **Merge efficiency**: Streams all files simultaneously (no full load)
+
+#### Configuration
+
+**Sort window size** (default: 10000):
+```bash
+sai3-bench sort --files large.tsv.zst --window-size 50000
+```
+
+**Multi-process merge** (automatic):
+```yaml
+execution_mode: MultiProcess
+workers: 4  # Creates 4 worker files, merges at end
+```
+
+#### Use Cases
+
+1. **Offline analysis**: Sort unsorted op-logs from production runs
+2. **Replay preparation**: Validate and sort before timing-faithful replay
+3. **Multi-worker testing**: Merge separate worker logs into unified timeline
+4. **Debugging**: Check chronological order to identify timing issues
+5. **Performance analysis**: Ensure timestamps are ordered for accurate metrics
+
+#### Breaking Changes
+
+None - All new opt-in functionality.
+
+#### Dependencies
+
+- Requires `s3dlio >= 0.9.16` for optional op-log sorting support
+- Uses `s3dlio-oplog` crate for shared types
+
+---
+
 ## [0.7.2] - 2025-11-04
 
 ### 📊 Prepare Phase Metrics & Live Performance Stats

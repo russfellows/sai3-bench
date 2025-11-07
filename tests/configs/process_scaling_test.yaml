@@ -1,0 +1,12 @@
+duration: 5s
+concurrency: 32
+
+# Test auto-scaling to physical cores
+processes: auto
+
+target: "file:///tmp/sai3-test"
+
+workload:
+  - weight: 100
+    op: get
+    path: "data/*.dat"

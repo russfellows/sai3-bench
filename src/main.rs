@@ -15,6 +15,7 @@ use sai3_bench::config::Config;
 use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::workload;
 use serde_yaml;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Builder as RtBuilder;
@@ -100,6 +101,7 @@ enum Commands {
     ///   sai3-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
     ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
     ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
     Replay {
         /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
         #[arg(long)]
@@ -120,6 +122,49 @@ enum Commands {
         /// Continue on errors instead of stopping
         #[arg(long)]
         continue_on_error: bool,
+        
+        /// Parse and validate op-log, check sort order, then exit (no execution)
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Internal: Child worker process (multi-process mode)
+    /// 
+    /// This command is used internally by multi-process mode to spawn child worker processes.
+    /// It reads config from stdin (JSON), runs the workload, and outputs Summary to stdout (JSON).
+    /// 
+    /// DO NOT INVOKE MANUALLY - this is for internal use only.
+    #[command(hide = true)]
+    InternalWorker {
+        /// Worker ID (0-based index)
+        #[arg(long)]
+        worker_id: usize,
+        
+        /// Optional op-log file path for this worker
+        #[arg(long)]
+        op_log: Option<std::path::PathBuf>,
+    },
+    /// Sort op-log file(s) by start timestamp (offline operation)
+    /// 
+    /// Sorts one or more op-log files in chronological order by start timestamp.
+    /// Creates new sorted files with ".sorted" suffix before extension.
+    /// Original files are not modified.
+    /// 
+    /// Examples:
+    ///   sai3-bench sort --files /tmp/ops.tsv.zst
+    ///   sai3-bench sort --files worker0.tsv.zst worker1.tsv.zst worker2.tsv.zst
+    ///   sai3-bench sort --files /tmp/*.tsv.zst --in-place
+    Sort {
+        /// Op-log file(s) to sort (supports multiple files)
+        #[arg(long, required = true, num_args = 1..)]
+        files: Vec<std::path::PathBuf>,
+        
+        /// Sort in-place (overwrite original files instead of creating .sorted versions)
+        #[arg(long)]
+        in_place: bool,
+        
+        /// Window size for streaming sort (default: 10000 lines)
+        #[arg(long, default_value_t = 10000)]
+        window_size: usize,
     },
     /// Storage utility operations (for quick testing and validation)
     /// 
@@ -242,10 +287,51 @@ fn main() -> Result<()> {
     // Execute command
     match cli.command {
         Commands::Run { config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
-            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
+            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref(), cli.op_log.as_deref())?
         }
-        Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
-            replay_cmd(op_log, target, remap, speed, continue_on_error)?
+        Commands::Replay { op_log, target, remap, speed, continue_on_error, dry_run } => {
+            replay_cmd(op_log, target, remap, speed, continue_on_error, dry_run)?
+        }
+        Commands::InternalWorker { worker_id, op_log } => {
+            // This is a child worker process - read config from stdin, run workload, output to stdout
+            use std::io::{self, Read, Write};
+            
+            // Read config JSON from stdin
+            let mut config_json = String::new();
+            io::stdin().read_to_string(&mut config_json)
+                .context("Failed to read config from stdin")?;
+            let config: Config = serde_json::from_str(&config_json)
+                .context("Failed to parse config JSON from stdin")?;
+            
+            // Initialize worker-specific op-logger if provided
+            if let Some(ref op_log_path) = op_log {
+                workload::init_operation_logger(op_log_path)
+                    .with_context(|| format!("Worker {} failed to initialize op-logger at {}", worker_id, op_log_path.display()))?;
+            }
+            
+            // Run the workload
+            let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+            let summary = rt.block_on(async {
+                workload::run(&config, None).await
+            })?;
+            
+            // Finalize op-logger if enabled
+            if op_log.is_some() {
+                workload::finalize_operation_logger()
+                    .with_context(|| format!("Worker {} failed to finalize op-logger", worker_id))?;
+            }
+            
+            // Convert to IPC format and output Summary as JSON to stdout
+            let ipc_summary = workload::IpcSummary::from(&summary);
+            serde_json::to_writer(io::stdout(), &ipc_summary)
+                .context("Failed to write summary JSON to stdout")?;
+            io::stdout().flush()?;
+            
+            // Exit immediately (don't fall through to global logger finalization)
+            return Ok(());
+        }
+        Commands::Sort { files, in_place, window_size } => {
+            sort_oplog_files(&files, in_place, window_size)?
         }
         Commands::Util { command } => {
             match command {
@@ -291,6 +377,66 @@ fn validate_uri(uri: &str) -> Result<String> {
 // -----------------------------------------------------------------------------
 // Commands implementations - Multi-backend support
 // -----------------------------------------------------------------------------
+
+fn sort_oplog_files(files: &[std::path::PathBuf], in_place: bool, window_size: usize) -> Result<()> {
+    use sai3_bench::oplog_merge;
+    
+    if files.is_empty() {
+        bail!("No files provided to sort");
+    }
+    
+    info!("Sorting {} op-log file(s) with window_size={}", files.len(), window_size);
+    
+    for file_path in files {
+        if !file_path.exists() {
+            bail!("File does not exist: {}", file_path.display());
+        }
+        
+        // Determine output path
+        let output_path = if in_place {
+            // Create temp file, then rename
+            let temp_path = file_path.with_extension("tmp.zst");
+            oplog_merge::sort_oplog_file(file_path, &temp_path, window_size)
+                .with_context(|| format!("Failed to sort file: {}", file_path.display()))?;
+            
+            // Replace original with sorted
+            std::fs::rename(&temp_path, file_path)
+                .with_context(|| format!("Failed to rename sorted file: {} -> {}", 
+                                        temp_path.display(), file_path.display()))?;
+            
+            info!("✓ Sorted in-place: {}", file_path.display());
+            continue;
+        } else {
+            // Create .sorted version
+            let file_stem = file_path.file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow!("Invalid filename: {}", file_path.display()))?;
+            
+            // Handle .zst extension
+            let sorted_name = if file_path.extension().and_then(|e| e.to_str()) == Some("zst") {
+                // Remove .zst, add .sorted, add .zst back
+                let base_stem = std::path::Path::new(file_stem)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(file_stem);
+                format!("{}.sorted.tsv.zst", base_stem)
+            } else {
+                format!("{}.sorted.zst", file_stem)
+            };
+            
+            file_path.with_file_name(sorted_name)
+        };
+        
+        oplog_merge::sort_oplog_file(file_path, &output_path, window_size)
+            .with_context(|| format!("Failed to sort file: {}", file_path.display()))?;
+        
+        info!("✓ Sorted: {} -> {}", file_path.display(), output_path.display());
+    }
+    
+    info!("Successfully sorted {} file(s)", files.len());
+    Ok(())
+}
+
 fn health_cmd(uri: &str) -> Result<()> {
     let validated_uri = validate_uri(uri)?;
     
@@ -710,6 +856,24 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     println!("┌─ Test Configuration ─────────────────────────────────────────────────┐");
     println!("│ Duration:     {:?}", config.duration);
     println!("│ Concurrency:  {} threads", config.concurrency);
+    
+    // Multi-process scaling (v0.7.3+)
+    if let Some(ref processes) = config.processes {
+        let resolved = processes.resolve();
+        match processes {
+            sai3_bench::config::ProcessScaling::Single => {
+                println!("│ Processes:    1 (single process mode)");
+            },
+            sai3_bench::config::ProcessScaling::Auto => {
+                println!("│ Processes:    {} (auto-detected physical cores)", resolved);
+            },
+            sai3_bench::config::ProcessScaling::Manual(n) => {
+                println!("│ Processes:    {} (manual configuration)", n);
+            },
+        }
+        println!("│ Total Workers: {} (processes × threads)", resolved * config.concurrency);
+    }
+    
     if let Some(ref target) = config.target {
         let backend = sai3_bench::workload::BackendType::from_uri(target);
         println!("│ Target URI:   {}", target);
@@ -844,10 +1008,19 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
             // Display fill pattern
             println!("│   Fill Pattern:     {:?}", spec.fill);
             if matches!(spec.fill, sai3_bench::config::FillPattern::Random) {
-                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, 
-                    if spec.dedup_factor == 1 { "all unique" } else { &format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) });
-                println!("│   Compress Factor:  {} ({})", spec.compress_factor,
-                    if spec.compress_factor == 1 { "uncompressible" } else { &format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) });
+                let dedup_desc = if spec.dedup_factor == 1 { 
+                    "all unique".to_string() 
+                } else { 
+                    format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) 
+                };
+                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, dedup_desc);
+                
+                let compress_desc = if spec.compress_factor == 1 { 
+                    "uncompressible".to_string() 
+                } else { 
+                    format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) 
+                };
+                println!("│   Compress Factor:  {} ({})", spec.compress_factor, compress_desc);
             }
             
             if idx < prepare.ensure_objects.len() - 1 {
@@ -931,7 +1104,16 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bool, skip_prepare: bool, no_cleanup: bool, tsv_name: Option<&str>) -> Result<()> {
+fn run_workload(
+    config_path: &str, 
+    dry_run: bool, 
+    prepare_only: bool, 
+    verify: bool, 
+    skip_prepare: bool, 
+    no_cleanup: bool, 
+    tsv_name: Option<&str>,
+    op_log_path: Option<&Path>,
+) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
@@ -1163,8 +1345,69 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
     println!("{}", workload_msg);
     results_dir.write_console(workload_msg)?;
     
-    // Run the workload
-    let summary = rt.block_on(workload::run(&config, tree_manifest))?;
+    // Determine process scaling configuration
+    let num_processes = config.processes
+        .as_ref()
+        .map(|p| p.resolve())
+        .unwrap_or(1); // Default to single process
+    let processing_mode = config.processing_mode;
+    
+    // Handle op_log for multi-process execution
+    // Only MultiProcess mode supports per-worker op-logs (separate processes).
+    // MultiRuntime mode uses the global op-logger since all workers share one process.
+    let needs_oplog_merge = num_processes > 1 
+        && op_log_path.is_some() 
+        && processing_mode == sai3_bench::config::ProcessingMode::MultiProcess;
+    
+    if needs_oplog_merge {
+        info!("MultiProcess mode with op_log enabled - workers will write separate files");
+        // Finalize the global op_logger before spawning worker processes
+        workload::finalize_operation_logger()
+            .context("Failed to finalize global operation logger")?;
+    }
+    
+    // Run the workload using the configured processing mode
+    let summary = if num_processes > 1 {
+        // Multi-worker execution
+        info!("Using {} mode with {} workers", 
+              match processing_mode {
+                  sai3_bench::config::ProcessingMode::MultiProcess => "MultiProcess",
+                  sai3_bench::config::ProcessingMode::MultiRuntime => "MultiRuntime",
+              },
+              num_processes);
+        
+        match processing_mode {
+            sai3_bench::config::ProcessingMode::MultiProcess => {
+                // Multi-process mode: spawn N child processes
+                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest, op_log_path))?
+            }
+            sai3_bench::config::ProcessingMode::MultiRuntime => {
+                // Multi-runtime mode: spawn N tokio runtimes in threads
+                // Note: op_log not passed - all workers use global logger in single process
+                sai3_bench::multiruntime::run_multiruntime(&config, num_processes, tree_manifest)?
+            }
+        }
+    } else {
+        // Single worker - use traditional execution
+        info!("Single worker mode (processes={})", num_processes);
+        rt.block_on(workload::run(&config, tree_manifest))?
+    };
+    
+    // Merge worker op-log files if multi-worker mode was used with op_log enabled
+    if needs_oplog_merge {
+        if let Some(op_log_base) = op_log_path {
+            info!("Merging worker op-log files...");
+            let merged_path = sai3_bench::oplog_merge::merge_worker_oplogs(
+                op_log_base,
+                num_processes,
+                false, // Delete worker files after merge
+            )?;
+            
+            let merge_msg = format!("\nOp-log merged: {}", merged_path.display());
+            println!("{}", merge_msg);
+            info!("Op-log merge complete: {}", merged_path.display());
+        }
+    }
     
     // Print results
     let results_header = "\n=== Results ===";
@@ -1350,10 +1593,76 @@ fn replay_cmd(
     remap: Option<std::path::PathBuf>,
     speed: f64,
     continue_on_error: bool,
+    dry_run: bool,
 ) -> Result<()> {
     use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
     use sai3_bench::remap::RemapConfig;
+    use sai3_bench::oplog_merge;
     
+    // Dry-run mode: validate op-log file and check sort order
+    if dry_run {
+        println!("Dry-run mode: Validating replay op-log file...");
+        println!("  File: {}", op_log.display());
+        
+        if !op_log.exists() {
+            bail!("Op-log file does not exist: {}", op_log.display());
+        }
+        
+        println!("  Checking sort order (first 10,000 lines)...");
+        match oplog_merge::check_oplog_sorted(&op_log, Some(10000)) {
+            Ok((is_sorted, lines_checked, first_ooo_line)) => {
+                if is_sorted {
+                    println!("  ✓ Op-log is sorted ({} lines checked)", lines_checked);
+                } else {
+                    println!("  ⚠️  WARNING: Op-log is NOT sorted!");
+                    println!("      First out-of-order line: {}", first_ooo_line.unwrap_or(0));
+                    println!("      Replay will issue operations out of chronological order.");
+                    println!("      Use 'sai3-bench sort --files {}' to sort the file.", op_log.display());
+                }
+            }
+            Err(e) => {
+                println!("  ⚠️  WARNING: Failed to check sort order: {}", e);
+            }
+        }
+        
+        // Count total operations
+        match s3dlio_oplog::OpLogStreamReader::from_file(&op_log) {
+            Ok(mut reader) => {
+                let mut count = 0;
+                while let Some(Ok(_)) = reader.next() {
+                    count += 1;
+                }
+                println!("  Total operations: {}", count);
+            }
+            Err(e) => {
+                println!("  ⚠️  WARNING: Failed to count operations: {}", e);
+            }
+        }
+        
+        if let Some(ref uri) = target {
+            println!("  Target URI: {}", uri);
+            validate_uri(uri)?;
+            println!("  ✓ Target URI is valid");
+        }
+        
+        if let Some(ref remap_path) = remap {
+            println!("  Remap config: {}", remap_path.display());
+            if !remap_path.exists() {
+                bail!("Remap config file does not exist: {}", remap_path.display());
+            }
+            // Try to parse it
+            let file = std::fs::File::open(remap_path)
+                .with_context(|| format!("Failed to open remap config: {}", remap_path.display()))?;
+            let config: RemapConfig = serde_yaml::from_reader(file)
+                .with_context(|| format!("Failed to parse remap config: {}", remap_path.display()))?;
+            println!("  ✓ Remap config is valid ({} rules)", config.rules.len());
+        }
+        
+        println!("\n✓ Dry-run validation complete");
+        return Ok(());
+    }
+    
+    // Normal execution mode
     // Validate target URI if provided
     if let Some(ref uri) = target {
         validate_uri(uri)?;
