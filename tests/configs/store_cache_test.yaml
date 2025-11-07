@@ -1,0 +1,12 @@
+# Test configuration for ObjectStore caching verification
+# Simple file:// workload to verify store reuse
+
+target: "file:///tmp/sai3-store-cache-test/"
+duration: "2s"
+concurrency: 2
+
+workload:
+  - op: put
+    path: "test-objects/"
+    object_size: 1024
+    weight: 100
