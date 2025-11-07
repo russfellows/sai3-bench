@@ -710,6 +710,24 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     println!("┌─ Test Configuration ─────────────────────────────────────────────────┐");
     println!("│ Duration:     {:?}", config.duration);
     println!("│ Concurrency:  {} threads", config.concurrency);
+    
+    // Multi-process scaling (v0.7.3+)
+    if let Some(ref processes) = config.processes {
+        let resolved = processes.resolve();
+        match processes {
+            sai3_bench::config::ProcessScaling::Single => {
+                println!("│ Processes:    1 (single process mode)");
+            },
+            sai3_bench::config::ProcessScaling::Auto => {
+                println!("│ Processes:    {} (auto-detected physical cores)", resolved);
+            },
+            sai3_bench::config::ProcessScaling::Manual(n) => {
+                println!("│ Processes:    {} (manual configuration)", n);
+            },
+        }
+        println!("│ Total Workers: {} (processes × threads)", resolved * config.concurrency);
+    }
+    
     if let Some(ref target) = config.target {
         let backend = sai3_bench::workload::BackendType::from_uri(target);
         println!("│ Target URI:   {}", target);
