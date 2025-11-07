@@ -508,17 +508,72 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 }
 
 // -----------------------------------------------------------------------------
+// ObjectStore caching for connection pool reuse (v0.7.3+)
+// -----------------------------------------------------------------------------
+
+type StoreCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>>;
+
+/// Get or create an ObjectStore from cache
+/// Cache key is based on base URI + config settings to ensure correct store for each combination
+fn get_cached_store(
+    uri: &str,
+    cache: &StoreCache,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
+    // Extract base URI (protocol + bucket/container)
+    let base_uri = if let Some(idx) = uri.find("://") {
+        let after_proto = &uri[idx+3..];
+        if let Some(slash_idx) = after_proto.find('/') {
+            &uri[..idx+3+slash_idx]
+        } else {
+            uri
+        }
+    } else {
+        uri
+    };
+    
+    // Create cache key including config settings
+    let cache_key = format!("{}_range:{:?}_cache:{:?}", 
+        base_uri,
+        range_config.map(|c| c.enabled),
+        page_cache_mode
+    );
+    
+    // Check cache first
+    {
+        let cache_lock = cache.lock().unwrap();
+        if let Some(store) = cache_lock.get(&cache_key) {
+            return Ok(Arc::clone(store));
+        }
+    }
+    
+    // Not in cache - create new store
+    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    let arc_store = Arc::new(store);
+    
+    // Add to cache
+    {
+        let mut cache_lock = cache.lock().unwrap();
+        cache_lock.insert(cache_key, Arc::clone(&arc_store));
+    }
+    
+    Ok(arc_store)
+}
+
+// -----------------------------------------------------------------------------
 // Internal config-aware variants (used by workload::run with YAML configs)
 // -----------------------------------------------------------------------------
 
-/// Internal GET operation with config support (for performance-critical workloads)
-async fn get_object_with_config(
+/// Internal GET operation with cached store (for performance-critical workloads)
+async fn get_object_cached(
     uri: &str,
+    cache: &StoreCache,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Vec<u8>> {
-    debug!("GET operation (with config) starting for URI: {}", uri);
-    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    debug!("GET operation (cached store) starting for URI: {}", uri);
+    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
@@ -527,15 +582,16 @@ async fn get_object_with_config(
     Ok(bytes.to_vec())
 }
 
-/// Internal PUT operation with config support (for performance-critical workloads)
-async fn put_object_with_config(
+/// Internal PUT operation with cached store (for performance-critical workloads)
+async fn put_object_cached(
     uri: &str,
     data: &[u8],
+    cache: &StoreCache,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("PUT operation (with config) starting for URI: {}, {} bytes", uri, data.len());
-    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    debug!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
+    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     store.put(uri, data).await
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
@@ -544,14 +600,15 @@ async fn put_object_with_config(
     Ok(())
 }
 
-/// Internal DELETE operation with config support (for performance-critical workloads)
-async fn delete_object_with_config(
+/// Internal DELETE operation with cached store (for performance-critical workloads)
+async fn delete_object_cached(
     uri: &str,
+    cache: &StoreCache,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("DELETE operation (with config) starting for URI: {}", uri);
-    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    debug!("DELETE operation (cached store) starting for URI: {}", uri);
+    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
@@ -559,6 +616,45 @@ async fn delete_object_with_config(
     debug!("DELETE operation completed successfully for URI: {}", uri);
     Ok(())
 }
+
+/// Internal LIST operation with cached store (for performance-critical workloads)
+async fn list_objects_cached(
+    uri: &str,
+    cache: &StoreCache,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<Vec<String>> {
+    debug!("LIST operation (cached store) starting for URI: {}", uri);
+    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    
+    let keys = store.list(uri, true).await
+        .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
+    
+    debug!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
+    Ok(keys)
+}
+
+/// Internal STAT operation with cached store (for performance-critical workloads)
+async fn stat_object_cached(
+    uri: &str,
+    cache: &StoreCache,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<u64> {
+    debug!("STAT operation (cached store) starting for URI: {}", uri);
+    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    
+    let metadata = store.stat(uri).await
+        .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
+    
+    let size = metadata.size;
+    debug!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
+    Ok(size)
+}
+
+// -----------------------------------------------------------------------------
+// Internal config-aware variants (used by workload::run with YAML configs)
+// -----------------------------------------------------------------------------
 
 /// Internal MKDIR operation with config support (for filesystem backends)
 async fn mkdir_with_config(
@@ -1089,6 +1185,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         None
     };
     
+    // Create ObjectStore pool for connection reuse (v0.7.3+)
+    // Instead of creating a new store for every operation (wasteful!),
+    // we create stores once and reuse them across all operations
+    let store_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>> = 
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
@@ -1101,6 +1203,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
         let ops_counter = live_ops.clone();  // Clone atomic counter for live stats
         let bytes_counter = live_bytes.clone();  // Clone atomic counter for live stats
+        let store_cache = store_cache.clone();  // Clone store cache for this worker
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1156,8 +1259,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let t0 = Instant::now();
-                        let bytes = get_object_with_config(
+                        let bytes = get_object_cached(
                             &full_uri,
+                            &store_cache,
                             cfg.range_engine.as_ref(),
                             cfg.page_cache_mode,
                         ).await?;
@@ -1231,9 +1335,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         );
 
                         let t0 = Instant::now();
-                        put_object_with_config(
+                        put_object_cached(
                             &full_uri,
                             &buf,
+                            &store_cache,
                             cfg.range_engine.as_ref(),
                             cfg.page_cache_mode,
                         ).await?;
@@ -1254,7 +1359,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         let uri = cfg.get_meta_uri(op);
 
                         let t0 = Instant::now();
-                        let _keys = list_objects_multi_backend(&uri).await?;
+                        let _keys = list_objects_cached(&uri, &store_cache, cfg.range_engine.as_ref(), cfg.page_cache_mode).await?;
                         let duration = t0.elapsed();
 
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
@@ -1294,7 +1399,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let t0 = Instant::now();
-                        let _size = stat_object_multi_backend(&full_uri).await?;
+                        let _size = stat_object_cached(&full_uri, &store_cache, cfg.range_engine.as_ref(), cfg.page_cache_mode).await?;
                         let duration = t0.elapsed();
 
                         ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
@@ -1334,8 +1439,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let t0 = Instant::now();
-                        delete_object_with_config(
+                        delete_object_cached(
                             &full_uri,
+                            &store_cache,
                             cfg.range_engine.as_ref(),
                             cfg.page_cache_mode,
                         ).await?;
