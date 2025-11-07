@@ -45,6 +45,12 @@ pub struct Config {
     /// Default: None (unlimited throughput - current behavior)
     #[serde(default)]
     pub io_rate: Option<IoRateConfig>,
+    
+    /// Optional multi-process scaling configuration (v0.7.3+)
+    /// Controls how many processes to spawn per endpoint for parallel execution
+    /// Default: None (single process - current behavior)
+    #[serde(default)]
+    pub processes: Option<ProcessScaling>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -956,4 +962,109 @@ where
     }
 
     deserializer.deserialize_any(IopsVisitor)
+}
+
+/// Multi-process scaling configuration (v0.7.3+)
+/// Controls how many processes to spawn per endpoint for parallel execution
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessScaling {
+    /// Single process mode (default, current behavior)
+    Single,
+    
+    /// Auto-scale to physical CPU cores (not hyperthreads)
+    /// Best for cloud storage (S3/Azure/GCS) with single endpoint
+    Auto,
+    
+    /// Explicit process count
+    /// Useful for manual tuning or on-premises multi-endpoint setups
+    Manual(usize),
+}
+
+impl Default for ProcessScaling {
+    fn default() -> Self {
+        ProcessScaling::Single
+    }
+}
+
+/// Serde deserialization for ProcessScaling
+/// Accepts: "auto", "single", 1, or explicit integer
+impl<'de> Deserialize<'de> for ProcessScaling {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ProcessScalingVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ProcessScalingVisitor {
+            type Value = ProcessScaling;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("\"auto\", \"single\", 1, or a positive integer")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value == 1 {
+                    Ok(ProcessScaling::Single)
+                } else if value > 1 {
+                    Ok(ProcessScaling::Manual(value as usize))
+                } else {
+                    Err(E::custom("processes must be >= 1"))
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value == 1 {
+                    Ok(ProcessScaling::Single)
+                } else if value > 1 {
+                    Ok(ProcessScaling::Manual(value as usize))
+                } else {
+                    Err(E::custom("processes must be >= 1"))
+                }
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "auto" | "Auto" | "AUTO" => Ok(ProcessScaling::Auto),
+                    "single" | "Single" | "SINGLE" | "1" => Ok(ProcessScaling::Single),
+                    _ => {
+                        match value.parse::<usize>() {
+                            Ok(n) if n == 1 => Ok(ProcessScaling::Single),
+                            Ok(n) if n > 1 => Ok(ProcessScaling::Manual(n)),
+                            Ok(_) => Err(E::custom("processes must be >= 1")),
+                            Err(_) => Err(E::custom(format!("invalid process scaling value: {}", value))),
+                        }
+                    }
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ProcessScalingVisitor)
+    }
+}
+
+impl ProcessScaling {
+    /// Resolve the actual number of processes to spawn
+    /// For Auto mode, detects physical CPU cores
+    pub fn resolve(&self) -> usize {
+        match self {
+            ProcessScaling::Single => 1,
+            ProcessScaling::Auto => detect_physical_cores(),
+            ProcessScaling::Manual(n) => *n,
+        }
+    }
+}
+
+/// Detect number of physical CPU cores (not hyperthreads)
+/// Returns 1 if detection fails
+fn detect_physical_cores() -> usize {
+    num_cpus::get_physical().max(1)
 }
