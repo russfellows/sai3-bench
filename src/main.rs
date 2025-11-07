@@ -844,10 +844,19 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
             // Display fill pattern
             println!("│   Fill Pattern:     {:?}", spec.fill);
             if matches!(spec.fill, sai3_bench::config::FillPattern::Random) {
-                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, 
-                    if spec.dedup_factor == 1 { "all unique" } else { &format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) });
-                println!("│   Compress Factor:  {} ({})", spec.compress_factor,
-                    if spec.compress_factor == 1 { "uncompressible" } else { &format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) });
+                let dedup_desc = if spec.dedup_factor == 1 { 
+                    "all unique".to_string() 
+                } else { 
+                    format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) 
+                };
+                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, dedup_desc);
+                
+                let compress_desc = if spec.compress_factor == 1 { 
+                    "uncompressible".to_string() 
+                } else { 
+                    format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) 
+                };
+                println!("│   Compress Factor:  {} ({})", spec.compress_factor, compress_desc);
             }
             
             if idx < prepare.ensure_objects.len() - 1 {

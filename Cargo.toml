@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 build   = "build.rs"
 
@@ -18,12 +18,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
+num_cpus = "1.16"
 
-# s3dlio (version 0.9.12 - GCS factory fixes)
+# s3dlio (version 0.9.15 - S3 URI endpoint parsing)
 # Use git tag for standalone builds (no local s3dlio directory required)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.12" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.12" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.15" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.15" }
 
 # gRPC
 tonic = { version = "0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
