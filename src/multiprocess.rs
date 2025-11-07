@@ -20,6 +20,7 @@ use crate::directory_tree::TreeManifest;
 pub async fn run_multiprocess(
     cfg: &Config,
     tree_manifest: Option<TreeManifest>,
+    op_log_base_path: Option<&std::path::Path>,
 ) -> Result<Summary> {
     let process_count = cfg.processes
         .as_ref()
@@ -52,16 +53,32 @@ pub async fn run_multiprocess(
         let child_config_json = serde_json::to_string(&child_cfg)
             .context("Failed to serialize child config")?;
         
-        // Spawn child process with pipe for results
+        // Build command for child process
         let mut cmd = Command::new(std::env::current_exe()?);
-        cmd.arg("__internal_worker")
-            .arg(&child_config_json)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+        cmd.arg("internal-worker")
+            .arg("--worker-id")
+            .arg(proc_id.to_string());
+        
+        // Add op-log argument if enabled
+        if let Some(base_path) = op_log_base_path {
+            let worker_op_log = crate::oplog_merge::worker_oplog_path(base_path, proc_id);
+            cmd.arg("--op-log").arg(worker_op_log);
+        }
+        
+        cmd.stdin(Stdio::piped())   // Config JSON goes here
+            .stdout(Stdio::piped())  // Summary JSON comes back
             .stderr(Stdio::inherit()); // Child logs go to parent stderr
         
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .with_context(|| format!("Failed to spawn child process {}", proc_id))?;
+        
+        // Write config JSON to child's stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin.write_all(child_config_json.as_bytes())
+                .context("Failed to write config to child stdin")?;
+            stdin.flush()?;
+        }
         
         children.push((proc_id, child));
     }

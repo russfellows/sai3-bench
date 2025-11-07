@@ -1,0 +1,28 @@
+# Test configuration for single worker mode (baseline)
+# Uses file:// backend for local testing
+
+target: "file:///tmp/sai3-single-test/"
+duration: "5s"
+concurrency: 8
+
+# Single worker (traditional mode)
+processes: single
+
+# Prepare some initial objects for GET operations
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-single-test/data/"
+      count: 100
+      min_size: 4096
+      max_size: 4096
+      fill: zero
+
+workload:
+  - op: put
+    path: "data/"
+    object_size: 4096
+    weight: 50
+  
+  - op: get
+    path: "data/*.dat"
+    weight: 50

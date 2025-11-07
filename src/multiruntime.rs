@@ -17,6 +17,11 @@ use tokio::runtime::Runtime;
 /// Each runtime executes the workload with concurrency/N threads.
 /// Results are collected via native Rust channels (zero-copy, no serialization).
 /// 
+/// **Note on op_log**: Per-worker op-logs are not supported in MultiRuntime mode
+/// because all workers share the same process and s3dlio uses a global logger.
+/// The global op_logger initialized by main.rs will capture all operations.
+/// Per-worker op-logs only work with MultiProcess mode (separate processes).
+/// 
 /// Benefits:
 /// - No IPC overhead (in-process communication)
 /// - No serialization (direct Summary passing)
@@ -27,6 +32,7 @@ use tokio::runtime::Runtime;
 /// - Less isolation (shared address space)
 /// - No fork() benefits for initialization
 /// - Potential GIL-like contention on shared resources
+/// - Single op-log for all workers (can't split by worker)
 pub fn run_multiruntime(
     cfg: &Config,
     num_workers: usize,
@@ -329,6 +335,7 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::OpHists;
     use hdrhistogram::Histogram;
     
     #[test]
@@ -347,9 +354,9 @@ mod tests {
             get_bins: Default::default(),
             put_bins: Default::default(),
             meta_bins: Default::default(),
-            get_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
-            put_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
-            meta_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
+            get_hists: OpHists::new(),
+            put_hists: OpHists::new(),
+            meta_hists: OpHists::new(),
         };
         
         let mut sum2 = Summary {
@@ -365,14 +372,20 @@ mod tests {
             get_bins: Default::default(),
             put_bins: Default::default(),
             meta_bins: Default::default(),
-            get_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
-            put_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
-            meta_hists: vec![Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()],
+            get_hists: OpHists::new(),
+            put_hists: OpHists::new(),
+            meta_hists: OpHists::new(),
         };
         
-        // Add some data to histograms
-        sum1.get_hists[0].record(100).unwrap();
-        sum2.get_hists[0].record(200).unwrap();
+        // Add some data to histograms (bucket 0)
+        {
+            let mut hist = sum1.get_hists.buckets[0].lock().unwrap();
+            hist.record(100).unwrap();
+        }
+        {
+            let mut hist = sum2.get_hists.buckets[0].lock().unwrap();
+            hist.record(200).unwrap();
+        }
         
         let merged = merge_summaries(vec![sum1, sum2]).unwrap();
         

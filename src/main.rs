@@ -15,6 +15,7 @@ use sai3_bench::config::Config;
 use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::workload;
 use serde_yaml;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Builder as RtBuilder;
@@ -120,6 +121,22 @@ enum Commands {
         /// Continue on errors instead of stopping
         #[arg(long)]
         continue_on_error: bool,
+    },
+    /// Internal: Child worker process (multi-process mode)
+    /// 
+    /// This command is used internally by multi-process mode to spawn child worker processes.
+    /// It reads config from stdin (JSON), runs the workload, and outputs Summary to stdout (JSON).
+    /// 
+    /// DO NOT INVOKE MANUALLY - this is for internal use only.
+    #[command(hide = true)]
+    InternalWorker {
+        /// Worker ID (0-based index)
+        #[arg(long)]
+        worker_id: usize,
+        
+        /// Optional op-log file path for this worker
+        #[arg(long)]
+        op_log: Option<std::path::PathBuf>,
     },
     /// Storage utility operations (for quick testing and validation)
     /// 
@@ -242,10 +259,48 @@ fn main() -> Result<()> {
     // Execute command
     match cli.command {
         Commands::Run { config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
-            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref())?
+            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref(), cli.op_log.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error)?
+        }
+        Commands::InternalWorker { worker_id, op_log } => {
+            // This is a child worker process - read config from stdin, run workload, output to stdout
+            use std::io::{self, Read, Write};
+            
+            // Read config JSON from stdin
+            let mut config_json = String::new();
+            io::stdin().read_to_string(&mut config_json)
+                .context("Failed to read config from stdin")?;
+            let config: Config = serde_json::from_str(&config_json)
+                .context("Failed to parse config JSON from stdin")?;
+            
+            // Initialize worker-specific op-logger if provided
+            if let Some(ref op_log_path) = op_log {
+                workload::init_operation_logger(op_log_path)
+                    .with_context(|| format!("Worker {} failed to initialize op-logger at {}", worker_id, op_log_path.display()))?;
+            }
+            
+            // Run the workload
+            let rt = RtBuilder::new_multi_thread().enable_all().build()?;
+            let summary = rt.block_on(async {
+                workload::run(&config, None).await
+            })?;
+            
+            // Finalize op-logger if enabled
+            if op_log.is_some() {
+                workload::finalize_operation_logger()
+                    .with_context(|| format!("Worker {} failed to finalize op-logger", worker_id))?;
+            }
+            
+            // Convert to IPC format and output Summary as JSON to stdout
+            let ipc_summary = workload::IpcSummary::from(&summary);
+            serde_json::to_writer(io::stdout(), &ipc_summary)
+                .context("Failed to write summary JSON to stdout")?;
+            io::stdout().flush()?;
+            
+            // Exit immediately (don't fall through to global logger finalization)
+            return Ok(());
         }
         Commands::Util { command } => {
             match command {
@@ -958,7 +1013,16 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bool, skip_prepare: bool, no_cleanup: bool, tsv_name: Option<&str>) -> Result<()> {
+fn run_workload(
+    config_path: &str, 
+    dry_run: bool, 
+    prepare_only: bool, 
+    verify: bool, 
+    skip_prepare: bool, 
+    no_cleanup: bool, 
+    tsv_name: Option<&str>,
+    op_log_path: Option<&Path>,
+) -> Result<()> {
     info!("Loading workload configuration from: {}", config_path);
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
@@ -1197,6 +1261,20 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
         .unwrap_or(1); // Default to single process
     let processing_mode = config.processing_mode;
     
+    // Handle op_log for multi-process execution
+    // Only MultiProcess mode supports per-worker op-logs (separate processes).
+    // MultiRuntime mode uses the global op-logger since all workers share one process.
+    let needs_oplog_merge = num_processes > 1 
+        && op_log_path.is_some() 
+        && processing_mode == sai3_bench::config::ProcessingMode::MultiProcess;
+    
+    if needs_oplog_merge {
+        info!("MultiProcess mode with op_log enabled - workers will write separate files");
+        // Finalize the global op_logger before spawning worker processes
+        workload::finalize_operation_logger()
+            .context("Failed to finalize global operation logger")?;
+    }
+    
     // Run the workload using the configured processing mode
     let summary = if num_processes > 1 {
         // Multi-worker execution
@@ -1210,10 +1288,11 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
         match processing_mode {
             sai3_bench::config::ProcessingMode::MultiProcess => {
                 // Multi-process mode: spawn N child processes
-                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest))?
+                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest, op_log_path))?
             }
             sai3_bench::config::ProcessingMode::MultiRuntime => {
                 // Multi-runtime mode: spawn N tokio runtimes in threads
+                // Note: op_log not passed - all workers use global logger in single process
                 sai3_bench::multiruntime::run_multiruntime(&config, num_processes, tree_manifest)?
             }
         }
@@ -1222,6 +1301,22 @@ fn run_workload(config_path: &str, dry_run: bool, prepare_only: bool, verify: bo
         info!("Single worker mode (processes={})", num_processes);
         rt.block_on(workload::run(&config, tree_manifest))?
     };
+    
+    // Merge worker op-log files if multi-worker mode was used with op_log enabled
+    if needs_oplog_merge {
+        if let Some(op_log_base) = op_log_path {
+            info!("Merging worker op-log files...");
+            let merged_path = sai3_bench::oplog_merge::merge_worker_oplogs(
+                op_log_base,
+                num_processes,
+                false, // Delete worker files after merge
+            )?;
+            
+            let merge_msg = format!("\nOp-log merged: {}", merged_path.display());
+            println!("{}", merge_msg);
+            info!("Op-log merge complete: {}", merged_path.display());
+        }
+    }
     
     // Print results
     let results_header = "\n=== Results ===";

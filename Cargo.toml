@@ -24,8 +24,9 @@ num_cpus = "^1.16"
 # s3dlio (version 0.9.15 - S3 URI endpoint parsing)
 # Use git tag for standalone builds (no local s3dlio directory required)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.15" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.15" }
+# TEMPORARY: Testing op-log sorting performance
+s3dlio = { path = "../s3dlio" }
+s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
@@ -39,6 +40,7 @@ serde_yaml = "^0.9.34"
 serde_json = "1"
 rand = "0.9.2"
 humantime-serde = "^1.1.1"
+humantime = "^2.2"
 rand_distr = "^0.5.1"
 hostname = "^0.4"
 

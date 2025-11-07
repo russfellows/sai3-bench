@@ -4152,7 +4152,6 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "s3dlio"
 version = "0.9.15"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.15#fb25711ed3f015abcb8e0e4f73b02ff5bce13885"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4219,7 +4218,6 @@ dependencies = [
 [[package]]
 name = "s3dlio-oplog"
 version = "0.9.15"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.15#fb25711ed3f015abcb8e0e4f73b02ff5bce13885"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4254,6 +4252,7 @@ dependencies = [
  "futures 0.3.31",
  "hdrhistogram",
  "hostname 0.4.1",
+ "humantime",
  "humantime-serde",
  "indicatif",
  "libc",
