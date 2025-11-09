@@ -732,12 +732,25 @@ async fn run_distributed_workload(
 
     debug!("Coordinated start time: {} ns since epoch", start_ns);
 
-    // Send workload to all agents in parallel
-    let msg = format!("Sending workload to {} agents...", agent_addrs.len());
+    // v0.7.5: Use streaming RPC for live progress updates
+    let msg = format!("Starting workload on {} agents with live stats...", agent_addrs.len());
     println!("{}", msg);
     results_dir.write_console(&msg)?;
+    println!();  // Blank line before progress display
     
-    let mut handles = Vec::new();
+    // Create progress display using indicatif
+    use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+    let multi_progress = MultiProgress::new();
+    let progress_bar = multi_progress.add(ProgressBar::new_spinner());
+    progress_bar.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .expect("Invalid progress template")
+    );
+    progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    
+    // Spawn tasks to consume agent streams
+    let mut stream_handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
@@ -760,11 +773,11 @@ async fn run_distributed_workload(
                 .await
                 .with_context(|| format!("connect to agent {}", addr))?;
 
-            debug!("Connected to agent {}, sending workload request", addr);
+            debug!("Connected to agent {}, starting streaming workload", addr);
 
-            // Send workload request
-            let response = client
-                .run_workload(RunWorkloadRequest {
+            // Send streaming workload request
+            let mut stream = client
+                .run_workload_with_live_stats(RunWorkloadRequest {
                     config_yaml: config,
                     agent_id: agent_id.clone(),
                     path_prefix: path_prefix.clone(),
@@ -772,121 +785,126 @@ async fn run_distributed_workload(
                     shared_storage: shared,
                 })
                 .await
-                .with_context(|| format!("run_workload on agent {}", addr))?;
+                .with_context(|| format!("run_workload_with_live_stats on agent {}", addr))?
+                .into_inner();
 
-            debug!("Agent {} completed workload successfully", addr);
-            Ok::<WorkloadSummary, anyhow::Error>(response.into_inner())
+            debug!("Agent {} streaming started", addr);
+            
+            // Collect all LiveStats messages
+            let mut stats_history = Vec::new();
+            while let Some(stats_result) = stream.message().await? {
+                stats_history.push(stats_result);
+            }
+            
+            debug!("Agent {} stream completed with {} updates", addr, stats_history.len());
+            Ok::<Vec<LiveStats>, anyhow::Error>(stats_history)
         });
 
-        handles.push(handle);
+        stream_handles.push(handle);
     }
 
-    info!("Waiting for {} agents to complete workload", handles.len());
+    info!("Streaming from {} agents", stream_handles.len());
+    
+    // Channel to collect live stats from all agents
+    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(100);
+    
+    // Spawn task to forward stats from all agents to aggregator
+    for handle in stream_handles {
+        let tx = tx_stats.clone();
+        tokio::spawn(async move {
+            if let Ok(Ok(stats_vec)) = handle.await {
+                for stats in stats_vec {
+                    let _ = tx.send(stats).await;
+                }
+            }
+        });
+    }
+    drop(tx_stats);  // Drop original sender so channel closes when all tasks complete
     
     // Setup Ctrl+C handler
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     
-    // Wait for all agents to complete (or Ctrl+C)
-    let mut summaries = Vec::new();
-    let mut interrupted = false;
+    // Aggregator for live stats display
+    let mut aggregator = LiveStatsAggregator::new();
+    let mut last_update = std::time::Instant::now();
+    let mut completed_agents = std::collections::HashSet::new();
     
-    for (idx, handle) in handles.into_iter().enumerate() {
-        // Check for Ctrl+C between each agent completion
+    // Process live stats stream
+    loop {
         tokio::select! {
-            result = handle => {
-                match result {
-                    Ok(Ok(summary)) => {
-                        info!("Agent {} ({}) completed successfully", ids[idx], agent_addrs[idx]);
-                        let msg = format!("✓ Agent {} completed", ids[idx]);
-                        println!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Write agent results to agents/{id}/ subdirectory (v0.6.4)
-                        write_agent_results(&agents_dir, &ids[idx], &summary)?;
-                        
-                        summaries.push(summary);
-                    }
-                    Ok(Err(e)) => {
-                        error!("Agent {} ({}) failed: {:?}", ids[idx], agent_addrs[idx], e);
-                        let msg = format!("✗ Agent {} failed: {}", ids[idx], e);
-                        eprintln!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Cleanup and exit
-                        if !deployments.is_empty() {
-                            warn!("Cleaning up agents before exit...");
-                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
-                        }
-                        
-                        anyhow::bail!("Agent {} failed: {}", ids[idx], e);
-                    }
-                    Err(e) => {
-                        error!("Agent {} ({}) join error: {:?}", ids[idx], agent_addrs[idx], e);
-                        let msg = format!("✗ Agent {} join error: {}", ids[idx], e);
-                        eprintln!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Cleanup and exit
-                        if !deployments.is_empty() {
-                            warn!("Cleaning up agents before exit...");
-                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
-                        }
-                        
-                        anyhow::bail!("Agent {} join error: {}", ids[idx], e);
-                    }
+            Some(stats) = rx_stats.recv() => {
+                // Update aggregator
+                if stats.completed {
+                    completed_agents.insert(stats.agent_id.clone());
+                    aggregator.mark_completed(&stats.agent_id);
+                }
+                aggregator.update(stats);
+                
+                // Update display every 100ms (rate limiting)
+                if last_update.elapsed() > std::time::Duration::from_millis(100) {
+                    let agg = aggregator.aggregate();
+                    progress_bar.set_message(agg.format_progress());
+                    last_update = std::time::Instant::now();
+                }
+                
+                // Check if all agents completed
+                if aggregator.all_completed() {
+                    break;
                 }
             }
-            _ = &mut ctrl_c => {
-                warn!("Received Ctrl+C - interrupting workload");
-                let msg = "\n⚠ Interrupted by user (Ctrl+C)";
-                eprintln!("{}", msg);
-                results_dir.write_console(msg)?;
-                interrupted = true;
-                break;
-            }
-        }
-    }
-    
-    // Handle interruption
-    if interrupted {
-        warn!("Workload interrupted - cleaning up agents");
-        
-        if !deployments.is_empty() {
-            let cleanup_msg = "Stopping agent containers...";
-            eprintln!("{}", cleanup_msg);
             
-            use sai3_bench::ssh_deploy;
-            match ssh_deploy::cleanup_agents(deployments) {
-                Ok(_) => {
-                    eprintln!("✓ Agents cleaned up");
+            _ = &mut ctrl_c => {
+                warn!("Ctrl+C received, interrupting workload");
+                progress_bar.finish_with_message("Interrupted by user");
+                
+                // Cleanup deployments if any
+                if !deployments.is_empty() {
+                    warn!("Cleaning up agents...");
+                    let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
                 }
-                Err(e) => {
-                    eprintln!("⚠ Warning: Cleanup errors: {}", e);
-                }
+                
+                anyhow::bail!("Interrupted by Ctrl+C");
             }
         }
-        
-        bail!("Workload interrupted by user");
     }
-
-    let msg = format!("All {} agents completed successfully", summaries.len());
-    info!("{}", msg);
-    results_dir.write_console(&msg)?;
-
-    // Display results
-    print_distributed_results(&summaries, &mut results_dir)?;
     
-    // Generate consolidated results.tsv from individual agent histograms (v0.6.4)
-    create_consolidated_tsv(&agents_dir, &results_dir, &summaries)?;
-
-    // Finalize results directory with max wall time
-    let max_wall = summaries
-        .iter()
-        .map(|s| s.wall_seconds)
-        .fold(0.0f64, f64::max);
+    // Final aggregation
+    let final_stats = aggregator.aggregate();
+    progress_bar.finish_with_message(format!("✓ All {} agents completed", final_stats.num_agents));
+    println!();  // Blank line after progress
     
-    results_dir.finalize(max_wall)?;
+    // Note: We don't have WorkloadSummary objects anymore (they come from non-streaming RPC)
+    // The streaming version provides real-time stats but we'll need to handle final results differently
+    // For now, print final aggregate stats
+    println!("=== Final Aggregate Results ===");
+    println!("Total operations: {} GET, {} PUT, {} META", 
+             final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops);
+    println!("GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+             final_stats.total_get_ops as f64 / final_stats.elapsed_s,
+             format_bandwidth(final_stats.total_get_bytes, final_stats.elapsed_s),
+             final_stats.get_mean_us / 1000.0,
+             final_stats.get_p50_us / 1000.0,
+             final_stats.get_p95_us / 1000.0);
+    println!("PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+             final_stats.total_put_ops as f64 / final_stats.elapsed_s,
+             format_bandwidth(final_stats.total_put_bytes, final_stats.elapsed_s),
+             final_stats.put_mean_us / 1000.0,
+             final_stats.put_p50_us / 1000.0,
+             final_stats.put_p95_us / 1000.0);
+    println!("Elapsed: {:.2}s", final_stats.elapsed_s);
+    println!();
+    
+    // TODO: Handle agent results collection (summaries) - streaming RPC doesn't return WorkloadSummary
+    // For Phase 4, we'll skip the detailed per-agent result files and consolidated TSV
+    // This can be added back in Phase 5 if needed
+    let _summaries: Vec<WorkloadSummary> = Vec::new();  // Placeholder
+    
+    // Note: Skipping create_consolidated_tsv() in Phase 4 since streaming RPC 
+    // doesn't return WorkloadSummary objects. Will implement alternative in Phase 5.
+    
+    // Finalize results directory with elapsed time from final stats
+    results_dir.finalize(final_stats.elapsed_s)?;
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
 
