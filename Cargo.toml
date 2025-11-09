@@ -13,6 +13,7 @@ chrono = "^0.4"
 clap = { version = "^4.5", features = ["derive"] }
 dotenvy = "^0.15"
 futures = "0.3"
+tokio-stream = "0.1"  # v0.7.5: Stream trait for gRPC streaming
 hdrhistogram = { version = "^7.5", features = ["serialization"] }
 regex = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -57,6 +58,7 @@ shellexpand = "3.1"
 
 # Metadata operations (v0.7.0+)
 async-trait = "0.1"
+async-stream = "0.3"  # v0.7.5: Server streaming for live stats
 libc = "0.2"
 bytes = "1"
 
