@@ -4259,6 +4259,7 @@ dependencies = [
  "indicatif",
  "libc",
  "num_cpus",
+ "parking_lot",
  "predicates 2.1.5",
  "prost 0.13.5",
  "prost-build 0.13.5",
