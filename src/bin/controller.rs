@@ -177,7 +177,7 @@ struct AggregateStats {
 }
 
 impl AggregateStats {
-    /// Format multi-line progress display (GET on line 1, PUT on line 2)
+    /// Format multi-line progress display (GET on line 1, PUT on line 2, META on line 3 if present)
     fn format_progress(&self) -> String {
         let get_ops_s = if self.elapsed_s > 0.0 {
             self.total_get_ops as f64 / self.elapsed_s
@@ -192,21 +192,47 @@ impl AggregateStats {
             0.0
         };
         let put_bandwidth = format_bandwidth(self.total_put_bytes, self.elapsed_s);
+        
+        let meta_ops_s = if self.elapsed_s > 0.0 {
+            self.total_meta_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
 
-        format!(
-            "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
-            self.num_agents,
-            get_ops_s,
-            get_bandwidth,
-            self.get_mean_us / 1000.0,
-            self.get_p50_us / 1000.0,
-            self.get_p95_us / 1000.0,
-            put_ops_s,
-            put_bandwidth,
-            self.put_mean_us / 1000.0,
-            self.put_p50_us / 1000.0,
-            self.put_p95_us / 1000.0,
-        )
+        // Only show META line if there are META operations
+        if self.total_meta_ops > 0 {
+            format!(
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  META: {:.0} ops/s (mean: {:.1}ms)",
+                self.num_agents,
+                get_ops_s,
+                get_bandwidth,
+                self.get_mean_us / 1000.0,
+                self.get_p50_us / 1000.0,
+                self.get_p95_us / 1000.0,
+                put_ops_s,
+                put_bandwidth,
+                self.put_mean_us / 1000.0,
+                self.put_p50_us / 1000.0,
+                self.put_p95_us / 1000.0,
+                meta_ops_s,
+                self.meta_mean_us / 1000.0,
+            )
+        } else {
+            format!(
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+                self.num_agents,
+                get_ops_s,
+                get_bandwidth,
+                self.get_mean_us / 1000.0,
+                self.get_p50_us / 1000.0,
+                self.get_p95_us / 1000.0,
+                put_ops_s,
+                put_bandwidth,
+                self.put_mean_us / 1000.0,
+                self.put_p50_us / 1000.0,
+                self.put_p95_us / 1000.0,
+            )
+        }
     }
 }
 
@@ -836,6 +862,12 @@ async fn run_distributed_workload(
     let timeout_warn_secs = 5.0;
     let timeout_dead_secs = 10.0;
     
+    // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
+    let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
+    
+    // v0.7.5: Track last console.log write time (write every 1 second)
+    let mut last_console_log = std::time::Instant::now();
+    
     // Process live stats stream
     loop {
         // v0.7.5: Check for stalled agents (timeout detection)
@@ -863,12 +895,22 @@ async fn run_distributed_workload(
                 // v0.7.5: Update last seen timestamp for resilience
                 agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
                 
-                // Update aggregator
+                // v0.7.5: Extract final summary if completed
                 if stats.completed {
                     completed_agents.insert(stats.agent_id.clone());
                     aggregator.mark_completed(&stats.agent_id);
+                    
+                    // Extract and store final summary for persistence
+                    if let Some(summary) = stats.final_summary {
+                        debug!("Collected final summary from agent {}", summary.agent_id);
+                        agent_summaries.push(summary);
+                    } else {
+                        warn!("Agent {} completed but did not provide final summary", stats.agent_id);
+                    }
+                } else {
+                    // Regular update (not completed yet)
+                    aggregator.update(stats);
                 }
-                aggregator.update(stats);
                 
                 // Update display every 100ms (rate limiting)
                 if last_update.elapsed() > std::time::Duration::from_millis(100) {
@@ -878,8 +920,21 @@ async fn run_distributed_workload(
                     } else {
                         format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
                     };
-                    progress_bar.set_message(msg);
+                    progress_bar.set_message(msg.clone());
                     last_update = std::time::Instant::now();
+                    
+                    // v0.7.5: Write live stats to console.log every 1 second
+                    if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let log_line = format!("[{}] {}", timestamp, msg);
+                        if let Err(e) = results_dir.write_console(&log_line) {
+                            warn!("Failed to write live stats to console.log: {}", e);
+                        }
+                        last_console_log = std::time::Instant::now();
+                    }
                 }
                 
                 // v0.7.5: Check if all agents completed or dead (graceful degradation)
@@ -913,10 +968,8 @@ async fn run_distributed_workload(
     progress_bar.finish_with_message(format!("✓ All {} agents completed", final_stats.num_agents));
     println!();  // Blank line after progress
     
-    // Note: We don't have WorkloadSummary objects anymore (they come from non-streaming RPC)
-    // The streaming version provides real-time stats but we'll need to handle final results differently
-    // For now, print final aggregate stats
-    println!("=== Final Aggregate Results ===");
+    // v0.7.5: Print live aggregate stats for immediate visibility
+    println!("=== Live Aggregate Stats (from streaming) ===");
     println!("Total operations: {} GET, {} PUT, {} META", 
              final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops);
     println!("GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
@@ -934,13 +987,32 @@ async fn run_distributed_workload(
     println!("Elapsed: {:.2}s", final_stats.elapsed_s);
     println!();
     
-    // TODO: Handle agent results collection (summaries) - streaming RPC doesn't return WorkloadSummary
-    // For Phase 4, we'll skip the detailed per-agent result files and consolidated TSV
-    // This can be added back in Phase 5 if needed
-    let _summaries: Vec<WorkloadSummary> = Vec::new();  // Placeholder
-    
-    // Note: Skipping create_consolidated_tsv() in Phase 4 since streaming RPC 
-    // doesn't return WorkloadSummary objects. Will implement alternative in Phase 5.
+    // v0.7.5: Write per-agent results and create consolidated TSV with histogram aggregation
+    if !agent_summaries.is_empty() {
+        info!("Writing results for {} agents", agent_summaries.len());
+        
+        // Write per-agent results to agents/{agent-id}/ subdirectory
+        for summary in &agent_summaries {
+            if let Err(e) = write_agent_results(&agents_dir, &summary.agent_id, summary) {
+                error!("Failed to write results for agent {}: {}", summary.agent_id, e);
+            }
+        }
+        
+        // Create consolidated TSV with bucket-level histogram aggregation
+        if let Err(e) = create_consolidated_tsv(&agents_dir, &results_dir, &agent_summaries) {
+            error!("Failed to create consolidated TSV: {}", e);
+        } else {
+            info!("✓ Consolidated results.tsv created with accurate histogram aggregation");
+        }
+        
+        // Print detailed per-agent summary
+        if let Err(e) = print_distributed_results(&agent_summaries, &mut results_dir) {
+            error!("Failed to print distributed results: {}", e);
+        }
+    } else {
+        warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
+        warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
+    }
     
     // Finalize results directory with elapsed time from final stats
     results_dir.finalize(final_stats.elapsed_s)?;
