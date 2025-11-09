@@ -21,7 +21,216 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{Empty, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+use pb::iobench::{Empty, LiveStats, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+
+/// v0.7.5: Aggregator for live stats from multiple agents
+/// 
+/// Collects LiveStats messages from all agent streams and computes weighted aggregate metrics.
+/// Uses weighted averaging for latencies (weighted by operation count).
+struct LiveStatsAggregator {
+    agent_stats: std::collections::HashMap<String, LiveStats>,
+}
+
+impl LiveStatsAggregator {
+    fn new() -> Self {
+        Self {
+            agent_stats: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Update stats for a specific agent
+    fn update(&mut self, stats: LiveStats) {
+        self.agent_stats.insert(stats.agent_id.clone(), stats);
+    }
+
+    /// Mark an agent as completed
+    fn mark_completed(&mut self, agent_id: &str) {
+        if let Some(stats) = self.agent_stats.get_mut(agent_id) {
+            stats.completed = true;
+        }
+    }
+
+    /// Check if all agents have completed
+    fn all_completed(&self) -> bool {
+        !self.agent_stats.is_empty() && self.agent_stats.values().all(|s| s.completed)
+    }
+
+    /// Get aggregate stats across all agents (weighted latency averaging)
+    fn aggregate(&self) -> AggregateStats {
+        let mut total_get_ops = 0u64;
+        let mut total_get_bytes = 0u64;
+        let mut total_put_ops = 0u64;
+        let mut total_put_bytes = 0u64;
+        let mut total_meta_ops = 0u64;
+        let mut max_elapsed = 0.0f64;
+
+        // Weighted sums for latency averaging
+        let mut get_mean_weighted = 0.0f64;
+        let mut get_p50_weighted = 0.0f64;
+        let mut get_p95_weighted = 0.0f64;
+        let mut put_mean_weighted = 0.0f64;
+        let mut put_p50_weighted = 0.0f64;
+        let mut put_p95_weighted = 0.0f64;
+        let mut meta_mean_weighted = 0.0f64;
+
+        for stats in self.agent_stats.values() {
+            // Sum operations and bytes
+            total_get_ops += stats.get_ops;
+            total_get_bytes += stats.get_bytes;
+            total_put_ops += stats.put_ops;
+            total_put_bytes += stats.put_bytes;
+            total_meta_ops += stats.meta_ops;
+            max_elapsed = max_elapsed.max(stats.elapsed_s);
+
+            // Weighted latency sums (weight = operation count)
+            if stats.get_ops > 0 {
+                let weight = stats.get_ops as f64;
+                get_mean_weighted += stats.get_mean_us * weight;
+                get_p50_weighted += stats.get_p50_us * weight;
+                get_p95_weighted += stats.get_p95_us * weight;
+            }
+            if stats.put_ops > 0 {
+                let weight = stats.put_ops as f64;
+                put_mean_weighted += stats.put_mean_us * weight;
+                put_p50_weighted += stats.put_p50_us * weight;
+                put_p95_weighted += stats.put_p95_us * weight;
+            }
+            if stats.meta_ops > 0 {
+                let weight = stats.meta_ops as f64;
+                meta_mean_weighted += stats.meta_mean_us * weight;
+            }
+        }
+
+        // Calculate weighted averages
+        let get_mean_us = if total_get_ops > 0 {
+            get_mean_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let get_p50_us = if total_get_ops > 0 {
+            get_p50_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let get_p95_us = if total_get_ops > 0 {
+            get_p95_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let put_mean_us = if total_put_ops > 0 {
+            put_mean_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let put_p50_us = if total_put_ops > 0 {
+            put_p50_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let put_p95_us = if total_put_ops > 0 {
+            put_p95_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let meta_mean_us = if total_meta_ops > 0 {
+            meta_mean_weighted / total_meta_ops as f64
+        } else {
+            0.0
+        };
+
+        AggregateStats {
+            num_agents: self.agent_stats.len(),
+            total_get_ops,
+            total_get_bytes,
+            get_mean_us,
+            get_p50_us,
+            get_p95_us,
+            total_put_ops,
+            total_put_bytes,
+            put_mean_us,
+            put_p50_us,
+            put_p95_us,
+            total_meta_ops,
+            meta_mean_us,
+            elapsed_s: max_elapsed,
+        }
+    }
+}
+
+/// Aggregate statistics across all agents
+#[derive(Debug, Clone)]
+struct AggregateStats {
+    num_agents: usize,
+    total_get_ops: u64,
+    total_get_bytes: u64,
+    get_mean_us: f64,
+    get_p50_us: f64,
+    get_p95_us: f64,
+    total_put_ops: u64,
+    total_put_bytes: u64,
+    put_mean_us: f64,
+    put_p50_us: f64,
+    put_p95_us: f64,
+    total_meta_ops: u64,
+    meta_mean_us: f64,
+    elapsed_s: f64,
+}
+
+impl AggregateStats {
+    /// Format multi-line progress display (GET on line 1, PUT on line 2)
+    fn format_progress(&self) -> String {
+        let get_ops_s = if self.elapsed_s > 0.0 {
+            self.total_get_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
+        let get_bandwidth = format_bandwidth(self.total_get_bytes, self.elapsed_s);
+        
+        let put_ops_s = if self.elapsed_s > 0.0 {
+            self.total_put_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
+        let put_bandwidth = format_bandwidth(self.total_put_bytes, self.elapsed_s);
+
+        format!(
+            "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+            self.num_agents,
+            get_ops_s,
+            get_bandwidth,
+            self.get_mean_us / 1000.0,
+            self.get_p50_us / 1000.0,
+            self.get_p95_us / 1000.0,
+            put_ops_s,
+            put_bandwidth,
+            self.put_mean_us / 1000.0,
+            self.put_p50_us / 1000.0,
+            self.put_p95_us / 1000.0,
+        )
+    }
+}
+
+/// Format bytes/sec as human-readable bandwidth
+fn format_bandwidth(bytes: u64, seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return "0 B/s".to_string();
+    }
+    
+    let bytes_per_sec = bytes as f64 / seconds;
+    
+    if bytes_per_sec >= 1_073_741_824.0 {
+        // >= 1 GiB/s
+        format!("{:.2} GiB/s", bytes_per_sec / 1_073_741_824.0)
+    } else if bytes_per_sec >= 1_048_576.0 {
+        // >= 1 MiB/s
+        format!("{:.1} MiB/s", bytes_per_sec / 1_048_576.0)
+    } else if bytes_per_sec >= 1024.0 {
+        // >= 1 KiB/s
+        format!("{:.1} KiB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "sai3bench-ctl", version, about = "SAI3 Benchmark Controller (gRPC)")]
