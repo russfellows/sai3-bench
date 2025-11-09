@@ -56,6 +56,12 @@ pub struct Config {
     /// Default: MultiRuntime (stays in single process, multiple tokio runtimes)
     #[serde(default)]
     pub processing_mode: ProcessingMode,
+    
+    /// Optional live stats tracker for distributed execution (v0.7.5+)
+    /// Used by agent to report real-time operation statistics to controller
+    /// This is runtime state and should not be serialized to YAML config files
+    #[serde(skip)]
+    pub live_stats_tracker: Option<std::sync::Arc<crate::live_stats::LiveStatsTracker>>,
 }
 
 /// Processing mode for parallel execution (v0.7.3+)

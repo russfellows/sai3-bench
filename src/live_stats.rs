@@ -32,6 +32,18 @@ pub struct LiveStatsTracker {
     start_time: Instant,
 }
 
+impl std::fmt::Debug for LiveStatsTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveStatsTracker")
+            .field("get_ops", &self.get_ops.load(Ordering::Relaxed))
+            .field("get_bytes", &self.get_bytes.load(Ordering::Relaxed))
+            .field("put_ops", &self.put_ops.load(Ordering::Relaxed))
+            .field("put_bytes", &self.put_bytes.load(Ordering::Relaxed))
+            .field("meta_ops", &self.meta_ops.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl LiveStatsTracker {
     /// Create new tracker with histogram configuration matching workload.rs
     ///

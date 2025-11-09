@@ -312,60 +312,9 @@ impl Agent for AgentSvc {
         debug!("Summary: {} ops, {} bytes, {:.2}s", 
                summary.total_ops, summary.total_bytes, summary.wall_seconds);
 
-        // v0.6.4: Create results directory and capture output
-        let (metadata_json, tsv_content, results_path, op_log_path, 
-             histogram_get, histogram_put, histogram_meta) = 
-            create_agent_results(&agent_id, &config_yaml, &summary)
-                .await
-                .map_err(|e| {
-                    error!("Failed to create agent results: {}", e);
-                    Status::internal(format!("Failed to create agent results: {}", e))
-                })?;
-
-        info!("Agent results saved to: {}", results_path);
-
-        // Convert Summary to WorkloadSummary protobuf message
-        Ok(Response::new(WorkloadSummary {
-            agent_id: agent_id.clone(),
-            wall_seconds: summary.wall_seconds,
-            total_ops: summary.total_ops,
-            total_bytes: summary.total_bytes,
-            console_log: String::new(),  // Agent doesn't generate console output
-            metadata_json,
-            tsv_content,
-            results_path,
-            op_log_path: op_log_path.unwrap_or_default(),
-            histogram_get,
-            histogram_put,
-            histogram_meta,
-            get: Some(OpAggregateMetrics {
-                bytes: summary.get.bytes,
-                ops: summary.get.ops,
-                mean_us: summary.get.mean_us,
-                p50_us: summary.get.p50_us,
-                p95_us: summary.get.p95_us,
-                p99_us: summary.get.p99_us,
-            }),
-            put: Some(OpAggregateMetrics {
-                bytes: summary.put.bytes,
-                ops: summary.put.ops,
-                mean_us: summary.put.mean_us,
-                p50_us: summary.put.p50_us,
-                p95_us: summary.put.p95_us,
-                p99_us: summary.put.p99_us,
-            }),
-            meta: Some(OpAggregateMetrics {
-                bytes: summary.meta.bytes,
-                ops: summary.meta.ops,
-                mean_us: summary.meta.mean_us,
-                p50_us: summary.meta.p50_us,
-                p95_us: summary.meta.p95_us,
-                p99_us: summary.meta.p99_us,
-            }),
-            p50_us: summary.p50_us,
-            p95_us: summary.p95_us,
-            p99_us: summary.p99_us,
-        }))
+        // v0.7.5: Convert Summary to WorkloadSummary protobuf using helper
+        let proto_summary = summary_to_proto(&agent_id, &config_yaml, &summary).await?;
+        Ok(Response::new(proto_summary))
     }
 
     /// v0.7.5: Server streaming RPC for live progress updates during distributed execution
@@ -408,14 +357,20 @@ impl Agent for AgentSvc {
         // Create live stats tracker
         let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
         
-        // Channel to signal completion
-        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<(), String>>(1);
+        // v0.7.5: Capture config_yaml for final summary conversion
+        let config_yaml_for_summary = config_yaml.clone();
+        
+        // Channel to signal completion with workload summary (v0.7.5)
+        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
         
         // Spawn workload execution task
-        let tracker_exec = tracker.clone();  // TODO: Pass to workload::run for operation recording
-        let config_exec = config.clone();
+        let tracker_exec = tracker.clone();
+        let mut config_exec = config.clone();
         let agent_id_exec = agent_id.clone();
         tokio::spawn(async move {
+            // Wire live stats tracker for distributed operation recording (v0.7.5+)
+            config_exec.live_stats_tracker = Some(tracker_exec);
+            
             // Execute prepare phase if configured
             let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
                 match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload)).await {
@@ -436,11 +391,11 @@ impl Agent for AgentSvc {
                 None
             };
 
-            // Execute workload with tracker (TODO: integrate tracker into workload::run)
+            // Execute workload (tracker wired via config for live stats)
             match sai3_bench::workload::run(&config_exec, tree_manifest).await {
-                Ok(_summary) => {
+                Ok(summary) => {
                     info!("Workload completed successfully for agent {}", agent_id_exec);
-                    let _ = tx_done.send(Ok(())).await;
+                    let _ = tx_done.send(Ok(summary)).await;
                 }
                 Err(e) => {
                     error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
@@ -451,6 +406,7 @@ impl Agent for AgentSvc {
 
         // Create stream that sends stats every 1 second
         let agent_id_stream = agent_id.clone();
+        let config_yaml_stream = config_yaml_for_summary;  // v0.7.5: For final summary conversion
         let stream = async_stream::stream! {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -477,6 +433,7 @@ impl Agent for AgentSvc {
                             meta_mean_us: snapshot.meta_mean_us as f64,
                             elapsed_s: snapshot.elapsed_secs(),
                             completed: false,
+                            final_summary: None,  // v0.7.5: Only in final message
                         };
                         yield Ok(stats);
                     }
@@ -484,8 +441,17 @@ impl Agent for AgentSvc {
                     result = rx_done.recv() => {
                         // Workload completed (or failed)
                         match result {
-                            Some(Ok(())) => {
-                                // Send final stats with completed=true
+                            Some(Ok(summary)) => {
+                                // v0.7.5: Convert summary to proto for final message
+                                let proto_summary = match summary_to_proto(&agent_id_stream, &config_yaml_stream, &summary).await {
+                                    Ok(s) => Some(s),
+                                    Err(e) => {
+                                        error!("Failed to convert summary to proto: {:?}", e);
+                                        None  // Continue without summary rather than failing entire stream
+                                    }
+                                };
+                                
+                                // Send final stats with completed=true and full summary
                                 let snapshot = tracker.snapshot();
                                 let final_stats = LiveStats {
                                     agent_id: agent_id_stream.clone(),
@@ -504,6 +470,7 @@ impl Agent for AgentSvc {
                                     meta_mean_us: snapshot.meta_mean_us as f64,
                                     elapsed_s: snapshot.elapsed_secs(),
                                     completed: true,
+                                    final_summary: proto_summary,  // v0.7.5: Include complete results
                                 };
                                 yield Ok(final_stats);
                                 break;
@@ -524,6 +491,66 @@ impl Agent for AgentSvc {
 
         Ok(Response::new(Box::pin(stream)))
     }
+}
+
+/// Convert Summary to WorkloadSummary protobuf (v0.7.5)
+/// Helper to avoid duplication between blocking and streaming RPCs
+async fn summary_to_proto(
+    agent_id: &str,
+    config_yaml: &str,
+    summary: &sai3_bench::workload::Summary,
+) -> Result<WorkloadSummary, Status> {
+    // Create results directory and capture output
+    let (metadata_json, tsv_content, results_path, op_log_path, 
+         histogram_get, histogram_put, histogram_meta) = 
+        create_agent_results(agent_id, config_yaml, summary)
+            .await
+            .map_err(|e| {
+                error!("Failed to create agent results: {}", e);
+                Status::internal(format!("Failed to create agent results: {}", e))
+            })?;
+
+    Ok(WorkloadSummary {
+        agent_id: agent_id.to_string(),
+        wall_seconds: summary.wall_seconds,
+        total_ops: summary.total_ops,
+        total_bytes: summary.total_bytes,
+        console_log: String::new(),
+        metadata_json,
+        tsv_content,
+        results_path,
+        op_log_path: op_log_path.unwrap_or_default(),
+        histogram_get,
+        histogram_put,
+        histogram_meta,
+        get: Some(OpAggregateMetrics {
+            bytes: summary.get.bytes,
+            ops: summary.get.ops,
+            mean_us: summary.get.mean_us,
+            p50_us: summary.get.p50_us,
+            p95_us: summary.get.p95_us,
+            p99_us: summary.get.p99_us,
+        }),
+        put: Some(OpAggregateMetrics {
+            bytes: summary.put.bytes,
+            ops: summary.put.ops,
+            mean_us: summary.put.mean_us,
+            p50_us: summary.put.p50_us,
+            p95_us: summary.put.p95_us,
+            p99_us: summary.put.p99_us,
+        }),
+        meta: Some(OpAggregateMetrics {
+            bytes: summary.meta.bytes,
+            ops: summary.meta.ops,
+            mean_us: summary.meta.mean_us,
+            p50_us: summary.meta.p50_us,
+            p95_us: summary.meta.p95_us,
+            p99_us: summary.meta.p99_us,
+        }),
+        p50_us: summary.p50_us,
+        p95_us: summary.p95_us,
+        p99_us: summary.p99_us,
+    })
 }
 
 /// Create agent results directory and capture output files (v0.6.4)

@@ -830,10 +830,39 @@ async fn run_distributed_workload(
     let mut last_update = std::time::Instant::now();
     let mut completed_agents = std::collections::HashSet::new();
     
+    // v0.7.5: Resilience - track per-agent activity for timeout detection
+    let mut agent_last_seen: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+    let mut dead_agents = std::collections::HashSet::new();
+    let timeout_warn_secs = 5.0;
+    let timeout_dead_secs = 10.0;
+    
     // Process live stats stream
     loop {
+        // v0.7.5: Check for stalled agents (timeout detection)
+        let now = std::time::Instant::now();
+        for (agent_id, last_seen) in &agent_last_seen {
+            if dead_agents.contains(agent_id) || completed_agents.contains(agent_id) {
+                continue;  // Skip already dead or completed agents
+            }
+            
+            let elapsed = now.duration_since(*last_seen).as_secs_f64();
+            if elapsed >= timeout_dead_secs {
+                if !dead_agents.contains(agent_id) {
+                    error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DEAD", agent_id, elapsed);
+                    dead_agents.insert(agent_id.clone());
+                    aggregator.mark_completed(agent_id);  // Remove from active count
+                    progress_bar.set_message(format!("{} (⚠️ {} dead)", aggregator.aggregate().format_progress(), dead_agents.len()));
+                }
+            } else if elapsed >= timeout_warn_secs {
+                warn!("⚠️  Agent {} delayed: no updates for {:.1}s", agent_id, elapsed);
+            }
+        }
+        
         tokio::select! {
             Some(stats) = rx_stats.recv() => {
+                // v0.7.5: Update last seen timestamp for resilience
+                agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
+                
                 // Update aggregator
                 if stats.completed {
                     completed_agents.insert(stats.agent_id.clone());
@@ -844,14 +873,24 @@ async fn run_distributed_workload(
                 // Update display every 100ms (rate limiting)
                 if last_update.elapsed() > std::time::Duration::from_millis(100) {
                     let agg = aggregator.aggregate();
-                    progress_bar.set_message(agg.format_progress());
+                    let msg = if dead_agents.is_empty() {
+                        agg.format_progress()
+                    } else {
+                        format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
+                    };
+                    progress_bar.set_message(msg);
                     last_update = std::time::Instant::now();
                 }
                 
-                // Check if all agents completed
+                // v0.7.5: Check if all agents completed or dead (graceful degradation)
                 if aggregator.all_completed() {
                     break;
                 }
+            }
+            
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+                // v0.7.5: Periodic timeout check (every 1 second)
+                // Check logic is at top of loop
             }
             
             _ = &mut ctrl_c => {

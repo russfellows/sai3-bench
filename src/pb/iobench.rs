@@ -169,6 +169,10 @@ pub struct LiveStats {
     /// True on final message
     #[prost(bool, tag = "16")]
     pub completed: bool,
+    /// v0.7.5: Optional final summary (only present when completed=true)
+    /// Allows controller to collect complete results for persistence
+    #[prost(message, optional, tag = "17")]
+    pub final_summary: ::core::option::Option<WorkloadSummary>,
 }
 /// Generated client implementations.
 pub mod agent_client {

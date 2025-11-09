@@ -1273,6 +1273,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.get_bytes += bytes.len() as u64;
                         ws.get_bins.add(bytes.len() as u64);
                         
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_get(bytes.len(), duration);
+                        }
+                        
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
                         bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1350,6 +1355,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.put_bytes += sz;
                         ws.put_bins.add(sz);
                         
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_put(sz as usize, duration);
+                        }
+                        
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
                         bytes_counter.fetch_add(sz, Ordering::Relaxed);
@@ -1366,6 +1376,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // List operations don't transfer data, just metadata
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_meta(duration);
+                        }
                         
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
@@ -1406,6 +1421,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Stat operations don't transfer data, just metadata about the size
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_meta(duration);
+                        }
                         
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
@@ -1452,6 +1472,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // Delete operations don't transfer data
                         ws.meta_bins.add(0);
                         
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_meta(duration);
+                        }
+                        
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
@@ -1492,6 +1517,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Mkdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_meta(duration);
+                        }
                         
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
@@ -1534,6 +1564,11 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         ws.meta_ops += 1;
                         // Rmdir operations don't transfer data
                         ws.meta_bins.add(0);
+                        
+                        // Update live stats tracker for distributed execution (v0.7.5+)
+                        if let Some(ref tracker) = cfg.live_stats_tracker {
+                            tracker.record_meta(duration);
+                        }
                         
                         // Update live stats for progress bar
                         ops_counter.fetch_add(1, Ordering::Relaxed);
