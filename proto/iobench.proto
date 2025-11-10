@@ -103,6 +103,17 @@ message LiveStats {
   // v0.7.5: Optional final summary (only present when completed=true)
   // Allows controller to collect complete results for persistence
   WorkloadSummary final_summary = 17;
+  
+  // v0.7.6: Startup handshake for robust error handling
+  enum Status {
+    UNKNOWN = 0;
+    READY = 1;       // Agent validated config and is ready to start
+    RUNNING = 2;     // Workload is executing (normal stats messages)
+    ERROR = 3;       // Agent encountered startup error (see error_message)
+    COMPLETED = 4;   // Workload finished successfully
+  }
+  Status status = 18;
+  string error_message = 19;     // Details if status == ERROR
 }
 
 service Agent {

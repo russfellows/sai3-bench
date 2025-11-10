@@ -199,7 +199,96 @@ Multiple agents (all in TLS mode):
 
 **Important:** Do not pass --insecure to the controller when the agent is running with --tls.
 
-# 5 Examples for Workloads
+# 5 Distributed Live Stats (v0.7.6+)
+
+## Real-Time Progress Display
+
+When running distributed workloads with `sai3bench-ctl run`, you'll see a beautiful real-time progress display showing:
+
+- **Progress bar**: Visual progress with elapsed/total seconds (e.g., `[=====>] 15/30s`)
+- **Live metrics**: Aggregate stats updated every second across all agents
+- **Microsecond precision**: All latency values shown in µs for accuracy
+- **Agent count**: Number of active agents
+- **Per-operation stats**: Separate lines for GET, PUT, META operations
+
+### Example Output
+
+```
+=== Distributed Workload ===
+Config: tests/configs/workload.yaml
+Agents: 2
+Start delay: 2s
+Storage mode: local (per-agent)
+
+Starting workload on 2 agents with live stats...
+
+⏳ Waiting for agents to validate configuration...
+  ✅ agent-1 ready
+  ✅ agent-2 ready
+✅ All 2 agents ready - starting workload execution
+
+[========================================] 30/30s
+2 agents
+  GET: 19882 ops/s, 19.4 MiB/s (mean: 95µs, p50: 96µs, p95: 135µs)
+  PUT: 8541 ops/s, 16.7 MiB/s (mean: 102µs, p50: 98µs, p95: 136µs)
+✓ All 2 agents completed
+
+
+=== Live Aggregate Stats (from streaming) ===
+Total operations: 689656 GET, 296040 PUT, 0 META
+GET: 19882 ops/s, 19.4 MiB/s (mean: 95µs, p50: 96µs, p95: 135µs)
+PUT: 8541 ops/s, 16.7 MiB/s (mean: 102µs, p50: 98µs, p95: 136µs)
+Elapsed: 35.00s
+
+=== Distributed Results ===
+[... per-agent results ...]
+```
+
+## Startup Handshake Protocol
+
+The controller now implements a sophisticated startup handshake:
+
+1. **Validation phase** (3 seconds): Agents validate configuration
+   - Checks file:// patterns match actual files
+   - Verifies PUT operations have object sizes
+   - Validates all required parameters
+2. **Ready reporting**: Each agent sends READY or ERROR status
+3. **Error handling**: If any agent fails validation, controller displays errors and exits
+4. **Synchronized start**: All agents begin workload at exact same coordinated timestamp
+5. **Fast startup**: 5 seconds total (3s validation + 2s user-configurable delay)
+
+### Configuration Errors
+
+If agents detect configuration issues, you'll see clear error messages:
+
+```
+⏳ Waiting for agents to validate configuration...
+  ✅ agent-1 ready
+  ❌ agent-2 error: Pattern 'data/*.dat' matches no files
+
+❌ 1 agent(s) failed configuration validation:
+  ❌ agent-2: Pattern 'data/*.dat' matches no files
+
+Ready agents: 1/2
+  ✅ agent-1
+
+Error: 1 agent(s) failed startup validation
+```
+
+## Adjusting Start Delay
+
+The default start delay is 2 seconds (after 3s validation = 5s total). You can adjust it:
+
+```bash
+./sai3bench-ctl --agents node1:7761,node2:7761 \
+  --start-delay 5 \  # 5s instead of 2s (total: 8s)
+  --insecure \
+  run --config workload.yaml
+```
+
+For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEMENTATION.md`.
+
+# 6 Examples for Workloads
 GET (download) via controller
 ### PLAINTEXT
 ```
@@ -241,7 +330,7 @@ PUT (upload) via controller
   --concurrency 8
 ```
 
-# 6 Localhost Demo (No Makefile Needed)
+# 7 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
 ./target/release/sai3bench-agent --listen 127.0.0.1:7761
@@ -276,15 +365,16 @@ PUT (upload) via controller
   ping
 ```
 
-# 7 Troubleshooting
+# 8 Troubleshooting
+# 8 Troubleshooting
 TLS is enabled ... but --agent-ca was not provided
-You’re connecting to a TLS-enabled agent, but the controller is missing
---agent-ca. Provide the agent’s agent_cert.pem or run the controller with
+You're connecting to a TLS-enabled agent, but the controller is missing
+--agent-ca. Provide the agent's agent_cert.pem or run the controller with
 --insecure (plaintext) if the agent is also plaintext.
 h2 protocol error: http2 error / frame with invalid size
 
 Most commonly a TLS name mismatch or wrong certificate. Ensure:
-The controller uses --agent-ca that matches the agent’s certificate.
+The controller uses --agent-ca that matches the agent's certificate.
 The SNI matches (--agent-domain) a SAN entry on the agent certificate.
 The address you dial (host/IP) is present in the SANs (or you provide
 --agent-domain to override the SNI to a SAN value).
@@ -298,7 +388,23 @@ Increase --jobs (GET) or --concurrency (PUT), and/or add more agents.
 Verify network path and S3 region distance.
 Check CPU/network utilization on agent hosts.
 
-# 8 Notes and Best Practices
+Agent startup validation timeout
+One or more agents didn't respond within the validation window (3 seconds).
+Check that:
+- Agents are running and reachable
+- Network connectivity is stable
+- Agents have access to required files/resources
+- Increase --start-delay if agents need more time
+
+Configuration validation failed
+Agents perform pre-flight validation before starting workload. Common issues:
+- file:// patterns don't match any files: Verify path is correct and files exist
+- PUT operation missing object_size: Add object_size to PUT operations
+- Empty workload: Ensure workload array has at least one operation
+
+# 9 Notes and Best Practices
+
+# 9 Notes and Best Practices
 Use resolvable hostnames for agents and include them in --tls-sans when
 using TLS. If connecting by IP from the controller, add that IP to
 --tls-sans or set --agent-domain to a SAN value.
@@ -306,8 +412,12 @@ Keep the private key (agent_key.pem) on the agent host; only the cert
 (agent_cert.pem) should be copied to the controller(s).
 For repeatable test environments, you can pre-generate and persist the certs
 (via --tls-write-ca) and reuse them.
+Monitor live stats during execution to catch issues early (low throughput,
+high latency, stalled agents).
+All latency metrics are reported in microseconds (µs) for precision with
+fast operations.
 
-# 9 Running Tests
+# 10 Running Tests
 Unit + integration tests:
 
 cargo test
@@ -315,7 +425,7 @@ The gRPC integration test starts a local agent, then checks controller
 connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
-# 10 Versioning
+# 11 Versioning
 The agent reports its version on ping:
 
 ```

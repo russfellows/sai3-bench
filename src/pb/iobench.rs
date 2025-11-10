@@ -173,6 +173,64 @@ pub struct LiveStats {
     /// Allows controller to collect complete results for persistence
     #[prost(message, optional, tag = "17")]
     pub final_summary: ::core::option::Option<WorkloadSummary>,
+    #[prost(enumeration = "live_stats::Status", tag = "18")]
+    pub status: i32,
+    /// Details if status == ERROR
+    #[prost(string, tag = "19")]
+    pub error_message: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `LiveStats`.
+pub mod live_stats {
+    /// v0.7.6: Startup handshake for robust error handling
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Status {
+        Unknown = 0,
+        /// Agent validated config and is ready to start
+        Ready = 1,
+        /// Workload is executing (normal stats messages)
+        Running = 2,
+        /// Agent encountered startup error (see error_message)
+        Error = 3,
+        /// Workload finished successfully
+        Completed = 4,
+    }
+    impl Status {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "UNKNOWN",
+                Self::Ready => "READY",
+                Self::Running => "RUNNING",
+                Self::Error => "ERROR",
+                Self::Completed => "COMPLETED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN" => Some(Self::Unknown),
+                "READY" => Some(Self::Ready),
+                "RUNNING" => Some(Self::Running),
+                "ERROR" => Some(Self::Error),
+                "COMPLETED" => Some(Self::Completed),
+                _ => None,
+            }
+        }
+    }
 }
 /// Generated client implementations.
 pub mod agent_client {

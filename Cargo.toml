@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.7.4"
+version = "0.7.6"
 edition = "2021"
 build   = "build.rs"
 
@@ -44,6 +44,7 @@ humantime = "^2.2"
 rand_distr = "^0.5.1"
 hostname = "^0.4"
 parking_lot = "^0.12" # v0.7.5: Fast Mutex for live_stats histograms
+glob = "^0.3"          # v0.7.6: Pattern validation for startup handshake
 
 # Progress bars
 indicatif = "^0.17"

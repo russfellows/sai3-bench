@@ -202,35 +202,35 @@ impl AggregateStats {
         // Only show META line if there are META operations
         if self.total_meta_ops > 0 {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  META: {:.0} ops/s (mean: {:.1}ms)",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  META: {:.0} ops/s (mean: {:.0}µs)",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
-                self.get_mean_us / 1000.0,
-                self.get_p50_us / 1000.0,
-                self.get_p95_us / 1000.0,
+                self.get_mean_us,
+                self.get_p50_us,
+                self.get_p95_us,
                 put_ops_s,
                 put_bandwidth,
-                self.put_mean_us / 1000.0,
-                self.put_p50_us / 1000.0,
-                self.put_p95_us / 1000.0,
+                self.put_mean_us,
+                self.put_p50_us,
+                self.put_p95_us,
                 meta_ops_s,
-                self.meta_mean_us / 1000.0,
+                self.meta_mean_us,
             )
         } else {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)\n  PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
-                self.get_mean_us / 1000.0,
-                self.get_p50_us / 1000.0,
-                self.get_p95_us / 1000.0,
+                self.get_mean_us,
+                self.get_p50_us,
+                self.get_p95_us,
                 put_ops_s,
                 put_bandwidth,
-                self.put_mean_us / 1000.0,
-                self.put_p50_us / 1000.0,
-                self.put_p95_us / 1000.0,
+                self.put_mean_us,
+                self.put_p50_us,
+                self.put_p95_us,
             )
         }
     }
@@ -684,16 +684,16 @@ async fn run_distributed_workload(
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     debug!("Config YAML loaded, {} bytes", config_yaml.len());
+    
+    // Parse config early so we can use it for progress bar and storage detection
+    let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+        .context("Failed to parse config")?;
 
     // Auto-detect if storage is shared based on URI scheme
     let is_shared_storage = if let Some(explicit) = shared_prepare {
         debug!("Using explicit shared_prepare setting: {}", explicit);
         explicit
     } else {
-        // Parse config to detect storage type
-        let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
-            .context("Failed to parse config for storage detection")?;
-        
         let is_shared = detect_shared_storage(&config);
         debug!("Auto-detected shared storage: {} (based on URI scheme)", is_shared);
         is_shared
@@ -751,12 +751,16 @@ async fn run_distributed_workload(
     }
 
     // Calculate coordinated start time (N seconds in the future)
-    let start_time = SystemTime::now() + Duration::from_secs(start_delay_secs);
+    // v0.7.6: Add extra time for validation (3s) + user's start_delay
+    let validation_time_secs = 3;
+    let total_delay_secs = validation_time_secs + start_delay_secs;
+    let start_time = SystemTime::now() + Duration::from_secs(total_delay_secs);
     let start_ns = start_time
         .duration_since(UNIX_EPOCH)?
         .as_nanos() as i64;
 
-    debug!("Coordinated start time: {} ns since epoch", start_ns);
+    debug!("Coordinated start time: {} ns since epoch (validation: {}s, user delay: {}s)", 
+           start_ns, validation_time_secs, start_delay_secs);
 
     // v0.7.5: Use streaming RPC for live progress updates
     let msg = format!("Starting workload on {} agents with live stats...", agent_addrs.len());
@@ -767,13 +771,20 @@ async fn run_distributed_workload(
     // Create progress display using indicatif
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
     let multi_progress = MultiProgress::new();
-    let progress_bar = multi_progress.add(ProgressBar::new_spinner());
+    
+    // v0.7.6: Use progress bar with duration (not spinner) for better visibility
+    let duration_secs = config.duration.as_secs();
+    let progress_bar = multi_progress.add(ProgressBar::new(duration_secs));
     progress_bar.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
+        ProgressStyle::default_bar()
+            .template("{bar:40.cyan/blue} {pos:>3}/{len:3}s\n{msg}")
             .expect("Invalid progress template")
+            .progress_chars("=>-")
     );
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    
+    // v0.7.6: Create channel BEFORE spawning tasks (tasks need tx)
+    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(100);
     
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
@@ -790,6 +801,7 @@ async fn run_distributed_workload(
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
         let shared = is_shared_storage;
+        let tx = tx_stats.clone();  // v0.7.6: Clone sender for this task
 
         let handle = tokio::spawn(async move {
             debug!("Connecting to agent at {}", addr);
@@ -816,40 +828,116 @@ async fn run_distributed_workload(
 
             debug!("Agent {} streaming started", addr);
             
-            // Collect all LiveStats messages
-            let mut stats_history = Vec::new();
+            // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
+            let mut stats_count = 0;
             while let Some(stats_result) = stream.message().await? {
-                stats_history.push(stats_result);
+                stats_count += 1;
+                let _ = tx.send(stats_result).await;
             }
             
-            debug!("Agent {} stream completed with {} updates", addr, stats_history.len());
-            Ok::<Vec<LiveStats>, anyhow::Error>(stats_history)
+            debug!("Agent {} stream completed with {} updates", addr, stats_count);
+            Ok::<(), anyhow::Error>(())
         });
 
         stream_handles.push(handle);
     }
 
     info!("Streaming from {} agents", stream_handles.len());
+    drop(tx_stats);  // v0.7.6: Drop original sender so channel closes when all tasks complete
     
-    // Channel to collect live stats from all agents
-    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(100);
+    // v0.7.6: STARTUP HANDSHAKE - Track agent readiness
+    let expected_agent_count = stream_handles.len();
+    let mut agent_status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ready_agents = std::collections::HashSet::new();
+    let mut error_agents: Vec<(String, String)> = Vec::new();
     
-    // Spawn task to forward stats from all agents to aggregator
+    // v0.7.6: Stream forwarding tasks are already running (messages forwarded immediately)
+    // Just wait for them to complete in background
     for handle in stream_handles {
-        let tx = tx_stats.clone();
         tokio::spawn(async move {
-            if let Ok(Ok(stats_vec)) = handle.await {
-                for stats in stats_vec {
-                    let _ = tx.send(stats).await;
-                }
+            if let Err(e) = handle.await {
+                error!("Stream task error: {:?}", e);
             }
         });
     }
-    drop(tx_stats);  // Drop original sender so channel closes when all tasks complete
     
     // Setup Ctrl+C handler
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    
+    eprintln!("⏳ Waiting for agents to validate configuration...");
+    let startup_timeout_secs = validation_time_secs - 2;  // Leave 2s buffer before workload starts
+    let startup_timeout = tokio::time::Duration::from_secs(startup_timeout_secs);
+    let startup_deadline = tokio::time::Instant::now() + startup_timeout;
+    
+    // v0.7.6: Wait for READY/ERROR status from all agents
+    'startup: loop {
+        tokio::select! {
+            Some(stats) = rx_stats.recv() => {
+                // Check status field
+                match stats.status {
+                    1 => {  // READY
+                        agent_status.insert(stats.agent_id.clone(), "READY".to_string());
+                        ready_agents.insert(stats.agent_id.clone());
+                        eprintln!("  ✅ {} ready", stats.agent_id);
+                    }
+                    3 => {  // ERROR
+                        agent_status.insert(stats.agent_id.clone(), "ERROR".to_string());
+                        error_agents.push((stats.agent_id.clone(), stats.error_message.clone()));
+                        eprintln!("  ❌ {} error: {}", stats.agent_id, stats.error_message);
+                    }
+                    _ => {
+                        // Unexpected status during startup (RUNNING/COMPLETED)
+                        // This shouldn't happen, but treat as ready
+                        if !ready_agents.contains(&stats.agent_id) && !error_agents.iter().any(|(a, _)| a == &stats.agent_id) {
+                            agent_status.insert(stats.agent_id.clone(), "READY".to_string());
+                            ready_agents.insert(stats.agent_id.clone());
+                        }
+                    }
+                }
+                
+                // Check if all agents have responded
+                if agent_status.len() >= expected_agent_count {
+                    break 'startup;
+                }
+            }
+            _ = tokio::time::sleep_until(startup_deadline) => {
+                eprintln!("\n❌ Startup timeout: Not all agents responded within {}s", startup_timeout.as_secs());
+                eprintln!("Agent status ({}/{}):", agent_status.len(), expected_agent_count);
+                for (agent_id, status) in &agent_status {
+                    let icon = if status == "READY" { "✅" } else { "❌" };
+                    eprintln!("  {} {}: {}", icon, agent_id, status);
+                }
+                let missing_count = expected_agent_count - agent_status.len();
+                if missing_count > 0 {
+                    eprintln!("  ⏱️  {} agent(s) did not respond", missing_count);
+                }
+                anyhow::bail!("Agent startup validation timeout");
+            }
+            _ = &mut ctrl_c => {
+                eprintln!("\n⚠️  Interrupted during startup");
+                anyhow::bail!("Interrupted by user");
+            }
+        }
+    }
+    
+    // Check if any agents reported errors
+    if !error_agents.is_empty() {
+        eprintln!("\n❌ {} agent(s) failed configuration validation:", error_agents.len());
+        for (agent_id, error_msg) in &error_agents {
+            eprintln!("  ❌ {}: {}", agent_id, error_msg);
+        }
+        eprintln!("\nReady agents: {}/{}", ready_agents.len(), expected_agent_count);
+        for agent_id in &ready_agents {
+            eprintln!("  ✅ {}", agent_id);
+        }
+        anyhow::bail!("{} agent(s) failed startup validation", error_agents.len());
+    }
+    
+    eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
+    
+    // v0.7.6: Track workload start time for progress bar position
+    let workload_start = std::time::Instant::now();
     
     // Aggregator for live stats display
     let mut aggregator = LiveStatsAggregator::new();
@@ -921,6 +1009,11 @@ async fn run_distributed_workload(
                         format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
                     };
                     progress_bar.set_message(msg.clone());
+                    
+                    // v0.7.6: Update progress bar position based on elapsed time
+                    let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
+                    progress_bar.set_position(elapsed_secs);
+                    
                     last_update = std::time::Instant::now();
                     
                     // v0.7.5: Write live stats to console.log every 1 second
@@ -966,24 +1059,26 @@ async fn run_distributed_workload(
     // Final aggregation
     let final_stats = aggregator.aggregate();
     progress_bar.finish_with_message(format!("✓ All {} agents completed", final_stats.num_agents));
-    println!();  // Blank line after progress
+    
+    // v0.7.6: Add blank lines to preserve the last stats display before printing results
+    println!("\n\n");  // Preserve GET/PUT stats lines from being overwritten
     
     // v0.7.5: Print live aggregate stats for immediate visibility
     println!("=== Live Aggregate Stats (from streaming) ===");
     println!("Total operations: {} GET, {} PUT, {} META", 
              final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops);
-    println!("GET: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+    println!("GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
              final_stats.total_get_ops as f64 / final_stats.elapsed_s,
              format_bandwidth(final_stats.total_get_bytes, final_stats.elapsed_s),
-             final_stats.get_mean_us / 1000.0,
-             final_stats.get_p50_us / 1000.0,
-             final_stats.get_p95_us / 1000.0);
-    println!("PUT: {:.0} ops/s, {} (mean: {:.1}ms, p50: {:.1}ms, p95: {:.1}ms)",
+             final_stats.get_mean_us,
+             final_stats.get_p50_us,
+             final_stats.get_p95_us);
+    println!("PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
              final_stats.total_put_ops as f64 / final_stats.elapsed_s,
              format_bandwidth(final_stats.total_put_bytes, final_stats.elapsed_s),
-             final_stats.put_mean_us / 1000.0,
-             final_stats.put_p50_us / 1000.0,
-             final_stats.put_p95_us / 1000.0);
+             final_stats.put_mean_us,
+             final_stats.put_p50_us,
+             final_stats.put_p95_us);
     println!("Elapsed: {:.2}s", final_stats.elapsed_s);
     println!();
     
