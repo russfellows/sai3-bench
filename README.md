@@ -12,7 +12,7 @@ A comprehensive storage performance testing tool supporting multiple backends th
 
 **🎯 Distributed Live Stats with Startup Handshaking:**
 
-- **Real-Time Progress**: Upadting progress bar with live aggregate client metrics (updates every 1s)
+- **Real-Time Progress**: Progress bar with live aggregate client metrics (updates every 1s)
 - **Startup Handshake**: 3-way protocol ensures all agents validate config and start synchronized
 - **Fast Startup**: 5 seconds (3s validation + 2s delay) instead of previous 32s
 - **Microsecond Precision**: Consistent µs display throughout (live stats, console, TSV files)
