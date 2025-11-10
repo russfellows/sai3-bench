@@ -128,6 +128,110 @@ pub struct WorkloadSummary {
     #[prost(bytes = "vec", tag = "18")]
     pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
 }
+/// v0.7.5: Live performance statistics for distributed execution
+/// Sent every 1 second during workload execution for real-time visibility
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LiveStats {
+    #[prost(string, tag = "1")]
+    pub agent_id: ::prost::alloc::string::String,
+    /// Seconds since workload start
+    #[prost(double, tag = "2")]
+    pub timestamp_s: f64,
+    /// GET operations (read from storage)
+    #[prost(uint64, tag = "3")]
+    pub get_ops: u64,
+    #[prost(uint64, tag = "4")]
+    pub get_bytes: u64,
+    #[prost(double, tag = "5")]
+    pub get_mean_us: f64,
+    #[prost(double, tag = "6")]
+    pub get_p50_us: f64,
+    #[prost(double, tag = "7")]
+    pub get_p95_us: f64,
+    /// PUT operations (write to storage)
+    #[prost(uint64, tag = "8")]
+    pub put_ops: u64,
+    #[prost(uint64, tag = "9")]
+    pub put_bytes: u64,
+    #[prost(double, tag = "10")]
+    pub put_mean_us: f64,
+    #[prost(double, tag = "11")]
+    pub put_p50_us: f64,
+    #[prost(double, tag = "12")]
+    pub put_p95_us: f64,
+    /// META operations (LIST/HEAD/DELETE/etc.)
+    #[prost(uint64, tag = "13")]
+    pub meta_ops: u64,
+    #[prost(double, tag = "14")]
+    pub meta_mean_us: f64,
+    #[prost(double, tag = "15")]
+    pub elapsed_s: f64,
+    /// True on final message
+    #[prost(bool, tag = "16")]
+    pub completed: bool,
+    /// v0.7.5: Optional final summary (only present when completed=true)
+    /// Allows controller to collect complete results for persistence
+    #[prost(message, optional, tag = "17")]
+    pub final_summary: ::core::option::Option<WorkloadSummary>,
+    #[prost(enumeration = "live_stats::Status", tag = "18")]
+    pub status: i32,
+    /// Details if status == ERROR
+    #[prost(string, tag = "19")]
+    pub error_message: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `LiveStats`.
+pub mod live_stats {
+    /// v0.7.6: Startup handshake for robust error handling
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Status {
+        Unknown = 0,
+        /// Agent validated config and is ready to start
+        Ready = 1,
+        /// Workload is executing (normal stats messages)
+        Running = 2,
+        /// Agent encountered startup error (see error_message)
+        Error = 3,
+        /// Workload finished successfully
+        Completed = 4,
+    }
+    impl Status {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "UNKNOWN",
+                Self::Ready => "READY",
+                Self::Running => "RUNNING",
+                Self::Error => "ERROR",
+                Self::Completed => "COMPLETED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN" => Some(Self::Unknown),
+                "READY" => Some(Self::Ready),
+                "RUNNING" => Some(Self::Running),
+                "ERROR" => Some(Self::Error),
+                "COMPLETED" => Some(Self::Completed),
+                _ => None,
+            }
+        }
+    }
+}
 /// Generated client implementations.
 pub mod agent_client {
     #![allow(
@@ -296,6 +400,31 @@ pub mod agent_client {
             req.extensions_mut().insert(GrpcMethod::new("iobench.Agent", "RunWorkload"));
             self.inner.unary(req, path, codec).await
         }
+        /// v0.7.5: Server streaming for live progress updates during distributed execution
+        pub async fn run_workload_with_live_stats(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RunWorkloadRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::LiveStats>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/RunWorkloadWithLiveStats",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "RunWorkloadWithLiveStats"));
+            self.inner.server_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -327,6 +456,20 @@ pub mod agent_server {
             &self,
             request: tonic::Request<super::RunWorkloadRequest>,
         ) -> std::result::Result<tonic::Response<super::WorkloadSummary>, tonic::Status>;
+        /// Server streaming response type for the RunWorkloadWithLiveStats method.
+        type RunWorkloadWithLiveStatsStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::LiveStats, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// v0.7.5: Server streaming for live progress updates during distributed execution
+        async fn run_workload_with_live_stats(
+            &self,
+            request: tonic::Request<super::RunWorkloadRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::RunWorkloadWithLiveStatsStream>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct AgentServer<T> {
@@ -572,6 +715,53 @@ pub mod agent_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/RunWorkloadWithLiveStats" => {
+                    #[allow(non_camel_case_types)]
+                    struct RunWorkloadWithLiveStatsSvc<T: Agent>(pub Arc<T>);
+                    impl<
+                        T: Agent,
+                    > tonic::server::ServerStreamingService<super::RunWorkloadRequest>
+                    for RunWorkloadWithLiveStatsSvc<T> {
+                        type Response = super::LiveStats;
+                        type ResponseStream = T::RunWorkloadWithLiveStatsStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RunWorkloadRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::run_workload_with_live_stats(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RunWorkloadWithLiveStatsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

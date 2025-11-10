@@ -26,7 +26,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, OpSummary, PingReply, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
@@ -312,61 +312,315 @@ impl Agent for AgentSvc {
         debug!("Summary: {} ops, {} bytes, {:.2}s", 
                summary.total_ops, summary.total_bytes, summary.wall_seconds);
 
-        // v0.6.4: Create results directory and capture output
-        let (metadata_json, tsv_content, results_path, op_log_path, 
-             histogram_get, histogram_put, histogram_meta) = 
-            create_agent_results(&agent_id, &config_yaml, &summary)
-                .await
-                .map_err(|e| {
-                    error!("Failed to create agent results: {}", e);
-                    Status::internal(format!("Failed to create agent results: {}", e))
-                })?;
-
-        info!("Agent results saved to: {}", results_path);
-
-        // Convert Summary to WorkloadSummary protobuf message
-        Ok(Response::new(WorkloadSummary {
-            agent_id: agent_id.clone(),
-            wall_seconds: summary.wall_seconds,
-            total_ops: summary.total_ops,
-            total_bytes: summary.total_bytes,
-            console_log: String::new(),  // Agent doesn't generate console output
-            metadata_json,
-            tsv_content,
-            results_path,
-            op_log_path: op_log_path.unwrap_or_default(),
-            histogram_get,
-            histogram_put,
-            histogram_meta,
-            get: Some(OpAggregateMetrics {
-                bytes: summary.get.bytes,
-                ops: summary.get.ops,
-                mean_us: summary.get.mean_us,
-                p50_us: summary.get.p50_us,
-                p95_us: summary.get.p95_us,
-                p99_us: summary.get.p99_us,
-            }),
-            put: Some(OpAggregateMetrics {
-                bytes: summary.put.bytes,
-                ops: summary.put.ops,
-                mean_us: summary.put.mean_us,
-                p50_us: summary.put.p50_us,
-                p95_us: summary.put.p95_us,
-                p99_us: summary.put.p99_us,
-            }),
-            meta: Some(OpAggregateMetrics {
-                bytes: summary.meta.bytes,
-                ops: summary.meta.ops,
-                mean_us: summary.meta.mean_us,
-                p50_us: summary.meta.p50_us,
-                p95_us: summary.meta.p95_us,
-                p99_us: summary.meta.p99_us,
-            }),
-            p50_us: summary.p50_us,
-            p95_us: summary.p95_us,
-            p99_us: summary.p99_us,
-        }))
+        // v0.7.5: Convert Summary to WorkloadSummary protobuf using helper
+        let proto_summary = summary_to_proto(&agent_id, &config_yaml, &summary).await?;
+        Ok(Response::new(proto_summary))
     }
+
+    /// v0.7.5: Server streaming RPC for live progress updates during distributed execution
+    type RunWorkloadWithLiveStatsStream = 
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<LiveStats, Status>> + Send>>;
+
+    async fn run_workload_with_live_stats(
+        &self,
+        req: Request<RunWorkloadRequest>,
+    ) -> Result<Response<Self::RunWorkloadWithLiveStatsStream>, Status> {
+        info!("Received run_workload_with_live_stats request (streaming mode)");
+        
+        let RunWorkloadRequest {
+            config_yaml,
+            agent_id,
+            path_prefix,
+            start_timestamp_ns,
+            shared_storage,
+        } = req.into_inner();
+
+        // Parse and apply config (same as run_workload)
+        let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            .map_err(|e| Status::invalid_argument(format!("Invalid YAML config: {}", e)))?;
+
+        config
+            .apply_agent_prefix(&agent_id, &path_prefix, shared_storage)
+            .map_err(|e| Status::internal(format!("Failed to apply path prefix: {}", e)))?;
+
+        // v0.7.6: Parse coordinated start time (will wait inside stream after READY)
+        let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
+        let wait_duration = match start_time.duration_since(std::time::SystemTime::now()) {
+            Ok(d) if d > std::time::Duration::from_secs(60) => {
+                return Err(Status::invalid_argument("Start time is too far in the future (>60s)"));
+            }
+            Ok(d) => Some(d),
+            Err(_) => None,  // Start time is in the past
+        };
+
+        info!("Preparing workload execution with live stats for agent {}", agent_id);
+
+        // Create live stats tracker
+        let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
+        
+        // v0.7.6: VALIDATION PHASE - Check config before starting workload
+        // This prevents silent failures and provides immediate feedback to controller
+        if let Err(e) = validate_workload_config(&config).await {
+            // Send ERROR status immediately and exit stream
+            let error_stats = LiveStats {
+                agent_id: agent_id.clone(),
+                timestamp_s: 0.0,
+                get_ops: 0,
+                get_bytes: 0,
+                get_mean_us: 0.0,
+                get_p50_us: 0.0,
+                get_p95_us: 0.0,
+                put_ops: 0,
+                put_bytes: 0,
+                put_mean_us: 0.0,
+                put_p50_us: 0.0,
+                put_p95_us: 0.0,
+                meta_ops: 0,
+                meta_mean_us: 0.0,
+                elapsed_s: 0.0,
+                completed: false,
+                final_summary: None,
+                status: 3,  // ERROR
+                error_message: format!("Configuration validation failed: {}", e),
+            };
+            
+            let stream = async_stream::stream! {
+                yield Ok(error_stats);
+            };
+            return Ok(Response::new(Box::pin(stream) as Self::RunWorkloadWithLiveStatsStream));
+        }
+        
+        // v0.7.5: Capture config_yaml for final summary conversion
+        let config_yaml_for_summary = config_yaml.clone();
+        
+        // Channel to signal completion with workload summary (v0.7.5)
+        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
+        
+        // Create stream that sends stats every 1 second
+        let agent_id_stream = agent_id.clone();
+        let config_yaml_stream = config_yaml_for_summary;
+        let tracker_spawn = tracker.clone();
+        let config_spawn = config.clone();
+        let stream = async_stream::stream! {
+            // v0.7.6: Send READY status first (validation passed)
+            let ready_msg = LiveStats {
+                agent_id: agent_id_stream.clone(),
+                timestamp_s: 0.0,
+                get_ops: 0,
+                get_bytes: 0,
+                get_mean_us: 0.0,
+                get_p50_us: 0.0,
+                get_p95_us: 0.0,
+                put_ops: 0,
+                put_bytes: 0,
+                put_mean_us: 0.0,
+                put_p50_us: 0.0,
+                put_p95_us: 0.0,
+                meta_ops: 0,
+                meta_mean_us: 0.0,
+                elapsed_s: 0.0,
+                completed: false,
+                final_summary: None,
+                status: 1,  // READY
+                error_message: String::new(),
+            };
+            yield Ok(ready_msg);
+            
+            // v0.7.6: Wait for coordinated start time AFTER sending READY
+            if let Some(wait_dur) = wait_duration {
+                info!("Waiting {:?} for coordinated start", wait_dur);
+                tokio::time::sleep(wait_dur).await;
+            }
+            info!("Starting workload execution for agent {}", agent_id_stream);
+            
+            // v0.7.6: NOW spawn the workload task (after READY sent and coordinated start)
+            let tracker_exec = tracker_spawn.clone();
+            let mut config_exec = config_spawn.clone();
+            let agent_id_exec = agent_id_stream.clone();
+            tokio::spawn(async move {
+                // Wire live stats tracker for distributed operation recording (v0.7.5+)
+                config_exec.live_stats_tracker = Some(tracker_exec);
+                
+                // Execute prepare phase if configured
+                let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                    match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload)).await {
+                        Ok((prepared, manifest, _metrics)) => {
+                            info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                            
+                            if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                            }
+                            manifest
+                        }
+                        Err(e) => {
+                            let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Execute workload (tracker wired via config for live stats)
+                match sai3_bench::workload::run(&config_exec, tree_manifest).await {
+                    Ok(summary) => {
+                        info!("Workload completed successfully for agent {}", agent_id_exec);
+                        let _ = tx_done.send(Ok(summary)).await;
+                    }
+                    Err(e) => {
+                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
+                        let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
+                    }
+                }
+            });
+            
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Send live stats snapshot
+                        let snapshot = tracker.snapshot();
+                        let stats = LiveStats {
+                            agent_id: agent_id_stream.clone(),
+                            timestamp_s: snapshot.timestamp_secs() as f64,
+                            get_ops: snapshot.get_ops,
+                            get_bytes: snapshot.get_bytes,
+                            get_mean_us: snapshot.get_mean_us as f64,
+                            get_p50_us: snapshot.get_p50_us as f64,
+                            get_p95_us: snapshot.get_p95_us as f64,
+                            put_ops: snapshot.put_ops,
+                            put_bytes: snapshot.put_bytes,
+                            put_mean_us: snapshot.put_mean_us as f64,
+                            put_p50_us: snapshot.put_p50_us as f64,
+                            put_p95_us: snapshot.put_p95_us as f64,
+                            meta_ops: snapshot.meta_ops,
+                            meta_mean_us: snapshot.meta_mean_us as f64,
+                            elapsed_s: snapshot.elapsed_secs(),
+                            completed: false,
+                            final_summary: None,  // v0.7.5: Only in final message
+                            status: 2,  // RUNNING
+                            error_message: String::new(),
+                        };
+                        yield Ok(stats);
+                    }
+                    
+                    result = rx_done.recv() => {
+                        // Workload completed (or failed)
+                        match result {
+                            Some(Ok(summary)) => {
+                                // v0.7.5: Convert summary to proto for final message
+                                let proto_summary = match summary_to_proto(&agent_id_stream, &config_yaml_stream, &summary).await {
+                                    Ok(s) => Some(s),
+                                    Err(e) => {
+                                        error!("Failed to convert summary to proto: {:?}", e);
+                                        None  // Continue without summary rather than failing entire stream
+                                    }
+                                };
+                                
+                                // Send final stats with completed=true and full summary
+                                let snapshot = tracker.snapshot();
+                                let final_stats = LiveStats {
+                                    agent_id: agent_id_stream.clone(),
+                                    timestamp_s: snapshot.timestamp_secs() as f64,
+                                    get_ops: snapshot.get_ops,
+                                    get_bytes: snapshot.get_bytes,
+                                    get_mean_us: snapshot.get_mean_us as f64,
+                                    get_p50_us: snapshot.get_p50_us as f64,
+                                    get_p95_us: snapshot.get_p95_us as f64,
+                                    put_ops: snapshot.put_ops,
+                                    put_bytes: snapshot.put_bytes,
+                                    put_mean_us: snapshot.put_mean_us as f64,
+                                    put_p50_us: snapshot.put_p50_us as f64,
+                                    put_p95_us: snapshot.put_p95_us as f64,
+                                    meta_ops: snapshot.meta_ops,
+                                    meta_mean_us: snapshot.meta_mean_us as f64,
+                                    elapsed_s: snapshot.elapsed_secs(),
+                                    completed: true,
+                                    final_summary: proto_summary,  // v0.7.5: Include complete results
+                                    status: 4,  // COMPLETED
+                                    error_message: String::new(),
+                                };
+                                yield Ok(final_stats);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                yield Err(Status::internal(e));
+                                break;
+                            }
+                            None => {
+                                yield Err(Status::internal("Workload task terminated unexpectedly"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+/// Convert Summary to WorkloadSummary protobuf (v0.7.5)
+/// Helper to avoid duplication between blocking and streaming RPCs
+async fn summary_to_proto(
+    agent_id: &str,
+    config_yaml: &str,
+    summary: &sai3_bench::workload::Summary,
+) -> Result<WorkloadSummary, Status> {
+    // Create results directory and capture output
+    let (metadata_json, tsv_content, results_path, op_log_path, 
+         histogram_get, histogram_put, histogram_meta) = 
+        create_agent_results(agent_id, config_yaml, summary)
+            .await
+            .map_err(|e| {
+                error!("Failed to create agent results: {}", e);
+                Status::internal(format!("Failed to create agent results: {}", e))
+            })?;
+
+    Ok(WorkloadSummary {
+        agent_id: agent_id.to_string(),
+        wall_seconds: summary.wall_seconds,
+        total_ops: summary.total_ops,
+        total_bytes: summary.total_bytes,
+        console_log: String::new(),
+        metadata_json,
+        tsv_content,
+        results_path,
+        op_log_path: op_log_path.unwrap_or_default(),
+        histogram_get,
+        histogram_put,
+        histogram_meta,
+        get: Some(OpAggregateMetrics {
+            bytes: summary.get.bytes,
+            ops: summary.get.ops,
+            mean_us: summary.get.mean_us,
+            p50_us: summary.get.p50_us,
+            p95_us: summary.get.p95_us,
+            p99_us: summary.get.p99_us,
+        }),
+        put: Some(OpAggregateMetrics {
+            bytes: summary.put.bytes,
+            ops: summary.put.ops,
+            mean_us: summary.put.mean_us,
+            p50_us: summary.put.p50_us,
+            p95_us: summary.put.p95_us,
+            p99_us: summary.put.p99_us,
+        }),
+        meta: Some(OpAggregateMetrics {
+            bytes: summary.meta.bytes,
+            ops: summary.meta.ops,
+            mean_us: summary.meta.mean_us,
+            p50_us: summary.meta.p50_us,
+            p95_us: summary.meta.p95_us,
+            p99_us: summary.meta.p99_us,
+        }),
+        p50_us: summary.p50_us,
+        p95_us: summary.p95_us,
+        p99_us: summary.p99_us,
+    })
 }
 
 /// Create agent results directory and capture output files (v0.6.4)
@@ -542,6 +796,67 @@ async fn list_keys_async(bucket: &str, prefix: &str) -> Result<Vec<String>> {
         }
     }
     Ok(out)
+}
+
+/// v0.7.6: Validate workload configuration before execution
+/// Checks for common errors that would cause workload startup to fail
+async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result<()> {
+    use sai3_bench::config::OpSpec;
+    
+    // Check that workload has operations configured
+    if config.workload.is_empty() {
+        anyhow::bail!("No operations configured in workload");
+    }
+    
+    // Validate each operation
+    for weighted_op in &config.workload {
+        match &weighted_op.spec {
+            OpSpec::Get { path } => {
+                // For file:// backends, verify files exist
+                if path.starts_with("file://") {
+                    let file_path = path.replace("file://", "");
+                    // Check if it's a glob pattern
+                    if file_path.contains('*') {
+                        let paths: Vec<_> = glob::glob(&file_path)
+                            .map_err(|e| anyhow::anyhow!("Invalid glob pattern '{}': {}", path, e))?
+                            .collect();
+                        if paths.is_empty() {
+                            anyhow::bail!("No files found matching GET pattern: {}", path);
+                        }
+                    }
+                }
+            }
+            OpSpec::Put { path, object_size, size_spec, .. } => {
+                // PUT operations need size configuration
+                if object_size.is_none() && size_spec.is_none() {
+                    anyhow::bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
+                }
+            }
+            OpSpec::Delete { path } => {
+                // Delete needs a valid path
+                if path.is_empty() {
+                    anyhow::bail!("DELETE operation requires non-empty path");
+                }
+            }
+            OpSpec::List { path } => {
+                // List needs a valid path
+                if path.is_empty() {
+                    anyhow::bail!("LIST operation requires non-empty path");
+                }
+            }
+            OpSpec::Stat { path } => {
+                // Stat needs a valid path
+                if path.is_empty() {
+                    anyhow::bail!("STAT operation requires non-empty path");
+                }
+            }
+            _ => {
+                // Other operations (if any) are assumed valid
+            }
+        }
+    }
+    
+    Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread")]

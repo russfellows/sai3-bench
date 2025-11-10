@@ -21,7 +21,242 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{Empty, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+use pb::iobench::{Empty, LiveStats, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+
+/// v0.7.5: Aggregator for live stats from multiple agents
+/// 
+/// Collects LiveStats messages from all agent streams and computes weighted aggregate metrics.
+/// Uses weighted averaging for latencies (weighted by operation count).
+struct LiveStatsAggregator {
+    agent_stats: std::collections::HashMap<String, LiveStats>,
+}
+
+impl LiveStatsAggregator {
+    fn new() -> Self {
+        Self {
+            agent_stats: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Update stats for a specific agent
+    fn update(&mut self, stats: LiveStats) {
+        self.agent_stats.insert(stats.agent_id.clone(), stats);
+    }
+
+    /// Mark an agent as completed
+    fn mark_completed(&mut self, agent_id: &str) {
+        if let Some(stats) = self.agent_stats.get_mut(agent_id) {
+            stats.completed = true;
+        }
+    }
+
+    /// Check if all agents have completed
+    fn all_completed(&self) -> bool {
+        !self.agent_stats.is_empty() && self.agent_stats.values().all(|s| s.completed)
+    }
+
+    /// Get aggregate stats across all agents (weighted latency averaging)
+    fn aggregate(&self) -> AggregateStats {
+        let mut total_get_ops = 0u64;
+        let mut total_get_bytes = 0u64;
+        let mut total_put_ops = 0u64;
+        let mut total_put_bytes = 0u64;
+        let mut total_meta_ops = 0u64;
+        let mut max_elapsed = 0.0f64;
+
+        // Weighted sums for latency averaging
+        let mut get_mean_weighted = 0.0f64;
+        let mut get_p50_weighted = 0.0f64;
+        let mut get_p95_weighted = 0.0f64;
+        let mut put_mean_weighted = 0.0f64;
+        let mut put_p50_weighted = 0.0f64;
+        let mut put_p95_weighted = 0.0f64;
+        let mut meta_mean_weighted = 0.0f64;
+
+        for stats in self.agent_stats.values() {
+            // Sum operations and bytes
+            total_get_ops += stats.get_ops;
+            total_get_bytes += stats.get_bytes;
+            total_put_ops += stats.put_ops;
+            total_put_bytes += stats.put_bytes;
+            total_meta_ops += stats.meta_ops;
+            max_elapsed = max_elapsed.max(stats.elapsed_s);
+
+            // Weighted latency sums (weight = operation count)
+            if stats.get_ops > 0 {
+                let weight = stats.get_ops as f64;
+                get_mean_weighted += stats.get_mean_us * weight;
+                get_p50_weighted += stats.get_p50_us * weight;
+                get_p95_weighted += stats.get_p95_us * weight;
+            }
+            if stats.put_ops > 0 {
+                let weight = stats.put_ops as f64;
+                put_mean_weighted += stats.put_mean_us * weight;
+                put_p50_weighted += stats.put_p50_us * weight;
+                put_p95_weighted += stats.put_p95_us * weight;
+            }
+            if stats.meta_ops > 0 {
+                let weight = stats.meta_ops as f64;
+                meta_mean_weighted += stats.meta_mean_us * weight;
+            }
+        }
+
+        // Calculate weighted averages
+        let get_mean_us = if total_get_ops > 0 {
+            get_mean_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let get_p50_us = if total_get_ops > 0 {
+            get_p50_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let get_p95_us = if total_get_ops > 0 {
+            get_p95_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let put_mean_us = if total_put_ops > 0 {
+            put_mean_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let put_p50_us = if total_put_ops > 0 {
+            put_p50_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let put_p95_us = if total_put_ops > 0 {
+            put_p95_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
+        let meta_mean_us = if total_meta_ops > 0 {
+            meta_mean_weighted / total_meta_ops as f64
+        } else {
+            0.0
+        };
+
+        AggregateStats {
+            num_agents: self.agent_stats.len(),
+            total_get_ops,
+            total_get_bytes,
+            get_mean_us,
+            get_p50_us,
+            get_p95_us,
+            total_put_ops,
+            total_put_bytes,
+            put_mean_us,
+            put_p50_us,
+            put_p95_us,
+            total_meta_ops,
+            meta_mean_us,
+            elapsed_s: max_elapsed,
+        }
+    }
+}
+
+/// Aggregate statistics across all agents
+#[derive(Debug, Clone)]
+struct AggregateStats {
+    num_agents: usize,
+    total_get_ops: u64,
+    total_get_bytes: u64,
+    get_mean_us: f64,
+    get_p50_us: f64,
+    get_p95_us: f64,
+    total_put_ops: u64,
+    total_put_bytes: u64,
+    put_mean_us: f64,
+    put_p50_us: f64,
+    put_p95_us: f64,
+    total_meta_ops: u64,
+    meta_mean_us: f64,
+    elapsed_s: f64,
+}
+
+impl AggregateStats {
+    /// Format multi-line progress display (GET on line 1, PUT on line 2, META on line 3 if present)
+    fn format_progress(&self) -> String {
+        let get_ops_s = if self.elapsed_s > 0.0 {
+            self.total_get_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
+        let get_bandwidth = format_bandwidth(self.total_get_bytes, self.elapsed_s);
+        
+        let put_ops_s = if self.elapsed_s > 0.0 {
+            self.total_put_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
+        let put_bandwidth = format_bandwidth(self.total_put_bytes, self.elapsed_s);
+        
+        let meta_ops_s = if self.elapsed_s > 0.0 {
+            self.total_meta_ops as f64 / self.elapsed_s
+        } else {
+            0.0
+        };
+
+        // Only show META line if there are META operations
+        if self.total_meta_ops > 0 {
+            format!(
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  META: {:.0} ops/s (mean: {:.0}µs)",
+                self.num_agents,
+                get_ops_s,
+                get_bandwidth,
+                self.get_mean_us,
+                self.get_p50_us,
+                self.get_p95_us,
+                put_ops_s,
+                put_bandwidth,
+                self.put_mean_us,
+                self.put_p50_us,
+                self.put_p95_us,
+                meta_ops_s,
+                self.meta_mean_us,
+            )
+        } else {
+            format!(
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+                self.num_agents,
+                get_ops_s,
+                get_bandwidth,
+                self.get_mean_us,
+                self.get_p50_us,
+                self.get_p95_us,
+                put_ops_s,
+                put_bandwidth,
+                self.put_mean_us,
+                self.put_p50_us,
+                self.put_p95_us,
+            )
+        }
+    }
+}
+
+/// Format bytes/sec as human-readable bandwidth
+fn format_bandwidth(bytes: u64, seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return "0 B/s".to_string();
+    }
+    
+    let bytes_per_sec = bytes as f64 / seconds;
+    
+    if bytes_per_sec >= 1_073_741_824.0 {
+        // >= 1 GiB/s
+        format!("{:.2} GiB/s", bytes_per_sec / 1_073_741_824.0)
+    } else if bytes_per_sec >= 1_048_576.0 {
+        // >= 1 MiB/s
+        format!("{:.1} MiB/s", bytes_per_sec / 1_048_576.0)
+    } else if bytes_per_sec >= 1024.0 {
+        // >= 1 KiB/s
+        format!("{:.1} KiB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "sai3bench-ctl", version, about = "SAI3 Benchmark Controller (gRPC)")]
@@ -449,16 +684,16 @@ async fn run_distributed_workload(
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     debug!("Config YAML loaded, {} bytes", config_yaml.len());
+    
+    // Parse config early so we can use it for progress bar and storage detection
+    let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+        .context("Failed to parse config")?;
 
     // Auto-detect if storage is shared based on URI scheme
     let is_shared_storage = if let Some(explicit) = shared_prepare {
         debug!("Using explicit shared_prepare setting: {}", explicit);
         explicit
     } else {
-        // Parse config to detect storage type
-        let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
-            .context("Failed to parse config for storage detection")?;
-        
         let is_shared = detect_shared_storage(&config);
         debug!("Auto-detected shared storage: {} (based on URI scheme)", is_shared);
         is_shared
@@ -516,19 +751,43 @@ async fn run_distributed_workload(
     }
 
     // Calculate coordinated start time (N seconds in the future)
-    let start_time = SystemTime::now() + Duration::from_secs(start_delay_secs);
+    // v0.7.6: Add extra time for validation (3s) + user's start_delay
+    let validation_time_secs = 3;
+    let total_delay_secs = validation_time_secs + start_delay_secs;
+    let start_time = SystemTime::now() + Duration::from_secs(total_delay_secs);
     let start_ns = start_time
         .duration_since(UNIX_EPOCH)?
         .as_nanos() as i64;
 
-    debug!("Coordinated start time: {} ns since epoch", start_ns);
+    debug!("Coordinated start time: {} ns since epoch (validation: {}s, user delay: {}s)", 
+           start_ns, validation_time_secs, start_delay_secs);
 
-    // Send workload to all agents in parallel
-    let msg = format!("Sending workload to {} agents...", agent_addrs.len());
+    // v0.7.5: Use streaming RPC for live progress updates
+    let msg = format!("Starting workload on {} agents with live stats...", agent_addrs.len());
     println!("{}", msg);
     results_dir.write_console(&msg)?;
+    println!();  // Blank line before progress display
     
-    let mut handles = Vec::new();
+    // Create progress display using indicatif
+    use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+    let multi_progress = MultiProgress::new();
+    
+    // v0.7.6: Use progress bar with duration (not spinner) for better visibility
+    let duration_secs = config.duration.as_secs();
+    let progress_bar = multi_progress.add(ProgressBar::new(duration_secs));
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{bar:40.cyan/blue} {pos:>3}/{len:3}s\n{msg}")
+            .expect("Invalid progress template")
+            .progress_chars("=>-")
+    );
+    progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    
+    // v0.7.6: Create channel BEFORE spawning tasks (tasks need tx)
+    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(100);
+    
+    // Spawn tasks to consume agent streams
+    let mut stream_handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
@@ -542,6 +801,7 @@ async fn run_distributed_workload(
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
         let shared = is_shared_storage;
+        let tx = tx_stats.clone();  // v0.7.6: Clone sender for this task
 
         let handle = tokio::spawn(async move {
             debug!("Connecting to agent at {}", addr);
@@ -551,11 +811,11 @@ async fn run_distributed_workload(
                 .await
                 .with_context(|| format!("connect to agent {}", addr))?;
 
-            debug!("Connected to agent {}, sending workload request", addr);
+            debug!("Connected to agent {}, starting streaming workload", addr);
 
-            // Send workload request
-            let response = client
-                .run_workload(RunWorkloadRequest {
+            // Send streaming workload request
+            let mut stream = client
+                .run_workload_with_live_stats(RunWorkloadRequest {
                     config_yaml: config,
                     agent_id: agent_id.clone(),
                     path_prefix: path_prefix.clone(),
@@ -563,121 +823,294 @@ async fn run_distributed_workload(
                     shared_storage: shared,
                 })
                 .await
-                .with_context(|| format!("run_workload on agent {}", addr))?;
+                .with_context(|| format!("run_workload_with_live_stats on agent {}", addr))?
+                .into_inner();
 
-            debug!("Agent {} completed workload successfully", addr);
-            Ok::<WorkloadSummary, anyhow::Error>(response.into_inner())
+            debug!("Agent {} streaming started", addr);
+            
+            // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
+            let mut stats_count = 0;
+            while let Some(stats_result) = stream.message().await? {
+                stats_count += 1;
+                let _ = tx.send(stats_result).await;
+            }
+            
+            debug!("Agent {} stream completed with {} updates", addr, stats_count);
+            Ok::<(), anyhow::Error>(())
         });
 
-        handles.push(handle);
+        stream_handles.push(handle);
     }
 
-    info!("Waiting for {} agents to complete workload", handles.len());
+    info!("Streaming from {} agents", stream_handles.len());
+    drop(tx_stats);  // v0.7.6: Drop original sender so channel closes when all tasks complete
+    
+    // v0.7.6: STARTUP HANDSHAKE - Track agent readiness
+    let expected_agent_count = stream_handles.len();
+    let mut agent_status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ready_agents = std::collections::HashSet::new();
+    let mut error_agents: Vec<(String, String)> = Vec::new();
+    
+    // v0.7.6: Stream forwarding tasks are already running (messages forwarded immediately)
+    // Just wait for them to complete in background
+    for handle in stream_handles {
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                error!("Stream task error: {:?}", e);
+            }
+        });
+    }
     
     // Setup Ctrl+C handler
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     
-    // Wait for all agents to complete (or Ctrl+C)
-    let mut summaries = Vec::new();
-    let mut interrupted = false;
+    eprintln!("⏳ Waiting for agents to validate configuration...");
+    let startup_timeout_secs = validation_time_secs - 2;  // Leave 2s buffer before workload starts
+    let startup_timeout = tokio::time::Duration::from_secs(startup_timeout_secs);
+    let startup_deadline = tokio::time::Instant::now() + startup_timeout;
     
-    for (idx, handle) in handles.into_iter().enumerate() {
-        // Check for Ctrl+C between each agent completion
+    // v0.7.6: Wait for READY/ERROR status from all agents
+    'startup: loop {
         tokio::select! {
-            result = handle => {
-                match result {
-                    Ok(Ok(summary)) => {
-                        info!("Agent {} ({}) completed successfully", ids[idx], agent_addrs[idx]);
-                        let msg = format!("✓ Agent {} completed", ids[idx]);
-                        println!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Write agent results to agents/{id}/ subdirectory (v0.6.4)
-                        write_agent_results(&agents_dir, &ids[idx], &summary)?;
-                        
-                        summaries.push(summary);
+            Some(stats) = rx_stats.recv() => {
+                // Check status field
+                match stats.status {
+                    1 => {  // READY
+                        agent_status.insert(stats.agent_id.clone(), "READY".to_string());
+                        ready_agents.insert(stats.agent_id.clone());
+                        eprintln!("  ✅ {} ready", stats.agent_id);
                     }
-                    Ok(Err(e)) => {
-                        error!("Agent {} ({}) failed: {:?}", ids[idx], agent_addrs[idx], e);
-                        let msg = format!("✗ Agent {} failed: {}", ids[idx], e);
-                        eprintln!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Cleanup and exit
-                        if !deployments.is_empty() {
-                            warn!("Cleaning up agents before exit...");
-                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
-                        }
-                        
-                        anyhow::bail!("Agent {} failed: {}", ids[idx], e);
+                    3 => {  // ERROR
+                        agent_status.insert(stats.agent_id.clone(), "ERROR".to_string());
+                        error_agents.push((stats.agent_id.clone(), stats.error_message.clone()));
+                        eprintln!("  ❌ {} error: {}", stats.agent_id, stats.error_message);
                     }
-                    Err(e) => {
-                        error!("Agent {} ({}) join error: {:?}", ids[idx], agent_addrs[idx], e);
-                        let msg = format!("✗ Agent {} join error: {}", ids[idx], e);
-                        eprintln!("{}", msg);
-                        results_dir.write_console(&msg)?;
-                        
-                        // Cleanup and exit
-                        if !deployments.is_empty() {
-                            warn!("Cleaning up agents before exit...");
-                            let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
+                    _ => {
+                        // Unexpected status during startup (RUNNING/COMPLETED)
+                        // This shouldn't happen, but treat as ready
+                        if !ready_agents.contains(&stats.agent_id) && !error_agents.iter().any(|(a, _)| a == &stats.agent_id) {
+                            agent_status.insert(stats.agent_id.clone(), "READY".to_string());
+                            ready_agents.insert(stats.agent_id.clone());
                         }
-                        
-                        anyhow::bail!("Agent {} join error: {}", ids[idx], e);
                     }
                 }
+                
+                // Check if all agents have responded
+                if agent_status.len() >= expected_agent_count {
+                    break 'startup;
+                }
+            }
+            _ = tokio::time::sleep_until(startup_deadline) => {
+                eprintln!("\n❌ Startup timeout: Not all agents responded within {}s", startup_timeout.as_secs());
+                eprintln!("Agent status ({}/{}):", agent_status.len(), expected_agent_count);
+                for (agent_id, status) in &agent_status {
+                    let icon = if status == "READY" { "✅" } else { "❌" };
+                    eprintln!("  {} {}: {}", icon, agent_id, status);
+                }
+                let missing_count = expected_agent_count - agent_status.len();
+                if missing_count > 0 {
+                    eprintln!("  ⏱️  {} agent(s) did not respond", missing_count);
+                }
+                anyhow::bail!("Agent startup validation timeout");
             }
             _ = &mut ctrl_c => {
-                warn!("Received Ctrl+C - interrupting workload");
-                let msg = "\n⚠ Interrupted by user (Ctrl+C)";
-                eprintln!("{}", msg);
-                results_dir.write_console(msg)?;
-                interrupted = true;
-                break;
+                eprintln!("\n⚠️  Interrupted during startup");
+                anyhow::bail!("Interrupted by user");
             }
         }
     }
     
-    // Handle interruption
-    if interrupted {
-        warn!("Workload interrupted - cleaning up agents");
-        
-        if !deployments.is_empty() {
-            let cleanup_msg = "Stopping agent containers...";
-            eprintln!("{}", cleanup_msg);
+    // Check if any agents reported errors
+    if !error_agents.is_empty() {
+        eprintln!("\n❌ {} agent(s) failed configuration validation:", error_agents.len());
+        for (agent_id, error_msg) in &error_agents {
+            eprintln!("  ❌ {}: {}", agent_id, error_msg);
+        }
+        eprintln!("\nReady agents: {}/{}", ready_agents.len(), expected_agent_count);
+        for agent_id in &ready_agents {
+            eprintln!("  ✅ {}", agent_id);
+        }
+        anyhow::bail!("{} agent(s) failed startup validation", error_agents.len());
+    }
+    
+    eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
+    
+    // v0.7.6: Track workload start time for progress bar position
+    let workload_start = std::time::Instant::now();
+    
+    // Aggregator for live stats display
+    let mut aggregator = LiveStatsAggregator::new();
+    let mut last_update = std::time::Instant::now();
+    let mut completed_agents = std::collections::HashSet::new();
+    
+    // v0.7.5: Resilience - track per-agent activity for timeout detection
+    let mut agent_last_seen: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+    let mut dead_agents = std::collections::HashSet::new();
+    let timeout_warn_secs = 5.0;
+    let timeout_dead_secs = 10.0;
+    
+    // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
+    let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
+    
+    // v0.7.5: Track last console.log write time (write every 1 second)
+    let mut last_console_log = std::time::Instant::now();
+    
+    // Process live stats stream
+    loop {
+        // v0.7.5: Check for stalled agents (timeout detection)
+        let now = std::time::Instant::now();
+        for (agent_id, last_seen) in &agent_last_seen {
+            if dead_agents.contains(agent_id) || completed_agents.contains(agent_id) {
+                continue;  // Skip already dead or completed agents
+            }
             
-            use sai3_bench::ssh_deploy;
-            match ssh_deploy::cleanup_agents(deployments) {
-                Ok(_) => {
-                    eprintln!("✓ Agents cleaned up");
+            let elapsed = now.duration_since(*last_seen).as_secs_f64();
+            if elapsed >= timeout_dead_secs {
+                if !dead_agents.contains(agent_id) {
+                    error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DEAD", agent_id, elapsed);
+                    dead_agents.insert(agent_id.clone());
+                    aggregator.mark_completed(agent_id);  // Remove from active count
+                    progress_bar.set_message(format!("{} (⚠️ {} dead)", aggregator.aggregate().format_progress(), dead_agents.len()));
                 }
-                Err(e) => {
-                    eprintln!("⚠ Warning: Cleanup errors: {}", e);
-                }
+            } else if elapsed >= timeout_warn_secs {
+                warn!("⚠️  Agent {} delayed: no updates for {:.1}s", agent_id, elapsed);
             }
         }
         
-        bail!("Workload interrupted by user");
+        tokio::select! {
+            Some(stats) = rx_stats.recv() => {
+                // v0.7.5: Update last seen timestamp for resilience
+                agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
+                
+                // v0.7.5: Extract final summary if completed
+                if stats.completed {
+                    completed_agents.insert(stats.agent_id.clone());
+                    aggregator.mark_completed(&stats.agent_id);
+                    
+                    // Extract and store final summary for persistence
+                    if let Some(summary) = stats.final_summary {
+                        debug!("Collected final summary from agent {}", summary.agent_id);
+                        agent_summaries.push(summary);
+                    } else {
+                        warn!("Agent {} completed but did not provide final summary", stats.agent_id);
+                    }
+                } else {
+                    // Regular update (not completed yet)
+                    aggregator.update(stats);
+                }
+                
+                // Update display every 100ms (rate limiting)
+                if last_update.elapsed() > std::time::Duration::from_millis(100) {
+                    let agg = aggregator.aggregate();
+                    let msg = if dead_agents.is_empty() {
+                        agg.format_progress()
+                    } else {
+                        format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
+                    };
+                    progress_bar.set_message(msg.clone());
+                    
+                    // v0.7.6: Update progress bar position based on elapsed time
+                    let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
+                    progress_bar.set_position(elapsed_secs);
+                    
+                    last_update = std::time::Instant::now();
+                    
+                    // v0.7.5: Write live stats to console.log every 1 second
+                    if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let log_line = format!("[{}] {}", timestamp, msg);
+                        if let Err(e) = results_dir.write_console(&log_line) {
+                            warn!("Failed to write live stats to console.log: {}", e);
+                        }
+                        last_console_log = std::time::Instant::now();
+                    }
+                }
+                
+                // v0.7.5: Check if all agents completed or dead (graceful degradation)
+                if aggregator.all_completed() {
+                    break;
+                }
+            }
+            
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+                // v0.7.5: Periodic timeout check (every 1 second)
+                // Check logic is at top of loop
+            }
+            
+            _ = &mut ctrl_c => {
+                warn!("Ctrl+C received, interrupting workload");
+                progress_bar.finish_with_message("Interrupted by user");
+                
+                // Cleanup deployments if any
+                if !deployments.is_empty() {
+                    warn!("Cleaning up agents...");
+                    let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
+                }
+                
+                anyhow::bail!("Interrupted by Ctrl+C");
+            }
+        }
     }
-
-    let msg = format!("All {} agents completed successfully", summaries.len());
-    info!("{}", msg);
-    results_dir.write_console(&msg)?;
-
-    // Display results
-    print_distributed_results(&summaries, &mut results_dir)?;
     
-    // Generate consolidated results.tsv from individual agent histograms (v0.6.4)
-    create_consolidated_tsv(&agents_dir, &results_dir, &summaries)?;
-
-    // Finalize results directory with max wall time
-    let max_wall = summaries
-        .iter()
-        .map(|s| s.wall_seconds)
-        .fold(0.0f64, f64::max);
+    // Final aggregation
+    let final_stats = aggregator.aggregate();
+    progress_bar.finish_with_message(format!("✓ All {} agents completed", final_stats.num_agents));
     
-    results_dir.finalize(max_wall)?;
+    // v0.7.6: Add blank lines to preserve the last stats display before printing results
+    println!("\n\n");  // Preserve GET/PUT stats lines from being overwritten
+    
+    // v0.7.5: Print live aggregate stats for immediate visibility
+    println!("=== Live Aggregate Stats (from streaming) ===");
+    println!("Total operations: {} GET, {} PUT, {} META", 
+             final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops);
+    println!("GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+             final_stats.total_get_ops as f64 / final_stats.elapsed_s,
+             format_bandwidth(final_stats.total_get_bytes, final_stats.elapsed_s),
+             final_stats.get_mean_us,
+             final_stats.get_p50_us,
+             final_stats.get_p95_us);
+    println!("PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+             final_stats.total_put_ops as f64 / final_stats.elapsed_s,
+             format_bandwidth(final_stats.total_put_bytes, final_stats.elapsed_s),
+             final_stats.put_mean_us,
+             final_stats.put_p50_us,
+             final_stats.put_p95_us);
+    println!("Elapsed: {:.2}s", final_stats.elapsed_s);
+    println!();
+    
+    // v0.7.5: Write per-agent results and create consolidated TSV with histogram aggregation
+    if !agent_summaries.is_empty() {
+        info!("Writing results for {} agents", agent_summaries.len());
+        
+        // Write per-agent results to agents/{agent-id}/ subdirectory
+        for summary in &agent_summaries {
+            if let Err(e) = write_agent_results(&agents_dir, &summary.agent_id, summary) {
+                error!("Failed to write results for agent {}: {}", summary.agent_id, e);
+            }
+        }
+        
+        // Create consolidated TSV with bucket-level histogram aggregation
+        if let Err(e) = create_consolidated_tsv(&agents_dir, &results_dir, &agent_summaries) {
+            error!("Failed to create consolidated TSV: {}", e);
+        } else {
+            info!("✓ Consolidated results.tsv created with accurate histogram aggregation");
+        }
+        
+        // Print detailed per-agent summary
+        if let Err(e) = print_distributed_results(&agent_summaries, &mut results_dir) {
+            error!("Failed to print distributed results: {}", e);
+        }
+    } else {
+        warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
+        warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
+    }
+    
+    // Finalize results directory with elapsed time from final stats
+    results_dir.finalize(final_stats.elapsed_s)?;
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
 

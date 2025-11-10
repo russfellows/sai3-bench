@@ -73,10 +73,56 @@ message WorkloadSummary {
   bytes histogram_meta = 18;     // Serialized META histograms (all size buckets)
 }
 
+// v0.7.5: Live performance statistics for distributed execution
+// Sent every 1 second during workload execution for real-time visibility
+message LiveStats {
+  string agent_id = 1;
+  double timestamp_s = 2;        // Seconds since workload start
+  
+  // GET operations (read from storage)
+  uint64 get_ops = 3;
+  uint64 get_bytes = 4;
+  double get_mean_us = 5;
+  double get_p50_us = 6;
+  double get_p95_us = 7;
+  
+  // PUT operations (write to storage)
+  uint64 put_ops = 8;
+  uint64 put_bytes = 9;
+  double put_mean_us = 10;
+  double put_p50_us = 11;
+  double put_p95_us = 12;
+  
+  // META operations (LIST/HEAD/DELETE/etc.)
+  uint64 meta_ops = 13;
+  double meta_mean_us = 14;
+  
+  double elapsed_s = 15;
+  bool completed = 16;           // True on final message
+  
+  // v0.7.5: Optional final summary (only present when completed=true)
+  // Allows controller to collect complete results for persistence
+  WorkloadSummary final_summary = 17;
+  
+  // v0.7.6: Startup handshake for robust error handling
+  enum Status {
+    UNKNOWN = 0;
+    READY = 1;       // Agent validated config and is ready to start
+    RUNNING = 2;     // Workload is executing (normal stats messages)
+    ERROR = 3;       // Agent encountered startup error (see error_message)
+    COMPLETED = 4;   // Workload finished successfully
+  }
+  Status status = 18;
+  string error_message = 19;     // Details if status == ERROR
+}
+
 service Agent {
   rpc Ping(Empty) returns (PingReply);
   rpc RunGet(RunGetRequest) returns (OpSummary);
   rpc RunPut(RunPutRequest) returns (OpSummary);
   rpc RunWorkload(RunWorkloadRequest) returns (WorkloadSummary);  // v0.6.0
+  
+  // v0.7.5: Server streaming for live progress updates during distributed execution
+  rpc RunWorkloadWithLiveStats(RunWorkloadRequest) returns (stream LiveStats);
 }
 

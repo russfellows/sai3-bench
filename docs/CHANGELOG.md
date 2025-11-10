@@ -2,6 +2,105 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.6] - 2025-11-09 (Unreleased)
+
+### 🎯 Distributed Live Stats with Startup Handshaking
+
+**Major enhancement**: Complete real-time progress visualization for distributed workloads with sophisticated 3-way startup handshaking protocol and microsecond-precision metrics display.
+
+#### New Features
+
+- **Startup Handshake Protocol** - Coordinated agent startup with validation
+  - **3-way handshake**: Controller → Agents validate config → Agents report READY/ERROR → Synchronized start
+  - **Fast startup**: 5 seconds total (3s validation + 2s user delay) instead of previous 32s
+  - **Error propagation**: Agents send detailed error messages if validation fails
+  - **Synchronized execution**: All agents begin workload at exact same coordinated timestamp
+  - **Validation window**: Agents validate configuration before starting work
+  - **Status enum**: UNKNOWN(0), READY(1), RUNNING(2), ERROR(3), COMPLETED(4)
+
+- **Real-Time Progress Display** - Beautiful progress visualization during execution
+  ```
+  [========================================] 30/30s
+  2 agents
+    GET: 19882 ops/s, 19.4 MiB/s (mean: 95µs, p50: 96µs, p95: 135µs)
+    PUT: 8541 ops/s, 16.7 MiB/s (mean: 102µs, p50: 98µs, p95: 136µs)
+  ```
+  - **Progress bar**: Shows elapsed/total seconds with visual bar (not spinner)
+  - **Live updates**: Stats refresh every 1 second during execution
+  - **Multi-line display**: Agent count, GET stats, PUT stats on separate lines
+  - **Preserved output**: Final stats remain visible after completion
+  - **Smooth updates**: Uses indicatif for flicker-free display
+
+- **Microsecond Precision** - Consistent latency units throughout
+  - **Live stats**: Shows µs during execution (not ms)
+  - **Console output**: Final summary uses µs
+  - **TSV files**: Column headers use `_us` suffix (mean_us, p50_us, p95_us)
+  - **console.log**: All timestamped entries show µs
+  - **Better precision**: Accurate for fast operations (90-100µs range)
+
+- **Agent Configuration Validation** - Pre-flight checks before workload starts
+  - **Path validation**: Checks file:// patterns using glob to ensure files exist
+  - **Operation validation**: Verifies PUT has sizes, GET has patterns
+  - **Post-prefix validation**: Validates AFTER agent path prefix applied
+  - **Clear errors**: Descriptive messages when validation fails
+
+#### Protocol Changes
+
+**proto/iobench.proto** - Added startup handshake support:
+```protobuf
+message LiveStats {
+  enum Status {
+    UNKNOWN = 0;
+    READY = 1;      // Agent validated config and ready to start
+    RUNNING = 2;    // Agent executing workload
+    ERROR = 3;      // Agent validation error
+    COMPLETED = 4;  // Agent finished
+  }
+  Status status = 18;
+  string error_message = 19;
+}
+```
+
+#### Implementation Details
+
+**Agent changes** (`src/bin/agent.rs`):
+- New `validate_workload_config()` function validates after path prefixing
+- Stream yields READY → waits for coordinated start → spawns workload → streams stats
+- Sends ERROR status with details if validation fails
+- Uses glob crate to verify file:// patterns match actual files
+
+**Controller changes** (`src/bin/controller.rs`):
+- Parse config early to get duration for progress bar
+- Progress bar instead of spinner: `ProgressBar::new(duration_secs)`
+- Create channel BEFORE spawning tasks (critical fix)
+- Forward messages immediately (not batched after stream)
+- Startup handshake loop collects READY/ERROR from all agents
+- Track workload start time for accurate progress position
+- Changed all latency displays from ms to µs
+- Add newlines after completion to preserve final stats
+
+**Key fixes**:
+1. **Message flow**: Create channel before tasks, forward immediately
+2. **Workload timing**: Spawn workload INSIDE stream after READY sent
+3. **Coordinated start**: Wait happens inside stream, not blocking creation
+
+#### Dependencies
+
+- Added `glob = "^0.3"` for file pattern validation
+
+#### Testing
+
+Thoroughly tested with 2-agent local setup:
+- Fast startup (5s vs 32s)
+- Progress bar updates every second
+- Synchronized agent execution (both finish at 30.01s)
+- Error handling (missing files, invalid config)
+- All output files show µs consistently
+
+**See also**: `docs/DISTRIBUTED_LIVE_STATS_IMPLEMENTATION.md` for complete technical details
+
+---
+
 ## [0.7.4] - 2025-11-07
 
 ### 📊 Op-Log Sorting, Validation, and Multi-Process Merge

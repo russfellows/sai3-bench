@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.4-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.6-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-44%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,24 +8,28 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.4 (November 7, 2025)
+## 🌟 Latest Release - v0.7.6 (November 9, 2025)
 
-**📊 Op-Log Sorting, Validation, and Multi-Process Merge:**
+**🎯 Distributed Live Stats with Startup Handshaking:**
 
-- **Sort Command**: Offline sorting of op-log files with streaming window algorithm
-- **Replay Dry-Run**: Validate op-logs before execution (check sort order, file existence, operation count)
-- **Runtime Validation**: Automatic detection of out-of-order entries during replay with warnings
-- **Multi-Worker Merge**: K-way merge for multi-process op-logs with chronological ordering
+- **Real-Time Progress**: Beautiful progress bar with live aggregate metrics (updates every 1s)
+- **Startup Handshake**: 3-way protocol ensures all agents validate config and start synchronized
+- **Fast Startup**: 5 seconds (3s validation + 2s delay) instead of previous 32s
+- **Microsecond Precision**: Consistent µs display throughout (live stats, console, TSV files)
 
 ```bash
-# Sort unsorted op-log files
-sai3-bench sort --files /tmp/ops.tsv.zst
+# Run distributed workload with live progress
+sai3bench-ctl run --config workload.yaml \
+  --agents agent1.example.com:7761,agent2.example.com:7761
 
-# Validate before replay
-sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
+# Output shows real-time updates:
+# [=====>] 15/30s
+# 2 agents
+#   GET: 19882 ops/s (mean: 95µs, p50: 96µs, p95: 135µs)
+#   PUT: 8541 ops/s (mean: 102µs, p50: 98µs, p95: 136µs)
 ```
 
-See [CHANGELOG](docs/CHANGELOG.md#074) for complete details.
+See [CHANGELOG](docs/CHANGELOG.md#076) for complete details.
 
 ## 🚀 What Makes sai3-bench Unique?
 

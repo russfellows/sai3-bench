@@ -1,0 +1,17 @@
+# Distributed test using local file:// backend
+# Base path: /mnt/test/sai3bench-test/
+# Per-agent data already created in agent-1/data/ and agent-2/data/
+
+target: "file:///mnt/test/sai3bench-test/"
+duration: "30s"
+concurrency: 2
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+
+  - op: put
+    path: "results/"
+    object_size: 2048
+    weight: 30

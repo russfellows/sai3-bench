@@ -336,12 +336,11 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
 mod tests {
     use super::*;
     use crate::metrics::OpHists;
-    use hdrhistogram::Histogram;
     
     #[test]
     fn test_summary_merge_simple() {
         // Create two simple summaries
-        let mut sum1 = Summary {
+        let sum1 = Summary {
             wall_seconds: 1.0,
             total_bytes: 1000,
             total_ops: 100,
@@ -359,7 +358,7 @@ mod tests {
             meta_hists: OpHists::new(),
         };
         
-        let mut sum2 = Summary {
+        let sum2 = Summary {
             wall_seconds: 1.5,
             total_bytes: 2000,
             total_ops: 200,

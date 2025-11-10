@@ -4,6 +4,7 @@ use regex::escape;
 
 pub mod config;
 pub mod directory_tree; // Directory structure generation (width/depth model)
+pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod multiprocess; // Multi-process scaling for parallel I/O (v0.7.3+)
