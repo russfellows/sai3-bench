@@ -37,7 +37,7 @@ On **host4** (192.168.1.104):
 
 From your **controller host**:
 ```bash
-./sai3bench-ctl --insecure \
+./sai3bench-ctl \
   --agents 192.168.1.101:7761,192.168.1.102:7761,192.168.1.103:7761,192.168.1.104:7761 \
   run --config tests/configs/distributed_mixed_test.yaml
 ```
@@ -134,14 +134,14 @@ For **10+ agents**, use a file to manage the agent list:
 **Controller command**:
 ```bash
 AGENTS=$(paste -sd, agents.txt)
-./sai3bench-ctl --insecure --agents "$AGENTS" run --config my-workload.yaml
+./sai3bench-ctl --agents "$AGENTS" run --config my-workload.yaml
 ```
 
 Or use a loop to generate the list:
 ```bash
 # Generate agent list for hosts 1-20
 AGENTS=$(for i in {1..20}; do echo "192.168.1.$((100+i)):7761"; done | paste -sd,)
-./sai3bench-ctl --insecure --agents "$AGENTS" run --config my-workload.yaml
+./sai3bench-ctl --agents "$AGENTS" run --config my-workload.yaml
 ```
 
 ## Example: 5-Host Cloud Storage Test
@@ -173,12 +173,12 @@ echo ""
 
 # Test connectivity
 echo "Testing agent connectivity..."
-./sai3bench-ctl --insecure --agents "$AGENTS" ping
+./sai3bench-ctl --agents "$AGENTS" ping
 
 # Run workload
 echo ""
 echo "Starting distributed workload..."
-./sai3bench-ctl --insecure --agents "$AGENTS" run --config "$CONFIG"
+./sai3bench-ctl --agents "$AGENTS" run --config "$CONFIG"
 
 echo ""
 echo "✅ Test complete! Results in: $(ls -td sai3-* | head -1)"

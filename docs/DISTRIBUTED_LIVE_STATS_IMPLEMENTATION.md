@@ -482,7 +482,7 @@ workload:
 # Run test
 ./target/release/sai3bench-ctl \
   --agents 127.0.0.1:7761,127.0.0.1:7762 \
-  --insecure \
+  \
   run \
   --config tests/configs/test_distributed_local.yaml
 ```

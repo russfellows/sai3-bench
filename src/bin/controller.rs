@@ -269,12 +269,13 @@ struct Cli {
     #[arg(long)]
     agents: String,
 
-    /// If set, connect without TLS (http)
+    /// Enable TLS for secure connections (requires --agent-ca)
+    /// Default is plaintext HTTP (no TLS)
     #[arg(long, default_value_t = false)]
-    insecure: bool,
+    tls: bool,
 
     /// Path to PEM file containing the agent's self-signed certificate (to trust)
-    /// Only used when not --insecure
+    /// Required when --tls is enabled
     #[arg(long)]
     agent_ca: Option<PathBuf>,
 
@@ -342,6 +343,10 @@ enum Commands {
         /// Path to YAML workload configuration file
         #[arg(long)]
         config: PathBuf,
+        
+        /// Validate configuration without executing workload
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         
         /// Path prefix template for agent isolation (e.g., "agent-{id}/")
         /// Use {id} as placeholder for agent number (1, 2, 3, ...)
@@ -491,7 +496,7 @@ async fn main() -> Result<()> {
         
         Commands::Ping => {
             for a in &agents {
-                let mut c = mk_client(a, cli.insecure, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c.ping(Empty {}).await?.into_inner();
@@ -500,7 +505,7 @@ async fn main() -> Result<()> {
         }
         Commands::Get { uri, jobs } => {
             for a in &agents {
-                let mut c = mk_client(a, cli.insecure, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c
@@ -527,7 +532,7 @@ async fn main() -> Result<()> {
             concurrency,
         } => {
             for a in &agents {
-                let mut c = mk_client(a, cli.insecure, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c
@@ -551,6 +556,7 @@ async fn main() -> Result<()> {
         }
         Commands::Run {
             config,
+            dry_run,
             path_template,
             agent_ids,
             start_delay,
@@ -561,6 +567,19 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("Failed to read config file: {}", config.display()))?;
             let parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
                 .context("Failed to parse YAML config")?;
+            
+            // If dry-run, just validate and exit
+            if *dry_run {
+                println!("✅ Configuration validated successfully");
+                println!("   Config file: {}", config.display());
+                if let Some(ref dist) = parsed_config.distributed {
+                    println!("   Agents: {}", dist.agents.len());
+                    println!("   Shared filesystem: {}", dist.shared_filesystem);
+                    println!("   Tree creation: {:?}", dist.tree_creation_mode);
+                }
+                println!("\nTo execute, run without --dry-run");
+                return Ok(());
+            }
             
             // Determine agent addresses: config.distributed.agents takes precedence over CLI --agents
             let (agent_addrs, ssh_deployment) = if let Some(ref dist_config) = parsed_config.distributed {
@@ -604,7 +623,7 @@ async fn main() -> Result<()> {
                 *start_delay,
                 *shared_prepare,
                 ssh_deployment,
-                cli.insecure,
+                !cli.tls,
                 cli.agent_ca.as_ref(),
                 &cli.agent_domain,
             )

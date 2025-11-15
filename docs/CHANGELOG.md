@@ -2,7 +2,58 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
-## [0.7.6] - 2025-11-09 (Unreleased)
+## [0.7.7] - 2025-11-15
+
+### 🔧 CLI Improvements - Simplified TLS Configuration
+
+**Breaking Change**: Improved CLI interface for TLS configuration with clearer, more intuitive flags.
+
+#### Changed
+
+- **`--tls` flag replaces `--insecure`** - Cleaner, positive logic for TLS configuration
+  - **Old (v0.7.6)**: `--insecure` (default false, TLS enabled by default)
+  - **New (v0.7.7)**: `--tls` (default false, plaintext by default)
+  - **Rationale**: Plaintext is more common in testing scenarios, and `--tls` is clearer than `--no-insecure`
+  - **Migration**: Remove `--insecure` flag (plaintext is now default), add `--tls` to enable TLS
+  
+  ```bash
+  # Old way (v0.7.6):
+  sai3bench-ctl --agents host:7761 run --config test.yaml
+  
+  # New way (v0.7.7):
+  sai3bench-ctl --agents host:7761 run --config test.yaml
+  
+  # For TLS (v0.7.7):
+  sai3bench-ctl --agents host:7761 --tls --agent-ca cert.pem run --config test.yaml
+  ```
+
+#### Added
+
+- **`--dry-run` flag for `sai3bench-ctl run`** - Validate configuration without execution
+  - Parses YAML config file
+  - Shows key distributed configuration settings
+  - Validates config syntax without connecting to agents
+  - Provides quick feedback for testing configurations
+  
+  ```bash
+  sai3bench-ctl --agents 10.138.0.42:7761 run --config test.yaml --dry-run
+  # Output:
+  # ✅ Configuration validated successfully
+  #    Config file: test.yaml
+  #    Agents: 1
+  #    Shared filesystem: true
+  #    Tree creation: Coordinator
+  ```
+
+#### Documentation
+
+- Updated all examples to use `--tls` instead of `--insecure`
+- Added `--dry-run` usage examples to README.md
+- Updated help text to clarify TLS behavior
+
+---
+
+## [0.7.6] - 2025-11-09
 
 ### 🎯 Distributed Live Stats with Startup Handshaking
 
@@ -1474,7 +1525,7 @@ sai3bench-agent --listen 0.0.0.0:7761  # On host 1
 sai3bench-agent --listen 0.0.0.0:7761  # On host 2
 
 # Run distributed workload from controller
-sai3bench-ctl --insecure --agents host1:7761,host2:7761 \
+sai3bench-ctl --agents host1:7761,host2:7761 \
     run --config workload.yaml --start-delay 2
 
 # Output shows per-agent and aggregate results
