@@ -1,0 +1,80 @@
+# unet3d_gcs_test.yaml
+# GCS version of unet3d workload with nested directory structure
+# Single agent configuration for initial testing
+# 
+# Directory Structure (per agent):
+#   width=28, depth=2, files=130
+#   28 subdirs × 28 subdirs = 784 leaf directories
+#   784 × 130 files = 101,920 files per agent
+#
+# Average file size: ~6.6 MB (lognormal distribution)
+# Total dataset: ~673 GB per agent
+
+target: "gs://signal65-ai-ac/unet3d/"
+duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
+concurrency: 32      # Matches rdf-bench threads=32
+
+prepare:
+  prepare_strategy: parallel
+  # Create nested directory tree structure matching rdf-bench FSD
+  # width=28, depth=2, files=130
+  directory_structure:
+    width: 28                # 28 subdirectories per level
+    depth: 2                 # 2 levels deep
+    files_per_dir: 130       # 130 files in each leaf directory
+    distribution: "bottom"   # Files only in leaf directories
+    dir_mask: "scan.d%d_w%d.dir"
+  
+  ensure_objects:
+    # Lognormal distribution approximating the original distribution:
+    # Original: 1MB(10%), 2MB(20%), 4MB(30%), 8MB(25%), 16MB(10%), 32MB(5%)
+    # Mean: ~6.6 MB, Median: ~4 MB
+    # 
+    # NOTE: When using directory_structure, base_uri should be the parent path
+    # The directory tree will be created under this path
+    
+    - base_uri: "gs://signal65-ai-ac/unet3d/"
+      count: 101920  # Total files: 28 × 28 × 130
+      size_distribution:
+        type: lognormal
+        mean: 6917529      # ~6.6 MB mean
+        std_dev: 5534023    # ~5.3 MB std_dev (gives similar spread to original)
+        min: 1048576        # 1 MB minimum (prevent tiny files)
+        max: 33554432       # 32 MB maximum (match original distribution)
+      dedup_factor: 1
+      compress_factor: 1
+  
+  cleanup: false  # Keep data between runs
+
+workload:
+  # Sequential reads matching rdf-bench:
+  # operation=read, fileio=sequential, xfersize=1m
+  # Each worker will select files uniformly at random
+  
+  - op: get
+    path: "data/**/*"           # Glob pattern to match all files in nested tree
+    weight: 100
+
+# Distributed Configuration (1 controller + 1 worker)
+distributed:
+  shared_filesystem: true  # GCS is shared across all agents
+  tree_creation_mode: coordinator  # Controller creates directory tree once
+  path_selection: random  # Random file selection for workload
+  agents:
+    - address: "10.138.0.42:7761"
+      id: "agent-1"  # Must match controller's default agent naming
+
+# Expected Performance (1 agent, 32 threads, full file reads):
+#   Files: 101,920 total
+#   Avg file size: ~6.6 MB
+#   Total data: ~673 GB
+#   Target throughput: 1-2 GB/s (depends on GCS performance and network)
+
+# Notes on rdf-bench equivalence:
+#   ✅ Nested directory structure: width=28, depth=2
+#   ✅ Files per leaf dir: 130
+#   ✅ File size distribution: Lognormal (approximates weighted distribution)
+#   ✅ Sequential reads (sai3-bench always reads full files sequentially)
+#   ✅ Concurrency: 32 threads
+#   ⚠️  No xfersize control (sai3-bench reads full files, not 1MB chunks)
+#   ⚠️  No fileselect=(poisson,5) - sai3-bench uses uniform random selection

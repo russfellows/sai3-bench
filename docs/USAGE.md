@@ -78,12 +78,12 @@ FLAGS/OPTIONS:
 ```
 sai3bench-ctl
 USAGE:
-  sai3bench-ctl [--insecure] [--agent-ca <path>] [--agent-domain <name>] --agents <csv> <SUBCOMMAND> ...
+  sai3bench-ctl [--tls] [--agent-ca <path>] [--agent-domain <name>] --agents <csv> <SUBCOMMAND> ...
 
 GLOBAL FLAGS/OPTIONS:
   --agents <csv>        Comma-separated list of agent addresses (host:port)
-  --insecure            Use plaintext (no TLS). Must match agent mode.
-  --agent-ca <path>     Path to agent's certificate PEM (for TLS)
+  --tls                 Enable TLS for secure connections (requires --agent-ca). Default is plaintext HTTP.
+  --agent-ca <path>     Path to agent's certificate PEM (required when --tls enabled)
   --agent-domain <name> Override SNI / DNS name when validating TLS
 
 SUBCOMMANDS:
@@ -95,9 +95,9 @@ SUBCOMMANDS:
         [--object-size <bytes>] [--objects <count>] [--concurrency <N>]
 ```
 
-**Note:** When agents are started with --tls, the controller must not
-use --insecure. Instead, pass --agent-ca <path> to trust the agent’s
-self‑signed certificate. 
+**Note:** When agents are started with --tls, the controller must also
+use --tls --agent-ca <path> to trust the agent's self-signed certificate.
+By default (no --tls flag), both controller and agents use plaintext HTTP.
 
 If the agent cert doesn’t include the default DNS
 name the controller uses, add --agent-domain.
@@ -109,11 +109,11 @@ In one terminal:
 ./target/release/sai3bench-agent --listen 127.0.0.1:7761
 In another terminal:
 
-## Controller talking to that agent, explicit plaintext:
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
+## Controller talking to that agent (plaintext is default):
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761 ping
 
 ## Example GET workload (jobs = concurrency for downloads)
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/path/ --jobs 8
 
 # 3 Multi-Host (PLAINTEXT)
@@ -122,9 +122,9 @@ On each agent host (e.g., node1, node2):
 ./sai3bench-agent --listen 0.0.0.0:7761
 From the controller host:
 
-./sai3bench-ctl --insecure --agents node1:7761,node2:7761 ping
+./sai3bench-ctl --agents node1:7761,node2:7761 ping
 
-./sai3bench-ctl --insecure --agents node1:7761,node2:7761 get \
+./sai3bench-ctl --agents node1:7761,node2:7761 get \
   --uri s3://my-bucket/data/ --jobs 16
 
 # 4 TLS with Self‑Signed Certificates (No CA hassles)
@@ -197,7 +197,8 @@ Multiple agents (all in TLS mode):
   get --uri s3://my-bucket/data/ --jobs 16
 ```
 
-**Important:** Do not pass --insecure to the controller when the agent is running with --tls.
+**Important:** When the agent is running with --tls, the controller must also use --tls --agent-ca <path>.
+By default, both use plaintext (no flags needed).
 
 # 5 Distributed Live Stats (v0.7.6+)
 
@@ -282,7 +283,6 @@ The default start delay is 2 seconds (after 3s validation = 5s total). You can a
 ```bash
 ./sai3bench-ctl --agents node1:7761,node2:7761 \
   --start-delay 5 \  # 5s instead of 2s (total: 8s)
-  --insecure \
   run --config workload.yaml
 ```
 
@@ -290,9 +290,9 @@ For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEME
 
 # 6 Examples for Workloads
 GET (download) via controller
-### PLAINTEXT
+### PLAINTEXT (Default)
 ```
-./sai3bench-ctl --insecure --agents node1:7761 get \
+./sai3bench-ctl --agents node1:7761 get \
   --uri s3://my-bucket/prefix/ --jobs 16
 ```
 
@@ -311,7 +311,7 @@ PUT (upload) via controller
 
 ### PLAINTEXT
 ```
-./sai3bench-ctl --insecure --agents node1:7761 put \
+./sai3bench-ctl --agents node1:7761 put \
   --bucket my-bucket \
   --prefix test/ \
   --object-size 1048576 \
@@ -338,11 +338,11 @@ PUT (upload) via controller
 
 ### Terminal B — controller
 ```
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761 ping
 ```
 
 ```
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/prefix/ --jobs 4
 ```
 
@@ -370,7 +370,7 @@ PUT (upload) via controller
 TLS is enabled ... but --agent-ca was not provided
 You're connecting to a TLS-enabled agent, but the controller is missing
 --agent-ca. Provide the agent's agent_cert.pem or run the controller with
---insecure (plaintext) if the agent is also plaintext.
+plaintext (default, no --tls) if the agent is also plaintext. Use --tls on both if the agent uses --tls.
 h2 protocol error: http2 error / frame with invalid size
 
 Most commonly a TLS name mismatch or wrong certificate. Ensure:
@@ -429,7 +429,7 @@ Sections 3–4.
 The agent reports its version on ping:
 
 ```
-./sai3bench-ctl --insecure --agents node1:7761 ping
+./sai3bench-ctl --agents node1:7761 ping
 # connected to node1:7761 (agent version X.Y.Z)
 ```
 Keep controller/agent binaries from the same source build when testing.

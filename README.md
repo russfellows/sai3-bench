@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.6-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.7-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-44%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,28 +8,28 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.6 (November 9, 2025)
+## 🌟 Latest Release - v0.7.7 (November 15, 2025)
 
-**🎯 Distributed Live Stats with Startup Handshaking:**
+**🔧 CLI Improvements - Simplified TLS Configuration:**
 
-- **Real-Time Progress**: Progress bar with live aggregate client metrics (updates every 1s)
-- **Startup Handshake**: 3-way protocol ensures all agents validate config and start synchronized
-- **Fast Startup**: 5 seconds (3s validation + 2s delay) instead of previous 32s
-- **Microsecond Precision**: Consistent µs display throughout (live stats, console, TSV files)
+- **`--tls` flag**: Cleaner interface replacing confusing `--insecure` double-negative
+- **Plaintext by default**: No flags needed for most testing scenarios
+- **`--dry-run` support**: Validate configs before execution with `sai3bench-ctl run --dry-run`
 
 ```bash
-# Run distributed workload with live progress
-sai3bench-ctl run --config workload.yaml \
-  --agents agent1.example.com:7761,agent2.example.com:7761
+# Simple plaintext (default - no flags needed)
+sai3bench-ctl --agents 10.138.0.42:7761 run --config workload.yaml
 
-# Output shows real-time updates:
-# [=====>] 15/30s
-# 2 agents
-#   GET: 19882 ops/s (mean: 95µs, p50: 96µs, p95: 135µs)
-#   PUT: 8541 ops/s (mean: 102µs, p50: 98µs, p95: 136µs)
+# Validate config before running
+sai3bench-ctl --agents 10.138.0.42:7761 run --config workload.yaml --dry-run
+
+# Enable TLS when needed
+sai3bench-ctl --agents host:7761 --tls --agent-ca cert.pem run --config workload.yaml
 ```
 
-See [CHANGELOG](docs/CHANGELOG.md#076) for complete details.
+See [CHANGELOG](docs/CHANGELOG.md#077) for complete details.
+
+**Previous Release - v0.7.6 (November 9, 2025)** - Distributed live stats with startup handshaking
 
 ## 🚀 What Makes sai3-bench Unique?
 
