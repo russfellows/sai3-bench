@@ -178,6 +178,17 @@ pub struct LiveStats {
     /// Details if status == ERROR
     #[prost(string, tag = "19")]
     pub error_message: ::prost::alloc::string::String,
+    /// v0.7.9: Prepare phase progress tracking
+    ///
+    /// True if currently in prepare phase
+    #[prost(bool, tag = "20")]
+    pub in_prepare_phase: bool,
+    /// Objects created so far
+    #[prost(uint64, tag = "21")]
+    pub prepare_objects_created: u64,
+    /// Total objects to create
+    #[prost(uint64, tag = "22")]
+    pub prepare_objects_total: u64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

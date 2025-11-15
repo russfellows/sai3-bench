@@ -114,6 +114,11 @@ message LiveStats {
   }
   Status status = 18;
   string error_message = 19;     // Details if status == ERROR
+  
+  // v0.7.9: Prepare phase progress tracking
+  bool in_prepare_phase = 20;    // True if currently in prepare phase
+  uint64 prepare_objects_created = 21;  // Objects created so far
+  uint64 prepare_objects_total = 22;    // Total objects to create
 }
 
 service Agent {

@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Use AWS async SDK directly for listing to avoid nested runtimes
 use aws_config::{self, BehaviorVersion};
@@ -245,7 +245,7 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None)
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
@@ -382,6 +382,9 @@ impl Agent for AgentSvc {
                 final_summary: None,
                 status: 3,  // ERROR
                 error_message: format!("Configuration validation failed: {}", e),
+                in_prepare_phase: false,
+                prepare_objects_created: 0,
+                prepare_objects_total: 0,
             };
             
             let stream = async_stream::stream! {
@@ -395,6 +398,9 @@ impl Agent for AgentSvc {
         
         // Channel to signal completion with workload summary (v0.7.5)
         let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
+        
+        // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
+        let (tx_cancel, rx_cancel) = tokio::sync::oneshot::channel::<()>();
         
         // Create stream that sends stats every 1 second
         let agent_id_stream = agent_id.clone();
@@ -423,6 +429,9 @@ impl Agent for AgentSvc {
                 final_summary: None,
                 status: 1,  // READY
                 error_message: String::new(),
+                in_prepare_phase: false,
+                prepare_objects_created: 0,
+                prepare_objects_total: 0,
             };
             yield Ok(ready_msg);
             
@@ -437,40 +446,51 @@ impl Agent for AgentSvc {
             let tracker_exec = tracker_spawn.clone();
             let mut config_exec = config_spawn.clone();
             let agent_id_exec = agent_id_stream.clone();
+            let rx_cancel_exec = rx_cancel;
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
+                let tracker_for_prepare = tracker_exec.clone();
                 config_exec.live_stats_tracker = Some(tracker_exec);
                 
-                // Execute prepare phase if configured
-                let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                    match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload)).await {
-                        Ok((prepared, manifest, _metrics)) => {
-                            info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
-                            
-                            if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                // v0.7.8: Execute prepare/workload with cancellation support
+                tokio::select! {
+                    _ = rx_cancel_exec => {
+                        warn!("Agent {} received cancellation signal (controller disconnected)", agent_id_exec);
+                        let _ = tx_done.send(Err("Cancelled by controller".to_string())).await;
+                    }
+                    result = async {
+                        // Execute prepare phase if configured
+                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare)).await {
+                                Ok((prepared, manifest, _metrics)) => {
+                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                                    
+                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                                    }
+                                    manifest
+                                }
+                                Err(e) => {
+                                    let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                    return;
+                                }
                             }
-                            manifest
-                        }
-                        Err(e) => {
-                            let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
+                        } else {
+                            None
+                        };
 
-                // Execute workload (tracker wired via config for live stats)
-                match sai3_bench::workload::run(&config_exec, tree_manifest).await {
-                    Ok(summary) => {
-                        info!("Workload completed successfully for agent {}", agent_id_exec);
-                        let _ = tx_done.send(Ok(summary)).await;
-                    }
-                    Err(e) => {
-                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
-                        let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
-                    }
+                        // Execute workload (tracker wired via config for live stats)
+                        match sai3_bench::workload::run(&config_exec, tree_manifest).await {
+                            Ok(summary) => {
+                                info!("Workload completed successfully for agent {}", agent_id_exec);
+                                let _ = tx_done.send(Ok(summary)).await;
+                            }
+                            Err(e) => {
+                                error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
+                                let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
+                            }
+                        }
+                    } => result
                 }
             });
             
@@ -482,6 +502,8 @@ impl Agent for AgentSvc {
                     _ = interval.tick() => {
                         // Send live stats snapshot
                         let snapshot = tracker.snapshot();
+                        debug!("Sending stats: PUT {} ops, {} bytes, elapsed {:.1}s", 
+                               snapshot.put_ops, snapshot.put_bytes, snapshot.elapsed_secs());
                         let stats = LiveStats {
                             agent_id: agent_id_stream.clone(),
                             timestamp_s: snapshot.timestamp_secs() as f64,
@@ -502,6 +524,9 @@ impl Agent for AgentSvc {
                             final_summary: None,  // v0.7.5: Only in final message
                             status: 2,  // RUNNING
                             error_message: String::new(),
+                            in_prepare_phase: snapshot.in_prepare_phase,
+                            prepare_objects_created: snapshot.prepare_objects_created,
+                            prepare_objects_total: snapshot.prepare_objects_total,
                         };
                         yield Ok(stats);
                     }
@@ -541,6 +566,9 @@ impl Agent for AgentSvc {
                                     final_summary: proto_summary,  // v0.7.5: Include complete results
                                     status: 4,  // COMPLETED
                                     error_message: String::new(),
+                                    in_prepare_phase: false,
+                                    prepare_objects_created: 0,
+                                    prepare_objects_total: 0,
                                 };
                                 yield Ok(final_stats);
                                 break;
@@ -557,6 +585,11 @@ impl Agent for AgentSvc {
                     }
                 }
             }
+            
+            // v0.7.8: Stream is ending (controller disconnected or Ctrl+C)
+            // Send cancellation signal to workload task
+            info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
+            let _ = tx_cancel.send(());
         };
 
         Ok(Response::new(Box::pin(stream)))

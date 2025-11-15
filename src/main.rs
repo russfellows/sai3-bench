@@ -1246,7 +1246,7 @@ fn run_workload(
             results_dir.write_console(prepare_header)?;
             
             info!("Executing prepare step");
-            let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload)))?;
+            let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload), None))?;
             
             let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
                 prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);

@@ -796,9 +796,9 @@ async fn run_distributed_workload(
     let progress_bar = multi_progress.add(ProgressBar::new(duration_secs));
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{bar:40.cyan/blue} {pos:>3}/{len:3}s\n{msg}")
+            .template("{bar:40.cyan/blue} {pos:>7}/{len:7} {unit}\n{msg}")
             .expect("Invalid progress template")
-            .progress_chars("=>-")
+            .progress_chars("█▓▒░ ")
     );
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
     
@@ -851,10 +851,19 @@ async fn run_distributed_workload(
             let mut stats_count = 0;
             while let Some(stats_result) = stream.message().await? {
                 stats_count += 1;
-                let _ = tx.send(stats_result).await;
+                debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
+                       stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
+                       stats_result.get_bytes + stats_result.put_bytes);
+                if let Err(e) = tx.send(stats_result).await {
+                    error!("Failed to forward stats from agent {}: {}", addr, e);
+                    break;
+                }
             }
             
-            debug!("Agent {} stream completed with {} updates", addr, stats_count);
+            info!("Agent {} stream completed with {} updates", addr, stats_count);
+            if stats_count == 0 {
+                warn!("⚠️  Agent {} stream ended with ZERO updates - possible connection issue!", addr);
+            }
             Ok::<(), anyhow::Error>(())
         });
 
@@ -998,60 +1007,109 @@ async fn run_distributed_workload(
         }
         
         tokio::select! {
-            Some(stats) = rx_stats.recv() => {
-                // v0.7.5: Update last seen timestamp for resilience
-                agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
-                
-                // v0.7.5: Extract final summary if completed
-                if stats.completed {
-                    completed_agents.insert(stats.agent_id.clone());
-                    aggregator.mark_completed(&stats.agent_id);
-                    
-                    // Extract and store final summary for persistence
-                    if let Some(summary) = stats.final_summary {
-                        debug!("Collected final summary from agent {}", summary.agent_id);
-                        agent_summaries.push(summary);
-                    } else {
-                        warn!("Agent {} completed but did not provide final summary", stats.agent_id);
-                    }
-                } else {
-                    // Regular update (not completed yet)
-                    aggregator.update(stats);
-                }
-                
-                // Update display every 100ms (rate limiting)
-                if last_update.elapsed() > std::time::Duration::from_millis(100) {
-                    let agg = aggregator.aggregate();
-                    let msg = if dead_agents.is_empty() {
-                        agg.format_progress()
-                    } else {
-                        format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
-                    };
-                    progress_bar.set_message(msg.clone());
-                    
-                    // v0.7.6: Update progress bar position based on elapsed time
-                    let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
-                    progress_bar.set_position(elapsed_secs);
-                    
-                    last_update = std::time::Instant::now();
-                    
-                    // v0.7.5: Write live stats to console.log every 1 second
-                    if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let log_line = format!("[{}] {}", timestamp, msg);
-                        if let Err(e) = results_dir.write_console(&log_line) {
-                            warn!("Failed to write live stats to console.log: {}", e);
+            stats_opt = rx_stats.recv() => {
+                match stats_opt {
+                    Some(stats) => {
+                        // v0.7.5: Update last seen timestamp for resilience
+                        agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
+                        
+                        // v0.7.9: Capture prepare phase info BEFORE moving stats
+                        let in_prepare = stats.in_prepare_phase;
+                        let prepare_created = stats.prepare_objects_created;
+                        let prepare_total = stats.prepare_objects_total;
+                        
+                        // v0.7.5: Extract final summary if completed
+                        if stats.completed {
+                            completed_agents.insert(stats.agent_id.clone());
+                            aggregator.mark_completed(&stats.agent_id);
+                            
+                            // Extract and store final summary for persistence
+                            if let Some(summary) = stats.final_summary {
+                                debug!("Collected final summary from agent {}", summary.agent_id);
+                                agent_summaries.push(summary);
+                            } else {
+                                warn!("Agent {} completed but did not provide final summary", stats.agent_id);
+                            }
+                        } else {
+                            // Regular update (not completed yet)
+                            aggregator.update(stats);
                         }
-                        last_console_log = std::time::Instant::now();
+                        
+                        // Update display every 100ms (rate limiting)
+                        if last_update.elapsed() > std::time::Duration::from_millis(100) {
+                            let agg = aggregator.aggregate();
+                            
+                            // v0.7.9: Use captured prepare phase info
+                            let msg = if in_prepare && prepare_total > 0 {
+                                // Show prepare progress as "created/total (percentage)"
+                                let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
+                                if dead_agents.is_empty() {
+                                    format!("📦 Preparing: {}/{} objects ({}%)\n{}", 
+                                            prepare_created, prepare_total, pct, agg.format_progress())
+                                } else {
+                                    format!("📦 Preparing: {}/{} objects ({}
+%) (⚠️ {} dead)\n{}", 
+                                            prepare_created, prepare_total, pct, dead_agents.len(), agg.format_progress())
+                                }
+                            } else if dead_agents.is_empty() {
+                                agg.format_progress()
+                            } else {
+                                format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
+                            };
+                            progress_bar.set_message(msg.clone());
+                            
+                            // v0.7.9: Update progress bar based on phase
+                            if in_prepare && prepare_total > 0 {
+                                // During prepare: show objects created out of total
+                                progress_bar.set_length(prepare_total);
+                                progress_bar.set_position(prepare_created);
+                                // Update style to show 'objects' unit
+                                progress_bar.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7} objects\n{msg}")
+                                        .expect("Invalid progress template")
+                                        .progress_chars("█▓▒░ ")
+                                );
+                            } else {
+                                // During workload: show elapsed time out of duration
+                                progress_bar.set_length(duration_secs);
+                                let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
+                                progress_bar.set_position(elapsed_secs);
+                                // Update style to show 's' (seconds) unit
+                                progress_bar.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7}s\n{msg}")
+                                        .expect("Invalid progress template")
+                                        .progress_chars("█▓▒░ ")
+                                );
+                            }
+                            
+                            last_update = std::time::Instant::now();
+                            
+                            // v0.7.5: Write live stats to console.log every 1 second
+                            if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
+                                let timestamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let log_line = format!("[{}] {}", timestamp, msg);
+                                if let Err(e) = results_dir.write_console(&log_line) {
+                                    warn!("Failed to write live stats to console.log: {}", e);
+                                }
+                                last_console_log = std::time::Instant::now();
+                            }
+                        }
+                        
+                        // v0.7.5: Check if all agents completed or dead (graceful degradation)
+                        if aggregator.all_completed() {
+                            break;
+                        }
                     }
-                }
-                
-                // v0.7.5: Check if all agents completed or dead (graceful degradation)
-                if aggregator.all_completed() {
-                    break;
+                    None => {
+                        // Channel closed - all agent streams finished
+                        warn!("Stats channel closed unexpectedly - all agent streams ended");
+                        break;
+                    }
                 }
             }
             
