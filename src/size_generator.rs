@@ -416,8 +416,8 @@ mod tests {
         
         // Different seed should produce different sequence
         let mut gen3 = SizeGenerator::new_with_seed(&spec, 99).unwrap();
-        let size_from_gen1 = gen1.generate();
-        let size_from_gen3 = gen3.generate();
+        let _size_from_gen1 = gen1.generate();
+        let _size_from_gen3 = gen3.generate();
         
         // Very unlikely to match (though technically possible)
         // Run this multiple times to be confident

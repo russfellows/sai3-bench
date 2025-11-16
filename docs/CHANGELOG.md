@@ -2,6 +2,65 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.9] - 2025-11-16
+
+### 🔧 Deterministic Prepare & Test Improvements
+
+**Major enhancements**: Deterministic seeded size generation for gap-filling, skip_verification support (Issue #40), and comprehensive test suite improvements.
+
+#### New Features
+
+- **Deterministic Gap-Filling** - Reproducible prepare phase with seeded RNG
+  - **Seeded size generation**: `SizeGenerator::new_with_seed(spec, seed)` for reproducible size sequences
+  - **Seed calculation**: Based on `base_uri` bytes (deterministic per storage location)
+  - **Gap-aware file creation**: Parse existing filenames, identify missing indices, create at exact positions
+  - **Sequential mode**: Pre-generate all sizes, fill gaps at specific indices (e.g., 40-59)
+  - **Parallel mode**: Same gap-filling logic with index-aware task distribution
+  - **Benefits**: Same base_uri + same file count = identical file structure across runs
+
+- **Skip Verification** (Issue #40) - Optional LIST operation bypass for faster reruns
+  - **New config field**: `prepare.skip_verification: true` assumes all objects exist
+  - **Performance**: Eliminates expensive LIST operations on second/subsequent runs
+  - **Use case**: Known-good datasets, testing, or CI/CD pipelines with cached storage
+  - **Safety**: Disabled by default (`skip_verification: false`)
+  - **Agent log**: `⚡ skip_verification enabled - assuming all N objects exist (skipping LIST)`
+
+#### Bug Fixes
+
+- **Fixed directory tree detection** - Removed prefix filtering for tree mode LIST operations
+  - **Issue**: Tree mode files (e.g., `test.d1_w2.dir/file_*.dat`) not detected due to prefix mismatch
+  - **Impact**: Gap-filling couldn't find existing tree-structured files
+  - **Fix**: Use recursive LIST without prefix filtering in tree mode
+  - **Result**: Correctly detects all nested files in directory trees
+
+- **Fixed test suite for v0.7.9**
+  - **test_files_created_correctly**: Use separate directories per EnsureSpec to avoid index overlap
+  - **test_parse_real_config_file**: Updated to use `local_test_2agents.yaml` (deleted file reference fixed)
+  - **All integration tests**: Added `skip_verification: false` field to PrepareConfig
+  - **Test warnings**: Fixed unused variable warnings in `size_generator.rs` tests
+
+#### Technical Details
+
+- **SizeGenerator changes**:
+  - Added `StdRng` field for deterministic generation
+  - `new_with_seed(spec: &SizeSpec, seed: u64)` for explicit seed control
+  - All `generate()` methods now use `&mut self` for stateful RNG
+  - Seed folding: `base_uri.bytes().fold(0, |acc, b| acc.wrapping_mul(31).wrapping_add(b))`
+
+- **Prepare phase enhancements**:
+  - Index parsing from filenames: `prepared-00000042.dat` → index 42, `file_00000042.dat` → index 42
+  - Pre-generate ALL sizes (not on-demand) for consistent gap-filling
+  - Missing indices identified: `(0..count).filter(|i| !existing_indices.contains(i))`
+  - TaskSpec includes `index` field for gap-aware URI assignment
+
+#### Test Coverage
+
+- **92 tests passing** (48 unit + 44 integration)
+  - Unit tests: size_generator, directory_tree, metrics, replay, remap, etc.
+  - Integration: directory_tree_creation (6), distributed_config (30), parallel_prepare (8)
+- **End-to-end verification**: Deleted directory with 20 files, verified recreation at indices 40-59
+- **Distributed testing**: 2 agents, gap-filling works correctly with coordinator mode
+
 ## [0.7.8] - 2025-11-15
 
 ### 🎯 Prepare Phase Metrics Persistence via gRPC

@@ -1,32 +1,38 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.9-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-44%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-92%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.8 (November 15, 2025)
+## 🌟 Latest Release - v0.7.9 (November 16, 2025)
 
-**🎯 Prepare Phase Metrics Persistence:**
+**🔧 Deterministic Prepare & Skip Verification:**
 
-- **Prepare metrics via gRPC**: Complete transmission and aggregation of prepare phase statistics
-- **`prepare_results.tsv` files**: Per-agent and consolidated TSV files with PUT operation metrics
-- **HDR histogram merging**: Accurate percentile aggregation across multiple agents
-- **Bug fixes**: Workload timer reset, bucket label consistency, shared storage path handling
+- **Deterministic gap-filling**: Seeded RNG ensures reproducible file structures across runs
+- **skip_verification** (Issue #40): Optional LIST bypass for faster reruns with known-good datasets
+- **Improved detection**: Fixed directory tree file detection for nested structures
+- **Test improvements**: 92 tests passing (48 unit + 44 integration), comprehensive coverage
 
 ```bash
-# Run distributed test and get prepare metrics
+# First run: Create dataset with deterministic sizes
 sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
+# Prepare: Found 0, created 1000 files (deterministic seed: 1234567890)
 
-# Results include prepare_results.tsv (consolidated) and per-agent files
-ls sai3-*/
-  prepare_results.tsv       # Merged histograms from all agents
-  results.tsv               # Workload results
-  agents/agent-1/prepare_results.tsv
-  agents/agent-2/prepare_results.tsv
+# Delete some files to test gap-filling
+rm -rf /storage/test.d1_w2.dir/
+
+# Second run: Gap-filling recreates missing files at exact indices
+sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
+# Prepare: Found 800, identified 200 missing indices, created at positions 200-399
+
+# Third run: Fast rerun with skip_verification (no LIST operation)
+# Set skip_verification: true in config
+sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
+# Prepare: ⚡ skip_verification enabled - assuming all 1000 objects exist
 ```
 
 See [CHANGELOG](docs/CHANGELOG.md#078) for complete details.

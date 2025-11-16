@@ -29,10 +29,11 @@ async fn test_single_agent_creates_all() -> Result<()> {
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let mut metrics = PrepareMetrics::default();
-    let manifest = create_directory_tree(&config, 0, 1, &base_uri, &mut metrics).await?;
+    let manifest = create_directory_tree(&config, 0, 1, &base_uri, &mut metrics, None).await?;
     
     // Verify directory count: 2 + 4 = 6 directories
     assert_eq!(manifest.total_dirs, 6);
@@ -66,6 +67,7 @@ async fn test_multi_agent_no_collision() -> Result<()> {
             dir_mask: "test.d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let num_agents = 4;
@@ -128,6 +130,7 @@ async fn test_agent_assignment_balanced() -> Result<()> {
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let num_agents = 3;
@@ -183,6 +186,7 @@ async fn test_exclusive_directory_distribution() -> Result<()> {
             dir_mask: "sai3.d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let num_agents = 3;
@@ -240,6 +244,7 @@ async fn test_all_distribution_files_at_all_levels() -> Result<()> {
             dir_mask: "level.d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let mut metrics = PrepareMetrics::default();
@@ -283,6 +288,7 @@ async fn test_bottom_distribution_files_at_leaf_only() -> Result<()> {
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
         prepare_strategy: Default::default(),
+        skip_verification: false,
     };
     
     let mut metrics = PrepareMetrics::default();
