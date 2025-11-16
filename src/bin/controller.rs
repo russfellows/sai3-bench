@@ -978,7 +978,8 @@ async fn run_distributed_workload(
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
     
     // v0.7.6: Track workload start time for progress bar position
-    let workload_start = std::time::Instant::now();
+    // Note: This will be reset when prepare phase completes to measure actual workload time
+    let mut workload_start = std::time::Instant::now();
     
     // Aggregator for live stats display
     let mut aggregator = LiveStatsAggregator::new();
@@ -1041,6 +1042,8 @@ async fn run_distributed_workload(
                         if was_in_prepare_phase && !in_prepare {
                             debug!("Prepare phase completed, resetting aggregator for workload-only stats");
                             aggregator.reset_stats();
+                            // Reset workload timer to measure actual workload duration (not including prepare)
+                            workload_start = std::time::Instant::now();
                             was_in_prepare_phase = false;
                         } else if in_prepare {
                             was_in_prepare_phase = true;
