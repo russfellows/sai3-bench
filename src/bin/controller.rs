@@ -21,7 +21,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{Empty, LiveStats, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
 
 /// v0.7.5: Aggregator for live stats from multiple agents
 /// 
@@ -994,6 +994,9 @@ async fn run_distributed_workload(
     // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
     let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
     
+    // v0.7.9: Collect prepare summaries for persistence  
+    let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
+    
     // v0.7.5: Track last console.log write time (write every 1 second)
     let mut last_console_log = std::time::Instant::now();
     
@@ -1054,6 +1057,12 @@ async fn run_distributed_workload(
                                 agent_summaries.push(summary);
                             } else {
                                 warn!("Agent {} completed but did not provide final summary", stats.agent_id);
+                            }
+                            
+                            // v0.7.9: Extract and store prepare summary for persistence
+                            if let Some(prep_summary) = stats.prepare_summary {
+                                debug!("Collected prepare summary from agent {}", prep_summary.agent_id);
+                                prepare_summaries.push(prep_summary);
                             }
                         } else {
                             // Regular update (not completed yet)
@@ -1209,6 +1218,25 @@ async fn run_distributed_workload(
     } else {
         warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
         warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
+    }
+    
+    // v0.7.9: Write per-agent prepare results and create consolidated prepare TSV
+    if !prepare_summaries.is_empty() {
+        info!("Writing prepare results for {} agents", prepare_summaries.len());
+        
+        // Write per-agent prepare results to agents/{agent-id}/ subdirectory
+        for prep_summary in &prepare_summaries {
+            if let Err(e) = write_agent_prepare_results(&agents_dir, &prep_summary.agent_id, prep_summary) {
+                error!("Failed to write prepare results for agent {}: {}", prep_summary.agent_id, e);
+            }
+        }
+        
+        // Create consolidated prepare TSV with histogram aggregation
+        if let Err(e) = create_consolidated_prepare_tsv(results_dir.path(), &prepare_summaries) {
+            error!("Failed to create consolidated prepare TSV: {}", e);
+        } else {
+            info!("✓ Consolidated prepare_results.tsv created");
+        }
     }
     
     // Finalize results directory with elapsed time from final stats
@@ -1447,6 +1475,159 @@ fn write_agent_results(
     }
     
     info!("Wrote agent {} results to: {}", agent_id, agent_dir.display());
+    Ok(())
+}
+
+/// Write per-agent prepare results to agents/{agent-id}/ subdirectory (v0.7.9)
+fn write_agent_prepare_results(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    summary: &PrepareSummary,
+) -> anyhow::Result<()> {
+    use std::fs;
+    
+    // Create subdirectory for this agent
+    let agent_dir = agents_dir.join(agent_id);
+    fs::create_dir_all(&agent_dir)
+        .with_context(|| format!("Failed to create agent directory: {}", agent_dir.display()))?;
+    
+    // Write prepare_results.tsv
+    if !summary.tsv_content.is_empty() {
+        let tsv_path = agent_dir.join("prepare_results.tsv");
+        fs::write(&tsv_path, &summary.tsv_content)
+            .with_context(|| format!("Failed to write agent prepare TSV: {}", tsv_path.display()))?;
+    }
+    
+    // Write a note about the agent's local results path
+    if !summary.results_path.is_empty() {
+        let note_path = agent_dir.join("prepare_local_path.txt");
+        fs::write(&note_path, &summary.results_path)
+            .with_context(|| format!("Failed to write prepare path note: {}", note_path.display()))?;
+    }
+    
+    Ok(())
+}
+
+/// Create consolidated prepare_results.tsv from agent histograms (v0.7.9)
+/// Mirrors create_consolidated_tsv logic but for prepare phase
+fn create_consolidated_prepare_tsv(
+    results_dir: &std::path::Path,
+    summaries: &[PrepareSummary],
+) -> anyhow::Result<()> {
+    use hdrhistogram::Histogram;
+    use hdrhistogram::serialization::Deserializer;
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    
+    info!("Creating consolidated prepare_results.tsv from {} agent histograms", summaries.len());
+    
+    // Define histogram parameters (must match agent configuration)
+    const MIN: u64 = 1;
+    const MAX: u64 = 3_600_000_000;  // 1 hour in microseconds
+    const SIGFIG: u8 = 3;
+    const NUM_BUCKETS: usize = 9;
+    
+    // Create accumulators for PUT operations (prepare phase only does PUTs)
+    let mut put_accumulators = Vec::new();
+    for _ in 0..NUM_BUCKETS {
+        put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+    }
+    
+    // Deserialize and merge all PUT histograms from agents
+    let mut deserializer = Deserializer::new();
+    
+    for (agent_idx, summary) in summaries.iter().enumerate() {
+        info!("Merging prepare histograms from agent {} ({})", agent_idx + 1, summary.agent_id);
+        
+        if summary.histogram_put.is_empty() {
+            continue;
+        }
+        
+        // Deserialize PUT histograms (one per bucket)
+        let mut cursor = &summary.histogram_put[..];
+        for bucket_idx in 0..NUM_BUCKETS {
+            match deserializer.deserialize::<u64, _>(&mut cursor) {
+                Ok(hist) => {
+                    put_accumulators[bucket_idx].add(&hist)
+                        .context("Failed to merge PUT histograms")?;
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize PUT histogram bucket {} from agent {}: {}", 
+                          bucket_idx, summary.agent_id, e);
+                    break;  // Stop if deserialization fails
+                }
+            }
+        }
+    }
+    
+    // Calculate aggregate metrics from summaries
+    let mut total_ops: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_objects_created: u64 = 0;
+    let mut total_objects_existed: u64 = 0;
+    let total_wall_seconds = summaries.iter().map(|s| s.wall_seconds).fold(0.0f64, f64::max);
+    
+    for summary in summaries {
+        if let Some(ref put) = summary.put {
+            total_ops += put.ops;
+            total_bytes += put.bytes;
+        }
+        total_objects_created += summary.objects_created;
+        total_objects_existed += summary.objects_existed;
+    }
+    
+    // Write consolidated TSV
+    let tsv_path = results_dir.join("prepare_results.tsv");
+    let mut writer = BufWriter::new(File::create(&tsv_path)?);
+    
+    // Write header
+    writeln!(writer, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
+    
+    // Write PUT bucket rows (from merged histograms)
+    for (idx, hist) in put_accumulators.iter().enumerate() {
+        if hist.len() == 0 {
+            continue;
+        }
+        
+        let mean_us = hist.mean();
+        let p50_us = hist.value_at_quantile(0.50);
+        let p90_us = hist.value_at_quantile(0.90);
+        let p95_us = hist.value_at_quantile(0.95);
+        let p99_us = hist.value_at_quantile(0.99);
+        let max_us = hist.max();
+        let count = hist.len();
+        
+        // Estimate avg_bytes and throughput per bucket (approximate)
+        let avg_bytes = if total_ops > 0 { total_bytes / total_ops } else { 0 };
+        let ops_per_sec = count as f64 / total_wall_seconds;
+        let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+        
+        let bucket_label = match idx {
+            0 => "0-4K",
+            1 => "4-16K",
+            2 => "16-64K",
+            3 => "64-256K",
+            4 => "256K-1M",
+            5 => "1-4M",
+            6 => "4-16M",
+            7 => "16-64M",
+            8 => "64M+",
+            _ => "unknown",
+        };
+        
+        writeln!(
+            writer,
+            "PUT\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
+            bucket_label, idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+            avg_bytes, ops_per_sec, throughput_mibps, count
+        )?;
+    }
+    
+    writer.flush()?;
+    info!("Wrote consolidated prepare_results.tsv to {}", tsv_path.display());
+    info!("Prepare phase summary: {} objects created, {} existed, {:.2}s elapsed",
+          total_objects_created, total_objects_existed, total_wall_seconds);
+    
     Ok(())
 }
 
