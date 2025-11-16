@@ -231,11 +231,11 @@ async fn prepare_sequential(
             
             // 1. List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
-            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/prepared-*)
-            // We need to list recursively from base_uri and filter by prefix pattern
-            let existing_count = if config.skip_verification {
+            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
+            // v0.7.9: Parse filenames to extract indices for gap-filling
+            let (existing_count, existing_indices) = if config.skip_verification {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
-                spec.count  // Assume all files exist
+                (spec.count, std::collections::HashSet::new())  // Assume all files exist, no gaps
             } else if tree_manifest.is_some() {
                 // Directory tree mode: list all files recursively (no prefix filtering needed)
                 // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
@@ -252,6 +252,21 @@ async fn prepare_sequential(
                 
                 let match_count = all_files.len() as u64;
                 debug!("  LIST operation returned {} total files in tree", match_count);
+                
+                // v0.7.9: Parse filenames to extract indices for gap-aware creation
+                let mut indices = std::collections::HashSet::new();
+                for path in &all_files {
+                    // Extract filename from path (e.g., "test.d1_w2.dir/file_00000042.dat" -> "file_00000042.dat")
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse index from filename (e.g., "file_00000042.dat" -> 42)
+                        if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                debug!("  Parsed {} valid file indices from filenames", indices.len());
                 
                 // Verbose: show first 5 files found
                 if tracing::enabled!(tracing::Level::DEBUG) {
@@ -272,7 +287,7 @@ async fn prepare_sequential(
                     }
                 }
                 
-                match_count
+                (match_count, indices)
             } else {
                 // Flat file mode: original behavior
                 let list_pattern = if spec.base_uri.ends_with('/') {
@@ -296,7 +311,19 @@ async fn prepare_sequential(
                     }
                 }
                 
-                existing.len() as u64
+                // v0.7.9: Parse indices from prepared-NNNN.dat filenames for gap-filling
+                let mut indices = std::collections::HashSet::new();
+                for path in &existing {
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse: "prepared-00000042.dat" -> 42
+                        if let Some(idx_str) = filename.strip_prefix(&format!("{}-", prefix)).and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                (existing.len() as u64, indices)
             };
             
             info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
@@ -358,10 +385,32 @@ async fn prepare_sequential(
             if to_create > 0 {
                 use futures::stream::{FuturesUnordered, StreamExt};
                 
-                // Create size generator from spec
+                // v0.7.9: Pre-generate ALL sizes with deterministic seeded generator
+                // This ensures: (1) deterministic sizes, (2) gap-filling uses correct sizes
                 let size_spec = spec.get_size_spec();
-                let mut size_generator = SizeGenerator::new(&size_spec)
+                let seed = spec.base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
+                
+                info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
+                let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
+                for _ in 0..spec.count {
+                    all_sizes.push(size_generator.generate());
+                }
+                
+                // Identify missing indices (gaps to fill)
+                let missing_indices: Vec<u64> = (0..spec.count)
+                    .filter(|i| !existing_indices.contains(i))
+                    .collect();
+                
+                info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})", 
+                    missing_indices.len(), 
+                    &missing_indices[..std::cmp::min(10, missing_indices.len())]);
+                
+                if missing_indices.len() as u64 != to_create {
+                    warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
+                        missing_indices.len(), to_create);
+                }
                 
                 // Determine concurrency for prepare (use 32 like default workload concurrency)
                 let concurrency = 32;
@@ -430,36 +479,35 @@ async fn prepare_sequential(
                     }
                 });
                 
-                // Pre-generate all URIs and sizes for parallel execution
-                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
+                // v0.7.9: Generate tasks for missing indices with pre-generated sizes
+                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(missing_indices.len());
                 
-                // v0.7.9: Use tree manifest for file paths if available
+                // Use tree manifest for file paths if available
                 if let Some(manifest) = tree_manifest {
-                    // Create files in directory structure
-                    for i in 0..to_create {
-                        let global_idx = (existing_count + i) as usize;
-                        if let Some(rel_path) = manifest.get_file_path(global_idx) {
+                    // Create files at specific missing indices in directory structure
+                    for &missing_idx in &missing_indices {
+                        if let Some(rel_path) = manifest.get_file_path(missing_idx as usize) {
                             let uri = if spec.base_uri.ends_with('/') {
                                 format!("{}{}", spec.base_uri, rel_path)
                             } else {
                                 format!("{}/{}", spec.base_uri, rel_path)
                             };
-                            let size = size_generator.generate();
+                            let size = all_sizes[missing_idx as usize];
                             tasks.push((uri, size));
                         } else {
-                            warn!("No file path for index {} in tree manifest", global_idx);
+                            warn!("No file path for missing index {} in tree manifest", missing_idx);
                         }
                     }
                 } else {
-                    // Original behavior: flat file naming
-                    for i in 0..to_create {
-                        let key = format!("{}-{:08}.dat", prefix, existing_count + i);
+                    // Flat file mode: create at specific missing indices
+                    for &missing_idx in &missing_indices {
+                        let key = format!("{}-{:08}.dat", prefix, missing_idx);
                         let uri = if spec.base_uri.ends_with('/') {
                             format!("{}{}", spec.base_uri, key)
                         } else {
                             format!("{}/{}", spec.base_uri, key)
                         };
-                        let size = size_generator.generate();
+                        let size = all_sizes[missing_idx as usize];
                         tasks.push((uri, size));
                     }
                 }
