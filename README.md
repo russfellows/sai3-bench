@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.7-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.8-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-44%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,28 +8,30 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.7 (November 15, 2025)
+## 🌟 Latest Release - v0.7.8 (November 15, 2025)
 
-**🔧 CLI Improvements - Simplified TLS Configuration:**
+**🎯 Prepare Phase Metrics Persistence:**
 
-- **`--tls` flag**: Cleaner interface replacing confusing `--insecure` double-negative
-- **Plaintext by default**: No flags needed for most testing scenarios
-- **`--dry-run` support**: Validate configs before execution with `sai3bench-ctl run --dry-run`
+- **Prepare metrics via gRPC**: Complete transmission and aggregation of prepare phase statistics
+- **`prepare_results.tsv` files**: Per-agent and consolidated TSV files with PUT operation metrics
+- **HDR histogram merging**: Accurate percentile aggregation across multiple agents
+- **Bug fixes**: Workload timer reset, bucket label consistency, shared storage path handling
 
 ```bash
-# Simple plaintext (default - no flags needed)
-sai3bench-ctl --agents 10.138.0.42:7761 run --config workload.yaml
+# Run distributed test and get prepare metrics
+sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
 
-# Validate config before running
-sai3bench-ctl --agents 10.138.0.42:7761 run --config workload.yaml --dry-run
-
-# Enable TLS when needed
-sai3bench-ctl --agents host:7761 --tls --agent-ca cert.pem run --config workload.yaml
+# Results include prepare_results.tsv (consolidated) and per-agent files
+ls sai3-*/
+  prepare_results.tsv       # Merged histograms from all agents
+  results.tsv               # Workload results
+  agents/agent-1/prepare_results.tsv
+  agents/agent-2/prepare_results.tsv
 ```
 
-See [CHANGELOG](docs/CHANGELOG.md#077) for complete details.
+See [CHANGELOG](docs/CHANGELOG.md#078) for complete details.
 
-**Previous Release - v0.7.6 (November 9, 2025)** - Distributed live stats with startup handshaking
+**Previous Release - v0.7.7 (November 15, 2025)** - CLI improvements with `--tls` flag and `--dry-run` support
 
 ## 🚀 What Makes sai3-bench Unique?
 

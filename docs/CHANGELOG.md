@@ -2,6 +2,80 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.8] - 2025-11-15
+
+### 🎯 Prepare Phase Metrics Persistence via gRPC
+
+**Major enhancement**: Prepare phase metrics are now transmitted via gRPC and persisted in `prepare_results.tsv` files, matching the workload results format.
+
+#### New Features
+
+- **Prepare Metrics Transmission** - Complete gRPC support for prepare phase stats
+  - **Agent**: Sends `PrepareSummary` via LiveStats messages (same pattern as WorkloadSummary)
+  - **Controller**: Collects from all agents, aggregates histograms, writes consolidated TSV
+  - **Per-agent files**: `agents/{agent-id}/prepare_results.tsv` with individual metrics
+  - **Consolidated file**: `prepare_results.tsv` with merged histogram data from all agents
+  - **HDR histogram merging**: Mathematically accurate percentile aggregation (not averages)
+
+- **Prepare Results Format** - TSV file with operation-level metrics
+  ```
+  operation  size_bucket  bucket_idx  mean_us  p50_us  p90_us  p95_us  p99_us  max_us  avg_bytes  ops_per_sec  throughput_mibps  count
+  PUT        512KiB-4MiB  4           4287.18  3287    9175    9903    12359   12767   1048576    1464.52      1464.52           180
+  PUT        ALL          99          4287.18  3287    9175    9903    12359   12767   1048576    1464.52      1464.52           180
+  ```
+  - **Size buckets**: Same 9 buckets as workload results (zero, 1B-8KiB, 8KiB-64KiB, ...)
+  - **ALL summary row**: Combined stats across all buckets (bucket_idx=99)
+  - **Consistent labels**: Uses BUCKET_LABELS from metrics.rs (not hardcoded)
+
+#### Bug Fixes
+
+- **Fixed workload timer reset**: Controller now resets timer when transitioning from prepare to workload phase
+  - **Issue**: Timer started when agents became ready (including prepare time)
+  - **Impact**: Elapsed time included prepare duration, causing incorrect ops/s calculations
+  - **Fix**: Reset `workload_start` timer when prepare phase completes
+  - **Result**: Workload duration now matches agent reporting
+
+- **Fixed bucket label mismatch**: Consolidated prepare_results.tsv now uses correct size bucket labels
+  - **Issue**: Controller had hardcoded labels ("256K-1M") that didn't match agent labels ("512KiB-4MiB")
+  - **Impact**: Same bucket_idx showed different size ranges in agent vs consolidated files
+  - **Fix**: Use `BUCKET_LABELS` array from metrics.rs for consistency
+  - **Result**: All prepare_results.tsv files show identical bucket labels
+
+- **Fixed shared storage path prefix**: Agents with shared storage now skip path prefix in prepare phase
+  - **Issue**: Shared storage (S3/GCS/Azure) shouldn't use agent-specific prefixes during prepare
+  - **Impact**: Each agent tried to create full dataset, causing duplicate work
+  - **Fix**: Only apply path prefix for local storage (file://, direct://)
+  - **Result**: Coordinator creates dataset once, all agents use same paths
+
+- **Fixed prepare stats leakage**: Stats aggregator now resets when transitioning to workload phase
+  - **Issue**: Prepare phase PUT operations leaked into workload stats
+  - **Impact**: Workload results included prepare phase operations
+  - **Fix**: Reset aggregator when detecting prepare→workload transition
+  - **Result**: Clean separation between prepare and workload metrics
+
+#### Protocol Changes
+
+**proto/iobench.proto** - Added PrepareSummary message:
+```protobuf
+message PrepareSummary {
+    string agent_id = 1;
+    double wall_seconds = 2;
+    uint64 objects_created = 3;
+    uint64 objects_existed = 4;
+    OperationStats put = 5;
+    bytes histogram_put = 6;  // Serialized HDR histograms (9 buckets)
+}
+```
+
+#### Implementation Details
+
+- **Channel-based communication**: PrepareMetrics sent via mpsc channel (avoids lifetime issues)
+- **Temp directory creation**: Histograms serialized to temp dir before TSV generation
+- **Histogram serialization**: Uses HDR V2+MAX format for accurate percentile merging
+- **Bucket aggregation**: 9 size buckets + ALL bucket for comprehensive analysis
+
+---
+
 ## [0.7.7] - 2025-11-15
 
 ### 🔧 CLI Improvements - Simplified TLS Configuration
