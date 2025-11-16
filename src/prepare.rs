@@ -314,7 +314,7 @@ async fn prepare_sequential(
                 // All objects exist - reconstruct PreparedObject entries from manifest
                 let manifest = tree_manifest.unwrap();
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
@@ -335,7 +335,7 @@ async fn prepare_sequential(
             } else if to_create == 0 {
                 // Flat mode: all exist
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
@@ -360,7 +360,7 @@ async fn prepare_sequential(
                 
                 // Create size generator from spec
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 // Determine concurrency for prepare (use 32 like default workload concurrency)
@@ -715,7 +715,7 @@ async fn prepare_parallel(
             // Generate task specs (sizes but no URIs yet) for missing objects
             if to_create > 0 {
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
@@ -755,7 +755,7 @@ async fn prepare_parallel(
             
             for (prefix, _is_readonly) in &pools_to_create {
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
@@ -871,7 +871,7 @@ async fn prepare_parallel(
             
             for (prefix, _is_readonly) in &pools_to_create {
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let mut size_generator = SizeGenerator::new(&size_spec)
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
@@ -1369,7 +1369,7 @@ pub async fn create_directory_tree(
         
         // Create size generator
         use crate::size_generator::SizeGenerator;
-        let size_generator = SizeGenerator::new(&size_spec)
+        let mut size_generator = SizeGenerator::new(&size_spec)
             .context("Failed to create size generator for tree files")?;
         
             info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 

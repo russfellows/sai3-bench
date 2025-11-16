@@ -4,6 +4,8 @@
 //
 
 use anyhow::{anyhow, Context, Result};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rand_distr::{Distribution, LogNormal, Uniform};
 use serde::{Deserialize, Serialize};
 
@@ -72,8 +74,12 @@ pub struct DistributionParams {
 }
 
 /// Generator for object sizes based on a specification
+/// 
+/// v0.7.9: Uses seeded RNG for deterministic size generation.
+/// With the same seed, generates identical size sequences.
 pub struct SizeGenerator {
     generator: SizeGeneratorImpl,
+    rng: StdRng,
 }
 
 enum SizeGeneratorImpl {
@@ -91,8 +97,18 @@ enum SizeGeneratorImpl {
 }
 
 impl SizeGenerator {
-    /// Create a new size generator from a specification
+    /// Create a new size generator from a specification with default seed (0)
+    /// 
+    /// For deterministic generation, use `new_with_seed()` instead.
     pub fn new(spec: &SizeSpec) -> Result<Self> {
+        Self::new_with_seed(spec, 0)
+    }
+    
+    /// Create a new size generator with a specific seed for deterministic generation
+    /// 
+    /// The same seed with the same spec will always produce the same sequence of sizes.
+    /// This enables gap-filling to recreate exact file sizes based on file index.
+    pub fn new_with_seed(spec: &SizeSpec, seed: u64) -> Result<Self> {
         let generator = match spec {
             SizeSpec::Fixed(size) => {
                 if *size == 0 {
@@ -172,27 +188,29 @@ impl SizeGenerator {
             },
         };
         
-        Ok(SizeGenerator { generator })
+        Ok(SizeGenerator { 
+            generator,
+            rng: StdRng::seed_from_u64(seed),
+        })
     }
     
     /// Generate a single object size
-    pub fn generate(&self) -> u64 {
+    /// 
+    /// v0.7.9: Takes &mut self to update RNG state for deterministic sequence.
+    pub fn generate(&mut self) -> u64 {
         match &self.generator {
             SizeGeneratorImpl::Fixed(size) => *size,
             
             SizeGeneratorImpl::Uniform { dist, .. } => {
-                let mut rng = rand::rng();
-                dist.sample(&mut rng)
+                dist.sample(&mut self.rng)
             }
             
             SizeGeneratorImpl::LogNormal { dist, min, max } => {
-                let mut rng = rand::rng();
-                
                 // Sample from lognormal and clamp to [min, max]
                 // Rejection sampling: keep trying until we get a value in range
                 // (usually converges quickly for reasonable parameters)
                 loop {
-                    let sample = dist.sample(&mut rng);
+                    let sample = dist.sample(&mut self.rng);
                     let size = sample.round() as u64;
                     
                     if size >= *min && size <= *max {
@@ -208,7 +226,9 @@ impl SizeGenerator {
     }
     
     /// Get the expected mean size (useful for logging/debugging)
-    pub fn expected_mean(&self) -> u64 {
+    /// 
+    /// v0.7.9: Takes &mut self for LogNormal case which needs to sample from RNG
+    pub fn expected_mean(&mut self) -> u64 {
         match &self.generator {
             SizeGeneratorImpl::Fixed(size) => *size,
             SizeGeneratorImpl::Uniform { min, max, .. } => (min + max) / 2,
@@ -222,17 +242,23 @@ impl SizeGenerator {
     }
     
     /// Get a description of this generator (for logging)
-    pub fn description(&self) -> String {
+    /// 
+    /// v0.7.9: Takes &mut self for LogNormal case which calls expected_mean()
+    pub fn description(&mut self) -> String {
         match &self.generator {
             SizeGeneratorImpl::Fixed(size) => format!("fixed {}", human_bytes(*size)),
             SizeGeneratorImpl::Uniform { min, max, .. } => {
                 format!("uniform {}-{}", human_bytes(*min), human_bytes(*max))
             }
             SizeGeneratorImpl::LogNormal { min, max, .. } => {
+                // Copy values first to avoid borrow issues when calling expected_mean()
+                let min_val = *min;
+                let max_val = *max;
+                let mean = self.expected_mean();
                 format!("lognormal (mean ~{}, range {}-{})", 
-                    human_bytes(self.expected_mean()), 
-                    human_bytes(*min), 
-                    human_bytes(*max))
+                    human_bytes(mean), 
+                    human_bytes(min_val), 
+                    human_bytes(max_val))
             }
         }
     }
@@ -263,7 +289,7 @@ mod tests {
     #[test]
     fn test_fixed_size() {
         let spec = SizeSpec::Fixed(1048576);
-        let generator = SizeGenerator::new(&spec).unwrap();
+        let mut generator = SizeGenerator::new(&spec).unwrap();
         
         for _ in 0..100 {
             assert_eq!(generator.generate(), 1048576);
@@ -284,7 +310,7 @@ mod tests {
             },
         });
         
-        let generator = SizeGenerator::new(&spec).unwrap();
+        let mut generator = SizeGenerator::new(&spec).unwrap();
         
         // Generate samples and verify they're in range
         for _ in 0..1000 {
@@ -310,7 +336,7 @@ mod tests {
             },
         });
         
-        let generator = SizeGenerator::new(&spec).unwrap();
+        let mut generator = SizeGenerator::new(&spec).unwrap();
         
         // Generate samples and verify they're in range
         let mut samples = Vec::new();
@@ -366,5 +392,41 @@ mod tests {
         assert_eq!(human_bytes(1536), "1.50KB");
         assert_eq!(human_bytes(1048576), "1.00MB");
         assert_eq!(human_bytes(1073741824), "1.00GB");
+    }
+    
+    #[test]
+    fn test_deterministic_generation() {
+        // Same seed should produce same sequence
+        let spec = SizeSpec::Distribution(SizeDistribution {
+            dist_type: DistributionType::Uniform,
+            min: Some(1024),
+            max: Some(10240),
+            params: DistributionParams { mean: None, std_dev: None },
+        });
+        
+        let mut gen1 = SizeGenerator::new_with_seed(&spec, 42).unwrap();
+        let mut gen2 = SizeGenerator::new_with_seed(&spec, 42).unwrap();
+        
+        // Generate 100 sizes from each - should be identical
+        for _ in 0..100 {
+            let size1 = gen1.generate();
+            let size2 = gen2.generate();
+            assert_eq!(size1, size2, "Same seed should produce same sequence");
+        }
+        
+        // Different seed should produce different sequence
+        let mut gen3 = SizeGenerator::new_with_seed(&spec, 99).unwrap();
+        let size_from_gen1 = gen1.generate();
+        let size_from_gen3 = gen3.generate();
+        
+        // Very unlikely to match (though technically possible)
+        // Run this multiple times to be confident
+        let mut differences = 0;
+        for _ in 0..50 {
+            if gen1.generate() != gen3.generate() {
+                differences += 1;
+            }
+        }
+        assert!(differences > 40, "Different seeds should produce different sequences");
     }
 }
