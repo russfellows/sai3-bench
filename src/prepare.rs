@@ -229,18 +229,77 @@ async fn prepare_sequential(
             
             let store = create_store_for_uri(&spec.base_uri)?;
             
-            // 1. List existing objects with this prefix
-            let list_pattern = if spec.base_uri.ends_with('/') {
-                format!("{}{}-", spec.base_uri, prefix)
+            // 1. List existing objects with this prefix (unless skip_verification is enabled)
+            // Issue #40: skip_verification config option
+            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/prepared-*)
+            // We need to list recursively from base_uri and filter by prefix pattern
+            let existing_count = if config.skip_verification {
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+                spec.count  // Assume all files exist
+            } else if tree_manifest.is_some() {
+                // Directory tree mode: list all files recursively (no prefix filtering needed)
+                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
+                let list_base = if spec.base_uri.ends_with('/') {
+                    spec.base_uri.clone()
+                } else {
+                    format!("{}/", spec.base_uri)
+                };
+                
+                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
+                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
+                let all_files = store.list(&list_base, true).await
+                    .context("Failed to list existing objects")?;
+                
+                let match_count = all_files.len() as u64;
+                debug!("  LIST operation returned {} total files in tree", match_count);
+                
+                // Verbose: show first 5 files found
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("  Sample files found in directory tree:");
+                    for (i, path) in all_files.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if all_files.len() > 5 {
+                        debug!("    ... and {} more files", all_files.len() - 5);
+                    }
+                }
+                
+                // Extra verbose: show ALL files
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!("  Complete file list ({} files):", all_files.len());
+                    for (i, path) in all_files.iter().enumerate() {
+                        tracing::trace!("    [{}] {}", i+1, path);
+                    }
+                }
+                
+                match_count
             } else {
-                format!("{}/{}-", spec.base_uri, prefix)
+                // Flat file mode: original behavior
+                let list_pattern = if spec.base_uri.ends_with('/') {
+                    format!("{}{}-", spec.base_uri, prefix)
+                } else {
+                    format!("{}/{}-", spec.base_uri, prefix)
+                };
+                
+                info!("  [Flat file mode] Listing with pattern: {}", list_pattern);
+                let existing = store.list(&list_pattern, true).await
+                    .context("Failed to list existing objects")?;
+                
+                debug!("  Found {} files matching pattern", existing.len());
+                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
+                    debug!("  Sample files found:");
+                    for (i, path) in existing.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if existing.len() > 5 {
+                        debug!("    ... and {} more files", existing.len() - 5);
+                    }
+                }
+                
+                existing.len() as u64
             };
             
-            let existing = store.list(&list_pattern, true).await
-                .context("Failed to list existing objects")?;
-            
-            let existing_count = existing.len() as u64;
-            info!("  Found {} existing {} objects", existing_count, prefix);
+            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
             
             // 2. Calculate how many to create
             let to_create = if existing_count >= spec.count {
@@ -249,6 +308,51 @@ async fn prepare_sequential(
             } else {
                 spec.count - existing_count
             };
+            
+            // 2.5. Record existing objects if all requirements met
+            if to_create == 0 && tree_manifest.is_some() {
+                // All objects exist - reconstruct PreparedObject entries from manifest
+                let manifest = tree_manifest.unwrap();
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                        let uri = if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, rel_path)
+                        } else {
+                            format!("{}/{}", spec.base_uri, rel_path)
+                        };
+                        let size = size_generator.generate();
+                        all_prepared.push(PreparedObject {
+                            uri,
+                            size,
+                            created: false,  // Existed already
+                        });
+                    }
+                }
+            } else if to_create == 0 {
+                // Flat mode: all exist
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let key = format!("{}-{:08}.dat", prefix, i);
+                    let uri = if spec.base_uri.ends_with('/') {
+                        format!("{}{}", spec.base_uri, key)
+                    } else {
+                        format!("{}/{}", spec.base_uri, key)
+                    };
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,
+                    });
+                }
+            }
             
             // 3. Create missing objects
             if to_create > 0 {
@@ -520,18 +624,77 @@ async fn prepare_parallel(
             
             let store = create_store_for_uri(&spec.base_uri)?;
             
-            // List existing objects with this prefix
-            let list_pattern = if spec.base_uri.ends_with('/') {
-                format!("{}{}-", spec.base_uri, prefix)
+            // List existing objects with this prefix (unless skip_verification is enabled)
+            // Issue #40: skip_verification config option
+            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/prepared-*)
+            // We need to list recursively from base_uri and filter by prefix pattern
+            let existing_count = if config.skip_verification {
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+                spec.count  // Assume all files exist
+            } else if tree_manifest.is_some() {
+                // Directory tree mode: list all files recursively (no prefix filtering needed)
+                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
+                let list_base = if spec.base_uri.ends_with('/') {
+                    spec.base_uri.clone()
+                } else {
+                    format!("{}/", spec.base_uri)
+                };
+                
+                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
+                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
+                let all_files = store.list(&list_base, true).await
+                    .context("Failed to list existing objects")?;
+                
+                let match_count = all_files.len() as u64;
+                debug!("  LIST operation returned {} total files in tree", match_count);
+                
+                // Verbose: show first 5 files found
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("  Sample files found in directory tree:");
+                    for (i, path) in all_files.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if all_files.len() > 5 {
+                        debug!("    ... and {} more files", all_files.len() - 5);
+                    }
+                }
+                
+                // Extra verbose: show ALL files
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!("  Complete file list ({} files):", all_files.len());
+                    for (i, path) in all_files.iter().enumerate() {
+                        tracing::trace!("    [{}] {}", i+1, path);
+                    }
+                }
+                
+                match_count
             } else {
-                format!("{}/{}-", spec.base_uri, prefix)
+                // Flat file mode: original behavior
+                let pattern = if spec.base_uri.ends_with('/') {
+                    format!("{}{}-", spec.base_uri, prefix)
+                } else {
+                    format!("{}/{}-", spec.base_uri, prefix)
+                };
+                
+                info!("  [Flat file mode] Listing with pattern: {}", pattern);
+                let existing = store.list(&pattern, true).await
+                    .context("Failed to list existing objects")?;
+                
+                debug!("  Found {} files matching pattern", existing.len());
+                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
+                    debug!("  Sample files found:");
+                    for (i, path) in existing.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if existing.len() > 5 {
+                        debug!("    ... and {} more files", existing.len() - 5);
+                    }
+                }
+                
+                existing.len() as u64
             };
             
-            let existing = store.list(&list_pattern, true).await
-                .context("Failed to list existing objects")?;
-            
-            let existing_count = existing.len() as u64;
-            info!("  Found {} existing {} objects", existing_count, prefix);
+            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
             
             // Store existing count for this pool
             let pool_key = (spec.base_uri.clone(), prefix.to_string());
@@ -544,6 +707,10 @@ async fn prepare_parallel(
             } else {
                 spec.count - existing_count
             };
+            
+            // Note: In parallel mode, we can't record existing objects here
+            // because all_prepared is created later after Phase 2 (URI assignment)
+            // The existing_count_per_pool tracking is sufficient for skipping creation
             
             // Generate task specs (sizes but no URIs yet) for missing objects
             if to_create > 0 {
@@ -575,8 +742,56 @@ async fn prepare_parallel(
     }
     
     if task_specs.is_empty() {
-        info!("All objects already exist, no preparation needed");
-        return Ok(Vec::new());
+        info!("All objects already exist - reconstructing PreparedObject list from existing files");
+        let mut all_prepared = Vec::new();
+        
+        // Reconstruct existing objects from specs
+        for spec in &config.ensure_objects {
+            let pools_to_create = if needs_separate_pools {
+                vec![("prepared", true), ("deletable", false)]
+            } else {
+                vec![("prepared", false)]
+            };
+            
+            for (prefix, _is_readonly) in &pools_to_create {
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let uri = if let Some(manifest) = tree_manifest {
+                        // Tree mode: use manifest paths
+                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                            if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            }
+                        } else {
+                            continue;  // Skip if manifest doesn't have this index
+                        }
+                    } else {
+                        // Flat mode: traditional naming
+                        let key = format!("{}-{:08}.dat", prefix, i);
+                        if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, key)
+                        } else {
+                            format!("{}/{}", spec.base_uri, key)
+                        }
+                    };
+                    
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,  // All existed
+                    });
+                }
+            }
+        }
+        
+        info!("Reconstructed {} existing objects for workload", all_prepared.len());
+        return Ok(all_prepared);
     }
     
     // Phase 2: Shuffle task specs to mix sizes across directories
@@ -639,6 +854,59 @@ async fn prepare_parallel(
         });
         
         *idx += 1;
+    }
+    
+    // Phase 3.5: Handle case where all objects already exist (total_to_create == 0)
+    if total_to_create == 0 {
+        info!("All objects already exist - reconstructing PreparedObject list");
+        let mut all_prepared = Vec::new();
+        
+        // Reconstruct existing objects from specs
+        for spec in &config.ensure_objects {
+            let pools_to_create = if needs_separate_pools {
+                vec![("prepared", true), ("deletable", false)]
+            } else {
+                vec![("prepared", false)]
+            };
+            
+            for (prefix, _is_readonly) in &pools_to_create {
+                let size_spec = spec.get_size_spec();
+                let size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let uri = if let Some(manifest) = tree_manifest {
+                        // Tree mode: use manifest paths
+                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                            if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            }
+                        } else {
+                            continue;  // Skip if manifest doesn't have this index
+                        }
+                    } else {
+                        // Flat mode: traditional naming
+                        let key = format!("{}-{:08}.dat", prefix, i);
+                        if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, key)
+                        } else {
+                            format!("{}/{}", spec.base_uri, key)
+                        }
+                    };
+                    
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,  // All existed
+                    });
+                }
+            }
+        }
+        
+        return Ok(all_prepared);
     }
     
     // Phase 4: Execute all tasks in parallel with unified progress bar

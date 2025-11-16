@@ -1,0 +1,50 @@
+# Local file:// test with 2 agents - verify directory tree detection works
+# Small test: 4×4=16 directories, 320 total files (160 per agent)
+
+target: "file:///tmp/sai3-test/"
+duration: "30s"       # Short test
+concurrency: 8        # Small concurrency for local testing
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false  # First run: verify detection works
+  
+  # Small directory tree for testing
+  directory_structure:
+    width: 4                  # 4 subdirectories per level
+    depth: 2                  # 2 levels deep
+    files_per_dir: 20         # 10 per agent × 2 agents = 20 files per directory
+    distribution: "bottom"
+    dir_mask: "test.d%d_w%d.dir"
+  
+  # Total: 16 dirs × 20 files = 320 files (~960 MB)
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test/"
+      count: 320  # 16 dirs × 20 files = 320 files
+      fill: zero  # Fast for local testing
+      size_spec:
+        type: lognormal
+        mean: 3145728      # 3 MB
+        std_dev: 1048576   # 1 MB
+        min: 1048576       # 1 MB
+        max: 4194304       # 4 MB
+      dedup_factor: 1
+      compress_factor: 1
+  
+  cleanup: false  # Keep files for second run test
+
+workload:
+  - op: get
+    path: "test.d*_w*.dir/**/*"
+    weight: 100
+
+# Distributed Configuration (2 local agents for testing)
+distributed:
+  shared_filesystem: true      # Treat file:// as shared storage
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "test-agent-1"
+    - address: "127.0.0.1:7762"
+      id: "test-agent-2"

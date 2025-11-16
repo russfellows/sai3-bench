@@ -1,0 +1,67 @@
+# unet3d_2-hosts_quick-test.yaml - Quick test with 2 agents (10% data)
+# GCS version of unet3d workload with nested directory structure
+# 
+# Quick test config: ~10% of full 2-host data for validation testing
+# Full 2-host: 100,352 files (~676 GB)
+# This config: 10,192 files (~69 GB)
+#
+# Matches rdf-bench structure: width=28, depth=2
+# Directory Structure:
+#   width=28, depth=2 → 28 × 28 = 784 leaf directories
+#   784 dirs × 13 files = 10,192 files (10% of full)
+#
+# Average file size: ~6.9 MB (weighted average from rdf-bench distribution)
+# Total dataset: ~69 GB
+
+target: "gs://signal65-ai-ac/unet3d/"
+duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
+concurrency: 32      # Matches rdf-bench threads=32
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  
+  # Create nested directory tree matching rdf-bench FSD:
+  # width=28, depth=2, files=13 per dir (10% of 128 for 2-host full config)
+  directory_structure:
+    width: 28                # 28 subdirectories per level (matches rdf-bench)
+    depth: 2                 # 2 levels deep (matches rdf-bench)
+    files_per_dir: 13        # 10% scale: 128 × 0.10 ≈ 13 files per directory
+    distribution: "bottom"   # Files only in leaf directories
+    dir_mask: "scan.d%d_w%d.dir"
+  
+  # Total files calculation: 784 leaf dirs × 13 files/dir = 10,192 files
+  ensure_objects:
+    - base_uri: "gs://signal65-ai-ac/unet3d/"
+      count: 10192  # 784 dirs × 13 files = 10,192 files (~69 GB)
+      fill: random
+      size_spec:
+        type: lognormal
+        mean: 7235174      # ~6.90 MB (matches rdf-bench weighted avg)
+        std_dev: 5788139   # ~5.52 MB (provides spread similar to discrete dist)
+        min: 1048576       # 1 MB minimum (matches rdf-bench)
+        max: 33554432      # 32 MB maximum (matches rdf-bench)
+      dedup_factor: 1
+      compress_factor: 1
+  
+  cleanup: false  # Keep data between runs
+
+workload:
+  # Sequential reads matching rdf-bench:
+  # operation=read, fileio=sequential, xfersize=1m
+  # Each worker will select files uniformly at random
+  
+  - op: get
+    path: "scan.d*_w*.dir/**/*"  # Match actual directory structure
+    weight: 100
+
+# Distributed Configuration (2 agents for quick testing)
+distributed:
+  shared_filesystem: true  # GCS is shared across all agents
+  tree_creation_mode: coordinator  # Controller creates directory tree once
+  path_selection: random  # Random file selection for workload
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+    - address: "127.0.0.1:7762"
+      id: "agent-2"

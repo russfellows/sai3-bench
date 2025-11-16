@@ -714,13 +714,19 @@ async fn run_distributed_workload(
     let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
         .context("Failed to parse config")?;
 
-    // Auto-detect if storage is shared based on URI scheme
+    // Determine if storage is shared:
+    // 1. CLI flag --shared-prepare takes highest priority (explicit override)
+    // 2. Config file's distributed.shared_filesystem setting
+    // 3. Auto-detect from URI scheme (fallback for backward compatibility)
     let is_shared_storage = if let Some(explicit) = shared_prepare {
-        debug!("Using explicit shared_prepare setting: {}", explicit);
+        debug!("Using explicit --shared-prepare CLI flag: {}", explicit);
         explicit
+    } else if let Some(ref distributed) = config.distributed {
+        debug!("Using config file's shared_filesystem setting: {}", distributed.shared_filesystem);
+        distributed.shared_filesystem
     } else {
         let is_shared = detect_shared_storage(&config);
-        debug!("Auto-detected shared storage: {} (based on URI scheme)", is_shared);
+        debug!("Auto-detected shared storage: {} (based on URI scheme - no config setting found)", is_shared);
         is_shared
     };
 
