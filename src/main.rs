@@ -949,7 +949,7 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
                 // Use file size spec from ensure_objects if available
                 let avg_bytes = if let Some(ref obj_spec) = prepare.ensure_objects.first() {
                     if let Some(ref size_spec) = obj_spec.size_spec {
-                        let generator = SizeGenerator::new(size_spec)?;
+                        let mut generator = SizeGenerator::new(size_spec)?;
                         generator.expected_mean()
                     } else if let (Some(min), Some(max)) = (obj_spec.min_size, obj_spec.max_size) {
                         (min + max) / 2
@@ -995,7 +995,7 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
             
             // Display size information
             if let Some(ref size_spec) = spec.size_spec {
-                let generator = SizeGenerator::new(size_spec)?;
+                let mut generator = SizeGenerator::new(size_spec)?;
                 println!("│   Size:             {}", generator.description());
             } else if let (Some(min), Some(max)) = (spec.min_size, spec.max_size) {
                 if min == max {
@@ -1053,7 +1053,7 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
             sai3_bench::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor } => {
                 let mut details = format!("path: {}", path);
                 if let Some(ref spec) = size_spec {
-                    let generator = SizeGenerator::new(spec)?;
+                    let mut generator = SizeGenerator::new(spec)?;
                     details.push_str(&format!(", size: {}", generator.description()));
                 } else if let Some(size) = object_size {
                     details.push_str(&format!(", size: {} bytes", size));

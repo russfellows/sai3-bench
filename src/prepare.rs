@@ -229,18 +229,104 @@ async fn prepare_sequential(
             
             let store = create_store_for_uri(&spec.base_uri)?;
             
-            // 1. List existing objects with this prefix
-            let list_pattern = if spec.base_uri.ends_with('/') {
-                format!("{}{}-", spec.base_uri, prefix)
+            // 1. List existing objects with this prefix (unless skip_verification is enabled)
+            // Issue #40: skip_verification config option
+            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
+            // v0.7.9: Parse filenames to extract indices for gap-filling
+            let (existing_count, existing_indices) = if config.skip_verification {
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+                (spec.count, std::collections::HashSet::new())  // Assume all files exist, no gaps
+            } else if tree_manifest.is_some() {
+                // Directory tree mode: list all files recursively (no prefix filtering needed)
+                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
+                let list_base = if spec.base_uri.ends_with('/') {
+                    spec.base_uri.clone()
+                } else {
+                    format!("{}/", spec.base_uri)
+                };
+                
+                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
+                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
+                let all_files = store.list(&list_base, true).await
+                    .context("Failed to list existing objects")?;
+                
+                let match_count = all_files.len() as u64;
+                debug!("  LIST operation returned {} total files in tree", match_count);
+                
+                // v0.7.9: Parse filenames to extract indices for gap-aware creation
+                let mut indices = std::collections::HashSet::new();
+                for path in &all_files {
+                    // Extract filename from path (e.g., "test.d1_w2.dir/file_00000042.dat" -> "file_00000042.dat")
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse index from filename (e.g., "file_00000042.dat" -> 42)
+                        if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                debug!("  Parsed {} valid file indices from filenames", indices.len());
+                
+                // Verbose: show first 5 files found
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("  Sample files found in directory tree:");
+                    for (i, path) in all_files.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if all_files.len() > 5 {
+                        debug!("    ... and {} more files", all_files.len() - 5);
+                    }
+                }
+                
+                // Extra verbose: show ALL files
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!("  Complete file list ({} files):", all_files.len());
+                    for (i, path) in all_files.iter().enumerate() {
+                        tracing::trace!("    [{}] {}", i+1, path);
+                    }
+                }
+                
+                (match_count, indices)
             } else {
-                format!("{}/{}-", spec.base_uri, prefix)
+                // Flat file mode: original behavior
+                let list_pattern = if spec.base_uri.ends_with('/') {
+                    format!("{}{}-", spec.base_uri, prefix)
+                } else {
+                    format!("{}/{}-", spec.base_uri, prefix)
+                };
+                
+                info!("  [Flat file mode] Listing with pattern: {}", list_pattern);
+                let existing = store.list(&list_pattern, true).await
+                    .context("Failed to list existing objects")?;
+                
+                debug!("  Found {} files matching pattern", existing.len());
+                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
+                    debug!("  Sample files found:");
+                    for (i, path) in existing.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if existing.len() > 5 {
+                        debug!("    ... and {} more files", existing.len() - 5);
+                    }
+                }
+                
+                // v0.7.9: Parse indices from prepared-NNNN.dat filenames for gap-filling
+                let mut indices = std::collections::HashSet::new();
+                for path in &existing {
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse: "prepared-00000042.dat" -> 42
+                        if let Some(idx_str) = filename.strip_prefix(&format!("{}-", prefix)).and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                (existing.len() as u64, indices)
             };
             
-            let existing = store.list(&list_pattern, true).await
-                .context("Failed to list existing objects")?;
-            
-            let existing_count = existing.len() as u64;
-            info!("  Found {} existing {} objects", existing_count, prefix);
+            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
             
             // 2. Calculate how many to create
             let to_create = if existing_count >= spec.count {
@@ -250,14 +336,81 @@ async fn prepare_sequential(
                 spec.count - existing_count
             };
             
+            // 2.5. Record existing objects if all requirements met
+            if to_create == 0 && tree_manifest.is_some() {
+                // All objects exist - reconstruct PreparedObject entries from manifest
+                let manifest = tree_manifest.unwrap();
+                let size_spec = spec.get_size_spec();
+                let mut size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                        let uri = if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, rel_path)
+                        } else {
+                            format!("{}/{}", spec.base_uri, rel_path)
+                        };
+                        let size = size_generator.generate();
+                        all_prepared.push(PreparedObject {
+                            uri,
+                            size,
+                            created: false,  // Existed already
+                        });
+                    }
+                }
+            } else if to_create == 0 {
+                // Flat mode: all exist
+                let size_spec = spec.get_size_spec();
+                let mut size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let key = format!("{}-{:08}.dat", prefix, i);
+                    let uri = if spec.base_uri.ends_with('/') {
+                        format!("{}{}", spec.base_uri, key)
+                    } else {
+                        format!("{}/{}", spec.base_uri, key)
+                    };
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,
+                    });
+                }
+            }
+            
             // 3. Create missing objects
             if to_create > 0 {
                 use futures::stream::{FuturesUnordered, StreamExt};
                 
-                // Create size generator from spec
+                // v0.7.9: Pre-generate ALL sizes with deterministic seeded generator
+                // This ensures: (1) deterministic sizes, (2) gap-filling uses correct sizes
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let seed = spec.base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
+                
+                info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
+                let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
+                for _ in 0..spec.count {
+                    all_sizes.push(size_generator.generate());
+                }
+                
+                // Identify missing indices (gaps to fill)
+                let missing_indices: Vec<u64> = (0..spec.count)
+                    .filter(|i| !existing_indices.contains(i))
+                    .collect();
+                
+                info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})", 
+                    missing_indices.len(), 
+                    &missing_indices[..std::cmp::min(10, missing_indices.len())]);
+                
+                if missing_indices.len() as u64 != to_create {
+                    warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
+                        missing_indices.len(), to_create);
+                }
                 
                 // Determine concurrency for prepare (use 32 like default workload concurrency)
                 let concurrency = 32;
@@ -326,36 +479,35 @@ async fn prepare_sequential(
                     }
                 });
                 
-                // Pre-generate all URIs and sizes for parallel execution
-                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
+                // v0.7.9: Generate tasks for missing indices with pre-generated sizes
+                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(missing_indices.len());
                 
-                // v0.7.9: Use tree manifest for file paths if available
+                // Use tree manifest for file paths if available
                 if let Some(manifest) = tree_manifest {
-                    // Create files in directory structure
-                    for i in 0..to_create {
-                        let global_idx = (existing_count + i) as usize;
-                        if let Some(rel_path) = manifest.get_file_path(global_idx) {
+                    // Create files at specific missing indices in directory structure
+                    for &missing_idx in &missing_indices {
+                        if let Some(rel_path) = manifest.get_file_path(missing_idx as usize) {
                             let uri = if spec.base_uri.ends_with('/') {
                                 format!("{}{}", spec.base_uri, rel_path)
                             } else {
                                 format!("{}/{}", spec.base_uri, rel_path)
                             };
-                            let size = size_generator.generate();
+                            let size = all_sizes[missing_idx as usize];
                             tasks.push((uri, size));
                         } else {
-                            warn!("No file path for index {} in tree manifest", global_idx);
+                            warn!("No file path for missing index {} in tree manifest", missing_idx);
                         }
                     }
                 } else {
-                    // Original behavior: flat file naming
-                    for i in 0..to_create {
-                        let key = format!("{}-{:08}.dat", prefix, existing_count + i);
+                    // Flat file mode: create at specific missing indices
+                    for &missing_idx in &missing_indices {
+                        let key = format!("{}-{:08}.dat", prefix, missing_idx);
                         let uri = if spec.base_uri.ends_with('/') {
                             format!("{}{}", spec.base_uri, key)
                         } else {
                             format!("{}/{}", spec.base_uri, key)
                         };
-                        let size = size_generator.generate();
+                        let size = all_sizes[missing_idx as usize];
                         tasks.push((uri, size));
                     }
                 }
@@ -483,6 +635,7 @@ async fn prepare_parallel(
         dedup: usize,
         compress: usize,
         prefix: String,  // "prepared" or "deletable"
+        index: u64,      // v0.7.9: Specific index for gap-filling
     }
     
     // Structure to hold complete task with URI
@@ -499,6 +652,8 @@ async fn prepare_parallel(
     let mut task_specs: Vec<TaskSpec> = Vec::new();
     let mut total_to_create: u64 = 0;
     let mut existing_count_per_pool: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
+    // v0.7.9: Track existing indices per pool for gap-filling
+    let mut existing_indices_per_pool: std::collections::HashMap<(String, String), std::collections::HashSet<u64>> = std::collections::HashMap::new();
     
     // Determine which pool(s) to create based on workload requirements
     let pools_to_create = if needs_separate_pools {
@@ -520,22 +675,108 @@ async fn prepare_parallel(
             
             let store = create_store_for_uri(&spec.base_uri)?;
             
-            // List existing objects with this prefix
-            let list_pattern = if spec.base_uri.ends_with('/') {
-                format!("{}{}-", spec.base_uri, prefix)
+            // List existing objects with this prefix (unless skip_verification is enabled)
+            // Issue #40: skip_verification config option
+            // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
+            // v0.7.9: Parse filenames to extract indices for gap-filling
+            let (existing_count, existing_indices) = if config.skip_verification {
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+                (spec.count, std::collections::HashSet::new())  // Assume all files exist, no gaps
+            } else if tree_manifest.is_some() {
+                // Directory tree mode: list all files recursively (no prefix filtering needed)
+                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
+                let list_base = if spec.base_uri.ends_with('/') {
+                    spec.base_uri.clone()
+                } else {
+                    format!("{}/", spec.base_uri)
+                };
+                
+                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
+                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
+                let all_files = store.list(&list_base, true).await
+                    .context("Failed to list existing objects")?;
+                
+                let match_count = all_files.len() as u64;
+                debug!("  LIST operation returned {} total files in tree", match_count);
+                
+                // v0.7.9: Parse filenames to extract indices for gap-aware creation
+                let mut indices = std::collections::HashSet::new();
+                for path in &all_files {
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse index from filename (e.g., "file_00000042.dat" -> 42)
+                        if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                debug!("  Parsed {} valid file indices from filenames", indices.len());
+                
+                // Verbose: show first 5 files found
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("  Sample files found in directory tree:");
+                    for (i, path) in all_files.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if all_files.len() > 5 {
+                        debug!("    ... and {} more files", all_files.len() - 5);
+                    }
+                }
+                
+                // Extra verbose: show ALL files
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!("  Complete file list ({} files):", all_files.len());
+                    for (i, path) in all_files.iter().enumerate() {
+                        tracing::trace!("    [{}] {}", i+1, path);
+                    }
+                }
+                
+                (match_count, indices)
             } else {
-                format!("{}/{}-", spec.base_uri, prefix)
+                // Flat file mode: original behavior
+                let pattern = if spec.base_uri.ends_with('/') {
+                    format!("{}{}-", spec.base_uri, prefix)
+                } else {
+                    format!("{}/{}-", spec.base_uri, prefix)
+                };
+                
+                info!("  [Flat file mode] Listing with pattern: {}", pattern);
+                let existing = store.list(&pattern, true).await
+                    .context("Failed to list existing objects")?;
+                
+                debug!("  Found {} files matching pattern", existing.len());
+                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
+                    debug!("  Sample files found:");
+                    for (i, path) in existing.iter().take(5).enumerate() {
+                        debug!("    [{}] {}", i+1, path);
+                    }
+                    if existing.len() > 5 {
+                        debug!("    ... and {} more files", existing.len() - 5);
+                    }
+                }
+                
+                // v0.7.9: Parse indices from prepared-NNNN.dat filenames for gap-filling
+                let mut indices = std::collections::HashSet::new();
+                for path in &existing {
+                    if let Some(filename) = path.rsplit('/').next() {
+                        // Parse: "prepared-00000042.dat" -> 42
+                        if let Some(idx_str) = filename.strip_prefix(&format!("{}-", prefix)).and_then(|s| s.strip_suffix(".dat")) {
+                            if let Ok(idx) = idx_str.parse::<u64>() {
+                                indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+                (existing.len() as u64, indices)
             };
             
-            let existing = store.list(&list_pattern, true).await
-                .context("Failed to list existing objects")?;
+            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
             
-            let existing_count = existing.len() as u64;
-            info!("  Found {} existing {} objects", existing_count, prefix);
-            
-            // Store existing count for this pool
+            // Store existing count and indices for this pool
             let pool_key = (spec.base_uri.clone(), prefix.to_string());
             existing_count_per_pool.insert(pool_key.clone(), existing_count);
+            existing_indices_per_pool.insert(pool_key.clone(), existing_indices.clone());
             
             // Calculate how many to create
             let to_create = if existing_count >= spec.count {
@@ -545,19 +786,45 @@ async fn prepare_parallel(
                 spec.count - existing_count
             };
             
-            // Generate task specs (sizes but no URIs yet) for missing objects
+            // Note: In parallel mode, we can't record existing objects here
+            // because all_prepared is created later after Phase 2 (URI assignment)
+            // The existing_count_per_pool tracking is sufficient for skipping creation
+            
+            // v0.7.9: Generate task specs with gap-aware index assignment
             if to_create > 0 {
+                // Pre-generate ALL sizes with deterministic seeded generator
                 let size_spec = spec.get_size_spec();
-                let size_generator = SizeGenerator::new(&size_spec)
+                let seed = spec.base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
                 
-                info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
-                    to_create, prefix, size_generator.description(), spec.fill, 
+                info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
+                let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
+                for _ in 0..spec.count {
+                    all_sizes.push(size_generator.generate());
+                }
+                
+                // Identify missing indices (gaps to fill)
+                let missing_indices: Vec<u64> = (0..spec.count)
+                    .filter(|i| !existing_indices.contains(i))
+                    .collect();
+                
+                info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})",
+                    missing_indices.len(),
+                    &missing_indices[..std::cmp::min(10, missing_indices.len())]);
+                
+                if missing_indices.len() as u64 != to_create {
+                    warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
+                        missing_indices.len(), to_create);
+                }
+                
+                info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})",
+                    to_create, prefix, size_generator.description(), spec.fill,
                     spec.dedup_factor, spec.compress_factor);
                 
-                // Generate all sizes for this spec
-                for _ in 0..to_create {
-                    let size = size_generator.generate();
+                // Generate task specs for missing indices with pre-generated sizes
+                for &missing_idx in &missing_indices {
+                    let size = all_sizes[missing_idx as usize];
                     
                     task_specs.push(TaskSpec {
                         size,
@@ -566,6 +833,7 @@ async fn prepare_parallel(
                         dedup: spec.dedup_factor,
                         compress: spec.compress_factor,
                         prefix: prefix.to_string(),
+                        index: missing_idx,  // Store the specific missing index
                     });
                 }
                 
@@ -575,8 +843,56 @@ async fn prepare_parallel(
     }
     
     if task_specs.is_empty() {
-        info!("All objects already exist, no preparation needed");
-        return Ok(Vec::new());
+        info!("All objects already exist - reconstructing PreparedObject list from existing files");
+        let mut all_prepared = Vec::new();
+        
+        // Reconstruct existing objects from specs
+        for spec in &config.ensure_objects {
+            let pools_to_create = if needs_separate_pools {
+                vec![("prepared", true), ("deletable", false)]
+            } else {
+                vec![("prepared", false)]
+            };
+            
+            for (prefix, _is_readonly) in &pools_to_create {
+                let size_spec = spec.get_size_spec();
+                let mut size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let uri = if let Some(manifest) = tree_manifest {
+                        // Tree mode: use manifest paths
+                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                            if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            }
+                        } else {
+                            continue;  // Skip if manifest doesn't have this index
+                        }
+                    } else {
+                        // Flat mode: traditional naming
+                        let key = format!("{}-{:08}.dat", prefix, i);
+                        if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, key)
+                        } else {
+                            format!("{}/{}", spec.base_uri, key)
+                        }
+                    };
+                    
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,  // All existed
+                    });
+                }
+            }
+        }
+        
+        info!("Reconstructed {} existing objects for workload", all_prepared.len());
+        return Ok(all_prepared);
     }
     
     // Phase 2: Shuffle task specs to mix sizes across directories
@@ -588,22 +904,18 @@ async fn prepare_parallel(
         .as_secs());
     task_specs.shuffle(&mut rng);
     
-    // Phase 3: Assign sequential URIs to shuffled tasks
-    // Track next index per (base_uri, prefix) combination
-    let mut next_index_per_pool: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
-    for (key, existing_count) in &existing_count_per_pool {
-        next_index_per_pool.insert(key.clone(), *existing_count);
-    }
+    // Phase 3: Assign URIs to shuffled tasks using their specific indices (gap-aware)
+    // v0.7.9: Tasks already have specific indices assigned during creation
     
     let mut all_tasks: Vec<PrepareTask> = Vec::with_capacity(task_specs.len());
     for spec in task_specs {
-        let pool_key = (spec.store_uri.clone(), spec.prefix.clone());
-        let idx = next_index_per_pool.get_mut(&pool_key).unwrap();
+        // v0.7.9: Use the specific index stored in TaskSpec (no sequential assignment)
+        let idx = spec.index;
         
-        // v0.7.9: Use tree manifest for file paths if available
+        // Use tree manifest for file paths if available
         let uri = if let Some(manifest) = tree_manifest {
-            // Create files in directory structure
-            let global_idx = *idx as usize;
+            // Create files in directory structure at specific index
+            let global_idx = idx as usize;
             if let Some(rel_path) = manifest.get_file_path(global_idx) {
                 if spec.store_uri.ends_with('/') {
                     format!("{}{}", spec.store_uri, rel_path)
@@ -612,7 +924,7 @@ async fn prepare_parallel(
                 }
             } else {
                 // Fallback to flat naming if manifest doesn't have this index
-                let key = format!("{}-{:08}.dat", spec.prefix, *idx);
+                let key = format!("{}-{:08}.dat", spec.prefix, idx);
                 if spec.store_uri.ends_with('/') {
                     format!("{}{}", spec.store_uri, key)
                 } else {
@@ -620,8 +932,8 @@ async fn prepare_parallel(
                 }
             }
         } else {
-            // Original behavior: flat file naming
-            let key = format!("{}-{:08}.dat", spec.prefix, *idx);
+            // Flat file naming at specific index
+            let key = format!("{}-{:08}.dat", spec.prefix, idx);
             if spec.store_uri.ends_with('/') {
                 format!("{}{}", spec.store_uri, key)
             } else {
@@ -637,8 +949,59 @@ async fn prepare_parallel(
             dedup: spec.dedup,
             compress: spec.compress,
         });
+    }
+    
+    // Phase 3.5: Handle case where all objects already exist (total_to_create == 0)
+    if total_to_create == 0 {
+        info!("All objects already exist - reconstructing PreparedObject list");
+        let mut all_prepared = Vec::new();
         
-        *idx += 1;
+        // Reconstruct existing objects from specs
+        for spec in &config.ensure_objects {
+            let pools_to_create = if needs_separate_pools {
+                vec![("prepared", true), ("deletable", false)]
+            } else {
+                vec![("prepared", false)]
+            };
+            
+            for (prefix, _is_readonly) in &pools_to_create {
+                let size_spec = spec.get_size_spec();
+                let mut size_generator = SizeGenerator::new(&size_spec)
+                    .context("Failed to create size generator")?;
+                
+                for i in 0..spec.count {
+                    let uri = if let Some(manifest) = tree_manifest {
+                        // Tree mode: use manifest paths
+                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                            if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            }
+                        } else {
+                            continue;  // Skip if manifest doesn't have this index
+                        }
+                    } else {
+                        // Flat mode: traditional naming
+                        let key = format!("{}-{:08}.dat", prefix, i);
+                        if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, key)
+                        } else {
+                            format!("{}/{}", spec.base_uri, key)
+                        }
+                    };
+                    
+                    let size = size_generator.generate();
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: false,  // All existed
+                    });
+                }
+            }
+        }
+        
+        return Ok(all_prepared);
     }
     
     // Phase 4: Execute all tasks in parallel with unified progress bar
@@ -1101,7 +1464,7 @@ pub async fn create_directory_tree(
         
         // Create size generator
         use crate::size_generator::SizeGenerator;
-        let size_generator = SizeGenerator::new(&size_spec)
+        let mut size_generator = SizeGenerator::new(&size_spec)
             .context("Failed to create size generator for tree files")?;
         
             info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 

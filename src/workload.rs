@@ -1295,7 +1295,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             
                             // Generate size for this write
                             use crate::size_generator::SizeGenerator;
-                            let size_generator = SizeGenerator::new(&size_spec)?;
+                            let mut size_generator = SizeGenerator::new(&size_spec)?;
                             let sz = size_generator.generate();
                             
                             // In tree mode, use target directly (path from op is ignored)
@@ -1315,7 +1315,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             let (base_uri, size_spec) = cfg.get_put_size_spec(op);
                             
                             use crate::size_generator::SizeGenerator;
-                            let size_generator = SizeGenerator::new(&size_spec)?;
+                            let mut size_generator = SizeGenerator::new(&size_spec)?;
                             let sz = size_generator.generate();
                             
                             let key = {

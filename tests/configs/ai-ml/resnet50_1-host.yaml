@@ -1,0 +1,52 @@
+# sai3-bench config for resnet50 workload - 1 host
+# Matches rdf-bench parameters: width=64, depth=2, files=150 per directory
+# Total: 4,096 leaf directories, 614,400 files, ~131 GB
+
+target: "gs://signal65-ai-ac/resnet50/"
+duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
+concurrency: 64      # Matches rdf-bench threads=64 (increased from unet3d's 32)
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  
+  # Create nested directory tree matching rdf-bench FSD:
+  # width=64, depth=2, files=150 (per host in rdf-bench)
+  # rdf-bench: 1 host creates 4,096×150=614,400 files
+  directory_structure:
+    width: 64                 # 64 subdirectories per level (matches rdf-bench)
+    depth: 2                  # 2 levels deep (matches rdf-bench)
+    files_per_dir: 150        # 150 files/host × 1 host = 150 files per directory
+    distribution: "bottom"    # Files only in leaf directories
+    dir_mask: "scan.d%d_w%d.dir"
+  
+  # Total files calculation: 4,096 leaf dirs × 150 files/dir = 614,400 files
+  ensure_objects:
+    - base_uri: "gs://signal65-ai-ac/resnet50/"
+      count: 614400      # 4,096 dirs × 150 files = 614,400 files (~131 GB)
+      fill: random
+      size_spec:
+        type: lognormal
+        mean: 229376       # ~224 KB (matches rdf-bench weighted avg)
+        std_dev: 160563    # ~157 KB (70% for tight distribution)
+        min: 32768         # 32 KB minimum
+        max: 1048576       # 1 MB maximum
+      dedup_factor: 1
+      compress_factor: 1
+  
+  cleanup: false  # Keep data between runs
+
+workload:
+  # Sequential reads matching rdf-bench:
+  # operation=read, fileio=sequential, xfersize=256k
+  
+  - op: get
+    path: "scan.d*_w*.dir/**/*"  # Match actual directory structure
+    weight: 100
+
+# Distributed Configuration (standalone mode)
+distributed:
+  shared_filesystem: true  # GCS is shared across all agents
+  tree_creation_mode: coordinator  # Controller creates directory tree once
+  path_selection: random  # Random file selection (maximum contention)
+  agents: []  # Standalone mode

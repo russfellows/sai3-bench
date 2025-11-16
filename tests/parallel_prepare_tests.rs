@@ -52,6 +52,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Sequential,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
@@ -122,6 +123,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
@@ -197,6 +199,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
@@ -331,6 +334,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
@@ -346,16 +350,18 @@ async fn test_parallel_with_single_size() -> Result<()> {
 }
 
 /// Test that files are actually created with correct sizes on disk
+/// Uses different directories to avoid overlap between EnsureSpec entries
 #[tokio::test]
 async fn test_files_created_correctly() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let base_path = temp_dir.path().to_str().unwrap();
-    let base_uri = format!("file://{}/", base_path);
+    let base_uri_1kb = format!("file://{}/1kb/", base_path);
+    let base_uri_2kb = format!("file://{}/2kb/", base_path);
     
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: base_uri_1kb.clone(),
                 count: 3,
                 min_size: None,
                 max_size: None,
@@ -365,7 +371,7 @@ async fn test_files_created_correctly() -> Result<()> {
                 compress_factor: 1,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: base_uri_2kb.clone(),
                 count: 3,
                 min_size: None,
                 max_size: None,
@@ -379,6 +385,7 @@ async fn test_files_created_correctly() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
@@ -440,6 +447,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         post_prepare_delay: 0,
         directory_structure: None,  // No directory tree - test file ordering
         prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
     };
     
     let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;

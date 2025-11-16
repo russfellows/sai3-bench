@@ -1,0 +1,27 @@
+# Test config for standalone sai3-bench with prepare phase
+# Small dataset on file:// storage
+
+target: "file:///mnt/test/sai3-prepare-test/"
+
+prepare:
+  prepare_strategy: parallel
+  directory_structure:
+    width: 3
+    depth: 2
+    files_per_dir: 10
+    distribution: "bottom"
+    dir_mask: "scan.d%d_w%d.dir"
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3-prepare-test/"
+      count: 90  # 3x3x10 = 90 files
+      min_size: 1048576  # 1 MB
+      max_size: 1048576
+  post_prepare_delay: 1
+
+duration: 5s
+concurrency: 2
+
+workload:
+  - op: get
+    path: "scan.*/*.dat"
+    weight: 100

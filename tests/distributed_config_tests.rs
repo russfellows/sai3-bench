@@ -2,7 +2,7 @@
 //! Tests for distributed configuration parsing and validation
 
 use anyhow::Result;
-use sai3_bench::config::Config;
+use sai3_bench::config::{Config, TreeCreationMode};
 
 #[test]
 fn test_parse_distributed_config_basic() -> Result<()> {
@@ -236,7 +236,7 @@ workload:
 #[test]
 fn test_parse_real_config_file() -> Result<()> {
     // Parse the actual test config file
-    let config_path = "tests/configs/distributed_yaml_test.yaml";
+    let config_path = "tests/configs/local_test_2agents.yaml";
     let yaml = std::fs::read_to_string(config_path)?;
     let config: Config = serde_yaml::from_str(&yaml)?;
     
@@ -244,11 +244,12 @@ fn test_parse_real_config_file() -> Result<()> {
     let dist = config.distributed.as_ref().unwrap();
     
     assert_eq!(dist.agents.len(), 2);
-    assert_eq!(dist.agents[0].address, "localhost:7761");
-    assert_eq!(dist.agents[1].target_override, Some("file:///tmp/sai3bench-test-agent2/".to_string()));
+    assert_eq!(dist.agents[0].address, "127.0.0.1:7761");
+    assert_eq!(dist.agents[0].id, Some("test-agent-1".to_string()));
     
-    // SSH should be disabled
-    assert_eq!(dist.ssh.as_ref().unwrap().enabled, false);
+    // Verify shared filesystem settings
+    assert_eq!(dist.shared_filesystem, true);
+    assert_eq!(dist.tree_creation_mode, TreeCreationMode::Coordinator);
     
     Ok(())
 }
