@@ -25,10 +25,10 @@ num_cpus = "^1.16"
 # s3dlio (version 0.9.16 - Optional op-log sorting)
 # Use git tag for standalone builds (no local s3dlio directory required)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-# s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
-# s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
-s3dlio = { path = "../s3dlio" }
-s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
+# s3dlio = { path = "../s3dlio" }
+# s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
