@@ -13,22 +13,22 @@ This guide shows how to run sai3-bench across multiple hosts for large-scale loa
 
 On **host1** (192.168.1.101):
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 --agent-id host1
+./sai3bench-agent --listen 0.0.0.0:7761
 ```
 
 On **host2** (192.168.1.102):
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 --agent-id host2
+./sai3bench-agent --listen 0.0.0.0:7761
 ```
 
 On **host3** (192.168.1.103):
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 --agent-id host3
+./sai3bench-agent --listen 0.0.0.0:7761
 ```
 
 On **host4** (192.168.1.104):
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 --agent-id host4
+./sai3bench-agent --listen 0.0.0.0:7761
 ```
 
 **Note**: Agent IDs are optional but recommended for easier identification in results.
@@ -248,7 +248,7 @@ For production environments, use TLS:
 1. **Start Small**: Test with 2 agents first, then scale up
 2. **Check Connectivity**: Always run `ping` command before `run`
 3. **Monitor Resources**: Watch CPU/network on agent hosts during tests
-4. **Use Meaningful IDs**: Set `--agent-id` for easier debugging
+4. **Use Meaningful IDs**: Set `id` field in config YAML for easier debugging
 5. **Save Results**: Results directories are timestamped and self-contained
 6. **Review Logs**: Check `console.log` in results directory for any errors
 7. **Histogram Accuracy**: The consolidated `results.tsv` uses proper histogram merging, not simple averaging of percentiles

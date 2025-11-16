@@ -223,6 +223,13 @@ pub struct PrepareConfig {
     /// - parallel: Interleave all ensure_objects entries for maximum throughput
     #[serde(default)]
     pub prepare_strategy: PrepareStrategy,
+    
+    /// Skip verification of directory tree structure (v0.7.8+)
+    /// When true, assumes all files exist and skips the listing verification step
+    /// Use this for faster startup when you know the directory structure is complete
+    /// Default: false (always verify and create missing files)
+    #[serde(default)]
+    pub skip_verification: bool,
 }
 
 /// Specification for ensuring objects exist

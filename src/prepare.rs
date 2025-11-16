@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::config::{FillPattern, PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
@@ -116,7 +116,8 @@ fn compute_op_agg(hists: &crate::metrics::OpHists, total_bytes: u64, total_ops: 
 /// v0.7.2+: Returns PrepareMetrics with full HDR histogram metrics collection
 pub async fn prepare_objects(
     config: &PrepareConfig,
-    workload: Option<&[crate::config::WeightedOp]>
+    workload: Option<&[crate::config::WeightedOp]>,
+    live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
 ) -> Result<(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)> {
     let prepare_start = Instant::now();
     
@@ -139,20 +140,43 @@ pub async fn prepare_objects(
         ..Default::default()
     };
     
+    // v0.7.9: Create tree manifest FIRST if directory_structure is configured
+    // This way file creation can use proper directory paths
+    let tree_manifest = if config.directory_structure.is_some() {
+        info!("Creating directory tree structure...");
+        let agent_id = 0;
+        let num_agents = 1;
+        
+        let base_uri = config.ensure_objects.first()
+            .map(|spec| spec.base_uri.as_str())
+            .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
+        
+        let manifest = create_tree_manifest_only(config, agent_id, num_agents, base_uri)?;
+        info!("Tree structure: {} directories, {} files total", 
+            manifest.total_dirs, manifest.total_files);
+        
+        Some(manifest)
+    } else {
+        None
+    };
+    
     // Choose execution strategy based on config
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref()).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref()).await?
         }
     };
     
-    // Create directory tree if configured and collect mkdir metrics
-    let tree_manifest = finalize_prepare_with_tree(config, &mut metrics).await?;
+    // Create directories if needed (after files exist with correct paths)
+    if tree_manifest.is_some() {
+        let base_uri = config.ensure_objects.first().unwrap().base_uri.as_str();
+        finalize_tree_with_mkdir(config, base_uri, &mut metrics, live_stats_tracker).await?;
+    }
     
     // Finalize metrics
     metrics.wall_seconds = prepare_start.elapsed().as_secs_f64();
@@ -181,6 +205,8 @@ async fn prepare_sequential(
     config: &PrepareConfig,
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
+    live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    tree_manifest: Option<&TreeManifest>,
 ) -> Result<Vec<PreparedObject>> {
     let mut all_prepared = Vec::new();
     
@@ -240,6 +266,11 @@ async fn prepare_sequential(
                     to_create, prefix, concurrency, size_generator.description(), spec.fill, 
                     spec.dedup_factor, spec.compress_factor);
                 
+                // v0.7.9: Set prepare phase progress in live stats tracker
+                if let Some(ref tracker) = live_stats_tracker {
+                    tracker.set_prepare_progress(0, to_create);
+                }
+                
                 // Create atomic counters for live stats
                 let live_ops = Arc::new(AtomicU64::new(0));
                 let live_bytes = Arc::new(AtomicU64::new(0));
@@ -297,21 +328,43 @@ async fn prepare_sequential(
                 
                 // Pre-generate all URIs and sizes for parallel execution
                 let mut tasks: Vec<(String, u64)> = Vec::with_capacity(to_create as usize);
-                for i in 0..to_create {
-                    let key = format!("{}-{:08}.dat", prefix, existing_count + i);
-                    let uri = if spec.base_uri.ends_with('/') {
-                        format!("{}{}", spec.base_uri, key)
-                    } else {
-                        format!("{}/{}", spec.base_uri, key)
-                    };
-                    let size = size_generator.generate();
-                    tasks.push((uri, size));
+                
+                // v0.7.9: Use tree manifest for file paths if available
+                if let Some(manifest) = tree_manifest {
+                    // Create files in directory structure
+                    for i in 0..to_create {
+                        let global_idx = (existing_count + i) as usize;
+                        if let Some(rel_path) = manifest.get_file_path(global_idx) {
+                            let uri = if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            };
+                            let size = size_generator.generate();
+                            tasks.push((uri, size));
+                        } else {
+                            warn!("No file path for index {} in tree manifest", global_idx);
+                        }
+                    }
+                } else {
+                    // Original behavior: flat file naming
+                    for i in 0..to_create {
+                        let key = format!("{}-{:08}.dat", prefix, existing_count + i);
+                        let uri = if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, key)
+                        } else {
+                            format!("{}/{}", spec.base_uri, key)
+                        };
+                        let size = size_generator.generate();
+                        tasks.push((uri, size));
+                    }
                 }
                 
                 // Execute PUT operations in parallel with semaphore-controlled concurrency
                 let sem = Arc::new(Semaphore::new(concurrency));
                 let mut futs = FuturesUnordered::new();
                 let pb_clone = pb.clone();
+                let tracker_clone = live_stats_tracker.clone();
                 
                 for (uri, size) in tasks {
                     let sem2 = sem.clone();
@@ -322,6 +375,7 @@ async fn prepare_sequential(
                     let pb2 = pb_clone.clone();
                     let ops_counter = live_ops.clone();
                     let bytes_counter = live_bytes.clone();
+                    let tracker = tracker_clone.clone();
                     
                     futs.push(tokio::spawn(async move {
                         let _permit = sem2.acquire_owned().await.unwrap();
@@ -341,13 +395,26 @@ async fn prepare_sequential(
                         let put_start = Instant::now();
                         store.put(&uri, &data).await
                             .with_context(|| format!("Failed to PUT {}", uri))?;
-                        let latency_us = put_start.elapsed().as_micros() as u64;
+                        let latency = put_start.elapsed();
+                        let latency_us = latency.as_micros() as u64;
+                        
+                        // Record stats for live streaming (if tracker provided)
+                        if let Some(ref t) = tracker {
+                            t.record_put(size as usize, latency);
+                        }
                         
                         // Update live counters
                         ops_counter.fetch_add(1, Ordering::Relaxed);
                         bytes_counter.fetch_add(size, Ordering::Relaxed);
                         
                         pb2.inc(1);
+                        
+                        // v0.7.9: Update prepare progress in live stats tracker
+                        if let Some(ref t) = tracker {
+                            let created = pb2.position();
+                            let total = pb2.length().unwrap_or(to_create);
+                            t.set_prepare_progress(created, total);
+                        }
                         
                         Ok::<(String, u64, u64), anyhow::Error>((uri, size, latency_us))
                     }));
@@ -378,6 +445,11 @@ async fn prepare_sequential(
                 
                 pb.finish_with_message(format!("created {} {} objects", to_create, prefix));
                 
+                // v0.7.9: Clear prepare progress after pool complete
+                if let Some(ref tracker) = live_stats_tracker {
+                    tracker.set_prepare_complete();
+                }
+                
                 // Add created objects to all_prepared
                 all_prepared.extend(created_objects);
             }
@@ -396,6 +468,8 @@ async fn prepare_parallel(
     config: &PrepareConfig,
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
+    live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    tree_manifest: Option<&TreeManifest>,
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use rand::seq::SliceRandom;
@@ -526,11 +600,33 @@ async fn prepare_parallel(
         let pool_key = (spec.store_uri.clone(), spec.prefix.clone());
         let idx = next_index_per_pool.get_mut(&pool_key).unwrap();
         
-        let key = format!("{}-{:08}.dat", spec.prefix, *idx);
-        let uri = if spec.store_uri.ends_with('/') {
-            format!("{}{}", spec.store_uri, key)
+        // v0.7.9: Use tree manifest for file paths if available
+        let uri = if let Some(manifest) = tree_manifest {
+            // Create files in directory structure
+            let global_idx = *idx as usize;
+            if let Some(rel_path) = manifest.get_file_path(global_idx) {
+                if spec.store_uri.ends_with('/') {
+                    format!("{}{}", spec.store_uri, rel_path)
+                } else {
+                    format!("{}/{}", spec.store_uri, rel_path)
+                }
+            } else {
+                // Fallback to flat naming if manifest doesn't have this index
+                let key = format!("{}-{:08}.dat", spec.prefix, *idx);
+                if spec.store_uri.ends_with('/') {
+                    format!("{}{}", spec.store_uri, key)
+                } else {
+                    format!("{}/{}", spec.store_uri, key)
+                }
+            }
         } else {
-            format!("{}/{}", spec.store_uri, key)
+            // Original behavior: flat file naming
+            let key = format!("{}-{:08}.dat", spec.prefix, *idx);
+            if spec.store_uri.ends_with('/') {
+                format!("{}{}", spec.store_uri, key)
+            } else {
+                format!("{}/{}", spec.store_uri, key)
+            }
         };
         
         all_tasks.push(PrepareTask {
@@ -549,6 +645,11 @@ async fn prepare_parallel(
     info!("Creating {} total objects in parallel (sizes shuffled for even distribution)", total_to_create);
     
     let concurrency = 32; // Match sequential strategy
+    
+    // v0.7.9: Set prepare phase progress in live stats tracker
+    if let Some(ref tracker) = live_stats_tracker {
+        tracker.set_prepare_progress(0, total_to_create);
+    }
     
     // Create atomic counters for live stats
     let live_ops = Arc::new(AtomicU64::new(0));
@@ -607,12 +708,14 @@ async fn prepare_parallel(
     let sem = Arc::new(Semaphore::new(concurrency));
     let mut futs = FuturesUnordered::new();
     let pb_clone = pb.clone();
+    let tracker_clone = live_stats_tracker.clone();
     
     for task in all_tasks {
         let sem2 = sem.clone();
         let pb2 = pb_clone.clone();
         let ops_counter = live_ops.clone();
         let bytes_counter = live_bytes.clone();
+        let tracker = tracker_clone.clone();
         
         futs.push(tokio::spawn(async move {
             let _permit = sem2.acquire_owned().await.unwrap();
@@ -632,13 +735,26 @@ async fn prepare_parallel(
             let put_start = Instant::now();
             store.put(&task.uri, &data).await
                 .with_context(|| format!("Failed to PUT {}", task.uri))?;
-            let latency_us = put_start.elapsed().as_micros() as u64;
+            let latency = put_start.elapsed();
+            let latency_us = latency.as_micros() as u64;
+            
+            // Record stats for live streaming (if tracker provided)
+            if let Some(ref t) = tracker {
+                t.record_put(task.size as usize, latency);
+            }
             
             // Update live counters
             ops_counter.fetch_add(1, Ordering::Relaxed);
             bytes_counter.fetch_add(task.size, Ordering::Relaxed);
             
             pb2.inc(1);
+            
+            // v0.7.9: Update prepare progress in live stats tracker
+            if let Some(ref t) = tracker {
+                let created = pb2.position();
+                let total = pb2.length().unwrap_or(total_to_create);
+                t.set_prepare_progress(created, total);
+            }
             
             Ok::<(String, u64, u64), anyhow::Error>((task.uri, task.size, latency_us))
         }));
@@ -669,45 +785,93 @@ async fn prepare_parallel(
     
     pb.finish_with_message(format!("created {} objects (all sizes)", total_to_create));
     
+    // v0.7.9: Clear prepare progress after parallel prepare complete
+    if let Some(ref tracker) = live_stats_tracker {
+        tracker.set_prepare_complete();
+    }
+    
     Ok(all_prepared)
 }
 
-/// Continue with directory tree creation after prepare strategy completes
-async fn finalize_prepare_with_tree(
+/// Create tree manifest without creating files or directories
+/// v0.7.9: Split from create_directory_tree to support file creation first, mkdir second
+fn create_tree_manifest_only(
     config: &PrepareConfig,
-    metrics: &mut PrepareMetrics,
-) -> Result<Option<TreeManifest>> {
-    // v0.7.0: Create directory tree if configured
-    let tree_manifest = if config.directory_structure.is_some() {
-        info!("Creating directory tree structure...");
-        // For now, use agent_id=0, num_agents=1 (distributed config integration is TODO)
-        // This will be properly extracted from distributed config in a future update
-        let agent_id = 0;
-        let num_agents = 1;
-        
-        // Need to extract base_uri from ensure_objects (first entry)
-        let base_uri = config.ensure_objects.first()
-            .map(|spec| spec.base_uri.as_str())
-            .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
-        
-        let manifest = create_directory_tree(
-            config,
-            agent_id,
-            num_agents,
-            base_uri,
-            metrics,  // Pass metrics to collect mkdir latencies
-        ).await?;
-        
-        info!("Directory tree created: {} total directories",
-            manifest.all_directories.len()
-        );
-        
-        Some(manifest)
-    } else {
-        None
-    };
+    _agent_id: usize,
+    num_agents: usize,
+    _base_uri: &str,
+) -> Result<TreeManifest> {
+    use crate::directory_tree::DirectoryTree;
     
-    Ok(tree_manifest)
+    let dir_config = config.directory_structure.as_ref()
+        .ok_or_else(|| anyhow!("No directory_structure specified in PrepareConfig"))?;
+    
+    info!("Creating directory tree: width={}, depth={}, files_per_dir={}, distribution={}", 
+        dir_config.width, dir_config.depth, dir_config.files_per_dir, dir_config.distribution);
+    
+    // Generate tree structure
+    let tree = DirectoryTree::new(dir_config.clone())
+        .context("Failed to create DirectoryTree")?;
+    
+    // Create manifest with agent assignments
+    let mut manifest = TreeManifest::from_tree(&tree);
+    manifest.assign_agents(num_agents);
+    
+    Ok(manifest)
+}
+
+/// Create directories after files have been created
+/// v0.7.9: Split from create_directory_tree to support file creation first, mkdir second
+async fn finalize_tree_with_mkdir(
+    config: &PrepareConfig,
+    base_uri: &str,
+    metrics: &mut PrepareMetrics,
+    _live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+) -> Result<()> {
+    let dir_config = config.directory_structure.as_ref()
+        .ok_or_else(|| anyhow!("No directory_structure specified"))?;
+    
+    // Create ObjectStore for this base URI
+    let store = create_store_for_uri(base_uri)?;
+    
+    // Determine if backend requires explicit directory creation
+    // Object storage (S3/Azure/GCS) doesn't need mkdir - directories are implicit in object keys
+    // File systems (file://, direct://) need explicit mkdir
+    let needs_mkdir = base_uri.starts_with("file://") || base_uri.starts_with("direct://");
+    
+    if needs_mkdir {
+        use crate::directory_tree::DirectoryTree;
+        let tree = DirectoryTree::new(dir_config.clone())?;
+        let manifest = TreeManifest::from_tree(&tree);
+        
+        info!("Creating {} directories...", manifest.all_directories.len());
+        let pb = ProgressBar::new(manifest.all_directories.len() as u64);
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
+        )?);
+        
+        for dir_path in &manifest.all_directories {
+            let full_uri = if base_uri.ends_with('/') {
+                format!("{}{}", base_uri, dir_path)
+            } else {
+                format!("{}/{}", base_uri, dir_path)
+            };
+            
+            store.mkdir(&full_uri).await
+                .with_context(|| format!("Failed to create directory: {}", full_uri))?;
+            
+            metrics.mkdir_count += 1;
+            metrics.mkdir.ops += 1;
+            
+            pb.inc(1);
+        }
+        
+        pb.finish_with_message("directories created");
+    } else {
+        info!("Skipping directory creation for object storage (directories are implicit in object keys)");
+    }
+    
+    Ok(())
 }
 
 /// Create directory tree structure with optional file population
@@ -720,6 +884,7 @@ pub async fn create_directory_tree(
     num_agents: usize,
     base_uri: &str,
     metrics: &mut PrepareMetrics,
+    live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
 ) -> Result<TreeManifest> {
     use crate::directory_tree::DirectoryTree;
     
@@ -813,8 +978,110 @@ pub async fn create_directory_tree(
             .collect();
         let total_files = manifest.total_files;
         
-        info!("Creating {} files across {} directories...", 
+        info!("Verifying {} files across {} directories...", 
             total_files, dirs_with_files.len());
+        
+        // Step 1: Build set of expected file paths
+        info!("Building expected file list...");
+        let mut expected_files = std::collections::HashSet::new();
+        for global_idx in 0..total_files {
+            if let Some(file_path) = manifest.get_file_path(global_idx) {
+                expected_files.insert(file_path);
+            }
+        }
+        info!("  Expected {} files in tree structure", expected_files.len());
+        
+        // Step 2: List existing files in all directories
+        info!("Checking existing files in {} directories...", dirs_with_files.len());
+        let mut existing_files = std::collections::HashSet::new();
+        let list_pb = ProgressBar::new(dirs_with_files.len() as u64);
+        list_pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
+        )?);
+        list_pb.set_message("listing");
+        
+        for dir_path in &dirs_with_files {
+            // For GCS/S3 object storage, list files with directory prefix + "/"
+            // This tells the storage to list objects whose keys start with this prefix
+            let dir_prefix = if base_uri.ends_with('/') {
+                format!("{}{}/", base_uri, dir_path)
+            } else {
+                format!("{}/{}/", base_uri, dir_path)
+            };
+            
+            // List files with this directory prefix
+            // recursive=false to list only direct children (no subdirs)
+            // This avoids pagination issues with large directory trees
+            
+            // DEBUG: Log the exact parameters we're passing
+            debug!("BEFORE list() call - dir_prefix: '{}', recursive: false", dir_prefix);
+            
+            // Add a small delay to avoid overwhelming GCS API
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            
+            match store.list(&dir_prefix, false).await {
+                Ok(files) => {
+                    // With recursive=false, we get only direct children
+                    // No filtering needed since there are no subdirectories
+                    
+                    debug!("AFTER list() call - returned {} files for {}", files.len(), dir_prefix);
+                    
+                    // DEBUG: For problematic directories (< 130 files), show ALL files returned
+                    if files.len() < 130 && files.len() > 0 {
+                        warn!("⚠️  Directory {} returned only {} files (expected 130):", dir_prefix, files.len());
+                        for (i, f) in files.iter().enumerate().take(10) {
+                            warn!("    File {}: {}", i, f);
+                        }
+                        if files.len() > 10 {
+                            warn!("    ... and {} more", files.len() - 10);
+                        }
+                    } else if files.len() == 0 {
+                        warn!("❌ Directory {} returned ZERO files (expected 130)", dir_prefix);
+                    }
+                    
+                    if !files.is_empty() && files.len() <= 3 {
+                        debug!("  Files: {:?}", files);
+                    } else if !files.is_empty() {
+                        debug!("  First file example: {}", files[0]);
+                    }
+                    
+                    for file_uri in files {
+                        // Extract relative path from full URI
+                        let relative_path = if let Some(stripped) = file_uri.strip_prefix(base_uri) {
+                            stripped.trim_start_matches('/')
+                        } else {
+                            warn!("File URI doesn't match base_uri: file={}, base={}", file_uri, base_uri);
+                            continue;
+                        };
+                        
+                        existing_files.insert(relative_path.to_string());
+                    }
+                }
+                Err(e) => {
+                    // Directory might not exist yet - that's OK, we'll create files later
+                    debug!("Could not list directory {}: {}", dir_prefix, e);
+                }
+            }
+            list_pb.inc(1);
+        }
+        list_pb.finish_with_message(format!("{} files found", existing_files.len()));
+        
+        // Step 3: Find missing files
+        let missing_files: Vec<String> = expected_files
+            .difference(&existing_files)
+            .cloned()
+            .collect();
+        
+        info!("  Found {} existing files, {} missing files", 
+            existing_files.len(), missing_files.len());
+        
+        // Step 4: Create only missing files (or all if none exist)
+        let to_create = missing_files.len();
+        
+        if to_create == 0 {
+            info!("All directory tree files already exist - skipping creation");
+        } else {
+            info!("Creating {} missing files...", to_create);
         
         // Get file generation configuration from ensure_objects (if configured)
         // Use same pattern as regular prepare_objects for consistency
@@ -837,54 +1104,68 @@ pub async fn create_directory_tree(
         let size_generator = SizeGenerator::new(&size_spec)
             .context("Failed to create size generator for tree files")?;
         
-        info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 
-            size_generator.description(), fill_pattern, dedup_factor, compress_factor);
-        
-        let pb = ProgressBar::new(total_files as u64);
-        pb.set_style(ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
-        )?);
-        
-        let mut global_file_idx = 0usize;
-        
-        for dir_path in dirs_with_files {
-            let dir_uri = if base_uri.ends_with('/') {
-                format!("{}{}", base_uri, dir_path)
-            } else {
-                format!("{}/{}", base_uri, dir_path)
-            };
+            info!("File size: {}, fill: {:?}, dedup: {}, compress: {}", 
+                size_generator.description(), fill_pattern, dedup_factor, compress_factor);
             
-            // Create files_per_dir files in this directory
-            for _local_idx in 0..manifest.files_per_dir {
-                // CORRECT PATTERN: Check if this global file index belongs to this agent
-                let assigned_agent = global_file_idx % num_agents;
+            let pb = ProgressBar::new(to_create as u64);
+            pb.set_style(ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files {msg}"
+            )?);
+            
+            let mut global_file_idx = 0usize;
+            
+            for dir_path in dirs_with_files {
+                let dir_uri = if base_uri.ends_with('/') {
+                    format!("{}{}", base_uri, dir_path)
+                } else {
+                    format!("{}/{}", base_uri, dir_path)
+                };
                 
-                if assigned_agent == agent_id {
-                    // This file belongs to us - create it
+                // Create files_per_dir files in this directory
+                for _local_idx in 0..manifest.files_per_dir {
+                    // Check if this file is missing
                     let file_name = manifest.get_file_name(global_file_idx);
+                    let file_relative_path = format!("{}/{}", dir_path, file_name);
                     let file_uri = format!("{}/{}", dir_uri, file_name);
                     
-                    // Generate file data using EXACT same pattern as regular prepare_objects
-                    let size = size_generator.generate();
-                    let data = match fill_pattern {
-                        FillPattern::Zero => vec![0u8; size as usize],
-                        FillPattern::Random => {
-                            s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                    // Only create if this file is in the missing list
+                    if missing_files.contains(&file_relative_path) {
+                        // CORRECT PATTERN: Check if this global file index belongs to this agent
+                        let assigned_agent = global_file_idx % num_agents;
+                        
+                        if assigned_agent == agent_id {
+                            // This file belongs to us - create it
+                            
+                            // Generate file data using EXACT same pattern as regular prepare_objects
+                            let size = size_generator.generate();
+                            let data = match fill_pattern {
+                                FillPattern::Zero => vec![0u8; size as usize],
+                                FillPattern::Random => {
+                                    s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                                }
+                            };
+                            
+                            let put_start = Instant::now();
+                            store.put(&file_uri, &data).await
+                                .with_context(|| format!("Failed to create file: {}", file_uri))?;
+                            let latency = put_start.elapsed();
+                            
+                            // Record stats for live streaming (if tracker provided)
+                            if let Some(ref tracker) = live_stats_tracker {
+                                tracker.record_put(size as usize, latency);
+                            }
+                            
+                            pb.inc(1);
                         }
-                    };
+                    }
                     
-                    store.put(&file_uri, &data).await
-                        .with_context(|| format!("Failed to create file: {}", file_uri))?;
-                    
-                    pb.inc(1);
+                    // CRITICAL: Always increment global index, even if we skip this file
+                    global_file_idx += 1;
                 }
-                
-                // CRITICAL: Always increment global index, even if we skip this file
-                global_file_idx += 1;
             }
+            
+            pb.finish_with_message(format!("missing files created (agent {}/{})", agent_id, num_agents));
         }
-        
-        pb.finish_with_message(format!("files created (agent {}/{})", agent_id, num_agents));
     }
     
     info!("Directory tree creation complete");

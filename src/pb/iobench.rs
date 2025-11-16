@@ -128,6 +128,39 @@ pub struct WorkloadSummary {
     #[prost(bytes = "vec", tag = "18")]
     pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
 }
+/// v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PrepareSummary {
+    #[prost(string, tag = "1")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(double, tag = "2")]
+    pub wall_seconds: f64,
+    #[prost(uint64, tag = "3")]
+    pub objects_created: u64,
+    #[prost(uint64, tag = "4")]
+    pub objects_existed: u64,
+    /// PUT operation aggregates (object creation)
+    #[prost(message, optional, tag = "5")]
+    pub put: ::core::option::Option<OpAggregateMetrics>,
+    /// MKDIR operation aggregates (directory creation)
+    #[prost(message, optional, tag = "6")]
+    pub mkdir: ::core::option::Option<OpAggregateMetrics>,
+    #[prost(uint64, tag = "7")]
+    pub mkdir_count: u64,
+    /// v0.7.9: HDR histogram data for accurate aggregation
+    ///
+    /// Serialized PUT histograms (all size buckets)
+    #[prost(bytes = "vec", tag = "8")]
+    pub histogram_put: ::prost::alloc::vec::Vec<u8>,
+    /// v0.7.9: TSV content for agent-level prepare results
+    ///
+    /// Prepare results TSV data
+    #[prost(string, tag = "9")]
+    pub tsv_content: ::prost::alloc::string::String,
+    /// Local path where agent saved prepare_results.tsv
+    #[prost(string, tag = "10")]
+    pub results_path: ::prost::alloc::string::String,
+}
 /// v0.7.5: Live performance statistics for distributed execution
 /// Sent every 1 second during workload execution for real-time visibility
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -178,6 +211,20 @@ pub struct LiveStats {
     /// Details if status == ERROR
     #[prost(string, tag = "19")]
     pub error_message: ::prost::alloc::string::String,
+    /// v0.7.9: Prepare phase progress tracking
+    ///
+    /// True if currently in prepare phase
+    #[prost(bool, tag = "20")]
+    pub in_prepare_phase: bool,
+    /// Objects created so far
+    #[prost(uint64, tag = "21")]
+    pub prepare_objects_created: u64,
+    /// Total objects to create
+    #[prost(uint64, tag = "22")]
+    pub prepare_objects_total: u64,
+    /// v0.7.9: Prepare phase summary (only present when prepare completes)
+    #[prost(message, optional, tag = "23")]
+    pub prepare_summary: ::core::option::Option<PrepareSummary>,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

@@ -73,6 +73,28 @@ message WorkloadSummary {
   bytes histogram_meta = 18;     // Serialized META histograms (all size buckets)
 }
 
+// v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
+message PrepareSummary {
+  string agent_id = 1;
+  double wall_seconds = 2;
+  uint64 objects_created = 3;
+  uint64 objects_existed = 4;
+  
+  // PUT operation aggregates (object creation)
+  OpAggregateMetrics put = 5;
+  
+  // MKDIR operation aggregates (directory creation)
+  OpAggregateMetrics mkdir = 6;
+  uint64 mkdir_count = 7;
+  
+  // v0.7.9: HDR histogram data for accurate aggregation
+  bytes histogram_put = 8;       // Serialized PUT histograms (all size buckets)
+  
+  // v0.7.9: TSV content for agent-level prepare results
+  string tsv_content = 9;        // Prepare results TSV data
+  string results_path = 10;      // Local path where agent saved prepare_results.tsv
+}
+
 // v0.7.5: Live performance statistics for distributed execution
 // Sent every 1 second during workload execution for real-time visibility
 message LiveStats {
@@ -114,6 +136,14 @@ message LiveStats {
   }
   Status status = 18;
   string error_message = 19;     // Details if status == ERROR
+  
+  // v0.7.9: Prepare phase progress tracking
+  bool in_prepare_phase = 20;    // True if currently in prepare phase
+  uint64 prepare_objects_created = 21;  // Objects created so far
+  uint64 prepare_objects_total = 22;    // Total objects to create
+  
+  // v0.7.9: Prepare phase summary (only present when prepare completes)
+  PrepareSummary prepare_summary = 23;
 }
 
 service Agent {

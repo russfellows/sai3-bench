@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Use AWS async SDK directly for listing to avoid nested runtimes
 use aws_config::{self, BehaviorVersion};
@@ -26,7 +26,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
@@ -245,7 +245,7 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload))
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None)
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
@@ -382,6 +382,10 @@ impl Agent for AgentSvc {
                 final_summary: None,
                 status: 3,  // ERROR
                 error_message: format!("Configuration validation failed: {}", e),
+                in_prepare_phase: false,
+                prepare_objects_created: 0,
+                prepare_objects_total: 0,
+                prepare_summary: None,
             };
             
             let stream = async_stream::stream! {
@@ -395,6 +399,12 @@ impl Agent for AgentSvc {
         
         // Channel to signal completion with workload summary (v0.7.5)
         let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
+        
+        // v0.7.9: Channel to send prepare metrics from workload task to stream task
+        let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
+        
+        // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
+        let (tx_cancel, rx_cancel) = tokio::sync::oneshot::channel::<()>();
         
         // Create stream that sends stats every 1 second
         let agent_id_stream = agent_id.clone();
@@ -423,6 +433,10 @@ impl Agent for AgentSvc {
                 final_summary: None,
                 status: 1,  // READY
                 error_message: String::new(),
+                in_prepare_phase: false,
+                prepare_objects_created: 0,
+                prepare_objects_total: 0,
+                prepare_summary: None,
             };
             yield Ok(ready_msg);
             
@@ -437,51 +451,101 @@ impl Agent for AgentSvc {
             let tracker_exec = tracker_spawn.clone();
             let mut config_exec = config_spawn.clone();
             let agent_id_exec = agent_id_stream.clone();
+            let rx_cancel_exec = rx_cancel;
+            
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
+                let tracker_for_prepare = tracker_exec.clone();
                 config_exec.live_stats_tracker = Some(tracker_exec);
                 
-                // Execute prepare phase if configured
-                let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                    match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload)).await {
-                        Ok((prepared, manifest, _metrics)) => {
-                            info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
-                            
-                            if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                // v0.7.8: Execute prepare/workload with cancellation support
+                tokio::select! {
+                    _ = rx_cancel_exec => {
+                        warn!("Agent {} received cancellation signal (controller disconnected)", agent_id_exec);
+                        let _ = tx_done.send(Err("Cancelled by controller".to_string())).await;
+                    }
+                    result = async {
+                        // Execute prepare phase if configured
+                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone())).await {
+                                Ok((prepared, manifest, prepare_metrics)) => {
+                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                                    
+                                    // v0.7.9: Export prepare metrics to TSV and JSON
+                                    if prepare_metrics.put.ops > 0 {
+                                        use sai3_bench::tsv_export::TsvExporter;
+                                        let results_dir = std::path::Path::new("./sai3-agent-results");
+                                        if let Err(e) = std::fs::create_dir_all(results_dir) {
+                                            warn!("Failed to create agent results directory: {}", e);
+                                        } else {
+                                            let prepare_tsv_path = results_dir.join("prepare_results.tsv");
+                                            match TsvExporter::with_path(&prepare_tsv_path) {
+                                                Ok(exporter) => {
+                                                    if let Err(e) = exporter.export_prepare_metrics(&prepare_metrics) {
+                                                        warn!("Failed to export prepare metrics: {}", e);
+                                                    } else {
+                                                        info!("Prepare metrics exported to: {}", prepare_tsv_path.display());
+                                                    }
+                                                }
+                                                Err(e) => warn!("Failed to create prepare TSV exporter: {}", e),
+                                            }
+                                            
+                                            // v0.7.9: Send prepare metrics to stream task
+                                            let _ = tx_prepare.send(prepare_metrics).await;
+                                        }
+                                    }
+                                    
+                                    // v0.7.9: Reset stats counters before workload to clear prepare phase PUT operations
+                                    tracker_for_prepare.reset_for_workload();
+                                    
+                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                                    }
+                                    manifest
+                                }
+                                Err(e) => {
+                                    let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                    return;
+                                }
                             }
-                            manifest
-                        }
-                        Err(e) => {
-                            let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
+                        } else {
+                            None
+                        };
 
-                // Execute workload (tracker wired via config for live stats)
-                match sai3_bench::workload::run(&config_exec, tree_manifest).await {
-                    Ok(summary) => {
-                        info!("Workload completed successfully for agent {}", agent_id_exec);
-                        let _ = tx_done.send(Ok(summary)).await;
-                    }
-                    Err(e) => {
-                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
-                        let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
-                    }
+                        // Execute workload (tracker wired via config for live stats)
+                        match sai3_bench::workload::run(&config_exec, tree_manifest).await {
+                            Ok(summary) => {
+                                info!("Workload completed successfully for agent {}", agent_id_exec);
+                                let _ = tx_done.send(Ok(summary)).await;
+                            }
+                            Err(e) => {
+                                error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
+                                let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
+                            }
+                        }
+                    } => result
                 }
             });
             
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+            // v0.7.9: Store prepare metrics when received from workload task
+            let mut stored_prepare_metrics: Option<sai3_bench::workload::PrepareMetrics> = None;
+
             loop {
                 tokio::select! {
+                    // v0.7.9: Receive prepare metrics from workload task
+                    Some(prep_metrics) = rx_prepare.recv() => {
+                        info!("Received prepare metrics: {} objects created", prep_metrics.objects_created);
+                        stored_prepare_metrics = Some(prep_metrics);
+                    }
+                    
                     _ = interval.tick() => {
                         // Send live stats snapshot
                         let snapshot = tracker.snapshot();
+                        debug!("Sending stats: PUT {} ops, {} bytes, elapsed {:.1}s", 
+                               snapshot.put_ops, snapshot.put_bytes, snapshot.elapsed_secs());
                         let stats = LiveStats {
                             agent_id: agent_id_stream.clone(),
                             timestamp_s: snapshot.timestamp_secs() as f64,
@@ -502,6 +566,10 @@ impl Agent for AgentSvc {
                             final_summary: None,  // v0.7.5: Only in final message
                             status: 2,  // RUNNING
                             error_message: String::new(),
+                            in_prepare_phase: snapshot.in_prepare_phase,
+                            prepare_objects_created: snapshot.prepare_objects_created,
+                            prepare_objects_total: snapshot.prepare_objects_total,
+                            prepare_summary: None,
                         };
                         yield Ok(stats);
                     }
@@ -517,6 +585,19 @@ impl Agent for AgentSvc {
                                         error!("Failed to convert summary to proto: {:?}", e);
                                         None  // Continue without summary rather than failing entire stream
                                     }
+                                };
+                                
+                                // v0.7.9: Convert prepare metrics to proto if available
+                                let proto_prepare = if let Some(ref prep_metrics) = stored_prepare_metrics {
+                                    match prepare_metrics_to_proto(&agent_id_stream, prep_metrics).await {
+                                        Ok(s) => Some(s),
+                                        Err(e) => {
+                                            error!("Failed to convert prepare metrics to proto: {:?}", e);
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
                                 };
                                 
                                 // Send final stats with completed=true and full summary
@@ -541,6 +622,10 @@ impl Agent for AgentSvc {
                                     final_summary: proto_summary,  // v0.7.5: Include complete results
                                     status: 4,  // COMPLETED
                                     error_message: String::new(),
+                                    in_prepare_phase: false,
+                                    prepare_objects_created: 0,
+                                    prepare_objects_total: 0,
+                                    prepare_summary: proto_prepare,  // v0.7.9: Include prepare metrics
                                 };
                                 yield Ok(final_stats);
                                 break;
@@ -557,6 +642,11 @@ impl Agent for AgentSvc {
                     }
                 }
             }
+            
+            // v0.7.8: Stream is ending (controller disconnected or Ctrl+C)
+            // Send cancellation signal to workload task
+            info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
+            let _ = tx_cancel.send(());
         };
 
         Ok(Response::new(Box::pin(stream)))
@@ -620,6 +710,77 @@ async fn summary_to_proto(
         p50_us: summary.p50_us,
         p95_us: summary.p95_us,
         p99_us: summary.p99_us,
+    })
+}
+
+/// Convert PrepareMetrics to PrepareSummary protobuf (v0.7.9)
+/// Follows same pattern as summary_to_proto for consistency
+async fn prepare_metrics_to_proto(
+    agent_id: &str,
+    metrics: &sai3_bench::workload::PrepareMetrics,
+) -> Result<PrepareSummary, Status> {
+    use sai3_bench::tsv_export::TsvExporter;
+    use hdrhistogram::serialization::{Serializer, V2Serializer};
+    use std::fs;
+    
+    // Get PID for unique naming (prevents collisions when multiple agents run on same host)
+    let pid = std::process::id();
+    
+    // Create prepare results directory structure similar to workload results
+    let agent_name = format!("{}-pid{}-prepare", agent_id, pid);
+    let results_base = std::env::temp_dir();
+    let results_path = results_base.join(&agent_name);
+    
+    // Create directory
+    fs::create_dir_all(&results_path)
+        .map_err(|e| Status::internal(format!("Failed to create prepare results directory: {}", e)))?;
+    
+    // Write TSV export to prepare_results.tsv
+    let tsv_path = results_path.join("prepare_results.tsv");
+    let exporter = TsvExporter::with_path(&tsv_path)
+        .map_err(|e| Status::internal(format!("Failed to create TSV exporter: {}", e)))?;
+    exporter.export_prepare_metrics(metrics)
+        .map_err(|e| Status::internal(format!("Failed to export prepare metrics: {}", e)))?;
+    
+    // Read back TSV content for transmission
+    let tsv_content = fs::read_to_string(&tsv_path)
+        .map_err(|e| Status::internal(format!("Failed to read prepare TSV: {}", e)))?;
+    
+    // Serialize histograms for accurate aggregation (same pattern as workload)
+    let mut serializer = V2Serializer::new();
+    let mut put_hist_bytes = Vec::new();
+    
+    for bucket_hist in metrics.put_hists.buckets.iter() {
+        let hist = bucket_hist.lock().unwrap();
+        serializer.serialize(&*hist, &mut put_hist_bytes)
+            .map_err(|e| Status::internal(format!("Failed to serialize PUT histogram: {}", e)))?;
+    }
+    
+    Ok(PrepareSummary {
+        agent_id: agent_id.to_string(),
+        wall_seconds: metrics.wall_seconds,
+        objects_created: metrics.objects_created,
+        objects_existed: metrics.objects_existed,
+        put: Some(OpAggregateMetrics {
+            bytes: metrics.put.bytes,
+            ops: metrics.put.ops,
+            mean_us: metrics.put.mean_us,
+            p50_us: metrics.put.p50_us,
+            p95_us: metrics.put.p95_us,
+            p99_us: metrics.put.p99_us,
+        }),
+        mkdir: Some(OpAggregateMetrics {
+            bytes: metrics.mkdir.bytes,
+            ops: metrics.mkdir.ops,
+            mean_us: metrics.mkdir.mean_us,
+            p50_us: metrics.mkdir.p50_us,
+            p95_us: metrics.mkdir.p95_us,
+            p99_us: metrics.mkdir.p99_us,
+        }),
+        mkdir_count: metrics.mkdir_count,
+        histogram_put: put_hist_bytes,
+        tsv_content,
+        results_path: results_path.display().to_string(),
     })
 }
 

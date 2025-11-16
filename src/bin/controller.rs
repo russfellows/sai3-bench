@@ -21,7 +21,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{Empty, LiveStats, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
 
 /// v0.7.5: Aggregator for live stats from multiple agents
 /// 
@@ -48,6 +48,12 @@ impl LiveStatsAggregator {
         if let Some(stats) = self.agent_stats.get_mut(agent_id) {
             stats.completed = true;
         }
+    }
+    
+    /// Reset all accumulated stats (v0.7.9+)
+    /// Call this when transitioning from prepare to workload phase
+    fn reset_stats(&mut self) {
+        self.agent_stats.clear();
     }
 
     /// Check if all agents have completed
@@ -796,9 +802,9 @@ async fn run_distributed_workload(
     let progress_bar = multi_progress.add(ProgressBar::new(duration_secs));
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{bar:40.cyan/blue} {pos:>3}/{len:3}s\n{msg}")
+            .template("{bar:40.cyan/blue} {pos:>7}/{len:7} {unit}\n{msg}")
             .expect("Invalid progress template")
-            .progress_chars("=>-")
+            .progress_chars("█▓▒░ ")
     );
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
     
@@ -811,8 +817,15 @@ async fn run_distributed_workload(
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
         
-        debug!("Agent {}: ID='{}', prefix='{}', address='{}', shared_storage={}", 
-               idx + 1, agent_id, path_prefix, agent_addr, is_shared_storage);
+        // v0.7.9: For shared storage (GCS/S3/Azure), don't use path prefix - all agents access same data
+        let effective_prefix = if is_shared_storage {
+            String::new()  // Empty prefix for shared storage
+        } else {
+            path_prefix.clone()  // Use agent-specific prefix for local storage
+        };
+        
+        debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}", 
+               idx + 1, agent_id, path_prefix, effective_prefix, agent_addr, is_shared_storage);
         
         let config = config_yaml.clone();
         let addr = agent_addr.clone();
@@ -837,7 +850,7 @@ async fn run_distributed_workload(
                 .run_workload_with_live_stats(RunWorkloadRequest {
                     config_yaml: config,
                     agent_id: agent_id.clone(),
-                    path_prefix: path_prefix.clone(),
+                    path_prefix: effective_prefix.clone(),
                     start_timestamp_ns: start_ns,
                     shared_storage: shared,
                 })
@@ -851,10 +864,19 @@ async fn run_distributed_workload(
             let mut stats_count = 0;
             while let Some(stats_result) = stream.message().await? {
                 stats_count += 1;
-                let _ = tx.send(stats_result).await;
+                debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
+                       stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
+                       stats_result.get_bytes + stats_result.put_bytes);
+                if let Err(e) = tx.send(stats_result).await {
+                    error!("Failed to forward stats from agent {}: {}", addr, e);
+                    break;
+                }
             }
             
-            debug!("Agent {} stream completed with {} updates", addr, stats_count);
+            info!("Agent {} stream completed with {} updates", addr, stats_count);
+            if stats_count == 0 {
+                warn!("⚠️  Agent {} stream ended with ZERO updates - possible connection issue!", addr);
+            }
             Ok::<(), anyhow::Error>(())
         });
 
@@ -956,7 +978,8 @@ async fn run_distributed_workload(
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
     
     // v0.7.6: Track workload start time for progress bar position
-    let workload_start = std::time::Instant::now();
+    // Note: This will be reset when prepare phase completes to measure actual workload time
+    let mut workload_start = std::time::Instant::now();
     
     // Aggregator for live stats display
     let mut aggregator = LiveStatsAggregator::new();
@@ -972,8 +995,14 @@ async fn run_distributed_workload(
     // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
     let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
     
+    // v0.7.9: Collect prepare summaries for persistence  
+    let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
+    
     // v0.7.5: Track last console.log write time (write every 1 second)
     let mut last_console_log = std::time::Instant::now();
+    
+    // v0.7.9: Track prepare phase state to detect transition to workload
+    let mut was_in_prepare_phase = false;
     
     // Process live stats stream
     loop {
@@ -998,60 +1027,126 @@ async fn run_distributed_workload(
         }
         
         tokio::select! {
-            Some(stats) = rx_stats.recv() => {
-                // v0.7.5: Update last seen timestamp for resilience
-                agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
-                
-                // v0.7.5: Extract final summary if completed
-                if stats.completed {
-                    completed_agents.insert(stats.agent_id.clone());
-                    aggregator.mark_completed(&stats.agent_id);
-                    
-                    // Extract and store final summary for persistence
-                    if let Some(summary) = stats.final_summary {
-                        debug!("Collected final summary from agent {}", summary.agent_id);
-                        agent_summaries.push(summary);
-                    } else {
-                        warn!("Agent {} completed but did not provide final summary", stats.agent_id);
-                    }
-                } else {
-                    // Regular update (not completed yet)
-                    aggregator.update(stats);
-                }
-                
-                // Update display every 100ms (rate limiting)
-                if last_update.elapsed() > std::time::Duration::from_millis(100) {
-                    let agg = aggregator.aggregate();
-                    let msg = if dead_agents.is_empty() {
-                        agg.format_progress()
-                    } else {
-                        format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
-                    };
-                    progress_bar.set_message(msg.clone());
-                    
-                    // v0.7.6: Update progress bar position based on elapsed time
-                    let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
-                    progress_bar.set_position(elapsed_secs);
-                    
-                    last_update = std::time::Instant::now();
-                    
-                    // v0.7.5: Write live stats to console.log every 1 second
-                    if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let log_line = format!("[{}] {}", timestamp, msg);
-                        if let Err(e) = results_dir.write_console(&log_line) {
-                            warn!("Failed to write live stats to console.log: {}", e);
+            stats_opt = rx_stats.recv() => {
+                match stats_opt {
+                    Some(stats) => {
+                        // v0.7.5: Update last seen timestamp for resilience
+                        agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
+                        
+                        // v0.7.9: Capture prepare phase info BEFORE moving stats
+                        let in_prepare = stats.in_prepare_phase;
+                        let prepare_created = stats.prepare_objects_created;
+                        let prepare_total = stats.prepare_objects_total;
+                        
+                        // v0.7.9: Detect transition from prepare to workload and reset aggregator
+                        if was_in_prepare_phase && !in_prepare {
+                            debug!("Prepare phase completed, resetting aggregator for workload-only stats");
+                            aggregator.reset_stats();
+                            // Reset workload timer to measure actual workload duration (not including prepare)
+                            workload_start = std::time::Instant::now();
+                            was_in_prepare_phase = false;
+                        } else if in_prepare {
+                            was_in_prepare_phase = true;
                         }
-                        last_console_log = std::time::Instant::now();
+                        
+                        // v0.7.5: Extract final summary if completed
+                        if stats.completed {
+                            completed_agents.insert(stats.agent_id.clone());
+                            aggregator.mark_completed(&stats.agent_id);
+                            
+                            // Extract and store final summary for persistence
+                            if let Some(summary) = stats.final_summary {
+                                debug!("Collected final summary from agent {}", summary.agent_id);
+                                agent_summaries.push(summary);
+                            } else {
+                                warn!("Agent {} completed but did not provide final summary", stats.agent_id);
+                            }
+                            
+                            // v0.7.9: Extract and store prepare summary for persistence
+                            if let Some(prep_summary) = stats.prepare_summary {
+                                debug!("Collected prepare summary from agent {}", prep_summary.agent_id);
+                                prepare_summaries.push(prep_summary);
+                            }
+                        } else {
+                            // Regular update (not completed yet)
+                            aggregator.update(stats);
+                        }
+                        
+                        // Update display every 100ms (rate limiting)
+                        if last_update.elapsed() > std::time::Duration::from_millis(100) {
+                            let agg = aggregator.aggregate();
+                            
+                            // v0.7.9: Use captured prepare phase info
+                            let msg = if in_prepare && prepare_total > 0 {
+                                // Show prepare progress as "created/total (percentage)"
+                                let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
+                                if dead_agents.is_empty() {
+                                    format!("📦 Preparing: {}/{} objects ({}%)\n{}", 
+                                            prepare_created, prepare_total, pct, agg.format_progress())
+                                } else {
+                                    format!("📦 Preparing: {}/{} objects ({}
+%) (⚠️ {} dead)\n{}", 
+                                            prepare_created, prepare_total, pct, dead_agents.len(), agg.format_progress())
+                                }
+                            } else if dead_agents.is_empty() {
+                                agg.format_progress()
+                            } else {
+                                format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
+                            };
+                            progress_bar.set_message(msg.clone());
+                            
+                            // v0.7.9: Update progress bar based on phase
+                            if in_prepare && prepare_total > 0 {
+                                // During prepare: show objects created out of total
+                                progress_bar.set_length(prepare_total);
+                                progress_bar.set_position(prepare_created);
+                                // Update style to show 'objects' unit
+                                progress_bar.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7} objects\n{msg}")
+                                        .expect("Invalid progress template")
+                                        .progress_chars("█▓▒░ ")
+                                );
+                            } else {
+                                // During workload: show elapsed time out of duration
+                                progress_bar.set_length(duration_secs);
+                                let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
+                                progress_bar.set_position(elapsed_secs);
+                                // Update style to show 's' (seconds) unit
+                                progress_bar.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7}s\n{msg}")
+                                        .expect("Invalid progress template")
+                                        .progress_chars("█▓▒░ ")
+                                );
+                            }
+                            
+                            last_update = std::time::Instant::now();
+                            
+                            // v0.7.5: Write live stats to console.log every 1 second
+                            if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
+                                let timestamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let log_line = format!("[{}] {}", timestamp, msg);
+                                if let Err(e) = results_dir.write_console(&log_line) {
+                                    warn!("Failed to write live stats to console.log: {}", e);
+                                }
+                                last_console_log = std::time::Instant::now();
+                            }
+                        }
+                        
+                        // v0.7.5: Check if all agents completed or dead (graceful degradation)
+                        if aggregator.all_completed() {
+                            break;
+                        }
                     }
-                }
-                
-                // v0.7.5: Check if all agents completed or dead (graceful degradation)
-                if aggregator.all_completed() {
-                    break;
+                    None => {
+                        // Channel closed - all agent streams finished
+                        warn!("Stats channel closed unexpectedly - all agent streams ended");
+                        break;
+                    }
                 }
             }
             
@@ -1126,6 +1221,25 @@ async fn run_distributed_workload(
     } else {
         warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
         warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
+    }
+    
+    // v0.7.9: Write per-agent prepare results and create consolidated prepare TSV
+    if !prepare_summaries.is_empty() {
+        info!("Writing prepare results for {} agents", prepare_summaries.len());
+        
+        // Write per-agent prepare results to agents/{agent-id}/ subdirectory
+        for prep_summary in &prepare_summaries {
+            if let Err(e) = write_agent_prepare_results(&agents_dir, &prep_summary.agent_id, prep_summary) {
+                error!("Failed to write prepare results for agent {}: {}", prep_summary.agent_id, e);
+            }
+        }
+        
+        // Create consolidated prepare TSV with histogram aggregation
+        if let Err(e) = create_consolidated_prepare_tsv(results_dir.path(), &prepare_summaries) {
+            error!("Failed to create consolidated prepare TSV: {}", e);
+        } else {
+            info!("✓ Consolidated prepare_results.tsv created");
+        }
     }
     
     // Finalize results directory with elapsed time from final stats
@@ -1364,6 +1478,180 @@ fn write_agent_results(
     }
     
     info!("Wrote agent {} results to: {}", agent_id, agent_dir.display());
+    Ok(())
+}
+
+/// Write per-agent prepare results to agents/{agent-id}/ subdirectory (v0.7.9)
+fn write_agent_prepare_results(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    summary: &PrepareSummary,
+) -> anyhow::Result<()> {
+    use std::fs;
+    
+    // Create subdirectory for this agent
+    let agent_dir = agents_dir.join(agent_id);
+    fs::create_dir_all(&agent_dir)
+        .with_context(|| format!("Failed to create agent directory: {}", agent_dir.display()))?;
+    
+    // Write prepare_results.tsv
+    if !summary.tsv_content.is_empty() {
+        let tsv_path = agent_dir.join("prepare_results.tsv");
+        fs::write(&tsv_path, &summary.tsv_content)
+            .with_context(|| format!("Failed to write agent prepare TSV: {}", tsv_path.display()))?;
+    }
+    
+    // Write a note about the agent's local results path
+    if !summary.results_path.is_empty() {
+        let note_path = agent_dir.join("prepare_local_path.txt");
+        fs::write(&note_path, &summary.results_path)
+            .with_context(|| format!("Failed to write prepare path note: {}", note_path.display()))?;
+    }
+    
+    Ok(())
+}
+
+/// Create consolidated prepare_results.tsv from agent histograms (v0.7.9)
+/// Mirrors create_consolidated_tsv logic but for prepare phase
+fn create_consolidated_prepare_tsv(
+    results_dir: &std::path::Path,
+    summaries: &[PrepareSummary],
+) -> anyhow::Result<()> {
+    use hdrhistogram::Histogram;
+    use hdrhistogram::serialization::Deserializer;
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    
+    info!("Creating consolidated prepare_results.tsv from {} agent histograms", summaries.len());
+    
+    // Define histogram parameters (must match agent configuration)
+    const MIN: u64 = 1;
+    const MAX: u64 = 3_600_000_000;  // 1 hour in microseconds
+    const SIGFIG: u8 = 3;
+    const NUM_BUCKETS: usize = 9;
+    
+    // Create accumulators for PUT operations (prepare phase only does PUTs)
+    let mut put_accumulators = Vec::new();
+    for _ in 0..NUM_BUCKETS {
+        put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+    }
+    
+    // Deserialize and merge all PUT histograms from agents
+    let mut deserializer = Deserializer::new();
+    
+    for (agent_idx, summary) in summaries.iter().enumerate() {
+        info!("Merging prepare histograms from agent {} ({})", agent_idx + 1, summary.agent_id);
+        
+        if summary.histogram_put.is_empty() {
+            continue;
+        }
+        
+        // Deserialize PUT histograms (one per bucket)
+        let mut cursor = &summary.histogram_put[..];
+        for bucket_idx in 0..NUM_BUCKETS {
+            match deserializer.deserialize::<u64, _>(&mut cursor) {
+                Ok(hist) => {
+                    put_accumulators[bucket_idx].add(&hist)
+                        .context("Failed to merge PUT histograms")?;
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize PUT histogram bucket {} from agent {}: {}", 
+                          bucket_idx, summary.agent_id, e);
+                    break;  // Stop if deserialization fails
+                }
+            }
+        }
+    }
+    
+    // Calculate aggregate metrics from summaries
+    let mut total_ops: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_objects_created: u64 = 0;
+    let mut total_objects_existed: u64 = 0;
+    let total_wall_seconds = summaries.iter().map(|s| s.wall_seconds).fold(0.0f64, f64::max);
+    
+    for summary in summaries {
+        if let Some(ref put) = summary.put {
+            total_ops += put.ops;
+            total_bytes += put.bytes;
+        }
+        total_objects_created += summary.objects_created;
+        total_objects_existed += summary.objects_existed;
+    }
+    
+    // Write consolidated TSV
+    let tsv_path = results_dir.join("prepare_results.tsv");
+    let mut writer = BufWriter::new(File::create(&tsv_path)?);
+    
+    // Write header
+    writeln!(writer, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
+    
+    // Write PUT bucket rows (from merged histograms)
+    for (idx, hist) in put_accumulators.iter().enumerate() {
+        if hist.len() == 0 {
+            continue;
+        }
+        
+        let mean_us = hist.mean();
+        let p50_us = hist.value_at_quantile(0.50);
+        let p90_us = hist.value_at_quantile(0.90);
+        let p95_us = hist.value_at_quantile(0.95);
+        let p99_us = hist.value_at_quantile(0.99);
+        let max_us = hist.max();
+        let count = hist.len();
+        
+        // Estimate avg_bytes and throughput per bucket (approximate)
+        let avg_bytes = if total_ops > 0 { total_bytes / total_ops } else { 0 };
+        let ops_per_sec = count as f64 / total_wall_seconds;
+        let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+        
+        let bucket_label = sai3_bench::metrics::BUCKET_LABELS[idx];
+        
+        writeln!(
+            writer,
+            "PUT\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
+            bucket_label, idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+            avg_bytes, ops_per_sec, throughput_mibps, count
+        )?;
+    }
+    
+    // Write ALL summary row (combines all buckets)
+    if total_ops > 0 {
+        // Merge all bucket histograms into one for overall stats
+        let mut all_hist = hdrhistogram::Histogram::<u64>::new(3)?;
+        for bucket_hist in put_accumulators.iter() {
+            if bucket_hist.len() > 0 {
+                all_hist.add(bucket_hist)?;
+            }
+        }
+        
+        if all_hist.len() > 0 {
+            let mean_us = all_hist.mean();
+            let p50_us = all_hist.value_at_quantile(0.50);
+            let p90_us = all_hist.value_at_quantile(0.90);
+            let p95_us = all_hist.value_at_quantile(0.95);
+            let p99_us = all_hist.value_at_quantile(0.99);
+            let max_us = all_hist.max();
+            let count = all_hist.len();
+            
+            let avg_bytes = total_bytes / total_ops;
+            let ops_per_sec = count as f64 / total_wall_seconds;
+            let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+            
+            writeln!(
+                writer,
+                "PUT\tALL\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
+                99, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+                avg_bytes, ops_per_sec, throughput_mibps, count
+            )?;
+        }
+    }
+    
+    writer.flush()?;
+    info!("Wrote consolidated prepare_results.tsv to {}", tsv_path.display());
+    info!("Prepare phase summary: {} objects created, {} existed, {:.2}s elapsed",
+          total_objects_created, total_objects_existed, total_wall_seconds);
+    
     Ok(())
 }
 

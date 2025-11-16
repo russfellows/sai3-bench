@@ -22,6 +22,11 @@ pub struct LiveStatsTracker {
     put_ops: Arc<AtomicU64>,
     put_bytes: Arc<AtomicU64>,
     meta_ops: Arc<AtomicU64>,
+    
+    // v0.7.9: Prepare phase progress tracking
+    in_prepare_phase: Arc<AtomicU64>,  // 0=false, 1=true (atomic bool)
+    prepare_objects_created: Arc<AtomicU64>,
+    prepare_objects_total: Arc<AtomicU64>,
 
     // Latency histograms (microseconds) - Mutex for snapshot operations
     get_hist: Arc<Mutex<Histogram<u64>>>,
@@ -55,6 +60,9 @@ impl LiveStatsTracker {
             put_ops: Arc::new(AtomicU64::new(0)),
             put_bytes: Arc::new(AtomicU64::new(0)),
             meta_ops: Arc::new(AtomicU64::new(0)),
+            in_prepare_phase: Arc::new(AtomicU64::new(0)),
+            prepare_objects_created: Arc::new(AtomicU64::new(0)),
+            prepare_objects_total: Arc::new(AtomicU64::new(0)),
             get_hist: Arc::new(Mutex::new(
                 Histogram::new_with_bounds(1, 3_600_000_000, 3).unwrap(),
             )),
@@ -94,6 +102,42 @@ impl LiveStatsTracker {
         let us = latency.as_micros().min(u64::MAX as u128) as u64;
         let _ = self.meta_hist.lock().record(us);
     }
+    
+    /// Set prepare phase progress (v0.7.9+)
+    ///
+    /// Call at start of prepare phase with total object count, then update
+    /// created count as objects are prepared. Call set_prepare_complete()
+    /// when prepare phase finishes.
+    #[inline]
+    pub fn set_prepare_progress(&self, created: u64, total: u64) {
+        self.in_prepare_phase.store(1, Ordering::Relaxed);
+        self.prepare_objects_created.store(created, Ordering::Relaxed);
+        self.prepare_objects_total.store(total, Ordering::Relaxed);
+    }
+    
+    /// Mark prepare phase as complete (v0.7.9+)
+    #[inline]
+    pub fn set_prepare_complete(&self) {
+        self.in_prepare_phase.store(0, Ordering::Relaxed);
+    }
+    
+    /// Reset all counters for workload phase (v0.7.9+)
+    /// 
+    /// Call this when transitioning from prepare to workload to clear
+    /// prepare phase statistics (PUT operations) that shouldn't appear
+    /// in workload-only metrics.
+    pub fn reset_for_workload(&self) {
+        self.get_ops.store(0, Ordering::Relaxed);
+        self.get_bytes.store(0, Ordering::Relaxed);
+        self.put_ops.store(0, Ordering::Relaxed);
+        self.put_bytes.store(0, Ordering::Relaxed);
+        self.meta_ops.store(0, Ordering::Relaxed);
+        
+        // Clear histograms
+        self.get_hist.lock().clear();
+        self.put_hist.lock().clear();
+        self.meta_hist.lock().clear();
+    }
 
     /// Capture current stats snapshot (for gRPC streaming)
     ///
@@ -108,6 +152,11 @@ impl LiveStatsTracker {
         let put_ops = self.put_ops.load(Ordering::Relaxed);
         let put_bytes = self.put_bytes.load(Ordering::Relaxed);
         let meta_ops = self.meta_ops.load(Ordering::Relaxed);
+        
+        // v0.7.9: Read prepare phase progress
+        let in_prepare_phase = self.in_prepare_phase.load(Ordering::Relaxed) != 0;
+        let prepare_objects_created = self.prepare_objects_created.load(Ordering::Relaxed);
+        let prepare_objects_total = self.prepare_objects_total.load(Ordering::Relaxed);
 
         // Calculate latency percentiles (requires histogram lock)
         let (get_mean_us, get_p50_us, get_p95_us) = {
@@ -151,6 +200,9 @@ impl LiveStatsTracker {
             put_p95_us,
             meta_ops,
             meta_mean_us,
+            in_prepare_phase,
+            prepare_objects_created,
+            prepare_objects_total,
         }
     }
 }
@@ -177,6 +229,9 @@ pub struct LiveStatsSnapshot {
     pub put_p95_us: u64,
     pub meta_ops: u64,
     pub meta_mean_us: u64,
+    pub in_prepare_phase: bool,
+    pub prepare_objects_created: u64,
+    pub prepare_objects_total: u64,
 }
 
 impl LiveStatsSnapshot {
