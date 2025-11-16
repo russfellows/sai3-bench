@@ -120,6 +120,24 @@ impl LiveStatsTracker {
     pub fn set_prepare_complete(&self) {
         self.in_prepare_phase.store(0, Ordering::Relaxed);
     }
+    
+    /// Reset all counters for workload phase (v0.7.9+)
+    /// 
+    /// Call this when transitioning from prepare to workload to clear
+    /// prepare phase statistics (PUT operations) that shouldn't appear
+    /// in workload-only metrics.
+    pub fn reset_for_workload(&self) {
+        self.get_ops.store(0, Ordering::Relaxed);
+        self.get_bytes.store(0, Ordering::Relaxed);
+        self.put_ops.store(0, Ordering::Relaxed);
+        self.put_bytes.store(0, Ordering::Relaxed);
+        self.meta_ops.store(0, Ordering::Relaxed);
+        
+        // Clear histograms
+        self.get_hist.lock().clear();
+        self.put_hist.lock().clear();
+        self.meta_hist.lock().clear();
+    }
 
     /// Capture current stats snapshot (for gRPC streaming)
     ///

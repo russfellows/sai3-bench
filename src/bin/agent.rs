@@ -461,9 +461,12 @@ impl Agent for AgentSvc {
                     result = async {
                         // Execute prepare phase if configured
                         let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare)).await {
+                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone())).await {
                                 Ok((prepared, manifest, _metrics)) => {
                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                                    
+                                    // v0.7.9: Reset stats counters before workload to clear prepare phase PUT operations
+                                    tracker_for_prepare.reset_for_workload();
                                     
                                     if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                                         tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;

@@ -49,6 +49,12 @@ impl LiveStatsAggregator {
             stats.completed = true;
         }
     }
+    
+    /// Reset all accumulated stats (v0.7.9+)
+    /// Call this when transitioning from prepare to workload phase
+    fn reset_stats(&mut self) {
+        self.agent_stats.clear();
+    }
 
     /// Check if all agents have completed
     fn all_completed(&self) -> bool {
@@ -811,8 +817,15 @@ async fn run_distributed_workload(
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
         
-        debug!("Agent {}: ID='{}', prefix='{}', address='{}', shared_storage={}", 
-               idx + 1, agent_id, path_prefix, agent_addr, is_shared_storage);
+        // v0.7.9: For shared storage (GCS/S3/Azure), don't use path prefix - all agents access same data
+        let effective_prefix = if is_shared_storage {
+            String::new()  // Empty prefix for shared storage
+        } else {
+            path_prefix.clone()  // Use agent-specific prefix for local storage
+        };
+        
+        debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}", 
+               idx + 1, agent_id, path_prefix, effective_prefix, agent_addr, is_shared_storage);
         
         let config = config_yaml.clone();
         let addr = agent_addr.clone();
@@ -837,7 +850,7 @@ async fn run_distributed_workload(
                 .run_workload_with_live_stats(RunWorkloadRequest {
                     config_yaml: config,
                     agent_id: agent_id.clone(),
-                    path_prefix: path_prefix.clone(),
+                    path_prefix: effective_prefix.clone(),
                     start_timestamp_ns: start_ns,
                     shared_storage: shared,
                 })
@@ -984,6 +997,9 @@ async fn run_distributed_workload(
     // v0.7.5: Track last console.log write time (write every 1 second)
     let mut last_console_log = std::time::Instant::now();
     
+    // v0.7.9: Track prepare phase state to detect transition to workload
+    let mut was_in_prepare_phase = false;
+    
     // Process live stats stream
     loop {
         // v0.7.5: Check for stalled agents (timeout detection)
@@ -1017,6 +1033,15 @@ async fn run_distributed_workload(
                         let in_prepare = stats.in_prepare_phase;
                         let prepare_created = stats.prepare_objects_created;
                         let prepare_total = stats.prepare_objects_total;
+                        
+                        // v0.7.9: Detect transition from prepare to workload and reset aggregator
+                        if was_in_prepare_phase && !in_prepare {
+                            debug!("Prepare phase completed, resetting aggregator for workload-only stats");
+                            aggregator.reset_stats();
+                            was_in_prepare_phase = false;
+                        } else if in_prepare {
+                            was_in_prepare_phase = true;
+                        }
                         
                         // v0.7.5: Extract final summary if completed
                         if stats.completed {
