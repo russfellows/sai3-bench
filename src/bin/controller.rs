@@ -1605,18 +1605,7 @@ fn create_consolidated_prepare_tsv(
         let ops_per_sec = count as f64 / total_wall_seconds;
         let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
         
-        let bucket_label = match idx {
-            0 => "0-4K",
-            1 => "4-16K",
-            2 => "16-64K",
-            3 => "64-256K",
-            4 => "256K-1M",
-            5 => "1-4M",
-            6 => "4-16M",
-            7 => "16-64M",
-            8 => "64M+",
-            _ => "unknown",
-        };
+        let bucket_label = sai3_bench::metrics::BUCKET_LABELS[idx];
         
         writeln!(
             writer,
@@ -1624,6 +1613,38 @@ fn create_consolidated_prepare_tsv(
             bucket_label, idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
             avg_bytes, ops_per_sec, throughput_mibps, count
         )?;
+    }
+    
+    // Write ALL summary row (combines all buckets)
+    if total_ops > 0 {
+        // Merge all bucket histograms into one for overall stats
+        let mut all_hist = hdrhistogram::Histogram::<u64>::new(3)?;
+        for bucket_hist in put_accumulators.iter() {
+            if bucket_hist.len() > 0 {
+                all_hist.add(bucket_hist)?;
+            }
+        }
+        
+        if all_hist.len() > 0 {
+            let mean_us = all_hist.mean();
+            let p50_us = all_hist.value_at_quantile(0.50);
+            let p90_us = all_hist.value_at_quantile(0.90);
+            let p95_us = all_hist.value_at_quantile(0.95);
+            let p99_us = all_hist.value_at_quantile(0.99);
+            let max_us = all_hist.max();
+            let count = all_hist.len();
+            
+            let avg_bytes = total_bytes / total_ops;
+            let ops_per_sec = count as f64 / total_wall_seconds;
+            let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+            
+            writeln!(
+                writer,
+                "PUT\tALL\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
+                99, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+                avg_bytes, ops_per_sec, throughput_mibps, count
+            )?;
+        }
     }
     
     writer.flush()?;
