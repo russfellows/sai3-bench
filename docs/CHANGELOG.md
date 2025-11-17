@@ -2,6 +2,17 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.10] - 2025-11-16
+
+### Dependencies
+
+- **Updated s3dlio**: v0.9.16 → v0.9.17
+  - Custom NPY/NPZ implementation (zero-copy, no ndarray-npy dependency)
+  - Multi-array NPZ support for PyTorch/JAX datasets
+  - TFRecord index generation for TensorFlow Data Service
+
+---
+
 ## [0.7.9] - 2025-11-16
 
 ### 🔧 Deterministic Prepare & Test Improvements

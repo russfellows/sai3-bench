@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.7.9"
+version = "0.7.10"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,11 +22,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio (version 0.9.16 - Optional op-log sorting)
+# s3dlio (version 0.9.17 - Custom NPY/NPZ, multi-array, TFRecord indices)
 # Use git tag for standalone builds (no local s3dlio directory required)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.16" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.17" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.17" }
 # s3dlio = { path = "../s3dlio" }
 # s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
