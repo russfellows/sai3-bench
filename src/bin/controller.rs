@@ -79,6 +79,12 @@ impl LiveStatsAggregator {
         let mut put_p95_weighted = 0.0f64;
         let mut meta_mean_weighted = 0.0f64;
 
+        // v0.7.11: CPU utilization sums (simple average across agents)
+        let mut cpu_user_sum = 0.0f64;
+        let mut cpu_system_sum = 0.0f64;
+        let mut cpu_iowait_sum = 0.0f64;
+        let mut cpu_total_sum = 0.0f64;
+
         for stats in self.agent_stats.values() {
             // Sum operations and bytes
             total_get_ops += stats.get_ops;
@@ -105,7 +111,20 @@ impl LiveStatsAggregator {
                 let weight = stats.meta_ops as f64;
                 meta_mean_weighted += stats.meta_mean_us * weight;
             }
+            
+            // v0.7.11: Accumulate CPU metrics
+            cpu_user_sum += stats.cpu_user_percent;
+            cpu_system_sum += stats.cpu_system_percent;
+            cpu_iowait_sum += stats.cpu_iowait_percent;
+            cpu_total_sum += stats.cpu_total_percent;
         }
+
+        // Calculate weighted averages
+        let num_agents = self.agent_stats.len() as f64;
+        let cpu_user_percent = if num_agents > 0.0 { cpu_user_sum / num_agents } else { 0.0 };
+        let cpu_system_percent = if num_agents > 0.0 { cpu_system_sum / num_agents } else { 0.0 };
+        let cpu_iowait_percent = if num_agents > 0.0 { cpu_iowait_sum / num_agents } else { 0.0 };
+        let cpu_total_percent = if num_agents > 0.0 { cpu_total_sum / num_agents } else { 0.0 };
 
         // Calculate weighted averages
         let get_mean_us = if total_get_ops > 0 {
@@ -159,6 +178,10 @@ impl LiveStatsAggregator {
             total_meta_ops,
             meta_mean_us,
             elapsed_s: max_elapsed,
+            cpu_user_percent,
+            cpu_system_percent,
+            cpu_iowait_percent,
+            cpu_total_percent,
         }
     }
 }
@@ -180,6 +203,11 @@ struct AggregateStats {
     total_meta_ops: u64,
     meta_mean_us: f64,
     elapsed_s: f64,
+    // v0.7.11: CPU utilization metrics (averaged across agents)
+    cpu_user_percent: f64,
+    cpu_system_percent: f64,
+    cpu_iowait_percent: f64,
+    cpu_total_percent: f64,
 }
 
 impl AggregateStats {
@@ -205,10 +233,18 @@ impl AggregateStats {
             0.0
         };
 
+        // v0.7.11: Build CPU line (only if we have CPU data)
+        let cpu_line = if self.cpu_total_percent > 0.0 {
+            format!("\n  CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
+                    self.cpu_total_percent, self.cpu_user_percent, self.cpu_system_percent, self.cpu_iowait_percent)
+        } else {
+            String::new()
+        };
+
         // Only show META line if there are META operations
         if self.total_meta_ops > 0 {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  META: {:.0} ops/s (mean: {:.0}µs)",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  META: {:.0} ops/s (mean: {:.0}µs){}",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
@@ -222,10 +258,11 @@ impl AggregateStats {
                 self.put_p95_us,
                 meta_ops_s,
                 self.meta_mean_us,
+                cpu_line,
             )
         } else {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs){}",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
@@ -237,6 +274,7 @@ impl AggregateStats {
                 self.put_mean_us,
                 self.put_p50_us,
                 self.put_p95_us,
+                cpu_line,
             )
         }
     }
@@ -1178,10 +1216,7 @@ async fn run_distributed_workload(
     
     // Final aggregation
     let final_stats = aggregator.aggregate();
-    progress_bar.finish_with_message(format!("✓ All {} agents completed", final_stats.num_agents));
-    
-    // v0.7.6: Add blank lines to preserve the last stats display before printing results
-    println!("\n\n");  // Preserve GET/PUT stats lines from being overwritten
+    progress_bar.finish_with_message(format!("✓ All {} agents completed\n\n", final_stats.num_agents));
     
     // v0.7.5: Print live aggregate stats for immediate visibility
     println!("=== Live Aggregate Stats (from streaming) ===");
@@ -1199,6 +1234,16 @@ async fn run_distributed_workload(
              final_stats.put_mean_us,
              final_stats.put_p50_us,
              final_stats.put_p95_us);
+    
+    // v0.7.11: Display CPU utilization summary if available
+    if final_stats.cpu_total_percent > 0.0 {
+        println!("CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
+                 final_stats.cpu_total_percent,
+                 final_stats.cpu_user_percent,
+                 final_stats.cpu_system_percent,
+                 final_stats.cpu_iowait_percent);
+    }
+    
     println!("Elapsed: {:.2}s", final_stats.elapsed_s);
     println!();
     

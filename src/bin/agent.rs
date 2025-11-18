@@ -20,6 +20,9 @@ use aws_sdk_s3 as s3;
 // Modern ObjectStore pattern (v0.9.4+)
 use s3dlio::object_store::store_for_uri;
 
+// v0.7.11: CPU utilization monitoring
+use sai3_bench::cpu_monitor::{CpuMonitor, CpuUtilization};
+
 pub mod pb {
     pub mod iobench {
         include!("../pb/iobench.rs");
@@ -386,6 +389,10 @@ impl Agent for AgentSvc {
                 prepare_objects_created: 0,
                 prepare_objects_total: 0,
                 prepare_summary: None,
+                cpu_user_percent: 0.0,
+                cpu_system_percent: 0.0,
+                cpu_iowait_percent: 0.0,
+                cpu_total_percent: 0.0,
             };
             
             let stream = async_stream::stream! {
@@ -405,6 +412,9 @@ impl Agent for AgentSvc {
         
         // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
         let (tx_cancel, rx_cancel) = tokio::sync::oneshot::channel::<()>();
+        
+        // v0.7.11: Initialize CPU monitor for utilization tracking
+        let mut cpu_monitor = CpuMonitor::new();
         
         // Create stream that sends stats every 1 second
         let agent_id_stream = agent_id.clone();
@@ -437,6 +447,10 @@ impl Agent for AgentSvc {
                 prepare_objects_created: 0,
                 prepare_objects_total: 0,
                 prepare_summary: None,
+                cpu_user_percent: 0.0,
+                cpu_system_percent: 0.0,
+                cpu_iowait_percent: 0.0,
+                cpu_total_percent: 0.0,
             };
             yield Ok(ready_msg);
             
@@ -542,10 +556,21 @@ impl Agent for AgentSvc {
                     }
                     
                     _ = interval.tick() => {
+                        // v0.7.11: Sample CPU utilization
+                        let cpu_util = cpu_monitor.sample()
+                            .ok()
+                            .flatten()
+                            .unwrap_or(CpuUtilization {
+                                user_percent: 0.0,
+                                system_percent: 0.0,
+                                iowait_percent: 0.0,
+                                total_percent: 0.0,
+                            });
+                        
                         // Send live stats snapshot
                         let snapshot = tracker.snapshot();
-                        debug!("Sending stats: PUT {} ops, {} bytes, elapsed {:.1}s", 
-                               snapshot.put_ops, snapshot.put_bytes, snapshot.elapsed_secs());
+                        debug!("Sending stats: PUT {} ops, {} bytes, elapsed {:.1}s, CPU {:.1}%", 
+                               snapshot.put_ops, snapshot.put_bytes, snapshot.elapsed_secs(), cpu_util.total_percent);
                         let stats = LiveStats {
                             agent_id: agent_id_stream.clone(),
                             timestamp_s: snapshot.timestamp_secs() as f64,
@@ -570,6 +595,10 @@ impl Agent for AgentSvc {
                             prepare_objects_created: snapshot.prepare_objects_created,
                             prepare_objects_total: snapshot.prepare_objects_total,
                             prepare_summary: None,
+                            cpu_user_percent: cpu_util.user_percent,
+                            cpu_system_percent: cpu_util.system_percent,
+                            cpu_iowait_percent: cpu_util.iowait_percent,
+                            cpu_total_percent: cpu_util.total_percent,
                         };
                         yield Ok(stats);
                     }
@@ -602,6 +631,18 @@ impl Agent for AgentSvc {
                                 
                                 // Send final stats with completed=true and full summary
                                 let snapshot = tracker.snapshot();
+                                
+                                // v0.7.11: Sample CPU one final time
+                                let cpu_util = cpu_monitor.sample()
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(CpuUtilization {
+                                        user_percent: 0.0,
+                                        system_percent: 0.0,
+                                        iowait_percent: 0.0,
+                                        total_percent: 0.0,
+                                    });
+                                
                                 let final_stats = LiveStats {
                                     agent_id: agent_id_stream.clone(),
                                     timestamp_s: snapshot.timestamp_secs() as f64,
@@ -626,6 +667,10 @@ impl Agent for AgentSvc {
                                     prepare_objects_created: 0,
                                     prepare_objects_total: 0,
                                     prepare_summary: proto_prepare,  // v0.7.9: Include prepare metrics
+                                    cpu_user_percent: cpu_util.user_percent,
+                                    cpu_system_percent: cpu_util.system_percent,
+                                    cpu_iowait_percent: cpu_util.iowait_percent,
+                                    cpu_total_percent: cpu_util.total_percent,
                                 };
                                 yield Ok(final_stats);
                                 break;

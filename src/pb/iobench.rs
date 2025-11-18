@@ -225,6 +225,20 @@ pub struct LiveStats {
     /// v0.7.9: Prepare phase summary (only present when prepare completes)
     #[prost(message, optional, tag = "23")]
     pub prepare_summary: ::core::option::Option<PrepareSummary>,
+    /// v0.7.11: CPU utilization metrics (sampled every 5 seconds)
+    ///
+    /// User mode CPU utilization (0-100%)
+    #[prost(double, tag = "24")]
+    pub cpu_user_percent: f64,
+    /// System/kernel mode CPU utilization (0-100%)
+    #[prost(double, tag = "25")]
+    pub cpu_system_percent: f64,
+    /// IO-wait CPU time (0-100%)
+    #[prost(double, tag = "26")]
+    pub cpu_iowait_percent: f64,
+    /// Total CPU utilization (user+system+iowait)
+    #[prost(double, tag = "27")]
+    pub cpu_total_percent: f64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

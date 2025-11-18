@@ -2,6 +2,59 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.11] - 2025-11-18
+
+### 📊 CPU Utilization Monitoring
+
+**Major enhancement**: Real-time CPU utilization metrics during distributed workload execution.
+
+#### New Features
+
+- **CPU Monitoring Module** - Lightweight Linux /proc/stat parsing
+  - **Metrics tracked**: User%, System%, IO-wait%, Total CPU%
+  - **Sampling interval**: 1 second (matches LiveStats update rate)
+  - **Overhead**: ~10μs per sample (negligible)
+  - **Platform**: Linux only (parses /proc/stat)
+
+- **gRPC Protocol Extension** - CPU fields in LiveStats message
+  - **Fields added**: cpu_user_percent, cpu_system_percent, cpu_iowait_percent, cpu_total_percent
+  - **Backward compatible**: Optional fields (24-27) at end of message
+  - **Transmission**: Agents sample and transmit CPU data every second
+
+- **Controller Display** - Live and summary CPU statistics
+  - **Live progress**: CPU line displayed during workload execution
+  - **Final summary**: CPU averages in "Live Aggregate Stats" section
+  - **Format**: "CPU: X.X% total (user: X.X%, system: X.X%, iowait: X.X%)"
+  - **Aggregation**: Averaged across all agents
+
+#### Implementation Details
+
+- **Agent side**: `CpuMonitor::new()` creates monitor, `sample()` returns current utilization
+- **Controller side**: `AggregateStats` struct extended with CPU fields, averaged in `aggregate()` method
+- **Display logic**: CPU line shown conditionally (only when data > 0.0%)
+- **Preservation**: Extra newline in progress bar finish message prevents overwriting
+
+#### Testing
+
+- **Unit tests**: 2 tests in cpu_monitor module (parsing, sampling)
+- **Integration test**: `tests/test_cpu_monitoring.sh` validates distributed CPU metrics
+- **All tests passing**: 50 library tests + distributed integration
+
+#### Files Added
+
+- `src/cpu_monitor.rs` - CPU monitoring implementation (197 lines)
+- `tests/test_cpu_monitoring.sh` - Integration test for distributed CPU monitoring
+
+#### Files Modified
+
+- `proto/iobench.proto` - Added CPU fields to LiveStats message
+- `src/bin/agent.rs` - CPU sampling and transmission
+- `src/bin/controller.rs` - CPU aggregation and display
+- `src/lib.rs` - Export cpu_monitor module
+- `Cargo.toml` - Added libc dependency for /proc/stat access
+
+---
+
 ## [0.7.10] - 2025-11-16
 
 ### Dependencies

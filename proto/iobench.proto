@@ -144,6 +144,12 @@ message LiveStats {
   
   // v0.7.9: Prepare phase summary (only present when prepare completes)
   PrepareSummary prepare_summary = 23;
+  
+  // v0.7.11: CPU utilization metrics (sampled every 5 seconds)
+  double cpu_user_percent = 24;    // User mode CPU utilization (0-100%)
+  double cpu_system_percent = 25;  // System/kernel mode CPU utilization (0-100%)
+  double cpu_iowait_percent = 26;  // IO-wait CPU time (0-100%)
+  double cpu_total_percent = 27;   // Total CPU utilization (user+system+iowait)
 }
 
 service Agent {
