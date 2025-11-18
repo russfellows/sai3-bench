@@ -1,21 +1,22 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.10-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.11-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-92%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-50%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.10 (November 16, 2025)
+## 🌟 Latest Release - v0.7.11 (November 18, 2025)
 
-**🔧 Deterministic Prepare & Skip Verification:**
+**📊 CPU Utilization Monitoring:**
 
-- **Deterministic gap-filling**: Seeded RNG ensures reproducible file structures across runs
-- **skip_verification** (Issue #40): Optional LIST bypass for faster reruns with known-good datasets
-- **Improved detection**: Fixed directory tree file detection for nested structures
-- **Test improvements**: 92 tests passing (48 unit + 44 integration), comprehensive coverage
+- **Real-time CPU metrics**: Agents report User%, System%, and IO-wait% every second during workload execution
+- **Live display**: CPU utilization shown in progress updates alongside GET/PUT stats
+- **Final summary**: Averaged CPU stats included in "Live Aggregate Stats" section
+- **Lightweight monitoring**: ~10μs overhead per sample, Linux /proc/stat based
+- **gRPC integration**: Extended LiveStats protocol with 4 new CPU fields (backward compatible)
 
 ```bash
 # First run: Create dataset with deterministic sizes
