@@ -169,6 +169,45 @@ Added 21 new tests in `tests/distributed_config_tests.rs`:
 - **`sai3bench-agent`** (`src/bin/agent.rs`) - gRPC server node for distributed loads
 - **`sai3bench-ctl`** (`src/bin/controller.rs`) - Coordinator for multi-agent execution
 
+### Agent CLI Usage (CRITICAL - ALWAYS USE THESE EXACT FLAGS)
+
+**Starting agents** (for distributed testing):
+```bash
+# CORRECT - agent uses --listen, NOT --port or --id
+./target/release/sai3bench-agent --listen 0.0.0.0:7761 -vv
+./target/release/sai3bench-agent --listen 0.0.0.0:7762 -vv
+
+# WRONG - these flags DO NOT EXIST
+./target/release/sai3bench-agent --port 7761 --id agent-1    # ERROR!
+```
+
+**Agent options**:
+- `--listen <ADDR:PORT>` - Listen address (default: 0.0.0.0:7761)
+- `-v`, `-vv`, `-vvv` - Verbosity levels (use -vv for debugging)
+- `--tls` - Enable TLS with ephemeral self-signed certificate
+- `--tls-domain <DOMAIN>` - Subject DNS name for cert (default: localhost)
+- `--tls-write-ca <PATH>` - Write generated cert/key for controller trust
+- `--tls-sans <SANS>` - Comma-separated Subject Alternative Names
+
+**Agent IDs** come from the **config YAML**, not CLI flags:
+```yaml
+distributed:
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"              # Agent ID defined HERE
+    - address: "127.0.0.1:7762"
+      id: "agent-2"              # Agent ID defined HERE
+```
+
+**Controller usage**:
+```bash
+# Config-driven (recommended - agents auto-discovered from YAML)
+./target/release/sai3bench-ctl run --config test.yaml
+
+# Explicit agents (overrides config)
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 run --config test.yaml
+```
+
 ### Removed Binaries (v0.6.9+)
 - **`sai3bench-run`** - Legacy standalone runner, replaced by `sai3-bench run` subcommand (more features)
 - **`fs_read_bench`** - Internal development tool for buffer pool testing (not needed for production)

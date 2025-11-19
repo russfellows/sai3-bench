@@ -21,6 +21,7 @@ pub mod size_generator; // Size distributions for realistic workloads (v0.5.3+)
 pub mod ssh_deploy; // SSH-based distributed deployment (v0.6.11+)
 pub mod ssh_setup; // SSH key setup automation (v0.6.11+)
 pub mod tsv_export; // TSV export for machine-readable results (v0.5.1+)
+pub mod validation; // Configuration validation and summary display (v0.7.12+)
 pub mod workload;
 
 // Re-export bucket_index from metrics for backward compatibility

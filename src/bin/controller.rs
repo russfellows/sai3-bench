@@ -27,14 +27,18 @@ use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest
 /// 
 /// Collects LiveStats messages from all agent streams and computes weighted aggregate metrics.
 /// Uses weighted averaging for latencies (weighted by operation count).
+/// v0.7.12: Tracks previous snapshot for windowed throughput calculation
 struct LiveStatsAggregator {
     agent_stats: std::collections::HashMap<String, LiveStats>,
+    // v0.7.12: Previous aggregate for computing windowed (current) throughput
+    previous_aggregate: Option<AggregateStats>,
 }
 
 impl LiveStatsAggregator {
     fn new() -> Self {
         Self {
             agent_stats: std::collections::HashMap::new(),
+            previous_aggregate: None,
         }
     }
 
@@ -54,6 +58,7 @@ impl LiveStatsAggregator {
     /// Call this when transitioning from prepare to workload phase
     fn reset_stats(&mut self) {
         self.agent_stats.clear();
+        self.previous_aggregate = None;  // v0.7.12: Reset windowed tracking
     }
 
     /// Check if all agents have completed
@@ -62,7 +67,8 @@ impl LiveStatsAggregator {
     }
 
     /// Get aggregate stats across all agents (weighted latency averaging)
-    fn aggregate(&self) -> AggregateStats {
+    /// v0.7.12: Also computes windowed throughput for current rate display
+    fn aggregate(&mut self) -> AggregateStats {
         let mut total_get_ops = 0u64;
         let mut total_get_bytes = 0u64;
         let mut total_put_ops = 0u64;
@@ -163,7 +169,30 @@ impl LiveStatsAggregator {
             0.0
         };
 
-        AggregateStats {
+        // v0.7.12: Compute windowed (current) throughput from delta since last update
+        let (windowed_get_ops_s, windowed_get_bytes, windowed_put_ops_s, windowed_put_bytes) = 
+            if let Some(ref prev) = self.previous_aggregate {
+                let delta_time = max_elapsed - prev.elapsed_s;
+                if delta_time > 0.1 {  // Only compute if >= 100ms elapsed
+                    let delta_get_ops = total_get_ops.saturating_sub(prev.total_get_ops);
+                    let delta_get_bytes = total_get_bytes.saturating_sub(prev.total_get_bytes);
+                    let delta_put_ops = total_put_ops.saturating_sub(prev.total_put_ops);
+                    let delta_put_bytes = total_put_bytes.saturating_sub(prev.total_put_bytes);
+                    (
+                        delta_get_ops as f64 / delta_time,
+                        delta_get_bytes,
+                        delta_put_ops as f64 / delta_time,
+                        delta_put_bytes
+                    )
+                } else {
+                    (0.0, 0, 0.0, 0)  // Not enough time elapsed
+                }
+            } else {
+                // First update: use cumulative
+                (0.0, 0, 0.0, 0)  // No previous data yet
+            };
+
+        let aggregate = AggregateStats {
             num_agents: self.agent_stats.len(),
             total_get_ops,
             total_get_bytes,
@@ -182,7 +211,21 @@ impl LiveStatsAggregator {
             cpu_system_percent,
             cpu_iowait_percent,
             cpu_total_percent,
-        }
+            windowed_get_ops_s,
+            windowed_get_bytes,
+            windowed_put_ops_s,
+            windowed_put_bytes,
+            windowed_delta_time: if self.previous_aggregate.is_some() {
+                max_elapsed - self.previous_aggregate.as_ref().unwrap().elapsed_s
+            } else {
+                0.0
+            },
+        };
+
+        // v0.7.12: Store current aggregate for next windowed calculation
+        self.previous_aggregate = Some(aggregate.clone());
+
+        aggregate
     }
 }
 
@@ -208,24 +251,33 @@ struct AggregateStats {
     cpu_system_percent: f64,
     cpu_iowait_percent: f64,
     cpu_total_percent: f64,
+    // v0.7.12: Windowed (current) throughput for responsive display
+    windowed_get_ops_s: f64,
+    windowed_get_bytes: u64,
+    windowed_put_ops_s: f64,
+    windowed_put_bytes: u64,
+    windowed_delta_time: f64,
 }
 
 impl AggregateStats {
     /// Format multi-line progress display (GET on line 1, PUT on line 2, META on line 3 if present)
+    /// v0.7.12: Shows windowed (current) throughput for responsive updates
     fn format_progress(&self) -> String {
-        let get_ops_s = if self.elapsed_s > 0.0 {
-            self.total_get_ops as f64 / self.elapsed_s
+        // v0.7.12: Use windowed rates if available (more responsive to current performance)
+        // Fall back to cumulative if windowed not yet available
+        let (get_ops_s, get_bandwidth) = if self.windowed_get_ops_s > 0.0 {
+            (self.windowed_get_ops_s, format_bandwidth(self.windowed_get_bytes, self.windowed_delta_time))
         } else {
-            0.0
+            let ops_s = if self.elapsed_s > 0.0 { self.total_get_ops as f64 / self.elapsed_s } else { 0.0 };
+            (ops_s, format_bandwidth(self.total_get_bytes, self.elapsed_s))
         };
-        let get_bandwidth = format_bandwidth(self.total_get_bytes, self.elapsed_s);
         
-        let put_ops_s = if self.elapsed_s > 0.0 {
-            self.total_put_ops as f64 / self.elapsed_s
+        let (put_ops_s, put_bandwidth) = if self.windowed_put_ops_s > 0.0 {
+            (self.windowed_put_ops_s, format_bandwidth(self.windowed_put_bytes, self.windowed_delta_time))
         } else {
-            0.0
+            let ops_s = if self.elapsed_s > 0.0 { self.total_put_ops as f64 / self.elapsed_s } else { 0.0 };
+            (ops_s, format_bandwidth(self.total_put_bytes, self.elapsed_s))
         };
-        let put_bandwidth = format_bandwidth(self.total_put_bytes, self.elapsed_s);
         
         let meta_ops_s = if self.elapsed_s > 0.0 {
             self.total_meta_ops as f64 / self.elapsed_s
@@ -241,42 +293,61 @@ impl AggregateStats {
             String::new()
         };
 
+        // v0.7.12: Format latencies with auto-switching µs/ms
+        let get_mean_str = format_latency(self.get_mean_us);
+        let get_p50_str = format_latency(self.get_p50_us);
+        let get_p95_str = format_latency(self.get_p95_us);
+        let put_mean_str = format_latency(self.put_mean_us);
+        let put_p50_str = format_latency(self.put_p50_us);
+        let put_p95_str = format_latency(self.put_p95_us);
+        let meta_mean_str = format_latency(self.meta_mean_us);
+
         // Only show META line if there are META operations
         if self.total_meta_ops > 0 {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  META: {:.0} ops/s (mean: {:.0}µs){}",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
-                self.get_mean_us,
-                self.get_p50_us,
-                self.get_p95_us,
+                get_mean_str,
+                get_p50_str,
+                get_p95_str,
                 put_ops_s,
                 put_bandwidth,
-                self.put_mean_us,
-                self.put_p50_us,
-                self.put_p95_us,
+                put_mean_str,
+                put_p50_str,
+                put_p95_str,
                 meta_ops_s,
-                self.meta_mean_us,
+                meta_mean_str,
                 cpu_line,
             )
         } else {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)\n  PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs){}",
+                "{} agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {}){}",
                 self.num_agents,
                 get_ops_s,
                 get_bandwidth,
-                self.get_mean_us,
-                self.get_p50_us,
-                self.get_p95_us,
+                get_mean_str,
+                get_p50_str,
+                get_p95_str,
                 put_ops_s,
                 put_bandwidth,
-                self.put_mean_us,
-                self.put_p50_us,
-                self.put_p95_us,
+                put_mean_str,
+                put_p50_str,
+                put_p95_str,
                 cpu_line,
             )
         }
+    }
+}
+
+/// v0.7.12: Format latency with auto-switching between µs and ms
+/// Uses ms when latency >= 10,000µs (10ms) for better readability
+fn format_latency(us: f64) -> String {
+    if us >= 10_000.0 {
+        format!("{:.1}ms", us / 1000.0)
+    } else {
+        format!("{:.0}µs", us)
     }
 }
 
@@ -416,6 +487,43 @@ enum Commands {
         #[arg(long)]
         shared_prepare: Option<bool>,
     },
+}
+
+// v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
+async fn abort_all_agents(
+    agent_addrs: &[String],
+    insecure: bool,
+    agent_ca: Option<&PathBuf>,
+    agent_domain: &str,
+) {
+    eprintln!("⚠️  Sending abort signal to all agents...");
+    let mut abort_tasks = Vec::new();
+    
+    for addr in agent_addrs {
+        let addr = addr.clone();
+        let insecure = insecure;
+        let ca = agent_ca.map(|p| p.clone());  // Clone PathBuf if present
+        let domain = agent_domain.to_string();
+        
+        let task = tokio::spawn(async move {
+            match mk_client(&addr, insecure, ca.as_ref(), &domain).await {
+                Ok(mut client) => {
+                    match client.abort_workload(Empty {}).await {
+                        Ok(_) => debug!("Abort signal sent to agent {}", addr),
+                        Err(e) => warn!("Failed to abort agent {}: {}", addr, e),
+                    }
+                }
+                Err(e) => warn!("Failed to connect to agent {} for abort: {}", addr, e),
+            }
+        });
+        abort_tasks.push(task);
+    }
+    
+    // Wait for all abort calls (with short timeout)
+    let _ = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        futures::future::join_all(abort_tasks)
+    ).await;
 }
 
 async fn mk_client(
@@ -612,16 +720,9 @@ async fn main() -> Result<()> {
             let parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
                 .context("Failed to parse YAML config")?;
             
-            // If dry-run, just validate and exit
+            // v0.7.12: Use comprehensive validation display (same as standalone binary)
             if *dry_run {
-                println!("✅ Configuration validated successfully");
-                println!("   Config file: {}", config.display());
-                if let Some(ref dist) = parsed_config.distributed {
-                    println!("   Agents: {}", dist.agents.len());
-                    println!("   Shared filesystem: {}", dist.shared_filesystem);
-                    println!("   Tree creation: {:?}", dist.tree_creation_mode);
-                }
-                println!("\nTo execute, run without --dry-run");
+                sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
                 return Ok(());
             }
             
@@ -820,8 +921,8 @@ async fn run_distributed_workload(
     }
 
     // Calculate coordinated start time (N seconds in the future)
-    // v0.7.6: Add extra time for validation (3s) + user's start_delay
-    let validation_time_secs = 3;
+    // v0.7.11: Generous validation time for large agent counts (30s base + 5s per agent + user delay)
+    let validation_time_secs = 30 + (agent_addrs.len() as u64 * 5);
     let total_delay_secs = validation_time_secs + start_delay_secs;
     let start_time = SystemTime::now() + Duration::from_secs(total_delay_secs);
     let start_ns = start_time
@@ -951,9 +1052,15 @@ async fn run_distributed_workload(
     tokio::pin!(ctrl_c);
     
     eprintln!("⏳ Waiting for agents to validate configuration...");
-    let startup_timeout_secs = validation_time_secs - 2;  // Leave 2s buffer before workload starts
+    // v0.7.11: Robust startup with retries - scale timeout with agent count
+    // Give agents multiple chances to respond (30s base + 5s per agent)
+    let startup_timeout_secs = 30 + (agent_addrs.len() as u64 * 5);
     let startup_timeout = tokio::time::Duration::from_secs(startup_timeout_secs);
     let startup_deadline = tokio::time::Instant::now() + startup_timeout;
+    
+    // Progress check interval - report status every 3 seconds
+    let mut progress_interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
+    progress_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     
     // v0.7.6: Wait for READY/ERROR status from all agents
     'startup: loop {
@@ -986,6 +1093,16 @@ async fn run_distributed_workload(
                     break 'startup;
                 }
             }
+            _ = progress_interval.tick() => {
+                // v0.7.11: Periodic progress update showing which agents are still pending
+                let elapsed = startup_deadline.duration_since(tokio::time::Instant::now());
+                if agent_status.len() < expected_agent_count {
+                    eprintln!("  ⏳ {}/{} agents ready, {} remaining ({:.0}s timeout remaining)", 
+                             agent_status.len(), expected_agent_count, 
+                             expected_agent_count - agent_status.len(),
+                             elapsed.as_secs_f64());
+                }
+            }
             _ = tokio::time::sleep_until(startup_deadline) => {
                 eprintln!("\n❌ Startup timeout: Not all agents responded within {}s", startup_timeout.as_secs());
                 eprintln!("Agent status ({}/{}):", agent_status.len(), expected_agent_count);
@@ -996,11 +1113,24 @@ async fn run_distributed_workload(
                 let missing_count = expected_agent_count - agent_status.len();
                 if missing_count > 0 {
                     eprintln!("  ⏱️  {} agent(s) did not respond", missing_count);
+                    eprintln!("\n💡 Troubleshooting:");
+                    eprintln!("  - Verify agents are running: check agent logs");
+                    eprintln!("  - Check network connectivity to agents");
+                    eprintln!("  - Ensure agents can reach storage backend");
+                    eprintln!("  - Consider increasing timeout for large agent counts");
                 }
+                
+                // v0.7.11: Abort all agents to prevent orphaned workload execution
+                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                
                 anyhow::bail!("Agent startup validation timeout");
             }
             _ = &mut ctrl_c => {
                 eprintln!("\n⚠️  Interrupted during startup");
+                
+                // v0.7.11: Abort all agents to prevent orphaned workload execution
+                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                
                 anyhow::bail!("Interrupted by user");
             }
         }
@@ -1016,6 +1146,10 @@ async fn run_distributed_workload(
         for agent_id in &ready_agents {
             eprintln!("  ✅ {}", agent_id);
         }
+        
+        // v0.7.11: Abort all agents to prevent orphaned workload execution
+        abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+        
         anyhow::bail!("{} agent(s) failed startup validation", error_agents.len());
     }
     
@@ -1200,8 +1334,11 @@ async fn run_distributed_workload(
             }
             
             _ = &mut ctrl_c => {
-                warn!("Ctrl+C received, interrupting workload");
-                progress_bar.finish_with_message("Interrupted by user");
+                warn!("Ctrl+C received, aborting all agents");
+                progress_bar.finish_with_message("Interrupted by user - aborting agents...");
+                
+                // v0.7.12: Abort all agents to stop running workload and reset state
+                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
                 
                 // Cleanup deployments if any
                 if !deployments.is_empty() {
