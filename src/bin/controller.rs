@@ -381,8 +381,9 @@ struct Cli {
     verbose: u8,
 
     /// Comma-separated agent addresses (host:port)
+    /// Optional: can also be specified in config YAML under distributed.agents
     #[arg(long)]
-    agents: String,
+    agents: Option<String>,
 
     /// Enable TLS for secure connections (requires --agent-ca)
     /// Default is plaintext HTTP (no TLS)
@@ -588,12 +589,14 @@ async fn main() -> Result<()> {
 
     let agents: Vec<String> = cli
         .agents
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+        .as_ref()
+        .map(|a| a.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+        .unwrap_or_default();
 
-    info!("Controller starting with {} agent(s)", agents.len());
+    info!("Controller starting with {} agent(s) from CLI", agents.len());
     debug!("Agent addresses: {:?}", agents);
 
     match &cli.command {
@@ -921,16 +924,16 @@ async fn run_distributed_workload(
     }
 
     // Calculate coordinated start time (N seconds in the future)
-    // v0.7.11: Generous validation time for large agent counts (30s base + 5s per agent + user delay)
-    let validation_time_secs = 30 + (agent_addrs.len() as u64 * 5);
-    let total_delay_secs = validation_time_secs + start_delay_secs;
+    // v0.7.12: 10 second coordinated start delay (agents already validated)
+    let coordinated_start_delay = 10;
+    let total_delay_secs = coordinated_start_delay + start_delay_secs;
     let start_time = SystemTime::now() + Duration::from_secs(total_delay_secs);
     let start_ns = start_time
         .duration_since(UNIX_EPOCH)?
         .as_nanos() as i64;
 
-    debug!("Coordinated start time: {} ns since epoch (validation: {}s, user delay: {}s)", 
-           start_ns, validation_time_secs, start_delay_secs);
+    debug!("Coordinated start time: {} ns since epoch (coordinated: {}s, user delay: {}s)", 
+           start_ns, coordinated_start_delay, start_delay_secs);
 
     // v0.7.5: Use streaming RPC for live progress updates
     let msg = format!("Starting workload on {} agents with live stats...", agent_addrs.len());
@@ -1154,6 +1157,15 @@ async fn run_distributed_workload(
     }
     
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
+    
+    // v0.7.12: Show countdown to coordinated start (AFTER agents are ready)
+    if total_delay_secs > 0 {
+        for remaining in (1..=total_delay_secs).rev() {
+            eprintln!("⏳ Starting in {}s...", remaining);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        eprintln!("✅ Starting workload now!\n");
+    }
     
     // v0.7.6: Track workload start time for progress bar position
     // Note: This will be reset when prepare phase completes to measure actual workload time

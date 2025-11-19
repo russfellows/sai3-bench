@@ -2,6 +2,42 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.7.12] - 2025-11-19
+
+### Improved
+- **Flexible Agent Specification** (v0.7.12): `--agents` CLI flag now optional
+  - Can specify agents in YAML config under `distributed.agents`
+  - Can specify agents on CLI with `--agents host1:port,host2:port`
+  - Can specify both (config YAML takes precedence)
+  - Backward compatible: existing CLI-only workflows continue to work
+- **Robust Agent Abort Mechanism**: Extended abort timeout to 5 seconds with 15-second retry for better reliability
+  - Agents now have two chances to reset cleanly (5s initial, 10s backoff)
+  - Ensures recovery even in edge cases where stream cleanup is delayed
+  - Addresses coordinated start delay interruptibility
+- **Reduced Coordinated Start Delay**: Changed from `30 + (agent_count × 5)` to fixed **10 seconds**
+  - Dramatically faster test startup (42s → 12s for 2 agents)
+  - Delay only applies after agents have validated configuration
+  - Still provides adequate time for distributed synchronization
+- **Countdown Display**: Added visible countdown timer before workload execution
+  - Shows "⏳ Starting in Xs..." for each remaining second
+  - Provides clear feedback that system is working, not hung
+  - Appears after agent validation completes
+  - Improves user experience during coordinated start phase
+
+### Fixed
+- **Display Order**: Countdown now appears AFTER agent validation completes (not before)
+  - Previous behavior showed countdown, then validated agents (confusing)
+  - New behavior: validate agents → show ready → countdown → start workload
+  - More logical and intuitive sequence
+
+### Technical Details
+- `--agents` CLI argument changed from `String` to `Option<String>`
+- Agent parsing handles `None` case with `unwrap_or_default()`
+- Abort timeout increased from 3s to 5s with 10s retry (total 15s maximum)
+- Coordinated start delay reduced from `30 + (5 × agent_count)` to fixed 10s
+- Countdown uses `eprintln!` for each second (visible output, not overwritten)
+- All abort phase tests continue to pass with new timing
+
 ## [0.7.11] - 2025-11-18
 
 ### 📊 CPU Utilization Monitoring

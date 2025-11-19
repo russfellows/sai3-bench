@@ -479,9 +479,6 @@ impl Agent for AgentSvc {
             ));
         }
         
-        // v0.7.11: Subscribe to abort signals from AbortWorkload RPC
-        let mut abort_rx = agent_state.subscribe_abort();
-        
         // v0.7.11: Set agent state to Running
         agent_state.set_state(WorkloadState::Running).await;
         
@@ -495,6 +492,9 @@ impl Agent for AgentSvc {
         let config_spawn = config.clone();
         let agent_state_stream = agent_state.clone();
         let stream = async_stream::stream! {
+            // v0.7.12: Subscribe to abort signals inside stream (needed for coordinated start + workload)
+            let mut abort_rx = agent_state_stream.subscribe_abort();
+            
             // v0.7.6: Send READY status first (validation passed)
             let ready_msg = LiveStats {
                 agent_id: agent_id_stream.clone(),
@@ -554,7 +554,8 @@ impl Agent for AgentSvc {
             let mut config_exec = config_spawn.clone();
             let agent_id_exec = agent_id_stream.clone();
             let rx_cancel_exec = rx_cancel;
-            let mut abort_rx_exec = abort_rx;
+            // v0.7.12: Subscribe again for the workload task (separate receiver)
+            let mut abort_rx_exec = agent_state_stream.subscribe_abort();
             
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
@@ -813,17 +814,31 @@ impl Agent for AgentSvc {
                 self.state.set_state(WorkloadState::Aborting).await;
                 self.state.send_abort();
                 
-                // v0.7.12: Reset to Idle after workload cleanup (3 second timeout)
-                // The workload task will terminate quickly after receiving abort signal,
-                // but the stream might not be polled if controller disconnects.
-                // We reset state here to ensure agents don't stay in Aborting forever.
+                // v0.7.12: Reset to Idle after workload cleanup with retry logic
+                // Try at 5s, retry at 15s (5s + 10s backoff)
+                // This ensures agents reset even if stream cleanup fails
                 let state_for_reset = self.state.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    // First attempt: 5 second timeout
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     let current = state_for_reset.get_state().await;
                     if current == WorkloadState::Aborting {
                         state_for_reset.set_state(WorkloadState::Idle).await;
-                        info!("⏰ Abort timeout - reset agent to Idle state (workload cleanup complete)");
+                        info!("⏰ Abort timeout (5s) - reset agent to Idle state (workload cleanup complete)");
+                    } else if current == WorkloadState::Idle {
+                        debug!("Agent already reset to Idle via stream cleanup");
+                    } else {
+                        // State changed to something unexpected during abort
+                        warn!("Unexpected state during abort: {:?}", current);
+                    }
+                    
+                    // Second attempt: retry after 10 more seconds if still in wrong state
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    let retry_state = state_for_reset.get_state().await;
+                    if retry_state == WorkloadState::Aborting || retry_state == WorkloadState::Running {
+                        warn!("⚠️  Agent stuck in {:?} state after 15s - forcing reset to Idle", retry_state);
+                        state_for_reset.set_state(WorkloadState::Idle).await;
+                        info!("⏰ Abort retry (15s) - forced agent to Idle state");
                     }
                 });
                 
