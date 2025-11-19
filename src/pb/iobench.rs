@@ -486,6 +486,28 @@ pub mod agent_client {
                 .insert(GrpcMethod::new("iobench.Agent", "RunWorkloadWithLiveStats"));
             self.inner.server_streaming(req, path, codec).await
         }
+        /// v0.7.11: Abort ongoing workload (controller failure, user interrupt, etc.)
+        pub async fn abort_workload(
+            &mut self,
+            request: impl tonic::IntoRequest<super::Empty>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/AbortWorkload",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "AbortWorkload"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -531,6 +553,11 @@ pub mod agent_server {
             tonic::Response<Self::RunWorkloadWithLiveStatsStream>,
             tonic::Status,
         >;
+        /// v0.7.11: Abort ongoing workload (controller failure, user interrupt, etc.)
+        async fn abort_workload(
+            &self,
+            request: tonic::Request<super::Empty>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct AgentServer<T> {
@@ -823,6 +850,49 @@ pub mod agent_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/AbortWorkload" => {
+                    #[allow(non_camel_case_types)]
+                    struct AbortWorkloadSvc<T: Agent>(pub Arc<T>);
+                    impl<T: Agent> tonic::server::UnaryService<super::Empty>
+                    for AbortWorkloadSvc<T> {
+                        type Response = super::Empty;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::Empty>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::abort_workload(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AbortWorkloadSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

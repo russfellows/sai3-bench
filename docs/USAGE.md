@@ -78,10 +78,12 @@ FLAGS/OPTIONS:
 ```
 sai3bench-ctl
 USAGE:
-  sai3bench-ctl [--tls] [--agent-ca <path>] [--agent-domain <name>] --agents <csv> <SUBCOMMAND> ...
+  sai3bench-ctl [--agents <csv>] [--tls] [--agent-ca <path>] [--agent-domain <name>] <SUBCOMMAND> ...
 
 GLOBAL FLAGS/OPTIONS:
   --agents <csv>        Comma-separated list of agent addresses (host:port)
+                        Optional: can also specify in config YAML under distributed.agents
+                        If both specified, config YAML takes precedence
   --tls                 Enable TLS for secure connections (requires --agent-ca). Default is plaintext HTTP.
   --agent-ca <path>     Path to agent's certificate PEM (required when --tls enabled)
   --agent-domain <name> Override SNI / DNS name when validating TLS
@@ -98,6 +100,41 @@ SUBCOMMANDS:
 **Note:** When agents are started with --tls, the controller must also
 use --tls --agent-ca <path> to trust the agent's self-signed certificate.
 By default (no --tls flag), both controller and agents use plaintext HTTP.
+
+## Specifying Agents (v0.7.12+)
+
+You have three flexible options for specifying agent addresses:
+
+### Option 1: YAML Config Only (Recommended)
+```yaml
+distributed:
+  agents:
+    - address: "node1.example.com:7761"
+      id: "agent-1"
+    - address: "node2.example.com:7761"
+      id: "agent-2"
+```
+
+```bash
+# No --agents flag needed
+./sai3bench-ctl run --config workload.yaml
+```
+
+### Option 2: CLI Only (Quick Testing)
+```bash
+# Specify on command line
+./sai3bench-ctl --agents node1:7761,node2:7761 run --config workload.yaml
+```
+
+### Option 3: Both (Config Takes Precedence)
+```bash
+# Config YAML agents override CLI agents
+./sai3bench-ctl --agents localhost:7761,localhost:7762 run --config workload.yaml
+# Uses agents from workload.yaml, not CLI
+```
+
+**Best Practice**: Define agents in your YAML config for reproducibility and documentation.
+Use CLI `--agents` for quick ad-hoc testing.
 
 If the agent cert doesn’t include the default DNS
 name the controller uses, add --agent-domain.
@@ -245,18 +282,24 @@ Elapsed: 35.00s
 [... per-agent results ...]
 ```
 
-## Startup Handshake Protocol
+## Startup Handshake Protocol (v0.7.12)
 
-The controller now implements a sophisticated startup handshake:
+The controller implements a sophisticated startup handshake with improved timing:
 
-1. **Validation phase** (3 seconds): Agents validate configuration
+1. **Validation phase** (~40 seconds for 2 agents): Agents validate configuration
    - Checks file:// patterns match actual files
    - Verifies PUT operations have object sizes
    - Validates all required parameters
+   - Timeout scales with agent count: 30s + (5s × agent_count)
 2. **Ready reporting**: Each agent sends READY or ERROR status
-3. **Error handling**: If any agent fails validation, controller displays errors and exits
-4. **Synchronized start**: All agents begin workload at exact same coordinated timestamp
-5. **Fast startup**: 5 seconds total (3s validation + 2s user-configurable delay)
+3. **Error handling**: If any agent fails validation, controller displays errors and aborts
+4. **Countdown display** (v0.7.12): Visual countdown shows time until workload starts
+   - "⏳ Starting in 10s..." (counts down second by second)
+   - Clear feedback that system is working, not hung
+5. **Synchronized start**: All agents begin workload at exact same coordinated timestamp
+6. **Fast coordinated start** (v0.7.12): Fixed 10-second delay (down from 30-50 seconds)
+   - Plus 2-second user-configurable delay (default)
+   - Total: ~12 seconds from agents ready to workload start
 
 ### Configuration Errors
 
@@ -276,13 +319,31 @@ Ready agents: 1/2
 Error: 1 agent(s) failed startup validation
 ```
 
+### v0.7.12 Startup Sequence
+
+The improved startup sequence provides better visibility:
+
+```
+⏳ Waiting for agents to validate configuration...
+  ✅ agent-1 ready
+  ✅ agent-2 ready
+✅ All 2 agents ready - starting workload execution
+
+⏳ Starting in 12s...
+⏳ Starting in 11s...
+⏳ Starting in 10s...
+...
+⏳ Starting in 1s...
+✅ Starting workload now!
+```
+
 ## Adjusting Start Delay
 
-The default start delay is 2 seconds (after 3s validation = 5s total). You can adjust it:
+The default start delay is 2 seconds (on top of the 10-second coordinated start). You can adjust it:
 
 ```bash
 ./sai3bench-ctl --agents node1:7761,node2:7761 \
-  --start-delay 5 \  # 5s instead of 2s (total: 8s)
+  --start-delay 5 \  # 5s instead of 2s (total: 15s coordinated start)
   run --config workload.yaml
 ```
 

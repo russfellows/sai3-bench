@@ -160,5 +160,8 @@ service Agent {
   
   // v0.7.5: Server streaming for live progress updates during distributed execution
   rpc RunWorkloadWithLiveStats(RunWorkloadRequest) returns (stream LiveStats);
+  
+  // v0.7.11: Abort ongoing workload (controller failure, user interrupt, etc.)
+  rpc AbortWorkload(Empty) returns (Empty);
 }
 

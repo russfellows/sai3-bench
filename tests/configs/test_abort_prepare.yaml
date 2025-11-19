@@ -1,0 +1,29 @@
+# Test config: Abort during prepare phase
+# 2 agents, 20 objects to prepare (should take 3-5 seconds)
+
+distributed:
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+    - address: "127.0.0.1:7762"
+      id: "agent-2"
+  start_delay: 2
+
+prepare:
+  directory_tree:
+    root: "/tmp/sai3test_abort_prepare"
+    depth: 2
+    dirs_per_level: 3
+  object_count: 30  # More objects = longer prepare phase
+  object_size: "1MB"
+  coordinator: "agent-1"  # agent-1 creates tree
+  shared_storage: true
+  post_prepare_delay: 0
+
+workload:
+  duration: 10
+  concurrency: 2
+  read_weight: 50
+  write_weight: 50
+  object_selection: "uniform"
+  object_size: "1MB"

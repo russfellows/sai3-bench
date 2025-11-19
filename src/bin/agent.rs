@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::signal;
-use tokio::sync::Semaphore;
+use tokio::sync::{broadcast, Mutex, Semaphore};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
@@ -62,8 +62,62 @@ struct Cli {
     tls_sans: Option<String>,
 }
 
-#[derive(Default)]
-struct AgentSvc;
+/// Agent state for workload management and cancellation
+#[derive(Clone)]
+struct AgentState {
+    /// Broadcast channel for abort signals (controller calls AbortWorkload)
+    abort_tx: broadcast::Sender<()>,
+    /// Current workload state
+    state: Arc<Mutex<WorkloadState>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum WorkloadState {
+    Idle,           // Ready to accept new workload
+    Running,        // Workload executing
+    Aborting,       // Abort requested, cleaning up
+}
+
+impl AgentState {
+    fn new() -> Self {
+        let (abort_tx, _) = broadcast::channel(16);
+        Self {
+            abort_tx,
+            state: Arc::new(Mutex::new(WorkloadState::Idle)),
+        }
+    }
+    
+    async fn set_state(&self, new_state: WorkloadState) {
+        let mut state = self.state.lock().await;
+        info!("Agent state transition: {:?} → {:?}", *state, new_state);
+        *state = new_state;
+    }
+    
+    async fn get_state(&self) -> WorkloadState {
+        self.state.lock().await.clone()
+    }
+    
+    /// Send abort signal to running workload
+    fn send_abort(&self) {
+        let _ = self.abort_tx.send(());
+        info!("Abort signal broadcast to workload");
+    }
+    
+    /// Subscribe to abort signals
+    fn subscribe_abort(&self) -> broadcast::Receiver<()> {
+        self.abort_tx.subscribe()
+    }
+}
+
+struct AgentSvc {
+    state: AgentState,
+}
+
+impl AgentSvc {
+    fn new(state: AgentState) -> Self {
+        Self { state }
+    }
+}
 
 #[tonic::async_trait]
 impl Agent for AgentSvc {
@@ -411,7 +465,22 @@ impl Agent for AgentSvc {
         let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
         
         // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
-        let (tx_cancel, rx_cancel) = tokio::sync::oneshot::channel::<()>();
+        let (tx_cancel, mut rx_cancel) = tokio::sync::oneshot::channel::<()>();
+        
+        // v0.7.11: Clone state for use in async contexts
+        let agent_state = self.state.clone();
+        
+        // v0.7.12: Check current state - only accept new workload if Idle
+        let current_state = agent_state.get_state().await;
+        if current_state != WorkloadState::Idle {
+            warn!("Rejecting workload request - agent in {:?} state (not Idle)", current_state);
+            return Err(Status::failed_precondition(
+                format!("Agent busy: current state is {:?}, expected Idle", current_state)
+            ));
+        }
+        
+        // v0.7.11: Set agent state to Running
+        agent_state.set_state(WorkloadState::Running).await;
         
         // v0.7.11: Initialize CPU monitor for utilization tracking
         let mut cpu_monitor = CpuMonitor::new();
@@ -421,7 +490,11 @@ impl Agent for AgentSvc {
         let config_yaml_stream = config_yaml_for_summary;
         let tracker_spawn = tracker.clone();
         let config_spawn = config.clone();
+        let agent_state_stream = agent_state.clone();
         let stream = async_stream::stream! {
+            // v0.7.12: Subscribe to abort signals inside stream (needed for coordinated start + workload)
+            let mut abort_rx = agent_state_stream.subscribe_abort();
+            
             // v0.7.6: Send READY status first (validation passed)
             let ready_msg = LiveStats {
                 agent_id: agent_id_stream.clone(),
@@ -455,9 +528,24 @@ impl Agent for AgentSvc {
             yield Ok(ready_msg);
             
             // v0.7.6: Wait for coordinated start time AFTER sending READY
+            // v0.7.12: Make coordinated start delay interruptible by abort signal
             if let Some(wait_dur) = wait_duration {
-                info!("Waiting {:?} for coordinated start", wait_dur);
-                tokio::time::sleep(wait_dur).await;
+                info!("Waiting {:?} for coordinated start", agent_id_stream);
+                tokio::select! {
+                    _ = &mut rx_cancel => {
+                        warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
+                        yield Err(Status::cancelled("Controller disconnected during coordinated start"));
+                        return;  // Exit stream generator
+                    }
+                    _ = abort_rx.recv() => {
+                        warn!("Agent {} aborted during coordinated start", agent_id_stream);
+                        yield Err(Status::aborted("Aborted during coordinated start"));
+                        return;  // Exit stream generator
+                    }
+                    _ = tokio::time::sleep(wait_dur) => {
+                        // Normal case: coordinated start time reached
+                    }
+                }
             }
             info!("Starting workload execution for agent {}", agent_id_stream);
             
@@ -466,17 +554,23 @@ impl Agent for AgentSvc {
             let mut config_exec = config_spawn.clone();
             let agent_id_exec = agent_id_stream.clone();
             let rx_cancel_exec = rx_cancel;
+            // v0.7.12: Subscribe again for the workload task (separate receiver)
+            let mut abort_rx_exec = agent_state_stream.subscribe_abort();
             
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
                 let tracker_for_prepare = tracker_exec.clone();
                 config_exec.live_stats_tracker = Some(tracker_exec);
                 
-                // v0.7.8: Execute prepare/workload with cancellation support
+                // v0.7.11: Execute prepare/workload with cancellation support (controller disconnect OR abort RPC)
                 tokio::select! {
                     _ = rx_cancel_exec => {
                         warn!("Agent {} received cancellation signal (controller disconnected)", agent_id_exec);
-                        let _ = tx_done.send(Err("Cancelled by controller".to_string())).await;
+                        let _ = tx_done.send(Err("Cancelled by controller disconnect".to_string())).await;
+                    }
+                    _ = abort_rx_exec.recv() => {
+                        warn!("Agent {} received ABORT signal via AbortWorkload RPC", agent_id_exec);
+                        let _ = tx_done.send(Err("Aborted by controller request".to_string())).await;
                     }
                     result = async {
                         // Execute prepare phase if configured
@@ -544,11 +638,20 @@ impl Agent for AgentSvc {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+            // v0.7.12: Subscribe to abort signals in stream loop
+            let mut abort_rx_stream = agent_state_stream.subscribe_abort();
+
             // v0.7.9: Store prepare metrics when received from workload task
             let mut stored_prepare_metrics: Option<sai3_bench::workload::PrepareMetrics> = None;
 
             loop {
                 tokio::select! {
+                    // v0.7.12: Handle abort signal - break out of stream loop immediately
+                    _ = abort_rx_stream.recv() => {
+                        warn!("Agent {} stream received abort signal - ending stream", agent_id_stream);
+                        break;
+                    }
+                    
                     // v0.7.9: Receive prepare metrics from workload task
                     Some(prep_metrics) = rx_prepare.recv() => {
                         info!("Received prepare metrics: {} objects created", prep_metrics.objects_created);
@@ -692,9 +795,64 @@ impl Agent for AgentSvc {
             // Send cancellation signal to workload task
             info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
             let _ = tx_cancel.send(());
+            
+            // v0.7.11: Reset agent state to Idle after stream completes
+            agent_state_stream.set_state(WorkloadState::Idle).await;
+            info!("Agent {} reset to Idle state, ready for next workload", agent_id_stream);
         };
 
         Ok(Response::new(Box::pin(stream)))
+    }
+    
+    // v0.7.12: Abort ongoing workload (controller failure, user interrupt, etc.)
+    async fn abort_workload(&self, _req: Request<Empty>) -> Result<Response<Empty>, Status> {
+        let current_state = self.state.get_state().await;
+        
+        match current_state {
+            WorkloadState::Running => {
+                warn!("⚠️  Abort workload requested - sending cancellation signal");
+                self.state.set_state(WorkloadState::Aborting).await;
+                self.state.send_abort();
+                
+                // v0.7.12: Reset to Idle after workload cleanup with retry logic
+                // Try at 5s, retry at 15s (5s + 10s backoff)
+                // This ensures agents reset even if stream cleanup fails
+                let state_for_reset = self.state.clone();
+                tokio::spawn(async move {
+                    // First attempt: 5 second timeout
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    let current = state_for_reset.get_state().await;
+                    if current == WorkloadState::Aborting {
+                        state_for_reset.set_state(WorkloadState::Idle).await;
+                        info!("⏰ Abort timeout (5s) - reset agent to Idle state (workload cleanup complete)");
+                    } else if current == WorkloadState::Idle {
+                        debug!("Agent already reset to Idle via stream cleanup");
+                    } else {
+                        // State changed to something unexpected during abort
+                        warn!("Unexpected state during abort: {:?}", current);
+                    }
+                    
+                    // Second attempt: retry after 10 more seconds if still in wrong state
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    let retry_state = state_for_reset.get_state().await;
+                    if retry_state == WorkloadState::Aborting || retry_state == WorkloadState::Running {
+                        warn!("⚠️  Agent stuck in {:?} state after 15s - forcing reset to Idle", retry_state);
+                        state_for_reset.set_state(WorkloadState::Idle).await;
+                        info!("⏰ Abort retry (15s) - forced agent to Idle state");
+                    }
+                });
+                
+                Ok(Response::new(Empty {}))
+            }
+            WorkloadState::Aborting => {
+                warn!("⚠️  Abort already in progress");
+                Ok(Response::new(Empty {}))
+            }
+            WorkloadState::Idle => {
+                info!("Abort requested but agent is idle");
+                Ok(Response::new(Empty {}))
+            }
+        }
     }
 }
 
@@ -1093,8 +1251,9 @@ async fn main() -> Result<()> {
     if !args.tls {
         info!("Agent starting in PLAINTEXT mode on {}", addr);
         println!("sai3bench-agent listening (PLAINTEXT) on {}", addr);
+        let agent_state = AgentState::new();
         Server::builder()
-            .add_service(AgentServer::new(AgentSvc::default()))
+            .add_service(AgentServer::new(AgentSvc::new(agent_state)))
             .serve_with_shutdown(addr, async {
                 let _ = signal::ctrl_c().await;
             })
@@ -1147,9 +1306,10 @@ async fn main() -> Result<()> {
         }
     );
 
+    let agent_state = AgentState::new();
     Server::builder()
         .tls_config(tls)?
-        .add_service(AgentServer::new(AgentSvc::default()))
+        .add_service(AgentServer::new(AgentSvc::new(agent_state)))
         .serve_with_shutdown(addr, async {
             let _ = signal::ctrl_c().await;
         })

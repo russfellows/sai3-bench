@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.11-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.7.12-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-50%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,37 +8,34 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.11 (November 18, 2025)
+## 🌟 Latest Release - v0.7.12 (November 19, 2025)
 
-**📊 CPU Utilization Monitoring:**
+**⏱️ Faster Startup & Better Feedback:**
 
-- **Real-time CPU metrics**: Agents report User%, System%, and IO-wait% every second during workload execution
-- **Live display**: CPU utilization shown in progress updates alongside GET/PUT stats
-- **Final summary**: Averaged CPU stats included in "Live Aggregate Stats" section
-- **Lightweight monitoring**: ~10μs overhead per sample, Linux /proc/stat based
-- **gRPC integration**: Extended LiveStats protocol with 4 new CPU fields (backward compatible)
+- **Reduced coordinated start delay**: Fixed 10-second delay (down from 30-50 seconds for multi-agent tests)
+- **Countdown display**: Visual "⏳ Starting in Xs..." countdown shows system is working, not hung
+- **Improved abort resilience**: 5-second timeout with 15-second retry ensures agents always recover
+- **Flexible agent specification**: Define agents in YAML config, CLI, or both (config takes precedence)
+- **Better UX**: Validation → agents ready → countdown → workload (logical sequence)
 
 ```bash
-# First run: Create dataset with deterministic sizes
-sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
-# Prepare: Found 0, created 1000 files (deterministic seed: 1234567890)
+# Agents validate and respond quickly
+✅ agent-1 ready
+✅ agent-2 ready
+✅ All 2 agents ready - starting workload execution
 
-# Delete some files to test gap-filling
-rm -rf /storage/test.d1_w2.dir/
+⏳ Starting in 10s...
+⏳ Starting in 9s...
+...
+✅ Starting workload now!
 
-# Second run: Gap-filling recreates missing files at exact indices
-sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
-# Prepare: Found 800, identified 200 missing indices, created at positions 200-399
-
-# Third run: Fast rerun with skip_verification (no LIST operation)
-# Set skip_verification: true in config
-sai3bench-ctl --agents host1:7761,host2:7762 run --config workload.yaml
-# Prepare: ⚡ skip_verification enabled - assuming all 1000 objects exist
+# NEW in v0.7.12: Run without --agents flag (uses config YAML)
+./sai3bench-ctl run --config workload.yaml
 ```
 
-See [CHANGELOG](docs/CHANGELOG.md#078) for complete details.
+See [CHANGELOG](docs/CHANGELOG.md#0712) for complete details.
 
-**Previous Release - v0.7.7 (November 15, 2025)** - CLI improvements with `--tls` flag and `--dry-run` support
+**Previous Release - v0.7.11 (November 18, 2025)** - CPU utilization monitoring with real-time metrics
 
 ## 🚀 What Makes sai3-bench Unique?
 
