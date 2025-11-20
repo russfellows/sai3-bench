@@ -445,7 +445,7 @@ async fn prepare_sequential(
                     let mut last_time = Instant::now();
                     
                     loop {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(crate::constants::PROGRESS_MONITOR_SLEEP_MS)).await;
                         
                         // Break when all objects created
                         if pb_monitor.position() >= pb_monitor.length().unwrap_or(u64::MAX) {
@@ -1034,7 +1034,7 @@ async fn prepare_parallel(
         let mut last_time = Instant::now();
         
         loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(crate::constants::PROGRESS_MONITOR_SLEEP_MS)).await;
             
             // Break when all objects created
             if pb_monitor.position() >= pb_monitor.length().unwrap_or(u64::MAX) {
@@ -1042,7 +1042,7 @@ async fn prepare_parallel(
             }
             
             let elapsed = last_time.elapsed();
-            if elapsed.as_secs_f64() >= 0.5 {
+            if elapsed.as_secs_f64() >= crate::constants::PROGRESS_STATS_REFRESH_SECS {
                 let current_ops = ops_monitor.load(Ordering::Relaxed);
                 let current_bytes = bytes_monitor.load(Ordering::Relaxed);
                 
@@ -1380,7 +1380,7 @@ pub async fn create_directory_tree(
             debug!("BEFORE list() call - dir_prefix: '{}', recursive: false", dir_prefix);
             
             // Add a small delay to avoid overwhelming GCS API
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(crate::constants::API_RATE_LIMIT_DELAY_MS)).await;
             
             match store.list(&dir_prefix, false).await {
                 Ok(files) => {

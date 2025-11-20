@@ -83,6 +83,26 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 
 ## Testing Requirements (CRITICAL - v0.7.0+)
 
+### Starting Local Test Agents
+
+**CRITICAL**: Use the `start_local_agents.sh` script to start agents for testing:
+
+```bash
+# Start 2 agents with verbose logging (RECOMMENDED for debugging):
+cd /home/eval/Documents/Code/sai3-bench/scripts
+./start_local_agents.sh 2 7761 "-vv"
+
+# Parameters:
+# 1. NUM_AGENTS (default: 2)
+# 2. BASE_PORT (default: 7761) 
+# 3. VERBOSE flag (default: "-v", use "-vv" for debugging)
+# 4. LOG_DIR (default: "/tmp")
+```
+
+**Agent logs**: Written to `/tmp/agent1.log`, `/tmp/agent2.log`, etc.
+
+**DO NOT** start agents manually with individual commands - use the script!
+
 ### Test Directories and Storage Configuration
 
 **Primary Test Directory**: `/mnt/test` (dedicated device and mount point)

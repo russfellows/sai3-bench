@@ -6,8 +6,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 use rand::{rng, Rng};
 //use rand::rngs::SmallRng;
@@ -36,16 +37,8 @@ pub use crate::prepare::{
 };
 
 // -----------------------------------------------------------------------------
-// Chunked read configuration for optimal direct:// performance
-// -----------------------------------------------------------------------------
-
-/// Optimal chunk size for direct:// reads (4 MiB)
-/// Based on testing: 4M chunks achieve 1.73 GiB/s vs 0.01 GiB/s for whole-file
-const DIRECT_IO_CHUNK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB
-
-/// Threshold for using chunked reads vs whole-file reads
-/// Files larger than this will use chunked reads for direct://
-const CHUNKED_READ_THRESHOLD: u64 = 8 * 1024 * 1024;  // 8 MiB
+// Import chunked read constants from constants module
+use crate::constants::{DIRECT_IO_CHUNK_SIZE, CHUNKED_READ_THRESHOLD};
 
 // -----------------------------------------------------------------------------
 // Multi-backend support infrastructure
@@ -789,6 +782,10 @@ pub struct IpcSummary {
     pub get_hists_serialized: Vec<String>,
     pub put_hists_serialized: Vec<String>,
     pub meta_hists_serialized: Vec<String>,
+    
+    // v0.7.13: Error statistics
+    pub total_errors: u64,
+    pub error_rate: f64,
 }
 
 impl IpcSummary {
@@ -828,6 +825,8 @@ impl IpcSummary {
             get_hists_serialized: serialize_ophists(&s.get_hists)?,
             put_hists_serialized: serialize_ophists(&s.put_hists)?,
             meta_hists_serialized: serialize_ophists(&s.meta_hists)?,
+            total_errors: s.total_errors,
+            error_rate: s.error_rate,
         })
     }
 }
@@ -862,6 +861,10 @@ pub struct Summary {
     pub get_hists: crate::metrics::OpHists,
     pub put_hists: crate::metrics::OpHists,
     pub meta_hists: crate::metrics::OpHists,
+    
+    // v0.7.13: Error statistics
+    pub total_errors: u64,
+    pub error_rate: f64,  // Errors per second at end of workload
 }
 
 // -----------------------------------------------------------------------------
@@ -899,6 +902,135 @@ impl Default for WorkerStats {
             meta_bins: SizeBins::default(),
         }
     }
+}
+
+/// Error tracking for workload resilience (v0.7.13+)
+/// 
+/// Tracks errors across all worker tasks to implement configurable error thresholds:
+/// - Total error count (abort if exceeded)
+/// - Error rate (errors/second - trigger backoff if exceeded)
+/// - Recent error timestamps for rate calculation
+#[derive(Clone)]
+struct ErrorTracker {
+    total_errors: Arc<AtomicU64>,
+    recent_errors: Arc<Mutex<Vec<Instant>>>,
+    config: crate::config::ErrorHandlingConfig,
+}
+
+impl ErrorTracker {
+    fn new(config: crate::config::ErrorHandlingConfig) -> Self {
+        Self {
+            total_errors: Arc::new(AtomicU64::new(0)),
+            recent_errors: Arc::new(Mutex::new(Vec::new())),
+            config,
+        }
+    }
+    
+    /// Record an error and check if thresholds are exceeded
+    /// Returns: (should_backoff, should_abort, total_errors, error_rate)
+    fn record_error(&self) -> (bool, bool, u64, f64) {
+        let now = Instant::now();
+        let total = self.total_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        
+        // Add to recent errors
+        let mut recent = self.recent_errors.lock().unwrap();
+        recent.push(now);
+        
+        // Clean up old errors outside the rate window
+        let window_start = now - Duration::from_secs_f64(self.config.error_rate_window);
+        recent.retain(|&t| t >= window_start);
+        
+        let errors_in_window = recent.len();
+        let error_rate = errors_in_window as f64 / self.config.error_rate_window;
+        
+        let should_backoff = error_rate >= self.config.error_rate_threshold;
+        let should_abort = total >= self.config.max_total_errors;
+        
+        (should_backoff, should_abort, total, error_rate)
+    }
+    
+    fn get_stats(&self) -> (u64, f64) {
+        let total = self.total_errors.load(Ordering::Relaxed);
+        let now = Instant::now();
+        let mut recent = self.recent_errors.lock().unwrap();
+        
+        // Clean up old errors
+        let window_start = now - Duration::from_secs_f64(self.config.error_rate_window);
+        recent.retain(|&t| t >= window_start);
+        
+        let error_rate = recent.len() as f64 / self.config.error_rate_window;
+        (total, error_rate)
+    }
+}
+
+/// Helper to execute an operation with error handling and retry logic (v0.7.13+)
+/// 
+/// Returns: Ok(Some(result)) on success, Ok(None) on error (skip), Err on abort
+async fn execute_with_error_handling<F, Fut, T>(
+    operation_name: &str,
+    error_tracker: &ErrorTracker,
+    op_fn: F,
+) -> Result<Option<T>>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let config = &error_tracker.config;
+    let max_attempts = if config.retry_on_error {
+        config.max_retries + 1  // Initial attempt + retries
+    } else {
+        1  // Single attempt, skip on error
+    };
+    
+    for attempt in 1..=max_attempts {
+        match op_fn().await {
+            Ok(result) => return Ok(Some(result)),
+            Err(e) => {
+                // Record error and check thresholds
+                let (should_backoff, should_abort, total_errors, error_rate) = error_tracker.record_error();
+                
+                // Log individual error (visible with -vv debug level)
+                debug!("❌ {} error (attempt {}/{}): {} [total_errors: {}, rate: {:.2}/sec]",
+                    operation_name, attempt, max_attempts, e, total_errors, error_rate);
+                
+                if should_abort {
+                    error!("❌ ERROR THRESHOLD EXCEEDED: {} total errors (max: {})",
+                        total_errors, config.max_total_errors);
+                    error!("   Aborting workload to prevent further failures");
+                    return Err(anyhow!(
+                        "Aborting workload: {} total errors exceeded threshold of {}",
+                        total_errors, config.max_total_errors
+                    ));
+                }
+                
+                if should_backoff {
+                    warn!("⚠️  HIGH ERROR RATE: {:.2} errors/sec (threshold: {:.2})", 
+                        error_rate, config.error_rate_threshold);
+                    warn!("   Backing off for {:?} to allow transient issues to clear", 
+                        config.backoff_duration);
+                    tokio::time::sleep(config.backoff_duration).await;
+                }
+                
+                let is_last_attempt = attempt == max_attempts;
+                
+                if is_last_attempt {
+                    // Last attempt failed - skip this operation and continue
+                    // Log at warn level (visible with -v) - user should know operations are failing
+                    warn!("⚠️  {} FAILED after {} attempts - SKIPPING (total errors: {})",
+                        operation_name, max_attempts, total_errors);
+                    warn!("   Last error: {}", e);
+                    return Ok(None);  // Skip operation, don't abort workload
+                } else {
+                    // Retry - log at info level (visible with -v) so users see retry attempts
+                    info!("🔄 Retrying {} (attempt {}/{}) after error: {}", 
+                        operation_name, attempt + 1, max_attempts, e);
+                }
+            }
+        }
+    }
+    
+    // Should never reach here, but return None as fallback
+    Ok(None)
 }
 
 /// Public entry: run a config and print a summary-like struct back.
@@ -1107,6 +1239,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let concurrency = cfg.concurrency;  // Copy value for closure
     let ops_clone = live_ops.clone();
     let bytes_clone = live_bytes.clone();
+    
+    // v0.7.13: Add cancellation channel for progress task
+    let (tx_cancel_progress, mut rx_cancel_progress) = tokio::sync::oneshot::channel::<()>();
+    
     let progress_handle = tokio::spawn(async move {
         let progress_start = Instant::now();
         let update_interval = Duration::from_millis(100); // Update every 100ms
@@ -1153,7 +1289,14 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 last_update = now;
             }
             
-            tokio::time::sleep(update_interval).await;
+            // v0.7.13: Check for cancellation signal (workload error or completion)
+            tokio::select! {
+                _ = tokio::time::sleep(update_interval) => {}
+                _ = &mut rx_cancel_progress => {
+                    info!("Progress task cancelled - workload ending early");
+                    break;
+                }
+            }
         }
     });
     
@@ -1191,6 +1334,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let store_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>> = 
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     
+    // v0.7.13: Create error tracker for resilient error handling
+    let error_tracker = ErrorTracker::new(cfg.error_handling.clone());
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
@@ -1204,6 +1350,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let ops_counter = live_ops.clone();  // Clone atomic counter for live stats
         let bytes_counter = live_bytes.clone();  // Clone atomic counter for live stats
         let store_cache = store_cache.clone();  // Clone store cache for this worker
+        let error_tracker = error_tracker.clone();  // Clone error tracker for this worker
 
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
@@ -1232,180 +1379,212 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
                 match op {
                     OpSpec::Get { .. } => {
-                        // GET operation: Use PathSelector if available (directory tree mode),
-                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        // v0.7.13: Wrap GET operation with error handling
+                        // URI resolution needs to happen outside the retry closure
                         let full_uri = if let Some(ref selector) = path_selector {
-                            // Directory tree mode: Select file from tree
                             let file_path = selector.select_file();
-                            // In tree mode, use target directly (path: "/" is ignored)
                             let base_uri = cfg.target.as_ref()
                                 .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                            
-                            // Build full URI for the specific file
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
                                 format!("{}/{}", base_uri, file_path)
                             }
                         } else {
-                            // Legacy mode: Pick from pre-resolved list
                             let original_uri = cfg.get_uri(op);
                             let uri = rewrite_pattern_for_pool(&original_uri, false, separate_pools);
-                            
                             let src = pre.get_for_uri(&uri).unwrap();
                             let mut r = rng();
                             let uri_idx = r.random_range(0..src.full_uris.len());
                             src.full_uris[uri_idx].clone()
                         };
 
-                        let t0 = Instant::now();
-                        let bytes = get_object_cached(
-                            &full_uri,
-                            &store_cache,
-                            cfg.range_engine.as_ref(),
-                            cfg.page_cache_mode,
-                        ).await?;
-                        let duration = t0.elapsed();
-
-                        let bucket = crate::metrics::bucket_index(bytes.len());
-                        ws.hist_get.record(bucket, duration);
-                        ws.get_ops += 1;
-                        ws.get_bytes += bytes.len() as u64;
-                        ws.get_bins.add(bytes.len() as u64);
+                        let store_cache_get = store_cache.clone();
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_get(bytes.len(), duration);
+                        let result = execute_with_error_handling(
+                            "GET",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                let bytes = get_object_cached(
+                                    &uri_for_closure,
+                                    &store_cache_get,
+                                    range_engine.as_ref(),
+                                    page_cache,
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok((bytes, duration))
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some((bytes, duration))) => {
+                                let bucket = crate::metrics::bucket_index(bytes.len());
+                                ws.hist_get.record(bucket, duration);
+                                ws.get_ops += 1;
+                                ws.get_bytes += bytes.len() as u64;
+                                ws.get_bins.add(bytes.len() as u64);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_get(bytes.len(), duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error - continue to next operation
+                            }
+                            Err(e) => {
+                                // Error threshold exceeded - abort workload
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
-                        bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     }
                     OpSpec::Put { dedup_factor, compress_factor, .. } => {
-                        // PUT operation: Use PathSelector if available (directory tree mode),
-                        // otherwise use random key generation (legacy mode)
-                        //
-                        // Tree mode: Overwrite/update existing file in tree structure
-                        // Legacy mode: Create new object with random name
+                        // v0.7.13: Wrap PUT operation with error handling
                         let (full_uri, sz) = if let Some(ref selector) = path_selector {
-                            // Directory tree mode: Select EXISTING file from tree to overwrite
                             let file_path = selector.select_file();
                             let (_base_uri, size_spec) = cfg.get_put_size_spec(op);
-                            
-                            // Generate size for this write
                             use crate::size_generator::SizeGenerator;
                             let mut size_generator = SizeGenerator::new(&size_spec)?;
                             let sz = size_generator.generate();
-                            
-                            // In tree mode, use target directly (path from op is ignored)
                             let base_uri = cfg.target.as_ref()
                                 .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                            
-                            // Build full URI for the existing file
                             let full_uri = if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
                                 format!("{}/{}", base_uri, file_path)
                             };
-                            
                             (full_uri, sz)
                         } else {
-                            // Legacy mode: Create new object with random name
                             let (base_uri, size_spec) = cfg.get_put_size_spec(op);
-                            
                             use crate::size_generator::SizeGenerator;
                             let mut size_generator = SizeGenerator::new(&size_spec)?;
                             let sz = size_generator.generate();
-                            
                             let key = {
                                 let mut r = rng();
                                 format!("obj_{}", r.random::<u64>())
                             };
-                            
                             let full_uri = if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, key)
                             } else {
                                 format!("{}/{}", base_uri, key)
                             };
-                            
                             (full_uri, sz)
                         };
                         
-                        // Generate data using s3dlio's controlled data generation
                         let buf = s3dlio::generate_controlled_data(
                             sz as usize,
                             *dedup_factor,
                             *compress_factor
                         );
 
-                        let t0 = Instant::now();
-                        put_object_cached(
-                            &full_uri,
-                            &buf,
-                            &store_cache,
-                            cfg.range_engine.as_ref(),
-                            cfg.page_cache_mode,
-                        ).await?;
-                        let duration = t0.elapsed();
-
-                        let bucket = crate::metrics::bucket_index(buf.len());
-                        ws.hist_put.record(bucket, duration);
-                        ws.put_ops += 1;
-                        ws.put_bytes += sz;
-                        ws.put_bins.add(sz);
+                        let store_cache_put = store_cache.clone();
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_put(sz as usize, duration);
+                        let result = execute_with_error_handling(
+                            "PUT",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                put_object_cached(
+                                    &uri_for_closure,
+                                    &buf,
+                                    &store_cache_put,
+                                    range_engine.as_ref(),
+                                    page_cache,
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                let bucket = crate::metrics::bucket_index(buf.len());
+                                ws.hist_put.record(bucket, duration);
+                                ws.put_ops += 1;
+                                ws.put_bytes += sz;
+                                ws.put_bins.add(sz);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_put(sz as usize, duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                bytes_counter.fetch_add(sz, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
-                        bytes_counter.fetch_add(sz, Ordering::Relaxed);
                     }
                     OpSpec::List { .. } => {
-                        // Get resolved URI from config
+                        // v0.7.13: Wrap LIST operation with error handling
                         let uri = cfg.get_meta_uri(op);
-
-                        let t0 = Instant::now();
-                        let _keys = list_objects_cached(&uri, &store_cache, cfg.range_engine.as_ref(), cfg.page_cache_mode).await?;
-                        let duration = t0.elapsed();
-
-                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
-                        ws.meta_ops += 1;
-                        // List operations don't transfer data, just metadata
-                        ws.meta_bins.add(0);
+                        let store_cache_list = store_cache.clone();
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_meta(duration);
+                        let result = execute_with_error_handling(
+                            "LIST",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                let _keys = list_objects_cached(
+                                    &uri,
+                                    &store_cache_list,
+                                    range_engine.as_ref(),
+                                    page_cache
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                ws.hist_meta.record(0, duration);
+                                ws.meta_ops += 1;
+                                ws.meta_bins.add(0);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_meta(duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Stat { .. } => {
-                        // STAT operation: Use PathSelector if available (directory tree mode),
-                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        // v0.7.13: Wrap STAT operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
-                            // Directory tree mode: Select file from tree
                             let file_path = selector.select_file();
-                            // In tree mode, use target directly (path from op is ignored)
                             let base_uri = cfg.target.as_ref()
                                 .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                            
-                            // Build full URI for the specific file
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
                                 format!("{}/{}", base_uri, file_path)
                             }
                         } else {
-                            // Legacy mode: Pick from pre-resolved list
                             let original_pattern = cfg.get_meta_uri(op);
                             let pattern = rewrite_pattern_for_pool(&original_pattern, false, separate_pools);
-                            
                             let src = pre.stat_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for STAT pattern: {}", pattern))?;
                             let mut r = rng();
@@ -1413,44 +1592,61 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             src.full_uris[uri_idx].clone()
                         };
 
-                        let t0 = Instant::now();
-                        let _size = stat_object_cached(&full_uri, &store_cache, cfg.range_engine.as_ref(), cfg.page_cache_mode).await?;
-                        let duration = t0.elapsed();
-
-                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
-                        ws.meta_ops += 1;
-                        // Stat operations don't transfer data, just metadata about the size
-                        ws.meta_bins.add(0);
+                        let store_cache_stat = store_cache.clone();
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_meta(duration);
+                        let result = execute_with_error_handling(
+                            "STAT",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                let _size = stat_object_cached(
+                                    &uri_for_closure,
+                                    &store_cache_stat,
+                                    range_engine.as_ref(),
+                                    page_cache
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                ws.hist_meta.record(0, duration);
+                                ws.meta_ops += 1;
+                                ws.meta_bins.add(0);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_meta(duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Delete { .. } => {
-                        // DELETE operation: Use PathSelector if available (directory tree mode),
-                        // otherwise fall back to pre-resolved URIs (legacy mode)
+                        // v0.7.13: Wrap DELETE operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
-                            // Directory tree mode: Select file from tree
                             let file_path = selector.select_file();
-                            // In tree mode, use target directly (path from op is ignored)
                             let base_uri = cfg.target.as_ref()
                                 .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                            
-                            // Build full URI for the specific file
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
                                 format!("{}/{}", base_uri, file_path)
                             }
                         } else {
-                            // Legacy mode: Pick from pre-resolved list
                             let original_pattern = cfg.get_meta_uri(op);
                             let pattern = rewrite_pattern_for_pool(&original_pattern, true, separate_pools);
-                            
                             let src = pre.delete_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for DELETE pattern: {}", pattern))?;
                             let mut r = rng();
@@ -1458,35 +1654,52 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             src.full_uris[uri_idx].clone()
                         };
 
-                        let t0 = Instant::now();
-                        delete_object_cached(
-                            &full_uri,
-                            &store_cache,
-                            cfg.range_engine.as_ref(),
-                            cfg.page_cache_mode,
-                        ).await?;
-                        let duration = t0.elapsed();
-
-                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
-                        ws.meta_ops += 1;
-                        // Delete operations don't transfer data
-                        ws.meta_bins.add(0);
+                        let store_cache_delete = store_cache.clone();
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_meta(duration);
+                        let result = execute_with_error_handling(
+                            "DELETE",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                delete_object_cached(
+                                    &uri_for_closure,
+                                    &store_cache_delete,
+                                    range_engine.as_ref(),
+                                    page_cache,
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                ws.hist_meta.record(0, duration);
+                                ws.meta_ops += 1;
+                                ws.meta_bins.add(0);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_meta(duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Mkdir { .. } => {
-                        // MKDIR requires PathSelector with TreeManifest
-                        // These operations only make sense with a structured directory tree
+                        // v0.7.13: Wrap MKDIR operation with error handling
                         let dir_name = if let Some(ref selector) = path_selector {
                             selector.select_directory()
                         } else {
-                            // No TreeManifest available - this is a configuration error
                             return Err(anyhow!(
                                 "MKDIR operation requires directory_structure in prepare config. \
                                  MKDIR/RMDIR are only for testing structured directory trees. \
@@ -1494,45 +1707,58 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             ));
                         };
                         
-                        // In tree mode, use target directly (path from op is ignored)
                         let base_uri = cfg.target.as_ref()
                             .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                        
-                        // Build full URI for the specific directory
                         let full_uri = if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, dir_name)
                         } else {
                             format!("{}/{}", base_uri, dir_name)
                         };
 
-                        let t0 = Instant::now();
-                        mkdir_with_config(
-                            &full_uri,
-                            cfg.range_engine.as_ref(),
-                            cfg.page_cache_mode,
-                        ).await?;
-                        let duration = t0.elapsed();
-
-                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
-                        ws.meta_ops += 1;
-                        // Mkdir operations don't transfer data
-                        ws.meta_bins.add(0);
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_meta(duration);
+                        let result = execute_with_error_handling(
+                            "MKDIR",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                mkdir_with_config(
+                                    &uri_for_closure,
+                                    range_engine.as_ref(),
+                                    page_cache,
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                ws.hist_meta.record(0, duration);
+                                ws.meta_ops += 1;
+                                ws.meta_bins.add(0);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_meta(duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                     OpSpec::Rmdir { recursive, .. } => {
-                        // RMDIR requires PathSelector with TreeManifest
-                        // These operations only make sense with a structured directory tree
+                        // v0.7.13: Wrap RMDIR operation with error handling
                         let dir_name = if let Some(ref selector) = path_selector {
                             selector.select_directory()
                         } else {
-                            // No TreeManifest available - this is a configuration error
                             return Err(anyhow!(
                                 "RMDIR operation requires directory_structure in prepare config. \
                                  MKDIR/RMDIR are only for testing structured directory trees. \
@@ -1540,38 +1766,54 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             ));
                         };
                         
-                        // In tree mode, use target directly (path from op is ignored)
                         let base_uri = cfg.target.as_ref()
                             .ok_or_else(|| anyhow!("target required in tree mode"))?;
-                        
-                        // Build full URI for the specific directory
                         let full_uri = if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, dir_name)
                         } else {
                             format!("{}/{}", base_uri, dir_name)
                         };
 
-                        let t0 = Instant::now();
-                        rmdir_with_config(
-                            &full_uri,
-                            *recursive,
-                            cfg.range_engine.as_ref(),
-                            cfg.page_cache_mode,
-                        ).await?;
-                        let duration = t0.elapsed();
-
-                        ws.hist_meta.record(0, duration); // Bucket 0 for metadata ops
-                        ws.meta_ops += 1;
-                        // Rmdir operations don't transfer data
-                        ws.meta_bins.add(0);
+                        let range_engine = cfg.range_engine.clone();
+                        let page_cache = cfg.page_cache_mode;
+                        let uri_for_closure = full_uri.clone();
+                        let is_recursive = *recursive;
                         
-                        // Update live stats tracker for distributed execution (v0.7.5+)
-                        if let Some(ref tracker) = cfg.live_stats_tracker {
-                            tracker.record_meta(duration);
+                        let result = execute_with_error_handling(
+                            "RMDIR",
+                            &error_tracker,
+                            || async {
+                                let t0 = Instant::now();
+                                rmdir_with_config(
+                                    &uri_for_closure,
+                                    is_recursive,
+                                    range_engine.as_ref(),
+                                    page_cache,
+                                ).await?;
+                                let duration = t0.elapsed();
+                                Ok(duration)
+                            }
+                        ).await;
+                        
+                        match result {
+                            Ok(Some(duration)) => {
+                                ws.hist_meta.record(0, duration);
+                                ws.meta_ops += 1;
+                                ws.meta_bins.add(0);
+                                
+                                if let Some(ref tracker) = cfg.live_stats_tracker {
+                                    tracker.record_meta(duration);
+                                }
+                                
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(None) => {
+                                // Operation skipped due to error
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
                         }
-                        
-                        // Update live stats for progress bar
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -1580,7 +1822,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         }));
     }
 
-    // Merge results from all workers
+    // v0.7.13: Merge results from all workers with error handling
+    // If any worker hit error threshold, cancel progress bar and return error
     let mut merged_get = crate::metrics::OpHists::new();
     let mut merged_put = crate::metrics::OpHists::new();
     let mut merged_meta = crate::metrics::OpHists::new();
@@ -1594,23 +1837,54 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let mut put_bins = SizeBins::default();
     let mut meta_bins = SizeBins::default();
 
+    let mut workload_error: Option<anyhow::Error> = None;
+    
     for h in handles {
-        let ws = h.await??;
-        merged_get.merge(&ws.hist_get);
-        merged_put.merge(&ws.hist_put);
-        merged_meta.merge(&ws.hist_meta);
-        get_bytes += ws.get_bytes;
-        get_ops += ws.get_ops;
-        put_bytes += ws.put_bytes;
-        put_ops += ws.put_ops;
-        meta_bytes += ws.meta_bytes;
-        meta_ops += ws.meta_ops;
-        get_bins.merge_from(&ws.get_bins);
-        put_bins.merge_from(&ws.put_bins);
-        meta_bins.merge_from(&ws.meta_bins);
+        match h.await {
+            Ok(Ok(ws)) => {
+                // Worker completed successfully
+                merged_get.merge(&ws.hist_get);
+                merged_put.merge(&ws.hist_put);
+                merged_meta.merge(&ws.hist_meta);
+                get_bytes += ws.get_bytes;
+                get_ops += ws.get_ops;
+                put_bytes += ws.put_bytes;
+                put_ops += ws.put_ops;
+                meta_bytes += ws.meta_bytes;
+                meta_ops += ws.meta_ops;
+                get_bins.merge_from(&ws.get_bins);
+                put_bins.merge_from(&ws.put_bins);
+                meta_bins.merge_from(&ws.meta_bins);
+            }
+            Ok(Err(e)) => {
+                // Worker hit error threshold
+                error!("Worker task failed: {}", e);
+                workload_error = Some(e);
+                break;  // Stop processing remaining workers
+            }
+            Err(e) => {
+                // Worker panicked
+                error!("Worker task panicked: {}", e);
+                workload_error = Some(anyhow!("Worker task panicked: {}", e));
+                break;
+            }
+        }
+    }
+    
+    // v0.7.13: If error occurred, cancel progress bar before returning
+    if workload_error.is_some() {
+        let _ = tx_cancel_progress.send(());
+        let _ = progress_handle.await;  // Wait for progress to exit
+        
+        let (total_errors, error_rate) = error_tracker.get_stats();
+        error!("❌ Workload aborted: {} total errors, {:.2} errors/sec",
+            total_errors, error_rate);
+        
+        return Err(workload_error.unwrap());
     }
 
     // Complete progress bar and wait for progress task
+    let _ = tx_cancel_progress.send(());  // Signal normal completion
     progress_handle.await?;
     
     let wall = start.elapsed().as_secs_f64();
@@ -1669,6 +1943,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
     // Detailed size-bucketed histograms are now shown in the consolidated Results section
     // (removed duplicate output here - was confusing to show latency stats twice)
+    
+    // v0.7.13: Get final error statistics
+    let (final_total_errors, final_error_rate) = error_tracker.get_stats();
+    if final_total_errors > 0 {
+        warn!("Workload completed with {} errors ({:.2} errors/sec)", final_total_errors, final_error_rate);
+    }
 
     Ok(Summary {
         wall_seconds: wall,
@@ -1686,6 +1966,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         get_hists: merged_get,
         put_hists: merged_put,
         meta_hists: merged_meta,
+        total_errors: final_total_errors,
+        error_rate: final_error_rate,
     })
 }
 

@@ -852,21 +852,21 @@ impl Agent for AgentSvc {
                                 let _ = agent_state_stream.transition_to(WorkloadState::Failed, &e).await;
                                 agent_state_stream.set_error(e.clone()).await;
                                 
-                                yield Err(Status::internal(e));
-                                
-                                // Auto-reset to Idle after sending error
+                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
                                 let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
                                 agent_state_stream.clear_error().await;
+                                
+                                yield Err(Status::internal(e));
                                 break;
                             }
                             None => {
                                 // v0.7.13: Transition to Failed for unexpected termination
                                 let _ = agent_state_stream.transition_to(WorkloadState::Failed, "task terminated unexpectedly").await;
                                 
-                                yield Err(Status::internal("Workload task terminated unexpectedly"));
-                                
-                                // Auto-reset to Idle
+                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
                                 let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
+                                
+                                yield Err(Status::internal("Workload task terminated unexpectedly"));
                                 break;
                             }
                         }

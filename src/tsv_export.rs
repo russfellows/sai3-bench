@@ -5,7 +5,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::metrics::{OpHists, BUCKET_LABELS};
+use crate::metrics::OpHists;
+use crate::constants::BUCKET_LABELS;
 use crate::prepare::PrepareMetrics;
 use crate::workload::SizeBins;
 

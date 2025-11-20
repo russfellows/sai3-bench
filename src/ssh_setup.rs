@@ -188,7 +188,7 @@ impl SshSetup {
         self.copy_key_to_host(host, user, password_prompt)?;
         
         // Wait a moment for key to propagate
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(crate::constants::SSH_KEY_PROPAGATION_WAIT_SECS));
         
         // Verify access
         if !self.verify_access(host, user)? {

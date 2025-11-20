@@ -1,9 +1,10 @@
 // src/bin/controller.rs
 
-use anyhow::{Context, Result, bail};
+use anyhow::{anyhow, Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
@@ -11,8 +12,8 @@ use tracing::{debug, error, info, warn};
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
-// Import BUCKET_LABELS from metrics module
-use sai3_bench::metrics::BUCKET_LABELS;
+// Import BUCKET_LABELS from constants module
+use sai3_bench::constants::BUCKET_LABELS;
 
 pub mod pb {
     pub mod iobench {
@@ -870,7 +871,15 @@ async fn main() -> Result<()> {
             
             // v0.7.12: Use comprehensive validation display (same as standalone binary)
             if *dry_run {
+                // v0.7.13: Validate workload configuration FIRST (before printing "Configuration is valid")
+                if let Err(e) = validate_workload_config(&parsed_config).await {
+                    eprintln!("❌ Configuration validation failed: {}", e);
+                    bail!("Configuration validation failed: {}", e);
+                }
+                
+                // Only print full summary with "Configuration is valid" if validation passed
                 sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
+                
                 return Ok(());
             }
             
@@ -1402,13 +1411,19 @@ async fn run_distributed_workload(
     let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
-    // v0.7.12: Show countdown to coordinated start (AFTER agents are ready)
+    // v0.7.13: Show countdown to coordinated start (suspend progress bar during countdown)
     if total_delay_secs > 0 {
-        for remaining in (1..=total_delay_secs).rev() {
-            eprintln!("⏳ Starting in {}s...", remaining);
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        eprintln!("✅ Starting workload now!\n");
+        progress_bar.suspend(|| {
+            for remaining in (1..=total_delay_secs).rev() {
+                eprint!("\r⏳ Starting in {}s...  ", remaining);
+                std::io::stderr().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            eprint!("\r⏳ Starting in 0s...  ");
+            std::io::stderr().flush().unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            eprintln!("\n✅ Starting workload now!\n");
+        });
     }
     
     // v0.7.6: Track workload start time for progress bar position
@@ -2088,7 +2103,7 @@ fn create_consolidated_prepare_tsv(
         let ops_per_sec = count as f64 / total_wall_seconds;
         let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
         
-        let bucket_label = sai3_bench::metrics::BUCKET_LABELS[idx];
+        let bucket_label = BUCKET_LABELS[idx];
         
         writeln!(
             writer,
@@ -2422,3 +2437,64 @@ fn is_shared_uri(uri: &str) -> bool {
         // Users can override with --shared-prepare if using NFS
 }
 
+/// v0.7.13: Validate workload configuration before execution
+/// Checks for common errors that would cause workload startup to fail
+/// This is the same validation that agents perform, so dry-run catches errors early
+async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result<()> {
+    use sai3_bench::config::OpSpec;
+    
+    // Check that workload has operations configured
+    if config.workload.is_empty() {
+        bail!("No operations configured in workload");
+    }
+    
+    // Validate each operation
+    for weighted_op in &config.workload {
+        match &weighted_op.spec {
+            OpSpec::Get { path } => {
+                // For file:// backends, verify files exist
+                if path.starts_with("file://") {
+                    let file_path = path.replace("file://", "");
+                    // Check if it's a glob pattern
+                    if file_path.contains('*') {
+                        let paths: Vec<_> = glob::glob(&file_path)
+                            .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", path, e))?
+                            .collect();
+                        if paths.is_empty() {
+                            bail!("No files found matching GET pattern: {}", path);
+                        }
+                    }
+                }
+            }
+            OpSpec::Put { path, object_size, size_spec, .. } => {
+                // PUT operations need size configuration
+                if object_size.is_none() && size_spec.is_none() {
+                    bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
+                }
+            }
+            OpSpec::Delete { path } => {
+                // Delete needs a valid path
+                if path.is_empty() {
+                    bail!("DELETE operation requires non-empty path");
+                }
+            }
+            OpSpec::List { path } => {
+                // List needs a valid path
+                if path.is_empty() {
+                    bail!("LIST operation requires non-empty path");
+                }
+            }
+            OpSpec::Stat { path } => {
+                // Stat needs a valid path
+                if path.is_empty() {
+                    bail!("STAT operation requires non-empty path");
+                }
+            }
+            _ => {
+                // Other operations (if any) are assumed valid
+            }
+        }
+    }
+    
+    Ok(())
+}

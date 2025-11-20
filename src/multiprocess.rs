@@ -203,6 +203,14 @@ fn merge_summaries(summaries: Vec<IpcSummary>) -> Result<Summary> {
     let overall_p95 = merged_get.p95_us;
     let overall_p99 = merged_get.p99_us;
     
+    // v0.7.13: Aggregate error statistics across all processes
+    let total_errors: u64 = summaries.iter().map(|s| s.total_errors).sum();
+    let avg_error_rate: f64 = if !summaries.is_empty() {
+        summaries.iter().map(|s| s.error_rate).sum::<f64>() / summaries.len() as f64
+    } else {
+        0.0
+    };
+    
     Ok(Summary {
         wall_seconds: total_wall_seconds,
         total_bytes,
@@ -219,6 +227,8 @@ fn merge_summaries(summaries: Vec<IpcSummary>) -> Result<Summary> {
         get_hists: merged_get_hists,
         put_hists: merged_put_hists,
         meta_hists: merged_meta_hists,
+        total_errors,
+        error_rate: avg_error_rate,
     })
 }
 
