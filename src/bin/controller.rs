@@ -1569,10 +1569,10 @@ async fn run_distributed_workload(
                                 // Show prepare progress as "created/total (percentage)"
                                 let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
                                 if dead_count == 0 {
-                                    format!("📦 Preparing: {}/{} objects ({}%)\n{}", 
+                                    format!("📦 Preparing: {}/{} objects ({}%) {}", 
                                             prepare_created, prepare_total, pct, agg.format_progress())
                                 } else {
-                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead)\n{}", 
+                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}", 
                                             prepare_created, prepare_total, pct, dead_count, agg.format_progress())
                                 }
                             } else if dead_count == 0 {
