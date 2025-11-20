@@ -3,6 +3,7 @@
 use regex::escape;
 
 pub mod config;
+pub mod constants; // Central constants and defaults (v0.8.0+)
 pub mod cpu_monitor;
 pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)

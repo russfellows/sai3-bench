@@ -182,7 +182,7 @@ mod tests {
         }
         
         // Wait less than interval - should return None
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(crate::constants::CPU_MONITOR_TEST_SLEEP_MS));
         if let Ok(result) = monitor.sample() {
             assert!(result.is_none(), "Too-soon sample should be None");
         }

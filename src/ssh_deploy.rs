@@ -235,7 +235,7 @@ impl AgentDeployment {
         info!("Agent container started on {}: {}", host, container_id);
         
         // Wait a moment for container to start
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(crate::constants::CONTAINER_STARTUP_WAIT_SECS));
         
         // Verify container is running
         let check_cmd = format!("{} ps -q --filter id={}", runtime, container_id);

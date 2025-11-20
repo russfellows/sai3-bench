@@ -62,10 +62,95 @@ pub struct Config {
     /// This is runtime state and should not be serialized to YAML config files
     #[serde(skip)]
     pub live_stats_tracker: Option<std::sync::Arc<crate::live_stats::LiveStatsTracker>>,
+    
+    /// Optional error handling configuration (v0.8.0+)
+    /// Controls how workload handles I/O errors (retry, skip, or abort)
+    /// Default: ErrorHandlingConfig::default() (100 max errors, 5 errors/sec threshold)
+    #[serde(default)]
+    pub error_handling: ErrorHandlingConfig,
+}
+
+fn default_duration() -> std::time::Duration {
+    std::time::Duration::from_secs(crate::constants::DEFAULT_DURATION_SECS)
+}
+
+fn default_concurrency() -> usize {
+    crate::constants::DEFAULT_CONCURRENCY
+}
+
+/// Error handling configuration (v0.8.0+)
+/// 
+/// I/O errors are expected during benchmarking (network failures, timeouts, etc.)
+/// This configuration controls when the workload should abort vs. continue.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ErrorHandlingConfig {
+    /// Maximum total errors before aborting workload
+    /// Default: 100
+    #[serde(default = "default_max_errors")]
+    pub max_total_errors: u64,
+    
+    /// Error rate threshold (errors per second) to trigger backoff
+    /// When this rate is exceeded, workload backs off for backoff_duration
+    /// Default: 5.0 (5 errors/second)
+    #[serde(default = "default_error_rate_threshold")]
+    pub error_rate_threshold: f64,
+    
+    /// Duration to back off when error rate threshold is hit
+    /// Default: 5 seconds
+    #[serde(default = "default_backoff_duration", with = "humantime_serde")]
+    pub backoff_duration: std::time::Duration,
+    
+    /// Window for calculating error rate (seconds)
+    /// Default: 1 second
+    #[serde(default = "default_error_rate_window")]
+    pub error_rate_window: f64,
+    
+    /// Whether to retry failed operations or skip them
+    /// Default: false (skip and continue)
+    #[serde(default)]
+    pub retry_on_error: bool,
+    
+    /// Maximum retries per operation (only used if retry_on_error=true)
+    /// Default: 3
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for ErrorHandlingConfig {
+    fn default() -> Self {
+        Self {
+            max_total_errors: crate::constants::DEFAULT_MAX_ERRORS,
+            error_rate_threshold: crate::constants::DEFAULT_ERROR_RATE_THRESHOLD,
+            backoff_duration: crate::constants::DEFAULT_BACKOFF_DURATION,
+            error_rate_window: crate::constants::DEFAULT_ERROR_RATE_WINDOW,
+            retry_on_error: crate::constants::DEFAULT_RETRY_ON_ERROR,
+            max_retries: crate::constants::DEFAULT_MAX_RETRIES,
+        }
+    }
+}
+
+fn default_max_errors() -> u64 {
+    crate::constants::DEFAULT_MAX_ERRORS
+}
+
+fn default_error_rate_threshold() -> f64 {
+    crate::constants::DEFAULT_ERROR_RATE_THRESHOLD
+}
+
+fn default_backoff_duration() -> std::time::Duration {
+    crate::constants::DEFAULT_BACKOFF_DURATION
+}
+
+fn default_error_rate_window() -> f64 {
+    crate::constants::DEFAULT_ERROR_RATE_WINDOW
+}
+
+fn default_max_retries() -> u32 {
+    crate::constants::DEFAULT_MAX_RETRIES
 }
 
 /// Processing mode for parallel execution (v0.7.3+)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessingMode {
     /// Multiple OS processes (true isolation, pipes for IPC)
@@ -74,13 +159,8 @@ pub enum ProcessingMode {
     
     /// Multiple tokio runtimes in single process (cleaner, native channels)
     /// Better for: simplicity, debugging, when OS-level isolation not needed
+    #[default]
     MultiRuntime,
-}
-
-impl Default for ProcessingMode {
-    fn default() -> Self {
-        ProcessingMode::MultiRuntime
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -168,14 +248,6 @@ pub enum OpSpec {
         #[serde(default)]
         recursive: bool,
     },
-}
-
-fn default_duration() -> std::time::Duration {
-    std::time::Duration::from_secs(60)
-}
-
-fn default_concurrency() -> usize {
-    32  // Higher default for better throughput
 }
 
 /// Strategy for executing prepare phase with multiple ensure_objects entries
@@ -308,11 +380,11 @@ pub enum FillPattern {
 }
 
 fn default_min_size() -> u64 { 
-    1024 * 1024  // 1 MiB
+    crate::constants::DEFAULT_MIN_SIZE
 }
 
 fn default_max_size() -> u64 { 
-    1024 * 1024  // 1 MiB
+    crate::constants::DEFAULT_MAX_SIZE
 }
 
 fn default_fill() -> FillPattern { 
@@ -320,11 +392,11 @@ fn default_fill() -> FillPattern {
 }
 
 fn default_dedup_factor() -> usize {
-    1  // All unique blocks by default
+    crate::constants::DEFAULT_DEDUP_FACTOR
 }
 
 fn default_compress_factor() -> usize {
-    1  // Uncompressible (random) by default
+    crate::constants::DEFAULT_COMPRESS_FACTOR
 }
 
 impl Config {
@@ -600,19 +672,19 @@ fn default_range_engine_enabled() -> bool {
 }
 
 fn default_chunk_size() -> u64 {
-    64 * 1024 * 1024  // 64 MB
+    crate::constants::DEFAULT_CHUNK_SIZE
 }
 
 fn default_max_concurrent() -> usize {
-    16  // Safe default for concurrent range requests
+    crate::constants::DEFAULT_MAX_CONCURRENT
 }
 
 fn default_min_split_size() -> u64 {
-    16 * 1024 * 1024  // 16 MiB - matches s3dlio library default
+    crate::constants::DEFAULT_MIN_SPLIT_SIZE
 }
 
 fn default_range_timeout_secs() -> u64 {
-    30
+    crate::constants::DEFAULT_RANGE_TIMEOUT_SECS
 }
 
 /// Page cache behavior modes for file system operations (Linux/Unix posix_fadvise hints)
@@ -849,7 +921,7 @@ fn default_binary_path() -> String {
 }
 
 fn default_partition_overlap() -> f64 {
-    0.3  // 30% overlap
+    crate::constants::DEFAULT_PARTITION_OVERLAP
 }
 
 /// Directory tree creation mode for distributed testing

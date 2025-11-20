@@ -3,7 +3,6 @@
 // Integration test for the gRPC Agent and Controller binaries (PLAINTEXT mode).
 // We only exercise `ping` here to avoid requiring AWS credentials or S3 access.
 
-use assert_cmd::Command;
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command as StdCommand};
@@ -39,8 +38,7 @@ fn agent_and_controller_ping() {
     let addr = format!("127.0.0.1:{port}");
 
     // 2) Start the agent on that address (PLAINTEXT)
-    let agent_bin = Command::cargo_bin("sai3bench-agent").unwrap();
-    let agent: Child = StdCommand::new(agent_bin.get_program())
+    let agent: Child = StdCommand::new(assert_cmd::cargo::cargo_bin!("sai3bench-agent"))
         .arg("--listen")
         .arg(&addr)
         .spawn()
@@ -64,11 +62,8 @@ fn agent_and_controller_ping() {
         "agent didn't start listening at {addr} in time"
     );
 
-    // 4) Run the controller `ping` against the agent using --insecure
-    //    (the agent is PLAINTEXT in this test)
-    let output = Command::cargo_bin("sai3bench-ctl")
-        .unwrap()
-        .arg("--insecure")
+    // 4) Run the controller `ping` against the agent (plaintext/insecure is now default)
+    let output = StdCommand::new(assert_cmd::cargo::cargo_bin!("sai3bench-ctl"))
         .arg("--agents")
         .arg(&addr)
         .arg("ping")

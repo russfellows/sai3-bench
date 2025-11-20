@@ -8,7 +8,6 @@ use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::signal;
 use tokio::sync::{broadcast, Mutex, Semaphore};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{debug, error, info, warn};
@@ -69,13 +68,17 @@ struct AgentState {
     abort_tx: broadcast::Sender<()>,
     /// Current workload state
     state: Arc<Mutex<WorkloadState>>,
+    /// Error message (if state is Failed)
+    error_message: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum WorkloadState {
-    Idle,           // Ready to accept new workload
-    Running,        // Workload executing
-    Aborting,       // Abort requested, cleaning up
+    Idle,      // Ready to accept new workload
+    Ready,     // Validated, waiting for coordinated start (0-60s)
+    Running,   // Workload executing (includes prepare phase)
+    Failed,    // Validation or workload error (auto-resets to Idle)
+    Aborting,  // Abort requested, cleaning up (5-15s timeout)
 }
 
 impl AgentState {
@@ -84,7 +87,39 @@ impl AgentState {
         Self {
             abort_tx,
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
+            error_message: Arc::new(Mutex::new(None)),
         }
+    }
+    
+    /// Validate state transition before applying (5-state model)
+    fn can_transition(from: &WorkloadState, to: &WorkloadState) -> bool {
+        use WorkloadState::*;
+        matches!(
+            (from, to),
+            // Normal flow
+            (Idle, Ready)           // RPC arrives, validation passes
+            | (Idle, Failed)        // RPC arrives, validation fails
+            | (Ready, Running)      // Start time reached, spawn workload
+            | (Ready, Idle)         // Abort during coordinated start (no cleanup needed)
+            | (Running, Idle)       // Workload completed successfully
+            | (Running, Failed)     // Workload error
+            | (Running, Aborting)   // Abort signal during execution
+            | (Aborting, Idle)      // Cleanup complete
+            | (Failed, Idle)        // Auto-reset after sending error
+        )
+    }
+    
+    /// Transition to new state with validation and logging
+    async fn transition_to(&self, new_state: WorkloadState, reason: &str) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if !Self::can_transition(&*state, &new_state) {
+            let msg = format!("Invalid state transition: {:?} → {:?} (reason: {})", *state, new_state, reason);
+            error!("{}", msg);
+            return Err(msg);
+        }
+        info!("Agent state transition: {:?} → {:?} ({})", *state, new_state, reason);
+        *state = new_state;
+        Ok(())
     }
     
     async fn set_state(&self, new_state: WorkloadState) {
@@ -95,6 +130,16 @@ impl AgentState {
     
     async fn get_state(&self) -> WorkloadState {
         self.state.lock().await.clone()
+    }
+    
+    async fn set_error(&self, error: String) {
+        let mut err_msg = self.error_message.lock().await;
+        *err_msg = Some(error);
+    }
+    
+    async fn clear_error(&self) {
+        let mut err_msg = self.error_message.lock().await;
+        *err_msg = None;
     }
     
     /// Send abort signal to running workload
@@ -415,9 +460,28 @@ impl Agent for AgentSvc {
         // Create live stats tracker
         let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
         
+        // v0.7.5: Capture config_yaml for final summary conversion
+        let config_yaml_for_summary = config_yaml.clone();
+        
+        // Channel to signal completion with workload summary (v0.7.5)
+        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
+        
+        // v0.7.9: Channel to send prepare metrics from workload task to stream task
+        let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
+        
+        // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
+        let (tx_cancel, mut rx_cancel) = tokio::sync::oneshot::channel::<()>();
+        
+        // v0.7.11: Clone state for use in async contexts
+        let agent_state = self.state.clone();
+        
         // v0.7.6: VALIDATION PHASE - Check config before starting workload
         // This prevents silent failures and provides immediate feedback to controller
         if let Err(e) = validate_workload_config(&config).await {
+            // v0.7.13: Transition to Failed state
+            agent_state.transition_to(WorkloadState::Failed, "validation failed").await.ok();
+            agent_state.set_error(e.to_string()).await;
+            
             // Send ERROR status immediately and exit stream
             let error_stats = LiveStats {
                 agent_id: agent_id.clone(),
@@ -451,24 +515,12 @@ impl Agent for AgentSvc {
             
             let stream = async_stream::stream! {
                 yield Ok(error_stats);
+                // v0.7.13: Auto-reset to Idle after sending error
+                let _ = agent_state.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
+                agent_state.clear_error().await;
             };
             return Ok(Response::new(Box::pin(stream) as Self::RunWorkloadWithLiveStatsStream));
         }
-        
-        // v0.7.5: Capture config_yaml for final summary conversion
-        let config_yaml_for_summary = config_yaml.clone();
-        
-        // Channel to signal completion with workload summary (v0.7.5)
-        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
-        
-        // v0.7.9: Channel to send prepare metrics from workload task to stream task
-        let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
-        
-        // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
-        let (tx_cancel, mut rx_cancel) = tokio::sync::oneshot::channel::<()>();
-        
-        // v0.7.11: Clone state for use in async contexts
-        let agent_state = self.state.clone();
         
         // v0.7.12: Check current state - only accept new workload if Idle
         let current_state = agent_state.get_state().await;
@@ -479,8 +531,9 @@ impl Agent for AgentSvc {
             ));
         }
         
-        // v0.7.11: Set agent state to Running
-        agent_state.set_state(WorkloadState::Running).await;
+        // v0.7.13: Transition to Ready state (validation passed)
+        agent_state.transition_to(WorkloadState::Ready, "validation passed").await
+            .map_err(|e| Status::internal(format!("State transition failed: {}", e)))?;
         
         // v0.7.11: Initialize CPU monitor for utilization tracking
         let mut cpu_monitor = CpuMonitor::new();
@@ -534,11 +587,15 @@ impl Agent for AgentSvc {
                 tokio::select! {
                     _ = &mut rx_cancel => {
                         warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
+                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
+                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "disconnect during wait").await;
                         yield Err(Status::cancelled("Controller disconnected during coordinated start"));
                         return;  // Exit stream generator
                     }
                     _ = abort_rx.recv() => {
                         warn!("Agent {} aborted during coordinated start", agent_id_stream);
+                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
+                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "abort during wait").await;
                         yield Err(Status::aborted("Aborted during coordinated start"));
                         return;  // Exit stream generator
                     }
@@ -547,6 +604,14 @@ impl Agent for AgentSvc {
                     }
                 }
             }
+            
+            // v0.7.13: Transition to Running state (start time reached, spawn workload)
+            if let Err(e) = agent_state_stream.transition_to(WorkloadState::Running, "start time reached").await {
+                error!("Failed to transition to Running: {}", e);
+                yield Err(Status::internal(format!("State transition failed: {}", e)));
+                return;
+            }
+            
             info!("Starting workload execution for agent {}", agent_id_stream);
             
             // v0.7.6: NOW spawn the workload task (after READY sent and coordinated start)
@@ -775,14 +840,32 @@ impl Agent for AgentSvc {
                                     cpu_iowait_percent: cpu_util.iowait_percent,
                                     cpu_total_percent: cpu_util.total_percent,
                                 };
+                                
+                                // v0.7.13: Transition to Idle (workload completed successfully)
+                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "workload completed").await;
+                                
                                 yield Ok(final_stats);
                                 break;
                             }
                             Some(Err(e)) => {
+                                // v0.7.13: Transition to Failed, then auto-reset to Idle
+                                let _ = agent_state_stream.transition_to(WorkloadState::Failed, &e).await;
+                                agent_state_stream.set_error(e.clone()).await;
+                                
+                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
+                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
+                                agent_state_stream.clear_error().await;
+                                
                                 yield Err(Status::internal(e));
                                 break;
                             }
                             None => {
+                                // v0.7.13: Transition to Failed for unexpected termination
+                                let _ = agent_state_stream.transition_to(WorkloadState::Failed, "task terminated unexpectedly").await;
+                                
+                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
+                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
+                                
                                 yield Err(Status::internal("Workload task terminated unexpectedly"));
                                 break;
                             }
@@ -796,8 +879,8 @@ impl Agent for AgentSvc {
             info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
             let _ = tx_cancel.send(());
             
-            // v0.7.11: Reset agent state to Idle after stream completes
-            agent_state_stream.set_state(WorkloadState::Idle).await;
+            // v0.7.13: Reset agent state to Idle after stream completes
+            let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
             info!("Agent {} reset to Idle state, ready for next workload", agent_id_stream);
         };
 
@@ -809,9 +892,15 @@ impl Agent for AgentSvc {
         let current_state = self.state.get_state().await;
         
         match current_state {
-            WorkloadState::Running => {
+            WorkloadState::Running | WorkloadState::Ready => {
                 warn!("⚠️  Abort workload requested - sending cancellation signal");
-                self.state.set_state(WorkloadState::Aborting).await;
+                
+                // v0.7.13: Transition to Aborting state
+                if let Err(e) = self.state.transition_to(WorkloadState::Aborting, "abort RPC received").await {
+                    error!("Failed to transition to Aborting: {}", e);
+                    return Err(Status::internal(format!("State transition failed: {}", e)));
+                }
+                
                 self.state.send_abort();
                 
                 // v0.7.12: Reset to Idle after workload cleanup with retry logic
@@ -823,7 +912,7 @@ impl Agent for AgentSvc {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     let current = state_for_reset.get_state().await;
                     if current == WorkloadState::Aborting {
-                        state_for_reset.set_state(WorkloadState::Idle).await;
+                        let _ = state_for_reset.transition_to(WorkloadState::Idle, "abort timeout 5s").await;
                         info!("⏰ Abort timeout (5s) - reset agent to Idle state (workload cleanup complete)");
                     } else if current == WorkloadState::Idle {
                         debug!("Agent already reset to Idle via stream cleanup");
@@ -837,6 +926,7 @@ impl Agent for AgentSvc {
                     let retry_state = state_for_reset.get_state().await;
                     if retry_state == WorkloadState::Aborting || retry_state == WorkloadState::Running {
                         warn!("⚠️  Agent stuck in {:?} state after 15s - forcing reset to Idle", retry_state);
+                        // Force transition (may violate state machine, but recovery needed)
                         state_for_reset.set_state(WorkloadState::Idle).await;
                         info!("⏰ Abort retry (15s) - forced agent to Idle state");
                     }
@@ -848,8 +938,8 @@ impl Agent for AgentSvc {
                 warn!("⚠️  Abort already in progress");
                 Ok(Response::new(Empty {}))
             }
-            WorkloadState::Idle => {
-                info!("Abort requested but agent is idle");
+            WorkloadState::Idle | WorkloadState::Failed => {
+                info!("Abort requested but agent is idle or failed");
                 Ok(Response::new(Empty {}))
             }
         }
@@ -1223,6 +1313,23 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     Ok(())
 }
 
+/// v0.7.13: Wait for shutdown signals (SIGINT or SIGTERM)
+/// 
+/// Returns signal name for logging. Provides graceful shutdown on Ctrl-C or systemd/Docker stop.
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    
+    let mut sigint = signal(SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -1255,10 +1362,12 @@ async fn main() -> Result<()> {
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::new(agent_state)))
             .serve_with_shutdown(addr, async {
-                let _ = signal::ctrl_c().await;
+                let sig = wait_for_shutdown_signal().await;
+                info!("Received {} - initiating graceful shutdown", sig);
             })
             .await
             .context("tonic server failed")?;
+        info!("Agent shutdown complete");
         return Ok(());
     }
 
@@ -1311,11 +1420,13 @@ async fn main() -> Result<()> {
         .tls_config(tls)?
         .add_service(AgentServer::new(AgentSvc::new(agent_state)))
         .serve_with_shutdown(addr, async {
-            let _ = signal::ctrl_c().await;
+            let sig = wait_for_shutdown_signal().await;
+            info!("Received {} - initiating graceful shutdown", sig);
         })
         .await
         .context("tonic server (TLS) failed")?;
-
+    
+    info!("Agent shutdown complete");
     Ok(())
 }
 

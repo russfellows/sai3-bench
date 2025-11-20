@@ -1,9 +1,10 @@
 // src/bin/controller.rs
 
-use anyhow::{Context, Result, bail};
+use anyhow::{anyhow, Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
@@ -11,8 +12,8 @@ use tracing::{debug, error, info, warn};
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
-// Import BUCKET_LABELS from metrics module
-use sai3_bench::metrics::BUCKET_LABELS;
+// Import BUCKET_LABELS from constants module
+use sai3_bench::constants::BUCKET_LABELS;
 
 pub mod pb {
     pub mod iobench {
@@ -22,6 +23,140 @@ pub mod pb {
 
 use pb::iobench::agent_client::AgentClient;
 use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+
+/// v0.7.13: Controller's view of agent states
+/// 
+/// Controller tracks more states than agents report because it sees the full lifecycle:
+/// - Connecting: Stream opened, waiting for first message
+/// - Validating: First message received, validation in progress
+/// - Ready: Agent sent READY(1) status
+/// - Preparing: In prepare phase (in_prepare_phase=true)
+/// - Running: Executing workload (RUNNING(2) status)
+/// - Completed: Workload finished successfully
+/// - Failed: Agent sent ERROR(3) status or validation failed
+/// - Disconnected: Stream closed unexpectedly or timeout
+/// - Aborting: Abort RPC sent, waiting for cleanup
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControllerAgentState {
+    Connecting,   // Stream opened
+    Validating,   // First message, validation in progress
+    Ready,        // READY(1) received
+    Preparing,    // in_prepare_phase=true
+    Running,      // RUNNING(2) received
+    Completed,    // Workload done
+    Failed,       // ERROR(3) received
+    Disconnected, // Stream closed or timeout
+    Aborting,     // Abort sent
+}
+
+impl ControllerAgentState {
+    /// Check if transition from current state to new state is valid
+    fn can_transition(from: &Self, to: &Self) -> bool {
+        use ControllerAgentState::*;
+        matches!(
+            (from, to),
+            // Startup sequence
+            (Connecting, Validating) // First message
+            | (Validating, Ready)      // Validation passes
+            | (Validating, Failed)     // Validation fails
+            // Normal execution
+            | (Ready, Preparing)       // Prepare phase starts
+            | (Ready, Running)         // No prepare, direct to running
+            | (Preparing, Running)     // Prepare → workload
+            | (Running, Completed)     // Success
+            | (Running, Failed)        // Error
+            // Disconnect/timeout
+            | (Connecting, Disconnected)
+            | (Validating, Disconnected)
+            | (Ready, Disconnected)
+            | (Preparing, Disconnected)
+            | (Running, Disconnected)
+            // Abort paths
+            | (Ready, Aborting)
+            | (Preparing, Aborting)
+            | (Running, Aborting)
+            | (Aborting, Completed)    // Cleanup done
+            | (Aborting, Failed)       // Abort failed
+            | (Aborting, Disconnected) // Lost during abort
+            // Stay in terminal states
+            | (Completed, Completed)
+            | (Failed, Failed)
+            | (Disconnected, Disconnected)
+        )
+    }
+}
+
+/// v0.7.13: Tracks state and metadata for a single agent
+/// 
+/// Replaces ad-hoc HashSets (ready_agents, completed_agents, dead_agents)
+/// with structured state tracking and validation.
+struct AgentTracker {
+    agent_id: String,
+    state: ControllerAgentState,
+    last_seen: std::time::Instant,
+    error_message: Option<String>,
+    latest_stats: Option<LiveStats>,
+}
+
+impl AgentTracker {
+    fn new(agent_id: String) -> Self {
+        Self {
+            agent_id,
+            state: ControllerAgentState::Connecting,  // v0.7.13: Stream opened, waiting for first message
+            last_seen: std::time::Instant::now(),
+            error_message: None,
+            latest_stats: None,
+        }
+    }
+
+    /// Attempt to transition to new state with validation and logging
+    fn transition_to(&mut self, new_state: ControllerAgentState, reason: &str) -> Result<()> {
+        if !ControllerAgentState::can_transition(&self.state, &new_state) {
+            let msg = format!(
+                "Invalid agent state transition: {:?} → {:?} ({})",
+                self.state, new_state, reason
+            );
+            error!("❌ Agent {}: {}", self.agent_id, msg);
+            return Err(anyhow::anyhow!(msg));
+        }
+
+        debug!(
+            "Agent {} state: {:?} → {:?} ({})",
+            self.agent_id, self.state, new_state, reason
+        );
+        self.state = new_state;
+        self.last_seen = std::time::Instant::now();
+        Ok(())
+    }
+
+    /// Update last seen timestamp (for timeout detection)
+    fn touch(&mut self) {
+        self.last_seen = std::time::Instant::now();
+    }
+
+    /// Check if agent is in a terminal state (won't send more updates)
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            ControllerAgentState::Completed
+                | ControllerAgentState::Failed
+                | ControllerAgentState::Disconnected
+        )
+    }
+
+    /// Check if agent is active (should be sending updates)
+    fn is_active(&self) -> bool {
+        matches!(
+            self.state,
+            ControllerAgentState::Preparing | ControllerAgentState::Running
+        )
+    }
+
+    /// Get time since last message (for timeout detection)
+    fn time_since_last_seen(&self) -> std::time::Duration {
+        self.last_seen.elapsed()
+    }
+}
 
 /// v0.7.5: Aggregator for live stats from multiple agents
 /// 
@@ -493,11 +628,22 @@ enum Commands {
 // v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
 async fn abort_all_agents(
     agent_addrs: &[String],
+    agent_trackers: &mut std::collections::HashMap<String, AgentTracker>,
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
 ) {
     eprintln!("⚠️  Sending abort signal to all agents...");
+    
+    // v0.7.13: Transition active agents to Aborting state
+    for addr in agent_addrs {
+        if let Some(tracker) = agent_trackers.get_mut(addr) {
+            if matches!(tracker.state, ControllerAgentState::Ready | ControllerAgentState::Preparing | ControllerAgentState::Running) {
+                let _ = tracker.transition_to(ControllerAgentState::Aborting, "abort RPC sent");
+            }
+        }
+    }
+    
     let mut abort_tasks = Vec::new();
     
     for addr in agent_addrs {
@@ -725,7 +871,15 @@ async fn main() -> Result<()> {
             
             // v0.7.12: Use comprehensive validation display (same as standalone binary)
             if *dry_run {
+                // v0.7.13: Validate workload configuration FIRST (before printing "Configuration is valid")
+                if let Err(e) = validate_workload_config(&parsed_config).await {
+                    eprintln!("❌ Configuration validation failed: {}", e);
+                    bail!("Configuration validation failed: {}", e);
+                }
+                
+                // Only print full summary with "Configuration is valid" if validation passed
                 sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
+                
                 return Ok(());
             }
             
@@ -780,6 +934,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// v0.7.13: Wait for shutdown signals (SIGINT or SIGTERM)
+/// 
+/// Returns signal name for logging. Provides graceful shutdown on Ctrl-C or systemd/Docker stop.
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    
+    let mut sigint = signal(SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
 }
 
 /// Execute a distributed workload across multiple agents
@@ -1010,15 +1181,45 @@ async fn run_distributed_workload(
             
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
-            while let Some(stats_result) = stream.message().await? {
-                stats_count += 1;
-                debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
-                       stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
-                       stats_result.get_bytes + stats_result.put_bytes);
-                if let Err(e) = tx.send(stats_result).await {
-                    error!("Failed to forward stats from agent {}: {}", addr, e);
-                    break;
+            let stream_result: Result<(), anyhow::Error> = async {
+                while let Some(stats_result) = stream.message().await? {
+                    stats_count += 1;
+                    debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
+                           stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
+                           stats_result.get_bytes + stats_result.put_bytes);
+                    if let Err(e) = tx.send(stats_result).await {
+                        error!("Failed to forward stats from agent {}: {}", addr, e);
+                        break;
+                    }
                 }
+                Ok(())
+            }.await;
+            
+            // v0.7.12: Handle stream errors by sending error status message
+            if let Err(e) = stream_result {
+                error!("Agent {} stream error: {}", agent_id, e);
+                // Send error message to controller so it knows agent failed
+                let error_stats = pb::iobench::LiveStats {
+                    agent_id: agent_id.clone(),
+                    timestamp_s: 0.0,
+                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                    meta_ops: 0, meta_mean_us: 0.0,
+                    elapsed_s: 0.0,
+                    completed: true,
+                    final_summary: None,
+                    status: 3,  // ERROR
+                    error_message: format!("Agent workload failed: {}", e),
+                    in_prepare_phase: false,
+                    prepare_objects_created: 0,
+                    prepare_objects_total: 0,
+                    prepare_summary: None,
+                    cpu_user_percent: 0.0,
+                    cpu_system_percent: 0.0,
+                    cpu_iowait_percent: 0.0,
+                    cpu_total_percent: 0.0,
+                };
+                let _ = tx.send(error_stats).await;
             }
             
             info!("Agent {} stream completed with {} updates", addr, stats_count);
@@ -1034,11 +1235,14 @@ async fn run_distributed_workload(
     info!("Streaming from {} agents", stream_handles.len());
     drop(tx_stats);  // v0.7.6: Drop original sender so channel closes when all tasks complete
     
-    // v0.7.6: STARTUP HANDSHAKE - Track agent readiness
+    // v0.7.13: STARTUP HANDSHAKE - Track agent state with formal state machine
     let expected_agent_count = stream_handles.len();
-    let mut agent_status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut ready_agents = std::collections::HashSet::new();
-    let mut error_agents: Vec<(String, String)> = Vec::new();
+    let mut agent_trackers: std::collections::HashMap<String, AgentTracker> = std::collections::HashMap::new();
+    
+    // Initialize trackers for all expected agents (agent_addrs are "host:port" strings)
+    for agent_id in agent_addrs {
+        agent_trackers.insert(agent_id.clone(), AgentTracker::new(agent_id.clone()));
+    }
     
     // v0.7.6: Stream forwarding tasks are already running (messages forwarded immediately)
     // Just wait for them to complete in background
@@ -1050,9 +1254,9 @@ async fn run_distributed_workload(
         });
     }
     
-    // Setup Ctrl+C handler
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    // v0.7.13: Setup signal handlers (SIGINT, SIGTERM)
+    let shutdown_signal = wait_for_shutdown_signal();
+    tokio::pin!(shutdown_signal);
     
     eprintln!("⏳ Waiting for agents to validate configuration...");
     // v0.7.11: Robust startup with retries - scale timeout with agent count
@@ -1065,57 +1269,96 @@ async fn run_distributed_workload(
     let mut progress_interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
     progress_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     
-    // v0.7.6: Wait for READY/ERROR status from all agents
+    // v0.7.13: Wait for READY/ERROR status from all agents with state tracking
     'startup: loop {
         tokio::select! {
             Some(stats) = rx_stats.recv() => {
-                // Check status field
+                // Get or create tracker for this agent
+                let tracker = agent_trackers
+                    .entry(stats.agent_id.clone())
+                    .or_insert_with(|| AgentTracker::new(stats.agent_id.clone()));
+                
+                // First message - transition from Connecting to Validating
+                if tracker.state == ControllerAgentState::Connecting {
+                    let _ = tracker.transition_to(ControllerAgentState::Validating, "first message received");
+                }
+                
+                // Check status field and update state
                 match stats.status {
                     1 => {  // READY
-                        agent_status.insert(stats.agent_id.clone(), "READY".to_string());
-                        ready_agents.insert(stats.agent_id.clone());
+                        if let Err(e) = tracker.transition_to(ControllerAgentState::Ready, "READY status received") {
+                            warn!("Failed to transition agent {} to Ready: {}", stats.agent_id, e);
+                        }
                         eprintln!("  ✅ {} ready", stats.agent_id);
                     }
                     3 => {  // ERROR
-                        agent_status.insert(stats.agent_id.clone(), "ERROR".to_string());
-                        error_agents.push((stats.agent_id.clone(), stats.error_message.clone()));
+                        tracker.error_message = Some(stats.error_message.clone());
+                        if let Err(e) = tracker.transition_to(ControllerAgentState::Failed, "ERROR status received") {
+                            warn!("Failed to transition agent {} to Failed: {}", stats.agent_id, e);
+                        }
                         eprintln!("  ❌ {} error: {}", stats.agent_id, stats.error_message);
                     }
                     _ => {
                         // Unexpected status during startup (RUNNING/COMPLETED)
-                        // This shouldn't happen, but treat as ready
-                        if !ready_agents.contains(&stats.agent_id) && !error_agents.iter().any(|(a, _)| a == &stats.agent_id) {
-                            agent_status.insert(stats.agent_id.clone(), "READY".to_string());
-                            ready_agents.insert(stats.agent_id.clone());
+                        // This shouldn't happen, but treat as ready if not already in terminal state
+                        if !tracker.is_terminal() && tracker.state != ControllerAgentState::Ready {
+                            if let Err(e) = tracker.transition_to(ControllerAgentState::Ready, "unexpected status during startup") {
+                                warn!("Failed to transition agent {} to Ready: {}", stats.agent_id, e);
+                            }
                         }
                     }
                 }
                 
-                // Check if all agents have responded
-                if agent_status.len() >= expected_agent_count {
+                tracker.touch();  // Update last seen
+                
+                // Check if all agents have responded (Ready or Failed)
+                let responded = agent_trackers.values()
+                    .filter(|t| t.state == ControllerAgentState::Ready || t.state == ControllerAgentState::Failed)
+                    .count();
+                if responded >= expected_agent_count {
                     break 'startup;
                 }
             }
             _ = progress_interval.tick() => {
-                // v0.7.11: Periodic progress update showing which agents are still pending
+                // v0.7.13: Periodic progress update showing which agents are still pending
                 let elapsed = startup_deadline.duration_since(tokio::time::Instant::now());
-                if agent_status.len() < expected_agent_count {
+                let responded = agent_trackers.values()
+                    .filter(|t| t.state == ControllerAgentState::Ready || t.state == ControllerAgentState::Failed)
+                    .count();
+                if responded < expected_agent_count {
                     eprintln!("  ⏳ {}/{} agents ready, {} remaining ({:.0}s timeout remaining)", 
-                             agent_status.len(), expected_agent_count, 
-                             expected_agent_count - agent_status.len(),
+                             responded, expected_agent_count, 
+                             expected_agent_count - responded,
                              elapsed.as_secs_f64());
                 }
             }
             _ = tokio::time::sleep_until(startup_deadline) => {
                 eprintln!("\n❌ Startup timeout: Not all agents responded within {}s", startup_timeout.as_secs());
-                eprintln!("Agent status ({}/{}):", agent_status.len(), expected_agent_count);
-                for (agent_id, status) in &agent_status {
-                    let icon = if status == "READY" { "✅" } else { "❌" };
-                    eprintln!("  {} {}: {}", icon, agent_id, status);
+                
+                // Count agents by state
+                let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
+                let failed_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Failed).count();
+                let connecting_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Connecting).count();
+                
+                eprintln!("Agent status: {} ready, {} failed, {} no response", ready_count, failed_count, connecting_count);
+                
+                // Show per-agent status
+                for tracker in agent_trackers.values() {
+                    let (icon, status) = match tracker.state {
+                        ControllerAgentState::Ready => ("✅", "ready"),
+                        ControllerAgentState::Failed => ("❌", "failed"),
+                        ControllerAgentState::Connecting => ("⏱️", "no response"),
+                        _ => ("⚠️", "unexpected"),
+                    };
+                    if tracker.state == ControllerAgentState::Failed {
+                        eprintln!("  {} {}: {} - {}", icon, tracker.agent_id, status, 
+                                 tracker.error_message.as_ref().unwrap_or(&"unknown error".to_string()));
+                    } else {
+                        eprintln!("  {} {}: {}", icon, tracker.agent_id, status);
+                    }
                 }
-                let missing_count = expected_agent_count - agent_status.len();
-                if missing_count > 0 {
-                    eprintln!("  ⏱️  {} agent(s) did not respond", missing_count);
+                
+                if connecting_count > 0 {
                     eprintln!("\n💡 Troubleshooting:");
                     eprintln!("  - Verify agents are running: check agent logs");
                     eprintln!("  - Check network connectivity to agents");
@@ -1123,48 +1366,64 @@ async fn run_distributed_workload(
                     eprintln!("  - Consider increasing timeout for large agent counts");
                 }
                 
-                // v0.7.11: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                // v0.7.13: Abort all agents to prevent orphaned workload execution
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
                 anyhow::bail!("Agent startup validation timeout");
             }
-            _ = &mut ctrl_c => {
-                eprintln!("\n⚠️  Interrupted during startup");
+            _ = &mut shutdown_signal => {
+                let sig = shutdown_signal.await;
+                eprintln!("\n⚠️  Received {} during startup", sig);
                 
-                // v0.7.11: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                // v0.7.13: Abort all agents to prevent orphaned workload execution
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
-                anyhow::bail!("Interrupted by user");
+                anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }
     
-    // Check if any agents reported errors
-    if !error_agents.is_empty() {
-        eprintln!("\n❌ {} agent(s) failed configuration validation:", error_agents.len());
-        for (agent_id, error_msg) in &error_agents {
+    // v0.7.13: Check if any agents reported errors
+    let failed_agents: Vec<_> = agent_trackers.values()
+        .filter(|t| t.state == ControllerAgentState::Failed)
+        .map(|t| (t.agent_id.clone(), t.error_message.clone()))
+        .collect();
+    
+    if !failed_agents.is_empty() {
+        eprintln!("\n❌ {} agent(s) failed configuration validation:", failed_agents.len());
+        for (agent_id, error_msg_opt) in &failed_agents {
+            let error_msg = error_msg_opt.as_deref().unwrap_or("unknown error");
             eprintln!("  ❌ {}: {}", agent_id, error_msg);
         }
-        eprintln!("\nReady agents: {}/{}", ready_agents.len(), expected_agent_count);
-        for agent_id in &ready_agents {
-            eprintln!("  ✅ {}", agent_id);
+        
+        let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
+        eprintln!("\nReady agents: {}/{}", ready_count, expected_agent_count);
+        for tracker in agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready) {
+            eprintln!("  ✅ {}", tracker.agent_id);
         }
         
-        // v0.7.11: Abort all agents to prevent orphaned workload execution
-        abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+        // v0.7.13: Abort all agents to prevent orphaned workload execution
+        abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
         
-        anyhow::bail!("{} agent(s) failed startup validation", error_agents.len());
+        anyhow::bail!("{} agent(s) failed startup validation", failed_agents.len());
     }
     
-    eprintln!("✅ All {} agents ready - starting workload execution\n", ready_agents.len());
+    let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
+    eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
-    // v0.7.12: Show countdown to coordinated start (AFTER agents are ready)
+    // v0.7.13: Show countdown to coordinated start (suspend progress bar during countdown)
     if total_delay_secs > 0 {
-        for remaining in (1..=total_delay_secs).rev() {
-            eprintln!("⏳ Starting in {}s...", remaining);
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        eprintln!("✅ Starting workload now!\n");
+        progress_bar.suspend(|| {
+            for remaining in (1..=total_delay_secs).rev() {
+                eprint!("\r⏳ Starting in {}s...  ", remaining);
+                std::io::stderr().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            eprint!("\r⏳ Starting in 0s...  ");
+            std::io::stderr().flush().unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            eprintln!("\n✅ Starting workload now!\n");
+        });
     }
     
     // v0.7.6: Track workload start time for progress bar position
@@ -1174,11 +1433,9 @@ async fn run_distributed_workload(
     // Aggregator for live stats display
     let mut aggregator = LiveStatsAggregator::new();
     let mut last_update = std::time::Instant::now();
-    let mut completed_agents = std::collections::HashSet::new();
     
-    // v0.7.5: Resilience - track per-agent activity for timeout detection
-    let mut agent_last_seen: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
-    let mut dead_agents = std::collections::HashSet::new();
+    // v0.7.13: agent_trackers already initialized above for startup phase
+    // Continue using it for workload execution (replaces completed_agents, dead_agents, agent_last_seen)
     let timeout_warn_secs = 5.0;
     let timeout_dead_secs = 10.0;
     
@@ -1196,37 +1453,64 @@ async fn run_distributed_workload(
     
     // Process live stats stream
     loop {
-        // v0.7.5: Check for stalled agents (timeout detection)
-        let now = std::time::Instant::now();
-        for (agent_id, last_seen) in &agent_last_seen {
-            if dead_agents.contains(agent_id) || completed_agents.contains(agent_id) {
-                continue;  // Skip already dead or completed agents
+        // v0.7.13: Check for stalled agents (timeout detection) using agent_trackers
+        let mut any_disconnected = false;
+        for tracker in agent_trackers.values_mut() {
+            if tracker.is_terminal() {
+                continue;  // Skip terminal states (Completed, Failed, Disconnected)
             }
             
-            let elapsed = now.duration_since(*last_seen).as_secs_f64();
+            if !tracker.is_active() {
+                continue;  // Skip non-active states (not Preparing/Running)
+            }
+            
+            let elapsed = tracker.time_since_last_seen().as_secs_f64();
             if elapsed >= timeout_dead_secs {
-                if !dead_agents.contains(agent_id) {
-                    error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DEAD", agent_id, elapsed);
-                    dead_agents.insert(agent_id.clone());
-                    aggregator.mark_completed(agent_id);  // Remove from active count
-                    progress_bar.set_message(format!("{} (⚠️ {} dead)", aggregator.aggregate().format_progress(), dead_agents.len()));
+                if tracker.state != ControllerAgentState::Disconnected {
+                    error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DISCONNECTED", tracker.agent_id, elapsed);
+                    let _ = tracker.transition_to(ControllerAgentState::Disconnected, "timeout");
+                    aggregator.mark_completed(&tracker.agent_id);  // Remove from active count
+                    any_disconnected = true;
                 }
             } else if elapsed >= timeout_warn_secs {
-                warn!("⚠️  Agent {} delayed: no updates for {:.1}s", agent_id, elapsed);
+                warn!("⚠️  Agent {} delayed: no updates for {:.1}s", tracker.agent_id, elapsed);
             }
+        }
+        
+        // Update progress bar if we detected any disconnections
+        if any_disconnected {
+            let dead_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Disconnected).count();
+            progress_bar.set_message(format!("{} (⚠️ {} dead)", aggregator.aggregate().format_progress(), dead_count));
         }
         
         tokio::select! {
             stats_opt = rx_stats.recv() => {
                 match stats_opt {
                     Some(stats) => {
-                        // v0.7.5: Update last seen timestamp for resilience
-                        agent_last_seen.insert(stats.agent_id.clone(), std::time::Instant::now());
+                        // v0.7.13: Update tracker for this agent
+                        let tracker = agent_trackers
+                            .entry(stats.agent_id.clone())
+                            .or_insert_with(|| AgentTracker::new(stats.agent_id.clone()));
+                        
+                        tracker.touch();  // Update last seen timestamp
+                        tracker.latest_stats = Some(stats.clone());
                         
                         // v0.7.9: Capture prepare phase info BEFORE moving stats
                         let in_prepare = stats.in_prepare_phase;
                         let prepare_created = stats.prepare_objects_created;
                         let prepare_total = stats.prepare_objects_total;
+                        
+                        // v0.7.13: Update agent state based on prepare phase
+                        if in_prepare && (tracker.state == ControllerAgentState::Ready || tracker.state == ControllerAgentState::Running) {
+                            if tracker.state != ControllerAgentState::Preparing {
+                                let _ = tracker.transition_to(ControllerAgentState::Preparing, "prepare phase started");
+                            }
+                        } else if !in_prepare && tracker.state == ControllerAgentState::Preparing {
+                            let _ = tracker.transition_to(ControllerAgentState::Running, "workload phase started");
+                        } else if !in_prepare && tracker.state == ControllerAgentState::Ready {
+                            // No prepare phase, direct to running
+                            let _ = tracker.transition_to(ControllerAgentState::Running, "workload started (no prepare)");
+                        }
                         
                         // v0.7.9: Detect transition from prepare to workload and reset aggregator
                         if was_in_prepare_phase && !in_prepare {
@@ -1241,7 +1525,20 @@ async fn run_distributed_workload(
                         
                         // v0.7.5: Extract final summary if completed
                         if stats.completed {
-                            completed_agents.insert(stats.agent_id.clone());
+                            // v0.7.13: Check if agent completed with error (status 3)
+                            if stats.status == 3 && !stats.error_message.is_empty() {
+                                error!("❌ Agent {} FAILED: {}", stats.agent_id, stats.error_message);
+                                tracker.error_message = Some(stats.error_message.clone());
+                                let _ = tracker.transition_to(ControllerAgentState::Failed, "error status received");
+                                aggregator.mark_completed(&stats.agent_id);
+                                progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, stats.error_message));
+                                // Abort all agents and exit
+                                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+                                anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, stats.error_message);
+                            }
+                            
+                            // Success case
+                            let _ = tracker.transition_to(ControllerAgentState::Completed, "workload completed");
                             aggregator.mark_completed(&stats.agent_id);
                             
                             // Extract and store final summary for persistence
@@ -1265,23 +1562,23 @@ async fn run_distributed_workload(
                         // Update display every 100ms (rate limiting)
                         if last_update.elapsed() > std::time::Duration::from_millis(100) {
                             let agg = aggregator.aggregate();
+                            let dead_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Disconnected).count();
                             
                             // v0.7.9: Use captured prepare phase info
                             let msg = if in_prepare && prepare_total > 0 {
                                 // Show prepare progress as "created/total (percentage)"
                                 let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
-                                if dead_agents.is_empty() {
+                                if dead_count == 0 {
                                     format!("📦 Preparing: {}/{} objects ({}%)\n{}", 
                                             prepare_created, prepare_total, pct, agg.format_progress())
                                 } else {
-                                    format!("📦 Preparing: {}/{} objects ({}
-%) (⚠️ {} dead)\n{}", 
-                                            prepare_created, prepare_total, pct, dead_agents.len(), agg.format_progress())
+                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead)\n{}", 
+                                            prepare_created, prepare_total, pct, dead_count, agg.format_progress())
                                 }
-                            } else if dead_agents.is_empty() {
+                            } else if dead_count == 0 {
                                 agg.format_progress()
                             } else {
-                                format!("{} (⚠️ {} dead)", agg.format_progress(), dead_agents.len())
+                                format!("{} (⚠️ {} dead)", agg.format_progress(), dead_count)
                             };
                             progress_bar.set_message(msg.clone());
                             
@@ -1345,12 +1642,13 @@ async fn run_distributed_workload(
                 // Check logic is at top of loop
             }
             
-            _ = &mut ctrl_c => {
-                warn!("Ctrl+C received, aborting all agents");
-                progress_bar.finish_with_message("Interrupted by user - aborting agents...");
+            _ = &mut shutdown_signal => {
+                let sig = shutdown_signal.await;
+                warn!("Received {} - aborting all agents", sig);
+                progress_bar.finish_with_message(format!("Interrupted by {} - aborting agents...", sig));
                 
-                // v0.7.12: Abort all agents to stop running workload and reset state
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                // v0.7.13: Abort all agents to stop running workload and reset state
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
                 // Cleanup deployments if any
                 if !deployments.is_empty() {
@@ -1358,7 +1656,7 @@ async fn run_distributed_workload(
                     let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
                 }
                 
-                anyhow::bail!("Interrupted by Ctrl+C");
+                anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }
@@ -1805,7 +2103,7 @@ fn create_consolidated_prepare_tsv(
         let ops_per_sec = count as f64 / total_wall_seconds;
         let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
         
-        let bucket_label = sai3_bench::metrics::BUCKET_LABELS[idx];
+        let bucket_label = BUCKET_LABELS[idx];
         
         writeln!(
             writer,
@@ -2139,3 +2437,64 @@ fn is_shared_uri(uri: &str) -> bool {
         // Users can override with --shared-prepare if using NFS
 }
 
+/// v0.7.13: Validate workload configuration before execution
+/// Checks for common errors that would cause workload startup to fail
+/// This is the same validation that agents perform, so dry-run catches errors early
+async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result<()> {
+    use sai3_bench::config::OpSpec;
+    
+    // Check that workload has operations configured
+    if config.workload.is_empty() {
+        bail!("No operations configured in workload");
+    }
+    
+    // Validate each operation
+    for weighted_op in &config.workload {
+        match &weighted_op.spec {
+            OpSpec::Get { path } => {
+                // For file:// backends, verify files exist
+                if path.starts_with("file://") {
+                    let file_path = path.replace("file://", "");
+                    // Check if it's a glob pattern
+                    if file_path.contains('*') {
+                        let paths: Vec<_> = glob::glob(&file_path)
+                            .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", path, e))?
+                            .collect();
+                        if paths.is_empty() {
+                            bail!("No files found matching GET pattern: {}", path);
+                        }
+                    }
+                }
+            }
+            OpSpec::Put { path, object_size, size_spec, .. } => {
+                // PUT operations need size configuration
+                if object_size.is_none() && size_spec.is_none() {
+                    bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
+                }
+            }
+            OpSpec::Delete { path } => {
+                // Delete needs a valid path
+                if path.is_empty() {
+                    bail!("DELETE operation requires non-empty path");
+                }
+            }
+            OpSpec::List { path } => {
+                // List needs a valid path
+                if path.is_empty() {
+                    bail!("LIST operation requires non-empty path");
+                }
+            }
+            OpSpec::Stat { path } => {
+                // Stat needs a valid path
+                if path.is_empty() {
+                    bail!("STAT operation requires non-empty path");
+                }
+            }
+            _ => {
+                // Other operations (if any) are assumed valid
+            }
+        }
+    }
+    
+    Ok(())
+}

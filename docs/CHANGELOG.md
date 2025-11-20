@@ -2,6 +2,119 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.8.0] - 2025-11-20
+
+### 🎯 Major Release: Formal State Machines, Error Handling, and Production Readiness
+
+**This is a significant release** focused on production-quality error handling, formal state management, and improved reliability for distributed workloads.
+
+#### Formal State Machines (v0.8.0)
+
+**Agent State Machine** - 5 states with validated transitions:
+- **States**: Idle → Ready → Running → (Completed/Failed) → Idle
+- **Aborting state**: Special handling for graceful shutdown
+- **Auto-reset**: Agents automatically reset from Failed → Idle after errors
+  - Agents can accept new requests immediately without restart
+  - No more "agent in Failed state" rejections after transient errors
+- **Transition validation**: Invalid state changes logged and rejected
+- **Thread-safe**: All state changes use Arc<Mutex<>> for concurrent access
+
+**Controller Agent Tracking** - 9 states for comprehensive lifecycle management:
+- **States**: Connecting → Validating → Ready → Running → Completed/Failed/Disconnected/Stalled/Aborting
+- **Timeout detection**: Agents marked as Stalled after 10s of no updates
+- **Disconnection tracking**: Separate state for agents that disconnect mid-workload
+- **Centralized logic**: Single ControllerAgentState enum replaces 3 separate HashMaps
+
+#### Comprehensive Error Handling (v0.8.0)
+
+**ErrorTracker** - Thread-safe error tracking across workers:
+- **Configurable thresholds**:
+  - `max_errors`: Total error limit (default: 1000)
+  - `max_error_rate`: Errors/second limit (default: 10.0)
+  - `max_retries`: Retry attempts per operation (default: 3)
+- **Automatic backoff**: High error rate triggers operation skipping
+- **Per-operation retry logic**: Failed operations retry with exponential backoff
+- **Error rate calculation**: Real-time errors/second tracking
+
+**Improved Logging** - Context-aware verbosity levels:
+- **Default (warn/error)**: Critical failures, threshold exceeded, high error rate
+- **-v (info)**: Retry attempts with 🔄 emoji indicators
+- **-vv (debug)**: Individual errors with full context and operation details
+- **Emoji-coded messages**: ❌ errors, ⚠️ warnings, 🔄 retries for visual scanning
+
+#### Signal Handling (v0.8.0)
+
+**Graceful Shutdown** - SIGINT/SIGTERM support:
+- **Signal handlers**: Tokio signal handling for Ctrl-C and terminate signals
+- **Resource cleanup**: Agents abort workloads before exit
+- **Coordination**: Controller sends abort to all agents on signal
+- **Exit codes**: 130 for SIGINT (Ctrl-C), 143 for SIGTERM
+
+#### Constants Centralization (v0.8.0)
+
+**Single Source of Truth** - All constants in `src/constants.rs`:
+- **Error handling**: MAX_ERRORS, MAX_ERROR_RATE, MAX_RETRIES, ERROR_BACKOFF_DURATION
+- **Timeouts**: AGENT_STARTUP_TIMEOUT, AGENT_STALL_TIMEOUT, AGENT_DISCONNECT_TIMEOUT
+- **Coordination**: COORDINATED_START_DELAY, ABORT_TIMEOUT, ABORT_RETRY_DELAY
+- **Progress**: STATS_UPDATE_INTERVAL, CONSOLE_LOG_INTERVAL, PROGRESS_BAR_TICK_MS
+- **Metrics**: BUCKET_LABELS (9 size buckets for histograms)
+
+#### User Experience Improvements (v0.8.0)
+
+**Countdown Display**:
+- **Single-line updates**: Countdown updates in place using carriage return
+- **Progress bar suspension**: Progress bar paused during countdown (no flicker)
+- **Visible final countdown**: Shows "⏳ Starting in 0s..." before "✅ Starting workload now!"
+- **Clean output**: No extra lines, professional appearance
+
+**Validation Improvements**:
+- **Dry-run validation**: Now matches agent validation exactly
+  - PUT operations require `object_size` or `size_spec`
+  - DELETE/LIST/STAT require non-empty path
+  - GET pattern validation for file:// URIs
+- **Validation order**: Validate BEFORE printing "Configuration is valid"
+- **Better error messages**: Multi-line, capitalized, context-rich
+
+#### Bug Fixes (v0.8.0)
+
+- **Agent auto-reset**: Fixed Failed → Idle transition (moved before yield to prevent stream termination)
+- **Countdown visibility**: Fixed progress bar overwriting countdown (now suspended during display)
+- **Validation order**: Fixed confusing error messages (validate before display)
+- **Bucket labels**: Use BUCKET_LABELS constant (single source of truth)
+- **Test compilation**: Added missing error_rate/total_errors fields to test structs
+- **Deprecated warnings**: Fixed cargo_bin() usage in grpc_integration test (use cargo_bin! macro)
+- **Test flag**: Removed obsolete --insecure flag (insecure is now default)
+
+#### Testing (v0.8.0)
+
+- **153 passing tests**: All tests pass with zero warnings
+- **Integration tests**: Agent auto-reset verified with multiple sequential requests
+- **Error handling**: Tested with different verbosity levels (-v, -vv)
+- **State transitions**: Verified with 2 local agents across success and failure scenarios
+
+### Technical Details
+
+**State Machine Implementation**:
+- Agent: `WorkloadState` enum with `transition_to()` validation
+- Controller: `ControllerAgentState` enum replaces completed_agents/dead_agents/agent_last_seen
+- Thread-safe: Arc<Mutex<State>> pattern throughout
+
+**Error Tracking**:
+- `ErrorTracker` struct with atomic counters (total_errors, error_rate)
+- Per-worker instances aggregated at summary generation
+- Real-time rate calculation using Instant timestamps
+
+**Constants Module**:
+- `src/constants.rs`: 150+ lines defining all timeouts, limits, intervals
+- Type-safe: Duration types for time constants
+- Documented: Each constant has inline documentation
+
+**Code Quality**:
+- Zero compiler warnings (cargo clippy clean)
+- Zero test failures (153/153 passing)
+- Consistent formatting (rustfmt applied)
+- Production-ready error handling
+
 ## [0.7.12] - 2025-11-19
 
 ### Improved

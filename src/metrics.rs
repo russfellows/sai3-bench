@@ -6,21 +6,8 @@ use hdrhistogram::Histogram;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Number of size buckets for histogram collection
-pub const NUM_BUCKETS: usize = 9;
-
-/// Labels for each size bucket
-pub const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
-    "zero",
-    "1B-8KiB",
-    "8KiB-64KiB",
-    "64KiB-512KiB",
-    "512KiB-4MiB",
-    "4MiB-32MiB",
-    "32MiB-256MiB",
-    "256MiB-2GiB",
-    ">2GiB",
-];
+// Import bucket constants from constants module
+use crate::constants::{NUM_BUCKETS, BUCKET_LABELS};
 
 /// Determine which size bucket a given byte count belongs to
 pub fn bucket_index(nbytes: usize) -> usize {
