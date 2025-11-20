@@ -274,9 +274,6 @@ pub fn rewrite_pattern_for_pool(pattern: &str, is_delete: bool, needs_separate_p
     }
 }
 
-/// Execute prepare step: ensure objects exist for testing
-/// 
-
 /// Helper to build full URI from components for different backends
 pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String {
     match backend {

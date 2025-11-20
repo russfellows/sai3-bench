@@ -173,6 +173,8 @@ fn test_ipc_summary_serialization() {
         put_bins: SizeBins { by_bucket: HashMap::new() },
         meta_bins: SizeBins { by_bucket: HashMap::new() },
         get_hists_serialized: vec![],
+        total_errors: 0,
+        error_rate: 0.0,
         put_hists_serialized: vec![],
         meta_hists_serialized: vec![],
     };

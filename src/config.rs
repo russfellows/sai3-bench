@@ -150,7 +150,7 @@ fn default_max_retries() -> u32 {
 }
 
 /// Processing mode for parallel execution (v0.7.3+)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessingMode {
     /// Multiple OS processes (true isolation, pipes for IPC)
@@ -159,13 +159,8 @@ pub enum ProcessingMode {
     
     /// Multiple tokio runtimes in single process (cleaner, native channels)
     /// Better for: simplicity, debugging, when OS-level isolation not needed
+    #[default]
     MultiRuntime,
-}
-
-impl Default for ProcessingMode {
-    fn default() -> Self {
-        ProcessingMode::MultiRuntime
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
