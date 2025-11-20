@@ -84,7 +84,8 @@ GLOBAL FLAGS/OPTIONS:
   --agents <csv>        Comma-separated list of agent addresses (host:port)
                         Optional: can also specify in config YAML under distributed.agents
                         If both specified, config YAML takes precedence
-  --tls                 Enable TLS for secure connections (requires --agent-ca). Default is plaintext HTTP.
+  --tls                 Enable TLS for secure connections (requires --agent-ca)
+                        Default is plaintext HTTP/2 (no TLS)
   --agent-ca <path>     Path to agent's certificate PEM (required when --tls enabled)
   --agent-domain <name> Override SNI / DNS name when validating TLS
 
@@ -136,7 +137,10 @@ distributed:
 **Best Practice**: Define agents in your YAML config for reproducibility and documentation.
 Use CLI `--agents` for quick ad-hoc testing.
 
-If the agent cert doesn’t include the default DNS
+**Note**: If agents are defined in your config YAML, the `--agents` CLI flag is optional.
+The controller will use agents from the config file when `--agents` is not specified.
+
+If the agent cert doesn't include the default DNS
 name the controller uses, add --agent-domain.
 
 # 2 Quick Start — Single Host (PLAINTEXT)
@@ -462,6 +466,61 @@ Agents perform pre-flight validation before starting workload. Common issues:
 - file:// patterns don't match any files: Verify path is correct and files exist
 - PUT operation missing object_size: Add object_size to PUT operations
 - Empty workload: Ensure workload array has at least one operation
+
+## Error Handling and Agent Auto-Reset (v0.8.0+)
+
+Agents implement comprehensive error handling with automatic recovery:
+
+### Error Thresholds (Default Values)
+- **max_total_errors**: 100 total errors before aborting
+- **error_rate_threshold**: 5.0 errors/second triggers smart backoff
+- **max_retries**: 3 retry attempts per operation (when retry_on_error=true)
+
+These defaults can be overridden in your config YAML:
+```yaml
+error_handling:
+  max_total_errors: 200
+  error_rate_threshold: 10.0
+  max_retries: 5
+  retry_on_error: true
+```
+
+### Smart Backoff
+When error rate exceeds threshold, agents skip operations to reduce system load,
+allowing the backend to recover. Retries use exponential backoff.
+
+### Agent Auto-Reset
+After encountering errors, agents automatically reset to listening state.
+This means agents accept new workload requests immediately without requiring restart.
+
+**Example**: If agent encounters I/O errors during workload execution:
+1. Agent reports errors to controller
+2. Agent transitions: Failed → Idle state
+3. Agent ready for next workload request
+4. No manual restart required
+
+### Verbosity Levels
+
+Control error/retry logging with verbosity flags:
+
+**Default** (no flags): Shows only critical failures and threshold warnings
+```bash
+./sai3bench-agent --listen 0.0.0.0:7761
+```
+
+**`-v` (info level)**: Adds retry attempt logging with 🔄 emoji
+```bash
+./sai3bench-agent --listen 0.0.0.0:7761 -v
+# Output: 🔄 Retry 1/3 for operation get on s3://bucket/key
+```
+
+**`-vv` (debug level)**: Shows individual errors with full context
+```bash
+./sai3bench-agent --listen 0.0.0.0:7761 -vv
+# Output: ❌ Error on get s3://bucket/key: Connection timeout (attempt 1/3)
+```
+
+**Best Practice**: Use `-v` for production monitoring, `-vv` for debugging specific issues.
 
 # 9 Notes and Best Practices
 

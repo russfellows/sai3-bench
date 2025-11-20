@@ -1,41 +1,44 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.7.12-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-50%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-153%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.7.12 (November 19, 2025)
+## 🌟 Latest Release - v0.8.0 (November 20, 2025)
 
-**⏱️ Faster Startup & Better Feedback:**
+**🎯 Production-Ready: Formal State Machines & Error Handling**
 
-- **Reduced coordinated start delay**: Fixed 10-second delay (down from 30-50 seconds for multi-agent tests)
-- **Countdown display**: Visual "⏳ Starting in Xs..." countdown shows system is working, not hung
-- **Improved abort resilience**: 5-second timeout with 15-second retry ensures agents always recover
-- **Flexible agent specification**: Define agents in YAML config, CLI, or both (config takes precedence)
-- **Better UX**: Validation → agents ready → countdown → workload (logical sequence)
+Major release focused on reliability, error handling, and production deployment:
+
+- **Formal state machines**: 5-state agent, 9-state controller tracking with validated transitions
+- **Auto-reset agents**: Agents automatically recover from errors (Failed → Idle), accept new requests without restart
+- **Comprehensive error handling**: Configurable thresholds (max errors, error rate, retries), automatic backoff
+- **Smart logging**: Context-aware verbosity (-v for retries, -vv for individual errors) with emoji indicators (❌⚠️🔄)
+- **Signal handling**: Graceful shutdown on SIGINT/SIGTERM with resource cleanup
+- **Constants centralization**: All timeouts, limits, intervals in single source of truth (`src/constants.rs`)
+- **Better validation**: Dry-run now matches agent validation exactly, catches config errors early
+- **Clean countdown**: Single-line updates, progress bar suspended, professional output
 
 ```bash
-# Agents validate and respond quickly
-✅ agent-1 ready
-✅ agent-2 ready
-✅ All 2 agents ready - starting workload execution
+# Agents auto-reset after errors - no restart needed
+./sai3bench-ctl --agents host1:7761,host2:7761 run --config test1.yaml  # Works
+./sai3bench-ctl --agents host1:7761,host2:7761 run --config test2.yaml  # Works immediately
 
-⏳ Starting in 10s...
-⏳ Starting in 9s...
-...
-✅ Starting workload now!
-
-# NEW in v0.7.12: Run without --agents flag (uses config YAML)
-./sai3bench-ctl run --config workload.yaml
+# Smart error logging with verbosity levels
+./sai3-bench -vv run --config workload.yaml  # See individual errors + retries
+./sai3-bench -v run --config workload.yaml   # See retry attempts only
+./sai3-bench run --config workload.yaml      # See critical errors only
 ```
 
-See [CHANGELOG](docs/CHANGELOG.md#0712) for complete details.
+**Testing:** 153 passing tests, zero warnings, zero clippy issues.
 
-**Previous Release - v0.7.11 (November 18, 2025)** - CPU utilization monitoring with real-time metrics
+See [CHANGELOG](docs/CHANGELOG.md#080) for complete details.
+
+**Previous Release - v0.7.12 (November 19, 2025)** - Faster startup with 10-second coordinated delay
 
 ## 🚀 What Makes sai3-bench Unique?
 

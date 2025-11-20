@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 // =============================================================================
-// Error Handling Defaults (v0.7.13+)
+// Error Handling Defaults (v0.8.0+)
 // =============================================================================
 
 /// Maximum total errors before aborting workload

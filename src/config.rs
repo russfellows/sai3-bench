@@ -63,7 +63,7 @@ pub struct Config {
     #[serde(skip)]
     pub live_stats_tracker: Option<std::sync::Arc<crate::live_stats::LiveStatsTracker>>,
     
-    /// Optional error handling configuration (v0.7.13+)
+    /// Optional error handling configuration (v0.8.0+)
     /// Controls how workload handles I/O errors (retry, skip, or abort)
     /// Default: ErrorHandlingConfig::default() (100 max errors, 5 errors/sec threshold)
     #[serde(default)]
@@ -78,7 +78,7 @@ fn default_concurrency() -> usize {
     crate::constants::DEFAULT_CONCURRENCY
 }
 
-/// Error handling configuration (v0.7.13+)
+/// Error handling configuration (v0.8.0+)
 /// 
 /// I/O errors are expected during benchmarking (network failures, timeouts, etc.)
 /// This configuration controls when the workload should abort vs. continue.

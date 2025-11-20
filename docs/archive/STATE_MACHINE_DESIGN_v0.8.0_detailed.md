@@ -293,7 +293,7 @@ The controller tracks the **full lifecycle** of each agent from the moment the g
 
 The controller's view is **"what is this agent doing right now?"** which requires more granularity than the agent's internal state machine.
 
-## Controller's 9-State Model (v0.7.13)
+## Controller's 9-State Model (v0.8.0)
 
 ```
 ┌─────────────┐  gRPC stream opens
@@ -407,7 +407,7 @@ Terminal states:
 - gRPC stream closed unexpectedly
 - No ERROR status received (just connection loss)
 - Can happen during any active state (CONNECTING, VALIDATING, READY, PREPARING, RUNNING)
-- Terminal state (no reconnect support in v0.7.13)
+- Terminal state (no reconnect support in v0.8.0)
 
 **9. ABORTING**
 - Controller sent AbortWorkload RPC to agent
@@ -455,7 +455,7 @@ Terminal states:
 | (none)      | COMPLETED           | Agent returns to Idle, controller tracks completion |
 | (none)      | DISCONNECTED        | Agent doesn't distinguish "ended" vs "lost connection" |
 
-## Implementation in controller.rs (v0.7.13)
+## Implementation in controller.rs (v0.8.0)
 
 ```rust
 enum ControllerAgentState {
@@ -514,7 +514,7 @@ struct AgentTracker {
 
 ## Recommendation
 
-**✅ Current implementation (v0.7.13) is correct:**
+**✅ Current implementation (v0.8.0) is correct:**
 - Agent: 5-state model (Idle, Ready, Running, Failed, Aborting)
 - Controller: 9-state model (Connecting, Validating, Ready, Preparing, Running, Completed, Failed, Disconnected, Aborting)
 

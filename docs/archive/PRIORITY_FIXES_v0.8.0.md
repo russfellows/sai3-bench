@@ -109,7 +109,7 @@
 - [ ] Build release binaries
 - [ ] Run full test suite
 - [ ] Manual cloud testing (if time permits)
-- [ ] Version bump to 0.7.13
+- [x] Version bump to 0.8.0 (completed)
 - [ ] Tag release
 
 **Day 3 Goal**: Tested, documented, ready to deploy
@@ -151,7 +151,7 @@
 
 ### Rollback Plan
 - Keep v0.7.12 tagged as stable
-- New work on feature/v0.7.13-state-machine branch
+- Completed on feature/state-machine-refactor branch (v0.8.0)
 - If not ready by Day 3 EOD, user can stay on v0.7.12
 
 ---
@@ -177,7 +177,7 @@
 
 ### Day 1 EOD ✅ COMPLETE (November 19, 2025)
 - [x] State machines implemented (5-state agent, 9-state controller)
-- [x] Code compiles without warnings (zero warnings as of v0.7.13)
+- [x] Code compiles without warnings (zero warnings as of v0.8.0)
 - [x] Basic manual test: agent error → controller exits (state transitions validated)
 - [x] All state transitions logged with debug output
 - [x] `can_transition()` validation prevents invalid state changes
