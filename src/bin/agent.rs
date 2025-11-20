@@ -8,7 +8,6 @@ use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::signal;
 use tokio::sync::{broadcast, Mutex, Semaphore};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{debug, error, info, warn};
@@ -1314,6 +1313,23 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     Ok(())
 }
 
+/// v0.7.13: Wait for shutdown signals (SIGINT or SIGTERM)
+/// 
+/// Returns signal name for logging. Provides graceful shutdown on Ctrl-C or systemd/Docker stop.
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    
+    let mut sigint = signal(SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -1346,10 +1362,12 @@ async fn main() -> Result<()> {
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::new(agent_state)))
             .serve_with_shutdown(addr, async {
-                let _ = signal::ctrl_c().await;
+                let sig = wait_for_shutdown_signal().await;
+                info!("Received {} - initiating graceful shutdown", sig);
             })
             .await
             .context("tonic server failed")?;
+        info!("Agent shutdown complete");
         return Ok(());
     }
 
@@ -1402,11 +1420,13 @@ async fn main() -> Result<()> {
         .tls_config(tls)?
         .add_service(AgentServer::new(AgentSvc::new(agent_state)))
         .serve_with_shutdown(addr, async {
-            let _ = signal::ctrl_c().await;
+            let sig = wait_for_shutdown_signal().await;
+            info!("Received {} - initiating graceful shutdown", sig);
         })
         .await
         .context("tonic server (TLS) failed")?;
-
+    
+    info!("Agent shutdown complete");
     Ok(())
 }
 

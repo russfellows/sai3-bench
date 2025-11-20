@@ -26,7 +26,6 @@ use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest
 /// v0.7.13: Controller's view of agent states
 /// 
 /// Controller tracks more states than agents report because it sees the full lifecycle:
-/// - Unknown: Agent never responded (startup timeout)
 /// - Connecting: Stream opened, waiting for first message
 /// - Validating: First message received, validation in progress
 /// - Ready: Agent sent READY(1) status
@@ -38,7 +37,6 @@ use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest
 /// - Aborting: Abort RPC sent, waiting for cleanup
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControllerAgentState {
-    Unknown,      // Never responded
     Connecting,   // Stream opened
     Validating,   // First message, validation in progress
     Ready,        // READY(1) received
@@ -57,8 +55,7 @@ impl ControllerAgentState {
         matches!(
             (from, to),
             // Startup sequence
-            (Unknown, Connecting)      // Stream opens
-            | (Connecting, Validating) // First message
+            (Connecting, Validating) // First message
             | (Validating, Ready)      // Validation passes
             | (Validating, Failed)     // Validation fails
             // Normal execution
@@ -104,7 +101,7 @@ impl AgentTracker {
     fn new(agent_id: String) -> Self {
         Self {
             agent_id,
-            state: ControllerAgentState::Unknown,
+            state: ControllerAgentState::Connecting,  // v0.7.13: Stream opened, waiting for first message
             last_seen: std::time::Instant::now(),
             error_message: None,
             latest_stats: None,
@@ -630,11 +627,22 @@ enum Commands {
 // v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
 async fn abort_all_agents(
     agent_addrs: &[String],
+    agent_trackers: &mut std::collections::HashMap<String, AgentTracker>,
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
 ) {
     eprintln!("⚠️  Sending abort signal to all agents...");
+    
+    // v0.7.13: Transition active agents to Aborting state
+    for addr in agent_addrs {
+        if let Some(tracker) = agent_trackers.get_mut(addr) {
+            if matches!(tracker.state, ControllerAgentState::Ready | ControllerAgentState::Preparing | ControllerAgentState::Running) {
+                let _ = tracker.transition_to(ControllerAgentState::Aborting, "abort RPC sent");
+            }
+        }
+    }
+    
     let mut abort_tasks = Vec::new();
     
     for addr in agent_addrs {
@@ -917,6 +925,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// v0.7.13: Wait for shutdown signals (SIGINT or SIGTERM)
+/// 
+/// Returns signal name for logging. Provides graceful shutdown on Ctrl-C or systemd/Docker stop.
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    
+    let mut sigint = signal(SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
 }
 
 /// Execute a distributed workload across multiple agents
@@ -1220,9 +1245,9 @@ async fn run_distributed_workload(
         });
     }
     
-    // Setup Ctrl+C handler
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    // v0.7.13: Setup signal handlers (SIGINT, SIGTERM)
+    let shutdown_signal = wait_for_shutdown_signal();
+    tokio::pin!(shutdown_signal);
     
     eprintln!("⏳ Waiting for agents to validate configuration...");
     // v0.7.11: Robust startup with retries - scale timeout with agent count
@@ -1244,8 +1269,8 @@ async fn run_distributed_workload(
                     .entry(stats.agent_id.clone())
                     .or_insert_with(|| AgentTracker::new(stats.agent_id.clone()));
                 
-                // First message - transition from Unknown to Validating
-                if tracker.state == ControllerAgentState::Unknown {
+                // First message - transition from Connecting to Validating
+                if tracker.state == ControllerAgentState::Connecting {
                     let _ = tracker.transition_to(ControllerAgentState::Validating, "first message received");
                 }
                 
@@ -1304,16 +1329,16 @@ async fn run_distributed_workload(
                 // Count agents by state
                 let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
                 let failed_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Failed).count();
-                let unknown_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Unknown).count();
+                let connecting_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Connecting).count();
                 
-                eprintln!("Agent status: {} ready, {} failed, {} no response", ready_count, failed_count, unknown_count);
+                eprintln!("Agent status: {} ready, {} failed, {} no response", ready_count, failed_count, connecting_count);
                 
                 // Show per-agent status
                 for tracker in agent_trackers.values() {
                     let (icon, status) = match tracker.state {
                         ControllerAgentState::Ready => ("✅", "ready"),
                         ControllerAgentState::Failed => ("❌", "failed"),
-                        ControllerAgentState::Unknown => ("⏱️", "no response"),
+                        ControllerAgentState::Connecting => ("⏱️", "no response"),
                         _ => ("⚠️", "unexpected"),
                     };
                     if tracker.state == ControllerAgentState::Failed {
@@ -1324,7 +1349,7 @@ async fn run_distributed_workload(
                     }
                 }
                 
-                if unknown_count > 0 {
+                if connecting_count > 0 {
                     eprintln!("\n💡 Troubleshooting:");
                     eprintln!("  - Verify agents are running: check agent logs");
                     eprintln!("  - Check network connectivity to agents");
@@ -1333,17 +1358,18 @@ async fn run_distributed_workload(
                 }
                 
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
                 anyhow::bail!("Agent startup validation timeout");
             }
-            _ = &mut ctrl_c => {
-                eprintln!("\n⚠️  Interrupted during startup");
+            _ = &mut shutdown_signal => {
+                let sig = shutdown_signal.await;
+                eprintln!("\n⚠️  Received {} during startup", sig);
                 
-                // v0.7.11: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                // v0.7.13: Abort all agents to prevent orphaned workload execution
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
-                anyhow::bail!("Interrupted by user");
+                anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }
@@ -1368,7 +1394,7 @@ async fn run_distributed_workload(
         }
         
         // v0.7.13: Abort all agents to prevent orphaned workload execution
-        abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+        abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
         
         anyhow::bail!("{} agent(s) failed startup validation", failed_agents.len());
     }
@@ -1492,7 +1518,7 @@ async fn run_distributed_workload(
                                 aggregator.mark_completed(&stats.agent_id);
                                 progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, stats.error_message));
                                 // Abort all agents and exit
-                                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                                 anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, stats.error_message);
                             }
                             
@@ -1601,12 +1627,13 @@ async fn run_distributed_workload(
                 // Check logic is at top of loop
             }
             
-            _ = &mut ctrl_c => {
-                warn!("Ctrl+C received, aborting all agents");
-                progress_bar.finish_with_message("Interrupted by user - aborting agents...");
+            _ = &mut shutdown_signal => {
+                let sig = shutdown_signal.await;
+                warn!("Received {} - aborting all agents", sig);
+                progress_bar.finish_with_message(format!("Interrupted by {} - aborting agents...", sig));
                 
-                // v0.7.12: Abort all agents to stop running workload and reset state
-                abort_all_agents(&agent_addrs, insecure, agent_ca, &agent_domain).await;
+                // v0.7.13: Abort all agents to stop running workload and reset state
+                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                 
                 // Cleanup deployments if any
                 if !deployments.is_empty() {
@@ -1614,7 +1641,7 @@ async fn run_distributed_workload(
                     let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
                 }
                 
-                anyhow::bail!("Interrupted by Ctrl+C");
+                anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }

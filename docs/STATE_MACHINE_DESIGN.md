@@ -278,8 +278,244 @@ Note: `completed` field in LiveStats indicates final message, not a separate sta
 4. **Simple**: 5 states is minimal for the actual behavior needed
 5. **Safe**: Validated transitions prevent impossible sequences
 
+---
+
+# Controller State Machine (9 States)
+
+## Why Controller Has More States
+
+The controller tracks the **full lifecycle** of each agent from the moment the gRPC stream opens until it completes or fails. This is different from the agent's internal states because:
+
+1. **Controller sees network layer**: Stream connection before first message
+2. **Controller tracks validation**: Period between first message and READY status
+3. **Controller tracks prepare separately**: Can distinguish preparing vs running
+4. **Controller sees completion**: Agent may disconnect after completing
+
+The controller's view is **"what is this agent doing right now?"** which requires more granularity than the agent's internal state machine.
+
+## Controller's 9-State Model (v0.7.13)
+
+```
+┌─────────────┐  gRPC stream opens
+│ CONNECTING  │  (stream opened, waiting for first message)
+└──────┬──────┘
+       │
+       ▼  first message arrives
+┌─────────────┐
+│ VALIDATING  │  (validation in progress, ~50ms)
+└──┬─────┬────┘
+   │     │
+   │     └──► validation fails ──► FAILED
+   │
+   ▼  send READY(1)
+┌─────────────┐
+│   READY     │  (waiting for coordinated start, 0-60s)
+└──┬─────┬────┘
+   │     │
+   │     └──► abort/disconnect ──► ABORTING / DISCONNECTED
+   │
+   ├──► prepare phase starts ──► PREPARING
+   │
+   └──► start_timestamp reached (no prepare) ──► RUNNING
+        
+┌─────────────┐
+│  PREPARING  │  (in_prepare_phase=true)
+└──────┬──────┘
+       │
+       ▼  prepare complete
+┌─────────────┐
+│   RUNNING   │  (RUNNING(2) status, executing workload)
+└──┬─────┬────┘
+   │     │
+   │     └──► abort ──► ABORTING
+   │
+   ├──► duration elapsed ──► COMPLETED
+   │
+   └──► error ──► FAILED
+
+Terminal states:
+┌─────────────┐
+│  COMPLETED  │  (workload finished successfully)
+└─────────────┘
+
+┌─────────────┐
+│   FAILED    │  (error during validation/prepare/execution)
+└─────────────┘
+
+┌──────────────┐
+│ DISCONNECTED │  (stream closed unexpectedly or timeout)
+└──────────────┘
+
+┌─────────────┐
+│  ABORTING   │  (abort RPC sent, waiting for cleanup)
+└──────┬──────┘
+       │
+       ├──► cleanup done ──► COMPLETED
+       ├──► abort failed ──► FAILED
+       └──► lost connection ──► DISCONNECTED
+```
+
+## Controller State Definitions
+
+**1. CONNECTING**
+- gRPC stream opened, waiting for first message
+- Agent may be validating config, but controller hasn't received anything yet
+- Timeout: 60 seconds (startup timeout)
+- Transition: First message → VALIDATING
+
+**2. VALIDATING**
+- First message received from agent
+- Agent is validating config (backend credentials, file paths, etc.)
+- Controller waiting for READY(1) or ERROR(3) status
+- Duration: ~50ms typical
+- Transition: READY status → READY, ERROR status → FAILED
+
+**3. READY**
+- Agent sent READY(1) status - validation passed
+- Waiting for coordinated start_timestamp
+- Can wait 0-60 seconds
+- Abort: Transitions to ABORTING (agent will exit stream cleanly)
+- Transition: Prepare starts → PREPARING, Start time reached → RUNNING
+
+**4. PREPARING**
+- Agent reported in_prepare_phase=true
+- Creating directories, generating files, pre-warming storage
+- Still sending RUNNING(2) status (not a separate protocol status)
+- Controller distinguishes this via in_prepare_phase flag
+- Transition: in_prepare_phase=false → RUNNING
+
+**5. RUNNING**
+- Agent executing workload operations (GET/PUT/DELETE)
+- Sending RUNNING(2) status every 1 second with metrics
+- in_prepare_phase=false
+- Abort: Transitions to ABORTING (5-15s cleanup)
+- Transition: Duration elapsed → COMPLETED, Error → FAILED
+
+**6. COMPLETED**
+- Workload finished successfully
+- Agent sent final LiveStats with completed=true
+- Terminal state (no further transitions)
+- Stream typically closes after this
+
+**7. FAILED**
+- Agent sent ERROR(3) status or validation failed
+- error_message contains details
+- Terminal state (no further transitions)
+- Controller will abort remaining agents
+
+**8. DISCONNECTED**
+- gRPC stream closed unexpectedly
+- No ERROR status received (just connection loss)
+- Can happen during any active state (CONNECTING, VALIDATING, READY, PREPARING, RUNNING)
+- Terminal state (no reconnect support in v0.7.13)
+
+**9. ABORTING**
+- Controller sent AbortWorkload RPC to agent
+- Waiting for agent cleanup (5-15s timeout)
+- Agent still sending stats during cleanup
+- Transition: Cleanup complete → COMPLETED, Failed → FAILED, Disconnect → DISCONNECTED
+
+## Controller State Transition Matrix
+
+| From        | Event                  | To           | Notes |
+|-------------|------------------------|--------------|-------|
+| CONNECTING  | First message          | VALIDATING   | Agent alive |
+| CONNECTING  | Timeout (60s)          | DISCONNECTED | Agent never responded |
+| CONNECTING  | Stream closed          | DISCONNECTED | Agent crashed during startup |
+| VALIDATING  | READY(1) received      | READY        | Validation passed |
+| VALIDATING  | ERROR(3) received      | FAILED       | Validation failed |
+| VALIDATING  | Stream closed          | DISCONNECTED | Agent crashed |
+| READY       | in_prepare_phase=true  | PREPARING    | Prepare starts |
+| READY       | RUNNING(2), no prepare | RUNNING      | Direct to workload |
+| READY       | Abort sent             | ABORTING     | Cancel coordinated start |
+| READY       | Stream closed          | DISCONNECTED | Lost connection |
+| PREPARING   | in_prepare_phase=false | RUNNING      | Prepare complete |
+| PREPARING   | Abort sent             | ABORTING     | Cancel prepare |
+| PREPARING   | Stream closed          | DISCONNECTED | Lost connection |
+| RUNNING     | completed=true         | COMPLETED    | Success |
+| RUNNING     | ERROR(3) received      | FAILED       | Workload error |
+| RUNNING     | Abort sent             | ABORTING     | User abort |
+| RUNNING     | Stream closed          | DISCONNECTED | Lost connection |
+| ABORTING    | completed=true         | COMPLETED    | Cleanup done |
+| ABORTING    | ERROR(3) received      | FAILED       | Abort failed |
+| ABORTING    | Stream closed          | DISCONNECTED | Lost during abort |
+| COMPLETED   | (none)                 | COMPLETED    | Terminal state |
+| FAILED      | (none)                 | FAILED       | Terminal state |
+| DISCONNECTED| (none)                 | DISCONNECTED | Terminal state |
+
+## Key Differences: Agent vs Controller States
+
+| Agent State | Controller State(s) | Why Different? |
+|-------------|---------------------|----------------|
+| Idle        | (not tracked)       | Controller only tracks active streams |
+| Ready       | CONNECTING → VALIDATING → READY | Controller sees network + validation separately |
+| Running     | PREPARING → RUNNING | Controller distinguishes prepare vs workload |
+| Failed      | FAILED              | Same meaning |
+| Aborting    | ABORTING            | Same meaning |
+| (none)      | COMPLETED           | Agent returns to Idle, controller tracks completion |
+| (none)      | DISCONNECTED        | Agent doesn't distinguish "ended" vs "lost connection" |
+
+## Implementation in controller.rs (v0.7.13)
+
+```rust
+enum ControllerAgentState {
+    Connecting,   // Stream opened
+    Validating,   // First message, validation in progress
+    Ready,        // READY(1) received
+    Preparing,    // in_prepare_phase=true
+    Running,      // RUNNING(2) received
+    Completed,    // Workload done
+    Failed,       // ERROR(3) received
+    Disconnected, // Stream closed or timeout
+    Aborting,     // Abort sent
+}
+
+struct AgentTracker {
+    agent_id: String,
+    state: ControllerAgentState,
+    last_seen: std::time::Instant,
+    error_message: Option<String>,
+    latest_stats: Option<LiveStats>,
+}
+```
+
+## Why This Design?
+
+**More states enable better debugging:**
+- "Agent stuck at CONNECTING" → network issue, agent never started
+- "Agent stuck at VALIDATING" → config validation taking too long
+- "Agent stuck at READY" → coordinated start delay or clock skew
+- "Agent stuck at PREPARING" → prepare phase taking too long
+- "Agent stuck at RUNNING" → workload hung or extremely slow
+
+**Terminal states enable proper cleanup:**
+- Controller knows when all agents are COMPLETED/FAILED/DISCONNECTED
+- Can aggregate final results without missing data
+- Can detect partial failures (some COMPLETED, some FAILED)
+
+**Aborting state enables tracking:**
+- Controller knows abort is in progress
+- Can wait for cleanup instead of immediately killing
+- Can detect hung aborts (stuck in ABORTING > 15s)
+
+---
+
+## Summary: Two State Machines Working Together
+
+**Agent (5 states)**: Internal state tracking for workload lifecycle
+- Idle → Ready → Running → (Completed/Failed/Aborting) → Idle
+- Focus: "What am I doing right now?"
+
+**Controller (9 states)**: External view of agent lifecycle from connection to completion
+- Connecting → Validating → Ready → Preparing → Running → (Completed/Failed/Disconnected/Aborting)
+- Focus: "What is this agent doing right now, and can I rely on it?"
+
+**Both use validated state transitions** with `can_transition()` checks and logging.
+
 ## Recommendation
 
-**Implement 5-state model** with IDLE, READY, RUNNING, FAILED, ABORTING.
+**✅ Current implementation (v0.7.13) is correct:**
+- Agent: 5-state model (Idle, Ready, Running, Failed, Aborting)
+- Controller: 9-state model (Connecting, Validating, Ready, Preparing, Running, Completed, Failed, Disconnected, Aborting)
 
-This is the sweet spot: not over-engineered (7 states), but not under-specified (4 states).
+This is the right balance: agent states match internal behavior, controller states match external visibility needs.
