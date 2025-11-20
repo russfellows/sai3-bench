@@ -1,9 +1,10 @@
 //
-// Copyright, 2025: Suse sai3_bench::workload::{gnal65/Futurum
+// Copyright (C) 2025 Russ Fellows, Signal65.com
+// Licensed under the GNU General Public License v3.0 or later
 //
 
 // -----------------------------------------------------------------------------
-// warp‑test ‑ lightweight S3 performance tester & utility CLI built on s3dlio
+// sai3-bench - Multi-protocol I/O benchmarking suite built on s3dlio
 // -----------------------------------------------------------------------------
 
 use anyhow::{anyhow, bail, Context, Result};
