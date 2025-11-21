@@ -51,6 +51,10 @@ concurrency: 32               # Number of parallel workers
 page_cache_mode: auto         # Page cache hint for file:// URIs (optional)
                               # Values: auto, sequential, random, dontneed, normal
                               # Default: auto (Linux/Unix only, no-op on other platforms)
+op_log_path: /data/oplog.tsv.zst  # s3dlio operation log path (optional, v0.8.1+)
+                                   # For distributed agents, overrides CLI --op-log flag
+                                   # Agent appends agent_id to prevent collisions
+                                   # Supports S3DLIO_OPLOG_SORT and other env vars
 
 # Prepare stage (optional)
 prepare:
@@ -171,6 +175,114 @@ workload:
 - Hints are advisory; kernel may ignore them under memory pressure
 - No impact on correctness, only performance
 - Dry-run mode displays current page cache configuration
+
+## Operation Logging (v0.8.1+)
+
+The `op_log_path` field enables s3dlio operation trace logging for detailed performance analysis and workload replay.
+
+### Basic Configuration
+
+```yaml
+# Enable operation logging
+op_log_path: /data/oplogs/benchmark.tsv.zst
+
+target: "s3://my-bucket/data/"
+duration: "60s"
+concurrency: 32
+
+workload:
+  - op: get
+    path: "objects/*"
+    weight: 70
+  - op: put
+    path: "uploads/"
+    object_size: 1048576
+    weight: 30
+```
+
+### Distributed Agents
+
+For distributed workloads, each agent automatically appends its `agent_id` to the filename to prevent collisions:
+
+```yaml
+op_log_path: /shared/storage/oplogs/trace.tsv.zst
+
+distributed:
+  agents:
+    - address: "node1:7761"
+      id: agent1
+    - address: "node2:7761"
+      id: agent2
+```
+
+**Results in**:
+- `/shared/storage/oplogs/trace-agent1.tsv.zst` (operations from node1)
+- `/shared/storage/oplogs/trace-agent2.tsv.zst` (operations from node2)
+
+### Precedence Rules
+
+- **YAML `op_log_path`** takes precedence over agent CLI `--op-log` flag
+- Allows per-workload oplog control in distributed environments
+- If both specified, YAML config wins
+
+### Environment Variables
+
+All s3dlio oplog environment variables are supported:
+
+```bash
+# Enable automatic operation log sorting (by timestamp)
+export S3DLIO_OPLOG_SORT=1
+
+# Configure buffer size (default: 64KB)
+export S3DLIO_OPLOG_BUF=131072
+
+# Configure compression level (default: 3)
+export S3DLIO_OPLOG_ZSTD_LEVEL=5
+```
+
+### Oplog Format
+
+Operation logs are TSV (tab-separated values) with zstd compression:
+
+```
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+0    123     PUT            1          1048576 s3://    bucket/key       2025-11-21T...           2025-11-21T...  1234567
+1    456     GET            1          1048576 s3://    bucket/key       2025-11-21T...           2025-11-21T...  987654
+```
+
+**Fields**:
+- `idx`: Operation sequence number
+- `thread`: Thread/worker ID
+- `op`: Operation type (GET, PUT, DELETE, LIST, etc.)
+- `bytes`: Data transferred
+- `endpoint`: Storage backend URI
+- `file`: Object/file path
+- `start/end`: ISO8601 timestamps
+- `duration_ns`: Latency in nanoseconds
+
+### Analysis Examples
+
+```bash
+# Decompress and view first 20 operations
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | head -20
+
+# Count total operations
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | wc -l
+
+# Find slowest operations (if sorted)
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | sort -t$'\t' -k12 -n | tail -10
+
+# Filter by operation type
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | awk -F'\t' '$3 == "GET"'
+```
+
+### Use Cases
+
+- **Performance Analysis**: Identify slow operations, latency distribution per agent
+- **Workload Replay**: Capture production traffic and replay at different speeds
+- **Debugging**: Trace specific operations that failed or exceeded thresholds
+- **Comparison**: Compare operation latencies across agents to identify hotspots
+- **Optimization**: Analyze access patterns for caching or prefetching strategies
 
 ## Target URI
 
