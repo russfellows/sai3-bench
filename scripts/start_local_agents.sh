@@ -8,6 +8,7 @@ NUM_AGENTS=${1:-2}
 BASE_PORT=${2:-7761}
 VERBOSE=${3:-"-v"}
 LOG_DIR=${4:-"/tmp"}
+OP_LOG=${5:-""}  # Optional: oplog base path (e.g., /tmp/agent-oplogs/oplog.tsv.zst)
 
 # Ensure we're in the right directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,8 +25,16 @@ for i in $(seq 0 $((NUM_AGENTS - 1))); do
     PORT=$((BASE_PORT + i))
     LOG_FILE="$LOG_DIR/agent$((i+1)).log"
     
-    echo "  Starting agent $((i+1)) on port $PORT (log: $LOG_FILE)"
-    ./target/release/sai3bench-agent $VERBOSE --listen "0.0.0.0:$PORT" > "$LOG_FILE" 2>&1 &
+    # Build command with optional oplog
+    CMD="./target/release/sai3bench-agent $VERBOSE --listen \"0.0.0.0:$PORT\""
+    if [ -n "$OP_LOG" ]; then
+        CMD="$CMD --op-log \"$OP_LOG\""
+        echo "  Starting agent $((i+1)) on port $PORT with oplog (log: $LOG_FILE)"
+    else
+        echo "  Starting agent $((i+1)) on port $PORT (log: $LOG_FILE)"
+    fi
+    
+    eval "$CMD" > "$LOG_FILE" 2>&1 &
     
     # Give it a moment to start
     sleep 0.5

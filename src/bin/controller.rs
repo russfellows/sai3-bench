@@ -1534,8 +1534,16 @@ async fn run_distributed_workload(
                                 aggregator.mark_completed(&stats.agent_id);
                                 progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, stats.error_message));
                                 
-                                // v0.8.1: Write test status before aborting
-                                let final_stats = aggregator.aggregate();
+                                // v0.8.1: Save partial results before aborting
+                                // Aggregate whatever stats we have so far for diagnostic purposes
+                                let partial_stats = aggregator.aggregate();
+                                
+                                // Finalize results directory with partial data
+                                if let Err(e) = results_dir.finalize(partial_stats.elapsed_s) {
+                                    error!("Failed to finalize results directory: {}", e);
+                                }
+                                
+                                // Write test status showing the failure
                                 let status_summary = check_test_status(&agent_trackers, &agent_summaries);
                                 if let Err(e) = write_test_status(&results_dir, &status_summary) {
                                     error!("Failed to write STATUS.txt: {}", e);
@@ -1543,6 +1551,10 @@ async fn run_distributed_workload(
                                 if let Err(e) = print_test_status(&status_summary, &mut results_dir) {
                                     error!("Failed to print test status: {}", e);
                                 }
+                                
+                                // Inform user that partial results were saved
+                                let partial_msg = format!("Partial results saved to: {}", results_dir.path().display());
+                                eprintln!("{}", partial_msg);
                                 
                                 // Abort all agents and exit
                                 abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
