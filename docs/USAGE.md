@@ -65,7 +65,7 @@ Binaries will be in target/release/
 sai3bench-agent
 USAGE:
   sai3bench-agent [--listen <addr>] [--tls] [--tls-domain <name>]
-                [--tls-sans <csv>] [--tls-write-ca <dir>]
+                [--tls-sans <csv>] [--tls-write-ca <dir>] [--op-log <path>]
 
 FLAGS/OPTIONS:
   --listen <addr>       Listen address (default: 0.0.0.0:7761)
@@ -73,6 +73,10 @@ FLAGS/OPTIONS:
   --tls-domain <name>   Subject CN / default SAN if --tls-sans not set (default: "localhost")
   --tls-sans <csv>      Comma-separated SANs (DNS names and/or IPs) for the cert (e.g. "hostA,10.1.2.3,127.0.0.1")
   --tls-write-ca <dir>  If set, writes PEM files (agent_cert.pem, agent_key.pem) into this directory
+  --op-log <path>       Optional s3dlio operation log path (e.g., /data/oplogs/trace.tsv.zst)
+                        Agent appends agent_id to filename to prevent collisions
+                        Can be overridden per-workload via config YAML op_log_path field
+                        Supports all s3dlio oplog environment variables (S3DLIO_OPLOG_SORT, etc.)
 ```
 
 ```
@@ -521,6 +525,63 @@ Control error/retry logging with verbosity flags:
 ```
 
 **Best Practice**: Use `-v` for production monitoring, `-vv` for debugging specific issues.
+
+### Operation Logging (v0.8.1+)
+
+Capture detailed operation traces for performance analysis and replay using s3dlio oplogs.
+
+**CLI Flag** (applies to all workloads on agent):
+```bash
+# Enable oplog via CLI flag
+./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
+# Creates: /data/oplogs/trace-agent1.tsv.zst (agent_id automatically appended)
+```
+
+**YAML Config** (per-workload control, takes precedence over CLI):
+```yaml
+# Enable in config YAML
+op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
+
+distributed:
+  agents:
+    - address: "node1:7761"
+      id: agent1
+    - address: "node2:7761"
+      id: agent2
+```
+
+Results in per-agent files:
+- `/shared/storage/oplogs/benchmark-agent1.tsv.zst`
+- `/shared/storage/oplogs/benchmark-agent2.tsv.zst`
+
+**Environment Variables** (all s3dlio oplog settings supported):
+```bash
+# Optional: enable automatic operation log sorting
+export S3DLIO_OPLOG_SORT=1
+
+# Optional: configure buffer size (default: 64KB)
+export S3DLIO_OPLOG_BUF=131072
+
+./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
+```
+
+**Oplog Analysis**:
+```bash
+# Decompress and view oplog
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | head -20
+
+# Count operations
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | wc -l
+
+# Sort operations by latency (requires S3DLIO_OPLOG_SORT=1 at capture time)
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | sort -t$'\t' -k12 -n | tail -10
+```
+
+**Use Cases**:
+- **Performance Analysis**: Identify slow operations, latency percentiles per agent
+- **Workload Replay**: Capture production traffic and replay at different speeds
+- **Debugging**: Trace specific operations that failed or exceeded thresholds
+- **Comparison**: Compare operation latencies across agents to identify hotspots
 
 # 9 Notes and Best Practices
 

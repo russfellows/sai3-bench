@@ -68,6 +68,15 @@ pub struct Config {
     /// Default: ErrorHandlingConfig::default() (100 max errors, 5 errors/sec threshold)
     #[serde(default)]
     pub error_handling: ErrorHandlingConfig,
+    
+    /// Optional operation log path for s3dlio oplog tracing (v0.8.2+)
+    /// Captures all storage operations (GET/PUT/DELETE/LIST/etc.) with timestamps and latencies
+    /// Output format: TSV (optionally zstd-compressed if path ends with .zst)
+    /// Supports environment variables: S3DLIO_OPLOG_SORT=1, S3DLIO_OPLOG_BUF=8192, etc.
+    /// In distributed mode, overrides agent CLI --op-log flag if specified
+    /// Default: None (no operation logging)
+    #[serde(default)]
+    pub op_log_path: Option<std::path::PathBuf>,
 }
 
 fn default_duration() -> std::time::Duration {

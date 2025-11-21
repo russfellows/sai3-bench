@@ -59,6 +59,13 @@ struct Cli {
     /// NOTE: With the current minimal change we treat these as DNS names; see note below.
     #[arg(long)]
     tls_sans: Option<String>,
+
+    /// Optional operation log path (s3dlio oplog) - applies to all workloads executed by this agent
+    /// Can be overridden per-workload via config YAML op_log_path field
+    /// Agent appends agent_id to filename to avoid collisions (e.g., oplog-agent1.tsv.zst)
+    /// Supports environment variables: S3DLIO_OPLOG_SORT, S3DLIO_OPLOG_BUF, etc.
+    #[arg(long)]
+    op_log: Option<std::path::PathBuf>,
 }
 
 /// Agent state for workload management and cancellation
@@ -70,6 +77,8 @@ struct AgentState {
     state: Arc<Mutex<WorkloadState>>,
     /// Error message (if state is Failed)
     error_message: Arc<Mutex<Option<String>>>,
+    /// Optional operation log path (from CLI --op-log flag)
+    agent_op_log_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,12 +91,13 @@ enum WorkloadState {
 }
 
 impl AgentState {
-    fn new() -> Self {
+    fn new(agent_op_log_path: Option<std::path::PathBuf>) -> Self {
         let (abort_tx, _) = broadcast::channel(16);
         Self {
             abort_tx,
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
             error_message: Arc::new(Mutex::new(None)),
+            agent_op_log_path,
         }
     }
     
@@ -402,20 +412,82 @@ impl Agent for AgentSvc {
             (Vec::new(), None)
         };
 
+        // Initialize s3dlio oplog if configured (v0.8.2+)
+        // Priority: config YAML op_log_path > agent CLI --op-log > None
+        let final_op_log_path = config.op_log_path.as_ref()
+            .or(self.state.agent_op_log_path.as_ref());
+        
+        if let Some(op_log_base) = final_op_log_path {
+            // Append agent_id to filename to avoid collisions
+            let op_log_path = if let Some(parent) = op_log_base.parent() {
+                let filename = op_log_base.file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("oplog.tsv.zst");
+                
+                // Insert agent_id before extension (e.g., oplog.tsv.zst -> oplog-agent1.tsv.zst)
+                let base_name = if filename.ends_with(".tsv.zst") {
+                    filename.strip_suffix(".tsv.zst").unwrap()
+                } else if filename.ends_with(".tsv") {
+                    filename.strip_suffix(".tsv").unwrap()
+                } else {
+                    filename
+                };
+                
+                let extension = if filename.ends_with(".tsv.zst") {
+                    ".tsv.zst"
+                } else if filename.ends_with(".tsv") {
+                    ".tsv"
+                } else {
+                    ""
+                };
+                
+                parent.join(format!("{}-{}{}", base_name, agent_id, extension))
+            } else {
+                // No parent directory, just append agent_id
+                let filename = op_log_base.file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("oplog.tsv.zst");
+                std::path::PathBuf::from(format!("{}-{}", filename, agent_id))
+            };
+            
+            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
+            sai3_bench::workload::init_operation_logger(&op_log_path)
+                .map_err(|e| {
+                    error!("Failed to initialize operation logger: {}", e);
+                    Status::internal(format!("Failed to initialize operation logger: {}", e))
+                })?;
+        }
+
         // Execute the workload using existing workload::run function
         let summary = sai3_bench::workload::run(&config, tree_manifest)
             .await
             .map_err(|e| {
                 error!("Workload execution failed: {}", e);
+                // Finalize oplog on error
+                if final_op_log_path.is_some() {
+                    if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger() {
+                        error!("Failed to finalize operation logger: {}", finalize_err);
+                    }
+                }
                 Status::internal(format!("Workload execution failed: {}", e))
             })?;
+
+        // Finalize s3dlio oplog if initialized
+        if final_op_log_path.is_some() {
+            info!("Finalizing s3dlio operation logger");
+            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                error!("Failed to finalize operation logger: {}", e);
+            }
+        }
 
         info!("Workload completed successfully for agent {}", agent_id);
         debug!("Summary: {} ops, {} bytes, {:.2}s", 
                summary.total_ops, summary.total_bytes, summary.wall_seconds);
 
         // v0.7.5: Convert Summary to WorkloadSummary protobuf using helper
-        let proto_summary = summary_to_proto(&agent_id, &config_yaml, &summary).await?;
+        // Pass oplog path to summary (for protobuf field population)
+        let op_log_path_str = final_op_log_path.map(|p| p.display().to_string());
+        let proto_summary = summary_to_proto(&agent_id, &config_yaml, &summary, op_log_path_str).await?;
         Ok(Response::new(proto_summary))
     }
 
@@ -456,6 +528,9 @@ impl Agent for AgentSvc {
         };
 
         info!("Preparing workload execution with live stats for agent {}", agent_id);
+
+        // v0.8.2: Clone agent_op_log_path early for 'static lifetime requirement
+        let agent_op_log_path_clone = self.state.agent_op_log_path.clone();
 
         // Create live stats tracker
         let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
@@ -614,6 +689,14 @@ impl Agent for AgentSvc {
             
             info!("Starting workload execution for agent {}", agent_id_stream);
             
+            // v0.8.2: Capture final oplog path for summary_to_proto (before spawning task)
+            let final_op_log_path_for_summary = config_spawn.op_log_path.as_ref()
+                .or(agent_op_log_path_clone.as_ref())
+                .map(|p| p.display().to_string());
+            
+            // v0.8.2: Clone agent_op_log_path for use in spawned task
+            let agent_op_log_path_for_task = agent_op_log_path_clone.clone();
+            
             // v0.7.6: NOW spawn the workload task (after READY sent and coordinated start)
             let tracker_exec = tracker_spawn.clone();
             let mut config_exec = config_spawn.clone();
@@ -685,13 +768,69 @@ impl Agent for AgentSvc {
                             None
                         };
 
+                        // v0.8.2: Initialize s3dlio oplog if configured (same logic as run_workload)
+                        let final_op_log_path = config_exec.op_log_path.as_ref()
+                            .or(agent_op_log_path_for_task.as_ref());
+                        
+                        if let Some(op_log_base) = final_op_log_path {
+                            // Append agent_id to filename to avoid collisions
+                            let op_log_path = if let Some(parent) = op_log_base.parent() {
+                                let filename = op_log_base.file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or("oplog.tsv.zst");
+                                
+                                let base_name = if filename.ends_with(".tsv.zst") {
+                                    filename.strip_suffix(".tsv.zst").unwrap()
+                                } else if filename.ends_with(".tsv") {
+                                    filename.strip_suffix(".tsv").unwrap()
+                                } else {
+                                    filename
+                                };
+                                
+                                let extension = if filename.ends_with(".tsv.zst") {
+                                    ".tsv.zst"
+                                } else if filename.ends_with(".tsv") {
+                                    ".tsv"
+                                } else {
+                                    ""
+                                };
+                                
+                                parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
+                            } else {
+                                let filename = op_log_base.file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or("oplog.tsv.zst");
+                                std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
+                            };
+                            
+                            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
+                            if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
+                                error!("Failed to initialize operation logger: {}", e);
+                                let _ = tx_done.send(Err(format!("Failed to initialize oplog: {}", e))).await;
+                                return;
+                            }
+                        }
+
                         // Execute workload (tracker wired via config for live stats)
                         match sai3_bench::workload::run(&config_exec, tree_manifest).await {
                             Ok(summary) => {
+                                // v0.8.2: Finalize oplog if initialized
+                                if final_op_log_path.is_some() {
+                                    info!("Finalizing s3dlio operation logger");
+                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                        error!("Failed to finalize operation logger: {}", e);
+                                    }
+                                }
                                 info!("Workload completed successfully for agent {}", agent_id_exec);
                                 let _ = tx_done.send(Ok(summary)).await;
                             }
                             Err(e) => {
+                                // v0.8.2: Finalize oplog on error
+                                if final_op_log_path.is_some() {
+                                    if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger() {
+                                        error!("Failed to finalize operation logger: {}", finalize_err);
+                                    }
+                                }
                                 error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
                                 let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
                             }
@@ -775,8 +914,8 @@ impl Agent for AgentSvc {
                         // Workload completed (or failed)
                         match result {
                             Some(Ok(summary)) => {
-                                // v0.7.5: Convert summary to proto for final message
-                                let proto_summary = match summary_to_proto(&agent_id_stream, &config_yaml_stream, &summary).await {
+                                // v0.7.5 / v0.8.2: Convert summary to proto for final message (with oplog path)
+                                let proto_summary = match summary_to_proto(&agent_id_stream, &config_yaml_stream, &summary, final_op_log_path_for_summary.clone()).await {
                                     Ok(s) => Some(s),
                                     Err(e) => {
                                         error!("Failed to convert summary to proto: {:?}", e);
@@ -952,11 +1091,12 @@ async fn summary_to_proto(
     agent_id: &str,
     config_yaml: &str,
     summary: &sai3_bench::workload::Summary,
+    op_log_path: Option<String>,
 ) -> Result<WorkloadSummary, Status> {
     // Create results directory and capture output
-    let (metadata_json, tsv_content, results_path, op_log_path, 
+    let (metadata_json, tsv_content, results_path, _op_log_path, 
          histogram_get, histogram_put, histogram_meta) = 
-        create_agent_results(agent_id, config_yaml, summary)
+        create_agent_results(agent_id, config_yaml, summary, op_log_path.clone())
             .await
             .map_err(|e| {
                 error!("Failed to create agent results: {}", e);
@@ -1083,6 +1223,7 @@ async fn create_agent_results(
     agent_id: &str,
     config_yaml: &str,
     summary: &sai3_bench::workload::Summary,
+    op_log_path: Option<String>,
 ) -> anyhow::Result<(String, String, String, Option<String>, Vec<u8>, Vec<u8>, Vec<u8>)> {
     use sai3_bench::results_dir::ResultsDir;
     use sai3_bench::tsv_export::TsvExporter;
@@ -1125,9 +1266,8 @@ async fn create_agent_results(
         summary.wall_seconds,
     )?;
     
-    // Note: Operation logs (--op-log) are not transferred via gRPC
-    // They remain on the agent's local filesystem if created
-    let op_log_path: Option<String> = None;  // Future: check for op-log file
+    // v0.8.2: Operation log path (if oplog was initialized, passed from caller)
+    // Oplog files remain on agent's local filesystem (not transferred via gRPC)
     
     // Finalize results directory
     results_dir.finalize(summary.wall_seconds)?;
@@ -1358,7 +1498,7 @@ async fn main() -> Result<()> {
     if !args.tls {
         info!("Agent starting in PLAINTEXT mode on {}", addr);
         println!("sai3bench-agent listening (PLAINTEXT) on {}", addr);
-        let agent_state = AgentState::new();
+        let agent_state = AgentState::new(args.op_log.clone());
         Server::builder()
             .add_service(AgentServer::new(AgentSvc::new(agent_state)))
             .serve_with_shutdown(addr, async {
@@ -1415,7 +1555,7 @@ async fn main() -> Result<()> {
         }
     );
 
-    let agent_state = AgentState::new();
+    let agent_state = AgentState::new(args.op_log.clone());
     Server::builder()
         .tls_config(tls)?
         .add_service(AgentServer::new(AgentSvc::new(agent_state)))

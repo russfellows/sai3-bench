@@ -2,6 +2,114 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.8.1] - 2025-11-21
+
+### 📊 Operation Logging Support for Distributed Agents
+
+**Enhanced distributed workload analysis** with s3dlio operation trace logging support in agents.
+
+#### Agent Operation Logging (v0.8.1)
+
+**CLI Flag Support**:
+- `--op-log <PATH>`: Enable s3dlio operation logging for agent workloads
+- Applies to all workloads executed by the agent
+- Can be overridden per-workload via YAML config `op_log_path`
+
+**YAML Configuration**:
+- `op_log_path: /path/to/oplog.tsv.zst` field in config
+- Takes precedence over CLI `--op-log` flag
+- Enables per-workload oplog control in distributed environments
+
+**Automatic Filename Management**:
+- Agent appends `agent_id` to filename to prevent collisions
+- Example: `/data/oplogs/trace.tsv.zst` → `/data/oplogs/trace-agent1.tsv.zst`
+- Each agent writes to separate file for independent analysis
+
+**Environment Variable Support**:
+- All s3dlio oplog environment variables respected:
+  - `S3DLIO_OPLOG_SORT=1`: Enable automatic operation log sorting
+  - `S3DLIO_OPLOG_BUF=<size>`: Configure buffer size
+  - And all other s3dlio oplog settings
+
+#### Error Handling Improvements (v0.8.1)
+
+**Proper Oplog Finalization**:
+- `finalize_operation_logger()` errors properly logged (not silently ignored)
+- Errors written to agent log for debugging
+- Workload continues even if oplog finalization fails
+
+**Partial Results on Failure**:
+- Controller saves partial results when agent fails
+- Uses aggregated stats to finalize results directory
+- Informs user that partial results were saved
+- Diagnostic information preserved for troubleshooting
+
+#### Script Enhancements (v0.8.1)
+
+**`start_local_agents.sh` Updates**:
+- New 5th parameter for optional oplog base path
+- Usage: `./start_local_agents.sh <num_agents> <base_port> <verbose> <log_dir> <op_log>`
+- Example: `./start_local_agents.sh 2 7761 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"`
+- Automatically passes `--op-log` to each agent if provided
+
+#### Use Cases
+
+**Distributed Performance Analysis**:
+```yaml
+# Enable oplog in YAML config
+op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
+
+distributed:
+  agents:
+    - address: "node1:7761"
+      id: agent1
+    - address: "node2:7761"  
+      id: agent2
+```
+
+Results in:
+- `/shared/storage/oplogs/benchmark-agent1.tsv.zst` (operations from node1)
+- `/shared/storage/oplogs/benchmark-agent2.tsv.zst` (operations from node2)
+
+**Per-Agent Analysis**:
+- Sort and analyze each agent's operations independently
+- Compare latency distributions across agents
+- Identify per-agent performance bottlenecks
+- Replay specific agent workloads for debugging
+
+**Operation Replay**:
+- Capture production workload from multiple agents
+- Replay at different speeds (1x, 10x, 100x)
+- Remap URIs for different target storage
+- Merge oplogs across agents for unified replay
+
+#### Testing (v0.8.1)
+
+- **159 passing tests** (6 new tests in streaming_replay_tests.rs)
+- Distributed oplog test: 2 agents, verified per-agent files created
+- Operation counts verified: 4848 + 5098 = 9946 operations
+- Oplog content validated: TSV format with zstd compression
+
+#### Bug Fixes (v0.8.1)
+
+- Fixed unused `final_stats` variable in controller (now used to save partial results)
+- Fixed ignored `finalize_operation_logger()` Result (now properly logged on error)
+- Updated controller to inform user when partial results are saved after agent failure
+
+### Technical Details
+
+**Implementation**:
+- Agent CLI: `Cli` struct with `op_log: Option<PathBuf>` field
+- Agent state: `AgentState` with `agent_op_log_path` field
+- Oplog initialization: Before workload in both `run_workload()` and `run_workload_with_live_stats()`
+- Filename generation: Append agent_id from config to prevent collisions
+- Error handling: Wrap `finalize_operation_logger()` in `if let Err(e)` blocks
+
+**Proto Changes**:
+- No protocol changes required (WorkloadSummary already has `op_log_path` field)
+
+---
+
 ## [0.8.0] - 2025-11-20
 
 ### 🎯 Major Release: Formal State Machines, Error Handling, and Production Readiness

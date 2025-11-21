@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -1532,6 +1533,29 @@ async fn run_distributed_workload(
                                 let _ = tracker.transition_to(ControllerAgentState::Failed, "error status received");
                                 aggregator.mark_completed(&stats.agent_id);
                                 progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, stats.error_message));
+                                
+                                // v0.8.1: Save partial results before aborting
+                                // Aggregate whatever stats we have so far for diagnostic purposes
+                                let partial_stats = aggregator.aggregate();
+                                
+                                // Finalize results directory with partial data
+                                if let Err(e) = results_dir.finalize(partial_stats.elapsed_s) {
+                                    error!("Failed to finalize results directory: {}", e);
+                                }
+                                
+                                // Write test status showing the failure
+                                let status_summary = check_test_status(&agent_trackers, &agent_summaries);
+                                if let Err(e) = write_test_status(&results_dir, &status_summary) {
+                                    error!("Failed to write STATUS.txt: {}", e);
+                                }
+                                if let Err(e) = print_test_status(&status_summary, &mut results_dir) {
+                                    error!("Failed to print test status: {}", e);
+                                }
+                                
+                                // Inform user that partial results were saved
+                                let partial_msg = format!("Partial results saved to: {}", results_dir.path().display());
+                                eprintln!("{}", partial_msg);
+                                
                                 // Abort all agents and exit
                                 abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
                                 anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, stats.error_message);
@@ -1569,10 +1593,10 @@ async fn run_distributed_workload(
                                 // Show prepare progress as "created/total (percentage)"
                                 let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
                                 if dead_count == 0 {
-                                    format!("📦 Preparing: {}/{} objects ({}%)\n{}", 
+                                    format!("📦 Preparing: {}/{} objects ({}%) {}", 
                                             prepare_created, prepare_total, pct, agg.format_progress())
                                 } else {
-                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead)\n{}", 
+                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}", 
                                             prepare_created, prepare_total, pct, dead_count, agg.format_progress())
                                 }
                             } else if dead_count == 0 {
@@ -1742,6 +1766,12 @@ async fn run_distributed_workload(
     
     // Finalize results directory with elapsed time from final stats
     results_dir.finalize(final_stats.elapsed_s)?;
+    
+    // v0.8.1: Check agent states and write test status summary
+    let status_summary = check_test_status(&agent_trackers, &agent_summaries);
+    write_test_status(&results_dir, &status_summary)?;
+    print_test_status(&status_summary, &mut results_dir)?;
+    
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
 
@@ -1768,6 +1798,180 @@ async fn run_distributed_workload(
         }
     }
 
+    Ok(())
+}
+
+/// v0.8.1: Test status summary for results directory
+struct TestStatus {
+    success: bool,
+    total_agents: usize,
+    completed: usize,
+    failed: usize,
+    disconnected: usize,
+    aborting: usize,
+    total_ops: u64,
+    agent_details: Vec<(String, ControllerAgentState, String)>, // (id, state, reason)
+}
+
+/// v0.8.1: Check final agent states and determine test success/failure
+fn check_test_status(
+    agent_trackers: &HashMap<String, AgentTracker>,
+    agent_summaries: &[WorkloadSummary],
+) -> TestStatus {
+    // Filter to only count agent IDs (not IP:port addresses from initialization)
+    // Agent IDs are the keys that agents report in their LiveStats messages
+    let real_agents: Vec<_> = agent_trackers
+        .iter()
+        .filter(|(id, _)| !id.contains(':'))  // Exclude "host:port" entries
+        .collect();
+    
+    let total_agents = real_agents.len();
+    let completed = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Completed).count();
+    let failed = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Failed).count();
+    let disconnected = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Disconnected).count();
+    let aborting = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Aborting).count();
+    
+    // Test succeeds only if ALL agents completed successfully
+    let success = total_agents > 0 && completed == total_agents && failed == 0 && disconnected == 0 && aborting == 0;
+    
+    // Calculate total operations from summaries
+    let total_ops: u64 = agent_summaries.iter().map(|s| s.total_ops).sum();
+    
+    // Collect agent details for status report (only real agent IDs, not addresses)
+    let mut agent_details: Vec<(String, ControllerAgentState, String)> = real_agents
+        .iter()
+        .map(|(id, tracker)| {
+            let reason = tracker.error_message
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", tracker.state));
+            ((*id).clone(), tracker.state, reason)
+        })
+        .collect();
+    agent_details.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by agent ID
+    
+    TestStatus {
+        success,
+        total_agents,
+        completed,
+        failed,
+        disconnected,
+        aborting,
+        total_ops,
+        agent_details,
+    }
+}
+
+/// v0.8.1: Write STATUS.txt file with test outcome
+fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::Result<()> {
+    use std::fs;
+    
+    let status_path = results_dir.path().join("STATUS.txt");
+    let mut content = String::new();
+    
+    // Header
+    if status.success {
+        content.push_str("TEST STATUS: SUCCESS\n");
+    } else {
+        content.push_str("TEST STATUS: FAILURE\n");
+    }
+    content.push_str(&format!("Timestamp: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+    content.push_str("\n");
+    
+    // Summary
+    content.push_str("=== Summary ===\n");
+    content.push_str(&format!("Total agents: {}\n", status.total_agents));
+    content.push_str(&format!("Completed: {}\n", status.completed));
+    content.push_str(&format!("Failed: {}\n", status.failed));
+    content.push_str(&format!("Disconnected: {}\n", status.disconnected));
+    content.push_str(&format!("Aborting: {}\n", status.aborting));
+    content.push_str(&format!("Total operations: {}\n", status.total_ops));
+    content.push_str("\n");
+    
+    // Per-agent details
+    content.push_str("=== Agent Details ===\n");
+    for (agent_id, state, reason) in &status.agent_details {
+        content.push_str(&format!("{}: {:?} ({})\n", agent_id, state, reason));
+    }
+    
+    // Failure details (if any)
+    if !status.success {
+        content.push_str("\n");
+        content.push_str("=== Failure Analysis ===\n");
+        
+        if status.failed > 0 {
+            content.push_str(&format!("⚠ {} agent(s) reported ERROR status\n", status.failed));
+        }
+        if status.disconnected > 0 {
+            content.push_str(&format!("⚠ {} agent(s) disconnected or timed out\n", status.disconnected));
+        }
+        if status.aborting > 0 {
+            content.push_str(&format!("⚠ {} agent(s) in aborting state\n", status.aborting));
+        }
+        if status.total_ops == 0 {
+            content.push_str("⚠ Zero operations completed - workload did not execute\n");
+        }
+        
+        content.push_str("\nRecommendations:\n");
+        content.push_str("1. Check agent logs in agents/*/console.log\n");
+        content.push_str("2. Review controller console.log for error messages\n");
+        content.push_str("3. Verify agent connectivity and network stability\n");
+        content.push_str("4. Check storage backend availability\n");
+    }
+    
+    fs::write(&status_path, content)
+        .with_context(|| format!("Failed to write STATUS.txt: {}", status_path.display()))?;
+    
+    Ok(())
+}
+
+/// v0.8.1: Print test status to console and console.log
+fn print_test_status(status: &TestStatus, results_dir: &mut ResultsDir) -> anyhow::Result<()> {
+    if status.success {
+        let msg = "\n✅ Test PASSED: All agents completed successfully".to_string();
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("   {} agents, {} total operations", status.total_agents, status.total_ops);
+        println!("{}", msg);
+        results_dir.write_console(&msg)?;
+    } else {
+        let msg = "\n❌ Test FAILED: One or more agents did not complete successfully".to_string();
+        eprintln!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        let msg = format!("   Completed: {}/{}", status.completed, status.total_agents);
+        eprintln!("{}", msg);
+        results_dir.write_console(&msg)?;
+        
+        if status.failed > 0 {
+            let msg = format!("   Failed: {} agent(s) reported errors", status.failed);
+            eprintln!("{}", msg);
+            results_dir.write_console(&msg)?;
+        }
+        
+        if status.disconnected > 0 {
+            let msg = format!("   Disconnected: {} agent(s) lost connection", status.disconnected);
+            eprintln!("{}", msg);
+            results_dir.write_console(&msg)?;
+        }
+        
+        if status.aborting > 0 {
+            let msg = format!("   Aborting: {} agent(s) in abort state", status.aborting);
+            eprintln!("{}", msg);
+            results_dir.write_console(&msg)?;
+        }
+        
+        if status.total_ops == 0 {
+            let msg = "   ⚠ CRITICAL: Zero operations completed - workload did not execute!".to_string();
+            eprintln!("{}", msg);
+            results_dir.write_console(&msg)?;
+        }
+        
+        let msg = "\n   See STATUS.txt in results directory for full details".to_string();
+        eprintln!("{}", msg);
+        results_dir.write_console(&msg)?;
+    }
+    
     Ok(())
 }
 

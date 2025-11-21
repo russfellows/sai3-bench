@@ -1,18 +1,41 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.1-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-153%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-159%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.8.0 (November 20, 2025)
+## 🌟 Latest Release - v0.8.1 (November 21, 2025)
 
-**🎯 Production-Ready: Formal State Machines & Error Handling**
+**📊 Operation Logging Support for Distributed Agents**
 
-Major release focused on reliability, error handling, and production deployment:
+Enhances distributed workload analysis with s3dlio operation trace logging:
+
+- **Agent operation logging**: `--op-log` CLI flag and `op_log_path` YAML config for s3dlio trace capture
+- **Per-agent filenames**: Automatic agent_id suffix prevents collisions (e.g., `oplog-agent1.tsv.zst`)
+- **Config precedence**: YAML `op_log_path` overrides CLI `--op-log` flag for flexibility
+- **Full environment support**: All s3dlio oplog variables (S3DLIO_OPLOG_SORT, S3DLIO_OPLOG_BUF, etc.)
+- **Proper error handling**: finalize_operation_logger() errors logged, partial results saved on agent failure
+- **Script enhancement**: `start_local_agents.sh` updated with optional oplog parameter
+
+```bash
+# Enable oplog via CLI flag
+./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
+# Creates: /data/oplogs/trace-agent1.tsv.zst
+
+# Or via YAML config (takes precedence)
+op_log_path: /data/oplogs/trace.tsv.zst
+
+# Use start script with oplog
+./scripts/start_local_agents.sh 2 7761 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"
+```
+
+See [CHANGELOG](docs/CHANGELOG.md#081) for complete details.
+
+**Previous Release - v0.8.0 (November 20, 2025)** - Formal state machines & error handling
 
 - **Formal state machines**: 5-state agent, 9-state controller tracking with validated transitions
 - **Auto-reset agents**: Agents automatically recover from errors (Failed → Idle), accept new requests without restart
@@ -34,11 +57,9 @@ Major release focused on reliability, error handling, and production deployment:
 ./sai3-bench run --config workload.yaml      # See critical errors only
 ```
 
-**Testing:** 153 passing tests, zero warnings, zero clippy issues.
+**Testing:** 159 passing tests, zero warnings, zero clippy issues.
 
 See [CHANGELOG](docs/CHANGELOG.md#080) for complete details.
-
-**Previous Release - v0.7.12 (November 19, 2025)** - Faster startup with 10-second coordinated delay
 
 ## 🚀 What Makes sai3-bench Unique?
 
