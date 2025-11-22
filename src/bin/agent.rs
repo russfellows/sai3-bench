@@ -907,6 +907,14 @@ impl Agent for AgentSvc {
                             cpu_iowait_percent: cpu_util.iowait_percent,
                             cpu_total_percent: cpu_util.total_percent,
                         };
+                        // v0.8.2: Yield can block if controller is slow - log if we're about to send
+                        if snapshot.in_prepare_phase && snapshot.prepare_objects_created % 10000 == 0 {
+                            debug!("Prepare progress: {}/{} objects ({:.1}%)",
+                                snapshot.prepare_objects_created,
+                                snapshot.prepare_objects_total,
+                                (snapshot.prepare_objects_created as f64 / snapshot.prepare_objects_total as f64) * 100.0
+                            );
+                        }
                         yield Ok(stats);
                     }
                     
@@ -1018,9 +1026,22 @@ impl Agent for AgentSvc {
             info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
             let _ = tx_cancel.send(());
             
-            // v0.7.13: Reset agent state to Idle after stream completes
-            let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
-            info!("Agent {} reset to Idle state, ready for next workload", agent_id_stream);
+            // v0.8.2: Reset agent state to Idle after stream completes
+            // BUG FIX: Previously tried unconditional transition to Idle
+            // 
+            // Issue: Normal flow transitions Running→Idle when workload completes (line 992)
+            //        Then stream cleanup tries Idle→Idle which fails validation
+            //        Error: "Invalid state transition: Idle → Idle (reason: stream ended)"
+            // 
+            // Solution: Check current state before attempting transition
+            //           Only transition if not already Idle (idempotent cleanup)
+            let current_state = agent_state_stream.get_state().await;
+            if current_state != WorkloadState::Idle {
+                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
+                info!("Agent {} reset to Idle state from {:?}, ready for next workload", agent_id_stream, current_state);
+            } else {
+                debug!("Agent {} already in Idle state, no transition needed", agent_id_stream);
+            }
         };
 
         Ok(Response::new(Box::pin(stream)))

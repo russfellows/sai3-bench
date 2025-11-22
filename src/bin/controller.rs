@@ -79,6 +79,15 @@ impl ControllerAgentState {
             | (Aborting, Completed)    // Cleanup done
             | (Aborting, Failed)       // Abort failed
             | (Aborting, Disconnected) // Lost during abort
+            // v0.8.2: Recovery from Disconnected (gRPC stream backpressure, network issues)
+            // BUG FIX: Previously Disconnected was terminal - agents couldn't recover
+            // Issue: Large prepare phases (400K+ objects) cause gRPC backpressure
+            //        Agent's yield blocks → no updates → timeout → marked Disconnected
+            //        Then agent recovers but controller couldn't process recovery
+            // Solution: Allow transitions FROM Disconnected based on message content
+            | (Disconnected, Preparing)  // Reconnect during prepare phase
+            | (Disconnected, Running)    // Reconnect during workload phase
+            | (Disconnected, Completed)  // Reconnect with completion message
             // Stay in terminal states
             | (Completed, Completed)
             | (Failed, Failed)
@@ -97,6 +106,7 @@ struct AgentTracker {
     last_seen: std::time::Instant,
     error_message: Option<String>,
     latest_stats: Option<LiveStats>,
+    reconnect_count: usize,  // v0.8.2: Count of disconnections followed by reconnection
 }
 
 impl AgentTracker {
@@ -107,6 +117,7 @@ impl AgentTracker {
             last_seen: std::time::Instant::now(),
             error_message: None,
             latest_stats: None,
+            reconnect_count: 0,  // v0.8.2: Track disconnect/reconnect events
         }
     }
 
@@ -136,12 +147,17 @@ impl AgentTracker {
     }
 
     /// Check if agent is in a terminal state (won't send more updates)
+    /// v0.8.2: Disconnected is NOT terminal - agents can recover
+    /// 
+    /// BUG FIX: Previously included Disconnected as terminal state
+    /// This prevented processing recovery messages from agents that timed out
+    /// but later resumed (e.g., after gRPC backpressure resolved)
+    /// 
+    /// Only Completed and Failed are truly terminal - no further messages expected
     fn is_terminal(&self) -> bool {
         matches!(
             self.state,
-            ControllerAgentState::Completed
-                | ControllerAgentState::Failed
-                | ControllerAgentState::Disconnected
+            ControllerAgentState::Completed | ControllerAgentState::Failed
         )
     }
 
@@ -164,17 +180,21 @@ impl AgentTracker {
 /// Collects LiveStats messages from all agent streams and computes weighted aggregate metrics.
 /// Uses weighted averaging for latencies (weighted by operation count).
 /// v0.7.12: Tracks previous snapshot for windowed throughput calculation
+/// v0.8.2: Tracks expected_agents for "X of Y Agents" display
 struct LiveStatsAggregator {
     agent_stats: std::collections::HashMap<String, LiveStats>,
     // v0.7.12: Previous aggregate for computing windowed (current) throughput
     previous_aggregate: Option<AggregateStats>,
+    // v0.8.2: Expected number of agents (from agent_addrs.len())
+    expected_agents: usize,
 }
 
 impl LiveStatsAggregator {
-    fn new() -> Self {
+    fn new(expected_agents: usize) -> Self {
         Self {
             agent_stats: std::collections::HashMap::new(),
             previous_aggregate: None,
+            expected_agents,
         }
     }
 
@@ -330,6 +350,7 @@ impl LiveStatsAggregator {
 
         let aggregate = AggregateStats {
             num_agents: self.agent_stats.len(),
+            expected_agents: self.expected_agents,  // v0.8.2: Track expected count
             total_get_ops,
             total_get_bytes,
             get_mean_us,
@@ -369,6 +390,7 @@ impl LiveStatsAggregator {
 #[derive(Debug, Clone)]
 struct AggregateStats {
     num_agents: usize,
+    expected_agents: usize,  // v0.8.2: For "X of Y Agents" display
     total_get_ops: u64,
     total_get_bytes: u64,
     get_mean_us: f64,
@@ -441,8 +463,9 @@ impl AggregateStats {
         // Only show META line if there are META operations
         if self.total_meta_ops > 0 {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
+                "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
                 self.num_agents,
+                self.expected_agents,
                 get_ops_s,
                 get_bandwidth,
                 get_mean_str,
@@ -459,8 +482,9 @@ impl AggregateStats {
             )
         } else {
             format!(
-                "{} agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {}){}",
+                "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {}){}",
                 self.num_agents,
+                self.expected_agents,
                 get_ops_s,
                 get_bandwidth,
                 get_mean_str,
@@ -1432,13 +1456,26 @@ async fn run_distributed_workload(
     let mut workload_start = std::time::Instant::now();
     
     // Aggregator for live stats display
-    let mut aggregator = LiveStatsAggregator::new();
+    let mut aggregator = LiveStatsAggregator::new(agent_addrs.len());  // v0.8.2: Pass expected agent count
     let mut last_update = std::time::Instant::now();
     
     // v0.7.13: agent_trackers already initialized above for startup phase
     // Continue using it for workload execution (replaces completed_agents, dead_agents, agent_last_seen)
-    let timeout_warn_secs = 5.0;
-    let timeout_dead_secs = 10.0;
+    // v0.8.2: Increased timeouts for long prepare phases (400K+ objects)
+    // BUG FIX: Previous values (5s/10s) too aggressive for production workloads
+    // 
+    // Root cause: During large prepare phases, agent's `yield Ok(stats)` can block
+    // if controller's gRPC receive buffer fills (backpressure). While blocked,
+    // agent cannot send updates, triggering false timeout detection.
+    // 
+    // Production testing: Saw 379s blockage with 400K objects, all agents working fine
+    // 
+    // New values balance:
+    //   - Fast detection of truly dead agents
+    //   - Tolerance for gRPC stream backpressure
+    //   - Warning visibility at 30s for monitoring
+    let timeout_warn_secs = 30.0;  // Warn after 30s (yellow flag)
+    let timeout_dead_secs = 60.0;  // Mark dead after 60s (red flag)
     
     // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
     let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
@@ -1496,16 +1533,51 @@ async fn run_distributed_workload(
                         tracker.touch();  // Update last seen timestamp
                         tracker.latest_stats = Some(stats.clone());
                         
+                        // v0.8.2: Agent recovery from Disconnected state
+                        // BUG FIX: Previously agents stayed Disconnected even after sending messages
+                        // 
+                        // Scenario: Agent times out during prepare (gRPC backpressure)
+                        //           → marked Disconnected
+                        //           → backpressure resolves, agent sends message
+                        //           → THIS CODE recovers agent to correct state
+                        // 
+                        // Recovery is AUTOMATIC and COMPLETE:
+                        //   - State: transition_to() performs full state change + timestamp reset
+                        //   - Display: dead_count recalculated dynamically (line 1611)
+                        //   - Aggregator: update() replaces entry, resets completed flag (line 1605)
+                        //   - No persistent degraded state remains
+                        if tracker.state == ControllerAgentState::Disconnected {
+                            let new_state = if stats.completed {
+                                ControllerAgentState::Completed
+                            } else if stats.in_prepare_phase {
+                                ControllerAgentState::Preparing
+                            } else {
+                                ControllerAgentState::Running
+                            };
+                            
+                            // v0.8.2: Increment reconnect counter for diagnostics
+                            tracker.reconnect_count += 1;
+                            
+                            warn!("🔄 Agent {} RECOVERED from DISCONNECTED → {:?} (reconnect #{})", stats.agent_id, new_state, tracker.reconnect_count);
+                            
+                            // Use transition_to with proper validation (now allowed in state machine)
+                            // Note: Checks error for visibility, shouldn't fail with state machine fix
+                            if let Err(e) = tracker.transition_to(new_state, "recovered from timeout") {
+                                error!("Failed to recover agent {}: {}", stats.agent_id, e);
+                            }
+                        }
+                        
                         // v0.7.9: Capture prepare phase info BEFORE moving stats
                         let in_prepare = stats.in_prepare_phase;
                         let prepare_created = stats.prepare_objects_created;
                         let prepare_total = stats.prepare_objects_total;
                         
                         // v0.7.13: Update agent state based on prepare phase
-                        if in_prepare && (tracker.state == ControllerAgentState::Ready || tracker.state == ControllerAgentState::Running) {
-                            if tracker.state != ControllerAgentState::Preparing {
-                                let _ = tracker.transition_to(ControllerAgentState::Preparing, "prepare phase started");
-                            }
+                        // v0.8.2: Only transition Ready→Preparing (not Running→Preparing, that's invalid)
+                        // BUG FIX: Previously checked (Ready || Running), but Running→Preparing is
+                        // not an allowed transition. Agents should never go backwards in phases.
+                        if in_prepare && tracker.state == ControllerAgentState::Ready {
+                            let _ = tracker.transition_to(ControllerAgentState::Preparing, "prepare phase started");
                         } else if !in_prepare && tracker.state == ControllerAgentState::Preparing {
                             let _ = tracker.transition_to(ControllerAgentState::Running, "workload phase started");
                         } else if !in_prepare && tracker.state == ControllerAgentState::Ready {
@@ -1809,6 +1881,7 @@ struct TestStatus {
     failed: usize,
     disconnected: usize,
     aborting: usize,
+    reconnect_count: usize,  // v0.8.2: Total disconnect/reconnect events across all agents
     total_ops: u64,
     agent_details: Vec<(String, ControllerAgentState, String)>, // (id, state, reason)
 }
@@ -1830,6 +1903,9 @@ fn check_test_status(
     let failed = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Failed).count();
     let disconnected = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Disconnected).count();
     let aborting = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Aborting).count();
+    
+    // v0.8.2: Sum reconnect counts across all agents for diagnostic visibility
+    let reconnect_count: usize = real_agents.iter().map(|(_, t)| t.reconnect_count).sum();
     
     // Test succeeds only if ALL agents completed successfully
     let success = total_agents > 0 && completed == total_agents && failed == 0 && disconnected == 0 && aborting == 0;
@@ -1856,6 +1932,7 @@ fn check_test_status(
         failed,
         disconnected,
         aborting,
+        reconnect_count,  // v0.8.2: Include disconnect/reconnect diagnostic
         total_ops,
         agent_details,
     }
@@ -1883,6 +1960,7 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
     content.push_str(&format!("Completed: {}\n", status.completed));
     content.push_str(&format!("Failed: {}\n", status.failed));
     content.push_str(&format!("Disconnected: {}\n", status.disconnected));
+    content.push_str(&format!("Disconnect/Reconnect Count: {}\n", status.reconnect_count));
     content.push_str(&format!("Aborting: {}\n", status.aborting));
     content.push_str(&format!("Total operations: {}\n", status.total_ops));
     content.push_str("\n");

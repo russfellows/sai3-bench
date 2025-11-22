@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.1-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.2-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-159%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,34 +8,20 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.8.1 (November 21, 2025)
+## 🌟 Latest Release - v0.8.2 (November 21, 2025)
 
-**📊 Operation Logging Support for Distributed Agents**
+**🔍 Enhanced Agent Status Visibility**
 
-Enhances distributed workload analysis with s3dlio operation trace logging:
+Improved agent status display and connection diagnostics for distributed testing:
 
-- **Agent operation logging**: `--op-log` CLI flag and `op_log_path` YAML config for s3dlio trace capture
-- **Per-agent filenames**: Automatic agent_id suffix prevents collisions (e.g., `oplog-agent1.tsv.zst`)
-- **Config precedence**: YAML `op_log_path` overrides CLI `--op-log` flag for flexibility
-- **Full environment support**: All s3dlio oplog variables (S3DLIO_OPLOG_SORT, S3DLIO_OPLOG_BUF, etc.)
-- **Proper error handling**: finalize_operation_logger() errors logged, partial results saved on agent failure
-- **Script enhancement**: `start_local_agents.sh` updated with optional oplog parameter
+- **"X of Y Agents" display**: Live stats show `"2 of 2 Agents"` instead of `"2 agents"` for better visibility
+- **Reconnection tracking**: New `Disconnect/Reconnect Count` field in STATUS.txt tracks temporary connection issues
+- **Connection diagnostics**: Distinguishes clean runs from tests with recovered connection problems
+- **Recovery logging**: Events logged as `"🔄 Agent X RECOVERED (reconnect #N)"` for troubleshooting
 
-```bash
-# Enable oplog via CLI flag
-./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
-# Creates: /data/oplogs/trace-agent1.tsv.zst
+See [CHANGELOG](docs/CHANGELOG.md#082) for complete details.
 
-# Or via YAML config (takes precedence)
-op_log_path: /data/oplogs/trace.tsv.zst
-
-# Use start script with oplog
-./scripts/start_local_agents.sh 2 7761 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"
-```
-
-See [CHANGELOG](docs/CHANGELOG.md#081) for complete details.
-
-**Previous Release - v0.8.0 (November 20, 2025)** - Formal state machines & error handling
+**Previous Release - v0.8.1 (November 21, 2025)** - Operation logging for distributed agents
 
 - **Formal state machines**: 5-state agent, 9-state controller tracking with validated transitions
 - **Auto-reset agents**: Agents automatically recover from errors (Failed → Idle), accept new requests without restart
