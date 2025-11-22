@@ -1018,9 +1018,14 @@ impl Agent for AgentSvc {
             info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
             let _ = tx_cancel.send(());
             
-            // v0.7.13: Reset agent state to Idle after stream completes
-            let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
-            info!("Agent {} reset to Idle state, ready for next workload", agent_id_stream);
+            // v0.8.1: Reset agent state to Idle after stream completes (if not already Idle)
+            let current_state = agent_state_stream.get_state().await;
+            if current_state != WorkloadState::Idle {
+                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
+                info!("Agent {} reset to Idle state from {:?}, ready for next workload", agent_id_stream, current_state);
+            } else {
+                debug!("Agent {} already in Idle state, no transition needed", agent_id_stream);
+            }
         };
 
         Ok(Response::new(Box::pin(stream)))
