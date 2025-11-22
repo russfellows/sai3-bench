@@ -19,14 +19,6 @@ Improved agent status display and connection diagnostics for distributed testing
 - **Connection diagnostics**: Distinguishes clean runs from tests with recovered connection problems
 - **Recovery logging**: Events logged as `"🔄 Agent X RECOVERED (reconnect #N)"` for troubleshooting
 
-```
-=== Summary ===
-Total agents: 8
-Completed: 8
-Disconnected: 0             ← No agents currently disconnected
-Disconnect/Reconnect Count: 3  ← But 3 temporary issues recovered
-```
-
 See [CHANGELOG](docs/CHANGELOG.md#082) for complete details.
 
 **Previous Release - v0.8.1 (November 21, 2025)** - Operation logging for distributed agents
