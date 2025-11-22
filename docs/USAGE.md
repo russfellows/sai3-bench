@@ -249,7 +249,9 @@ By default, both use plaintext (no flags needed).
 
 ## Real-Time Progress Display
 
-When running distributed workloads with `sai3bench-ctl run`, you'll see a beautiful real-time progress display showing:
+### Controller View (sai3bench-ctl)
+
+When running distributed workloads with `sai3bench-ctl run`, you'll see a real-time progress display showing:
 
 - **Progress bar**: Visual progress with elapsed/total seconds (e.g., `[=====>] 15/30s`)
 - **Live metrics**: Aggregate stats updated every second across all agents
@@ -257,7 +259,19 @@ When running distributed workloads with `sai3bench-ctl run`, you'll see a beauti
 - **Agent count**: Number of active agents
 - **Per-operation stats**: Separate lines for GET, PUT, META operations
 
-### Example Output
+### Agent Console View (sai3bench-agent)
+
+Each agent also displays its own progress on its console (v0.8.3):
+
+- **Prepare phase**: Progress bar showing file creation/discovery
+  - Format: `[agent-id] [=====>] 45/90 objects`
+- **Workload phase**: Live statistics spinner
+  - Format: `[agent-id] 1234 ops/s | 12.3 MiB/s | avg 95ms`
+  - Updates every 0.5 seconds with throughput and latency
+
+This allows you to monitor individual agent progress when running agents in separate terminals or log files.
+
+### Example Controller Output
 
 ```
 === Distributed Workload ===

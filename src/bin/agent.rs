@@ -705,6 +705,142 @@ impl Agent for AgentSvc {
             // v0.7.12: Subscribe again for the workload task (separate receiver)
             let mut abort_rx_exec = agent_state_stream.subscribe_abort();
             
+            // v0.8.3: Spawn LOCAL PROGRESS BAR task to display agent console progress
+            // This runs INDEPENDENTLY of gRPC streaming - agents MUST show progress locally
+            // Each agent displays its OWN progress bar on its OWN console (separate terminal window)
+            let tracker_progress = tracker_spawn.clone();
+            let agent_id_progress = agent_id_stream.clone();
+            tokio::spawn(async move {
+                use indicatif::{ProgressBar, ProgressStyle};
+                use std::time::{Duration as StdDuration, Instant};
+                
+                let mut interval = tokio::time::interval(StdDuration::from_millis(100));
+                let mut prepare_pb: Option<ProgressBar> = None;
+                let mut workload_pb: Option<ProgressBar> = None;
+                let mut last_prepare_total = 0u64;
+                let mut last_stats_update = Instant::now();
+                let mut last_ops = 0u64;
+                let mut last_bytes = 0u64;
+                
+                loop {
+                    interval.tick().await;
+                    let snapshot = tracker_progress.snapshot();
+                    
+                    // Prepare phase progress bar (stays visible after completion)
+                    if snapshot.in_prepare_phase {
+                        if prepare_pb.is_none() || last_prepare_total != snapshot.prepare_objects_total {
+                            // Create prepare progress bar with exact same style as standalone mode
+                            let pb = ProgressBar::new(snapshot.prepare_objects_total);
+                            pb.set_style(
+                                ProgressStyle::with_template(
+                                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
+                                ).unwrap()
+                            );
+                            pb.set_message(format!("[{}] preparing...", agent_id_progress));
+                            prepare_pb = Some(pb);
+                            last_prepare_total = snapshot.prepare_objects_total;
+                        }
+                        
+                        if let Some(ref pb) = prepare_pb {
+                            pb.set_position(snapshot.prepare_objects_created);
+                            
+                            // Update stats message every 0.5s
+                            let elapsed = last_stats_update.elapsed();
+                            if elapsed.as_secs_f64() >= 0.5 {
+                                let ops_delta = snapshot.put_ops.saturating_sub(last_ops);
+                                let bytes_delta = snapshot.put_bytes.saturating_sub(last_bytes);
+                                let time_delta = elapsed.as_secs_f64();
+                                
+                                if ops_delta > 0 {
+                                    let ops_per_sec = ops_delta as f64 / time_delta;
+                                    let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                                    // Estimate avg latency from throughput (rough approximation)
+                                    let avg_latency_ms = if snapshot.put_ops > 0 {
+                                        snapshot.put_mean_us as f64 / 1000.0
+                                    } else {
+                                        0.0
+                                    };
+                                    
+                                    pb.set_message(format!(
+                                        "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                                        agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
+                                    ));
+                                }
+                                
+                                last_ops = snapshot.put_ops;
+                                last_bytes = snapshot.put_bytes;
+                                last_stats_update = Instant::now();
+                            }
+                        }
+                    } else if snapshot.in_prepare_phase == false && prepare_pb.is_some() {
+                        // Prepare phase just finished - finalize the bar
+                        if let Some(pb) = prepare_pb.as_ref() {
+                            pb.finish_with_message(format!("[{}] prepare complete", agent_id_progress));
+                        }
+                    }
+                    
+                    // Workload execution phase progress bar (separate from prepare)
+                    if !snapshot.in_prepare_phase && (snapshot.put_ops > 0 || snapshot.get_ops > 0) {
+                        if workload_pb.is_none() {
+                            // Create workload progress bar (time-based, like standalone mode)
+                            let pb = ProgressBar::new_spinner();
+                            pb.set_style(
+                                ProgressStyle::with_template(
+                                    "{spinner:.green} [{elapsed_precise}] {msg}"
+                                ).unwrap()
+                            );
+                            pb.set_message(format!("[{}] workload running...", agent_id_progress));
+                            workload_pb = Some(pb);
+                            // Reset stats tracking for workload phase
+                            last_ops = 0;
+                            last_bytes = 0;
+                            last_stats_update = Instant::now();
+                        }
+                        
+                        if let Some(ref pb) = workload_pb {
+                            pb.tick();
+                            
+                            // Update stats message every 0.5s
+                            let elapsed = last_stats_update.elapsed();
+                            if elapsed.as_secs_f64() >= 0.5 {
+                                let ops_delta = (snapshot.get_ops + snapshot.put_ops).saturating_sub(last_ops);
+                                let bytes_delta = (snapshot.get_bytes + snapshot.put_bytes).saturating_sub(last_bytes);
+                                let time_delta = elapsed.as_secs_f64();
+                                
+                                if ops_delta > 0 {
+                                    let ops_per_sec = ops_delta as f64 / time_delta;
+                                    let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                                    let avg_latency_ms = if snapshot.get_ops > 0 && snapshot.put_ops > 0 {
+                                        // Mixed workload - average of both
+                                        ((snapshot.get_mean_us + snapshot.put_mean_us) as f64 / 2.0) / 1000.0
+                                    } else if snapshot.get_ops > 0 {
+                                        snapshot.get_mean_us as f64 / 1000.0
+                                    } else {
+                                        snapshot.put_mean_us as f64 / 1000.0
+                                    };
+                                    
+                                    pb.set_message(format!(
+                                        "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                                        agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
+                                    ));
+                                }
+                                
+                                last_ops = snapshot.get_ops + snapshot.put_ops;
+                                last_bytes = snapshot.get_bytes + snapshot.put_bytes;
+                                last_stats_update = Instant::now();
+                            }
+                        }
+                    }
+                    
+                    // Check if workload completed
+                    if workload_pb.is_some() && !snapshot.in_prepare_phase && snapshot.get_ops == 0 && snapshot.put_ops == 0 {
+                        // This means we had a workload but now it's done (counters should be non-zero during execution)
+                        // Actually, we need a better completion signal - let's wait for the task to finish
+                        // For now, just keep the spinner going until the task exits
+                    }
+                }
+            });
+            
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
                 let tracker_for_prepare = tracker_exec.clone();

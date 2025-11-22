@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.2-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.3-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-159%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -8,52 +8,13 @@
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
-## 🌟 Latest Release - v0.8.2 (November 21, 2025)
-
-**🔍 Enhanced Agent Status Visibility**
-
-Improved agent status display and connection diagnostics for distributed testing:
-
-- **"X of Y Agents" display**: Live stats show `"2 of 2 Agents"` instead of `"2 agents"` for better visibility
-- **Reconnection tracking**: New `Disconnect/Reconnect Count` field in STATUS.txt tracks temporary connection issues
-- **Connection diagnostics**: Distinguishes clean runs from tests with recovered connection problems
-- **Recovery logging**: Events logged as `"🔄 Agent X RECOVERED (reconnect #N)"` for troubleshooting
-
-See [CHANGELOG](docs/CHANGELOG.md#082) for complete details.
-
-**Previous Release - v0.8.1 (November 21, 2025)** - Operation logging for distributed agents
-
-- **Formal state machines**: 5-state agent, 9-state controller tracking with validated transitions
-- **Auto-reset agents**: Agents automatically recover from errors (Failed → Idle), accept new requests without restart
-- **Comprehensive error handling**: Configurable thresholds (max errors, error rate, retries), automatic backoff
-- **Smart logging**: Context-aware verbosity (-v for retries, -vv for individual errors) with emoji indicators (❌⚠️🔄)
-- **Signal handling**: Graceful shutdown on SIGINT/SIGTERM with resource cleanup
-- **Constants centralization**: All timeouts, limits, intervals in single source of truth (`src/constants.rs`)
-- **Better validation**: Dry-run now matches agent validation exactly, catches config errors early
-- **Clean countdown**: Single-line updates, progress bar suspended, professional output
-
-```bash
-# Agents auto-reset after errors - no restart needed
-./sai3bench-ctl --agents host1:7761,host2:7761 run --config test1.yaml  # Works
-./sai3bench-ctl --agents host1:7761,host2:7761 run --config test2.yaml  # Works immediately
-
-# Smart error logging with verbosity levels
-./sai3-bench -vv run --config workload.yaml  # See individual errors + retries
-./sai3-bench -v run --config workload.yaml   # See retry attempts only
-./sai3-bench run --config workload.yaml      # See critical errors only
-```
-
-**Testing:** 159 passing tests, zero warnings, zero clippy issues.
-
-See [CHANGELOG](docs/CHANGELOG.md#080) for complete details.
-
 ## 🚀 What Makes sai3-bench Unique?
 
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
-2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing (v0.7.0)
-3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends (v0.7.0)
+2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing
+3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends
 4. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
-5. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay (v0.7.4)
+5. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay
 6. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
 7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
 8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
@@ -71,7 +32,7 @@ All operations work identically across protocols - just change the URI scheme:
 
 See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides.
 
-## 🌳 Directory Tree Workloads (v0.7.0)
+## 🌳 Directory Tree Workloads
 
 Test realistic shared filesystem scenarios with configurable directory hierarchies:
 
