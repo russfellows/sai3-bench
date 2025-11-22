@@ -705,11 +705,17 @@ async fn mk_client(
     sni_domain: &str,
 ) -> Result<AgentClient<Channel>> {
     if insecure {
-        // Plain HTTP
+        // Plain HTTP with robust connection settings
         let ep = format!("http://{}", target);
         let channel = Endpoint::try_from(ep)?
             .connect_timeout(Duration::from_secs(5))
             .tcp_nodelay(true)
+            // BUG FIX v0.8.3: Add HTTP/2 keepalive to detect dead connections
+            // Without keepalive, broken TCP connections can hang for minutes
+            // These settings match gRPC best practices for long-lived streams
+            .http2_keep_alive_interval(Duration::from_secs(30))  // Send PING every 30s
+            .keep_alive_timeout(Duration::from_secs(10))         // Wait 10s for PONG
+            .keep_alive_while_idle(true)                         // Keep alive even when idle
             .connect()
             .await?;
         return Ok(AgentClient::new(channel));
@@ -731,6 +737,10 @@ async fn mk_client(
         .tls_config(tls)?
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true)
+        // BUG FIX v0.8.3: Add HTTP/2 keepalive (same as insecure mode)
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true)
         .connect()
         .await?;
     Ok(AgentClient::new(channel))
@@ -1153,7 +1163,20 @@ async fn run_distributed_workload(
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
     
     // v0.7.6: Create channel BEFORE spawning tasks (tasks need tx)
-    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(100);
+    // BUG FIX v0.8.3: Use unbounded channel to prevent backpressure deadlock
+    // Previous: bounded channel with buffer=100 caused stream tasks to block/fail
+    //   - 4 agents × 1 msg/sec = 4 msg/sec
+    //   - If controller slow (heavy aggregation), buffer fills in 25 seconds
+    //   - tx.send() blocks/fails → stream task exits → no more messages
+    //   - Controller sees timeout and marks agent disconnected
+    // Solution: Unbounded channel - agents can always send, controller processes at own pace
+    //
+    // ROBUSTNESS v0.8.3: Message reception runs in dedicated task, processing in main loop
+    //   - Stream forwarding → unbounded channel → reception task → bounded channel → main loop
+    //   - Reception task ONLY updates timestamps (fast, never blocks)
+    //   - Main loop does heavy processing (aggregation, UI, file I/O)
+    //   - Guarantees: tracker.touch() happens immediately, agents never timeout due to slow processing
+    let (tx_stats, mut rx_stats) = tokio::sync::mpsc::unbounded_channel::<LiveStats>();
     
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
@@ -1212,7 +1235,8 @@ async fn run_distributed_workload(
                     debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
                            stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
                            stats_result.get_bytes + stats_result.put_bytes);
-                    if let Err(e) = tx.send(stats_result).await {
+                    // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
+                    if let Err(e) = tx.send(stats_result) {
                         error!("Failed to forward stats from agent {}: {}", addr, e);
                         break;
                     }
@@ -1244,7 +1268,7 @@ async fn run_distributed_workload(
                     cpu_iowait_percent: 0.0,
                     cpu_total_percent: 0.0,
                 };
-                let _ = tx.send(error_stats).await;
+                let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
             
             info!("Agent {} stream completed with {} updates", addr, stats_count);
@@ -1469,13 +1493,18 @@ async fn run_distributed_workload(
     // agent cannot send updates, triggering false timeout detection.
     // 
     // Production testing: Saw 379s blockage with 400K objects, all agents working fine
+    // User testing: Saw 56% prepare completion (113K/200K) before timeout - agents still working
     // 
-    // New values balance:
-    //   - Fast detection of truly dead agents
-    //   - Tolerance for gRPC stream backpressure
-    //   - Warning visibility at 30s for monitoring
-    let timeout_warn_secs = 30.0;  // Warn after 30s (yellow flag)
-    let timeout_dead_secs = 60.0;  // Mark dead after 60s (red flag)
+    // BUG FIX v0.8.3: Previous 60s timeout was WAY too short for large prepare phases
+    // - 200K objects can take 5-10 minutes to create
+    // - gRPC backpressure can pause updates for minutes
+    // - Agents keep working but controller gives up and exits
+    // 
+    // New values:
+    //   - Warn after 60s (agents should send updates every 0.5s normally)
+    //   - Mark disconnected after 10 minutes (truly dead, not just slow)
+    let timeout_warn_secs = 60.0;   // Warn after 1 minute (yellow flag)
+    let timeout_dead_secs = 600.0;  // Mark dead after 10 minutes (red flag)
     
     // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
     let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
@@ -1507,7 +1536,9 @@ async fn run_distributed_workload(
                 if tracker.state != ControllerAgentState::Disconnected {
                     error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DISCONNECTED", tracker.agent_id, elapsed);
                     let _ = tracker.transition_to(ControllerAgentState::Disconnected, "timeout");
-                    aggregator.mark_completed(&tracker.agent_id);  // Remove from active count
+                    // BUG FIX v0.8.3: Do NOT mark as completed - disconnected != completed!
+                    // Previous code called mark_completed() here, causing early exit when all agents timed out
+                    // Now: disconnected agents don't count toward all_completed() check
                     any_disconnected = true;
                 }
             } else if elapsed >= timeout_warn_secs {
@@ -1543,10 +1574,19 @@ async fn run_distributed_workload(
                         // 
                         // Recovery is AUTOMATIC and COMPLETE:
                         //   - State: transition_to() performs full state change + timestamp reset
-                        //   - Display: dead_count recalculated dynamically (line 1611)
-                        //   - Aggregator: update() replaces entry, resets completed flag (line 1605)
+                        //   - Display: dead_count recalculated dynamically
+                        //   - Aggregator: update() replaces entry, resets completed flag if needed
                         //   - No persistent degraded state remains
                         if tracker.state == ControllerAgentState::Disconnected {
+                            // BUG FIX v0.8.3: If agent was marked completed due to disconnect, unmark it
+                            // This ensures all_completed() check waits for actual completion
+                            if let Some(agent_stats) = aggregator.agent_stats.get_mut(&stats.agent_id) {
+                                if agent_stats.completed && !stats.completed {
+                                    agent_stats.completed = false;
+                                    info!("Agent {} reconnected - unmarking as completed", stats.agent_id);
+                                }
+                            }
+                            
                             let new_state = if stats.completed {
                                 ControllerAgentState::Completed
                             } else if stats.in_prepare_phase {

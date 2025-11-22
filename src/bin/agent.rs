@@ -73,6 +73,8 @@ struct Cli {
 struct AgentState {
     /// Broadcast channel for abort signals (controller calls AbortWorkload)
     abort_tx: broadcast::Sender<()>,
+    /// Broadcast channel for workload completion/cleanup signals
+    completion_tx: broadcast::Sender<()>,
     /// Current workload state
     state: Arc<Mutex<WorkloadState>>,
     /// Error message (if state is Failed)
@@ -93,8 +95,10 @@ enum WorkloadState {
 impl AgentState {
     fn new(agent_op_log_path: Option<std::path::PathBuf>) -> Self {
         let (abort_tx, _) = broadcast::channel(16);
+        let (completion_tx, _) = broadcast::channel(16);
         Self {
             abort_tx,
+            completion_tx,
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
             error_message: Arc::new(Mutex::new(None)),
             agent_op_log_path,
@@ -158,9 +162,19 @@ impl AgentState {
         info!("Abort signal broadcast to workload");
     }
     
+    /// Send completion signal for cleanup tasks (progress bars, etc)
+    fn send_completion(&self) {
+        let _ = self.completion_tx.send(());
+    }
+    
     /// Subscribe to abort signals
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
+    }
+    
+    /// Subscribe to completion signals
+    fn subscribe_completion(&self) -> broadcast::Receiver<()> {
+        self.completion_tx.subscribe()
     }
 }
 
@@ -705,6 +719,160 @@ impl Agent for AgentSvc {
             // v0.7.12: Subscribe again for the workload task (separate receiver)
             let mut abort_rx_exec = agent_state_stream.subscribe_abort();
             
+            // v0.8.3: Spawn LOCAL PROGRESS BAR task to display agent console progress
+            // This runs INDEPENDENTLY of gRPC streaming - agents MUST show progress locally
+            // Each agent displays its OWN progress bar on its OWN console (separate terminal window)
+            let tracker_progress = tracker_spawn.clone();
+            let agent_id_progress = agent_id_stream.clone();
+            let mut rx_completion = agent_state_stream.subscribe_completion();
+            let mut rx_abort = agent_state_stream.subscribe_abort();
+            tokio::spawn(async move {
+                use indicatif::{ProgressBar, ProgressStyle};
+                use std::time::{Duration as StdDuration, Instant};
+                
+                let mut interval = tokio::time::interval(StdDuration::from_millis(100));
+                let mut prepare_pb: Option<ProgressBar> = None;
+                let mut workload_pb: Option<ProgressBar> = None;
+                let mut last_prepare_total = 0u64;
+                let mut last_stats_update = Instant::now();
+                let mut last_ops = 0u64;
+                let mut last_bytes = 0u64;
+                
+                loop {
+                    tokio::select! {
+                        _ = rx_completion.recv() => {
+                            // Workload completed successfully - clean up progress bars
+                            if let Some(pb) = prepare_pb.as_ref() {
+                                pb.finish_and_clear();
+                            }
+                            if let Some(pb) = workload_pb.as_ref() {
+                                pb.finish_and_clear();
+                            }
+                            break;
+                        }
+                        _ = rx_abort.recv() => {
+                            // Workload aborted - clean up progress bars immediately
+                            if let Some(pb) = prepare_pb.as_ref() {
+                                pb.abandon_with_message(format!("[{}] aborted", agent_id_progress));
+                            }
+                            if let Some(pb) = workload_pb.as_ref() {
+                                pb.abandon_with_message(format!("[{}] aborted", agent_id_progress));
+                            }
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let snapshot = tracker_progress.snapshot();
+                    
+                            // Prepare phase progress bar (stays visible after completion)
+                            if snapshot.in_prepare_phase {
+                                if prepare_pb.is_none() || last_prepare_total != snapshot.prepare_objects_total {
+                                    // Create prepare progress bar with exact same style as standalone mode
+                                    let pb = ProgressBar::new(snapshot.prepare_objects_total);
+                                    pb.set_style(
+                                        ProgressStyle::with_template(
+                                            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
+                                        ).unwrap()
+                                    );
+                                    pb.set_message(format!("[{}] preparing...", agent_id_progress));
+                                    prepare_pb = Some(pb);
+                                    last_prepare_total = snapshot.prepare_objects_total;
+                                }
+                                
+                                if let Some(ref pb) = prepare_pb {
+                                    pb.set_position(snapshot.prepare_objects_created);
+                                    
+                                    // Update stats message every 0.5s
+                                    let elapsed = last_stats_update.elapsed();
+                                    if elapsed.as_secs_f64() >= 0.5 {
+                                        let ops_delta = snapshot.put_ops.saturating_sub(last_ops);
+                                        let bytes_delta = snapshot.put_bytes.saturating_sub(last_bytes);
+                                        let time_delta = elapsed.as_secs_f64();
+                                        
+                                        if ops_delta > 0 {
+                                            let ops_per_sec = ops_delta as f64 / time_delta;
+                                            let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                                            // Estimate avg latency from throughput (rough approximation)
+                                            let avg_latency_ms = if snapshot.put_ops > 0 {
+                                                snapshot.put_mean_us as f64 / 1000.0
+                                            } else {
+                                                0.0
+                                            };
+                                            
+                                            pb.set_message(format!(
+                                                "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                                                agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
+                                            ));
+                                        }
+                                        
+                                        last_ops = snapshot.put_ops;
+                                        last_bytes = snapshot.put_bytes;
+                                        last_stats_update = Instant::now();
+                                    }
+                                }
+                            } else if snapshot.in_prepare_phase == false && prepare_pb.is_some() {
+                                // Prepare phase just finished - finalize the bar
+                                if let Some(pb) = prepare_pb.as_ref() {
+                                    pb.finish_with_message(format!("[{}] prepare complete", agent_id_progress));
+                                }
+                            }
+                            
+                            // Workload execution phase progress bar (separate from prepare)
+                            if !snapshot.in_prepare_phase && (snapshot.put_ops > 0 || snapshot.get_ops > 0) {
+                                if workload_pb.is_none() {
+                                    // Create workload progress bar (time-based, like standalone mode)
+                                    let pb = ProgressBar::new_spinner();
+                                    pb.set_style(
+                                        ProgressStyle::with_template(
+                                            "{spinner:.green} [{elapsed_precise}] {msg}"
+                                        ).unwrap()
+                                    );
+                                    pb.set_message(format!("[{}] workload running...", agent_id_progress));
+                                    workload_pb = Some(pb);
+                                    // Reset stats tracking for workload phase
+                                    last_ops = 0;
+                                    last_bytes = 0;
+                                    last_stats_update = Instant::now();
+                                }
+                                
+                                if let Some(ref pb) = workload_pb {
+                                    pb.tick();
+                                    
+                                    // Update stats message every 0.5s
+                                    let elapsed = last_stats_update.elapsed();
+                                    if elapsed.as_secs_f64() >= 0.5 {
+                                        let ops_delta = (snapshot.get_ops + snapshot.put_ops).saturating_sub(last_ops);
+                                        let bytes_delta = (snapshot.get_bytes + snapshot.put_bytes).saturating_sub(last_bytes);
+                                        let time_delta = elapsed.as_secs_f64();
+                                        
+                                        if ops_delta > 0 {
+                                            let ops_per_sec = ops_delta as f64 / time_delta;
+                                            let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
+                                            let avg_latency_ms = if snapshot.get_ops > 0 && snapshot.put_ops > 0 {
+                                                // Mixed workload - average of both
+                                                ((snapshot.get_mean_us + snapshot.put_mean_us) as f64 / 2.0) / 1000.0
+                                            } else if snapshot.get_ops > 0 {
+                                                snapshot.get_mean_us as f64 / 1000.0
+                                            } else {
+                                                snapshot.put_mean_us as f64 / 1000.0
+                                            };
+                                            
+                                            pb.set_message(format!(
+                                                "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
+                                                agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
+                                            ));
+                                        }
+                                        
+                                        last_ops = snapshot.get_ops + snapshot.put_ops;
+                                        last_bytes = snapshot.get_bytes + snapshot.put_bytes;
+                                        last_stats_update = Instant::now();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
             tokio::spawn(async move {
                 // Wire live stats tracker for distributed operation recording (v0.7.5+)
                 let tracker_for_prepare = tracker_exec.clone();
@@ -1021,10 +1189,13 @@ impl Agent for AgentSvc {
                 }
             }
             
-            // v0.7.8: Stream is ending (controller disconnected or Ctrl+C)
+            // v0.7.8: Stream is ending (controller disconnected or normal completion)
             // Send cancellation signal to workload task
-            info!("Agent {} stream ending - signaling workload cancellation", agent_id_stream);
+            info!("Agent {} stream ending - cleaning up", agent_id_stream);
             let _ = tx_cancel.send(());
+            
+            // v0.8.3: Signal completion to cleanup tasks (progress bars)
+            agent_state_stream.send_completion();
             
             // v0.8.2: Reset agent state to Idle after stream completes
             // BUG FIX: Previously tried unconditional transition to Idle

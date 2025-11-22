@@ -2,6 +2,114 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.8.3] - 2025-11-22
+
+### 🚀 Critical Robustness Improvements for Distributed Testing
+
+**Major fixes for agent-controller communication reliability** - eliminates timeout failures and connection issues during large workloads.
+
+#### Agent Progress Bars Restored (v0.8.3)
+
+**Local Console Visibility**:
+- Agents now display their **own progress bars** on their **own console** (independent of controller)
+- Separate progress bars for prepare phase and workload phase (each on its own line)
+- Enables monitoring individual agents in separate terminal windows
+- Format matches standalone mode: `{spinner} [{elapsed}] [{bar}] {pos}/{len} objects {stats}`
+- Real-time stats: ops/s, MiB/s, average latency
+- Updates every 0.5 seconds
+
+**Why This Matters**:
+- With 8 agents, you can monitor 8 separate consoles showing individual progress
+- Immediately see if an agent is hung, slow, or working correctly
+- No dependency on controller or gRPC connection
+- Critical regression fix: agents were completely silent after state machine refactor
+
+#### gRPC Communication Robustness (v0.8.3)
+
+**Unbounded Channel - Eliminates Backpressure Deadlock**:
+- **Root Cause**: Bounded channel (100 messages) filled up when controller was slow processing
+  - 4 agents × 1 msg/sec = buffer fills in 25 seconds
+  - Stream tasks blocked on `tx.send().await` → agents couldn't yield stats
+  - Controller saw no updates → marked agents as disconnected after 60s
+  - Controller exited thinking all agents dead → agents kept working and completed after controller quit
+- **Solution**: Unbounded channel allows agents to always send messages without blocking
+- **Result**: No more deadlock cascade, controller never blocks agents
+
+**HTTP/2 Keepalive - Detects Dead Connections Fast**:
+- **Added Settings**:
+  - `http2_keep_alive_interval(30s)` - Sends PING every 30 seconds
+  - `keep_alive_timeout(10s)` - Waits 10 seconds for PONG
+  - `keep_alive_while_idle(true)` - Maintains connection during slow phases
+- **Benefit**: Broken TCP connections detected in 40 seconds (not 10+ minutes)
+- **Why Critical**: Without keepalive, broken connections appear healthy until TCP timeout (minutes)
+
+**Increased Timeout Tolerance**:
+- Warning timeout: 30s → 60s (allows brief slowdowns)
+- Disconnected timeout: **60s → 600s (10 minutes)**
+- **Rationale**: Large prepare phases (200K objects) can legitimately take 5-10 minutes
+- Production testing saw 379s (6.3 minutes) with 400K objects - 60s timeout was way too aggressive
+
+**Fixed Premature Controller Exit**:
+- **Bug**: Disconnected agents were marked as "completed" → `all_completed()` returned true → controller exited
+- **Fix**: Disconnected agents stay in disconnected state, don't count toward completion
+- **Result**: Controller waits for actual completion, not timeout artifacts
+
+#### User-Reported Issue Fixed
+
+**Scenario** (User: November 22, 2025):
+- Test with 4 agents creating 200K objects (prepare phase)
+- Working fine up to 40%, then controller stopped updating
+- Controller showed multiple warning lines: "⚠️ Agent X delayed: no updates for Y seconds"
+- Controller marked all agents disconnected at 56% (113742/200704 objects)
+- Controller gave up and exited with failure
+- **But agents kept working and finished all 200704 objects after controller quit!**
+
+**Root Causes Identified**:
+1. Bounded channel deadlock (100-message buffer overflow)
+2. No HTTP/2 keepalive (couldn't detect broken connections)
+3. Timeout too aggressive (60s for prepare phases taking 5-10 minutes)
+4. Premature exit logic (disconnected = completed)
+
+**After v0.8.3 Fixes**:
+- Agents can always send messages (unbounded channel)
+- Dead connections detected in 40 seconds (keepalive)
+- Legitimate slow operations tolerated (10-minute timeout)
+- Controller waits for real completion (not timeout artifacts)
+
+#### Technical Details
+
+**Architecture Changes**:
+```
+Before: Stream → Bounded(100) → Controller (blocks on full buffer)
+After:  Stream → Unbounded → Controller (never blocks)
+```
+
+**Connection Monitoring**:
+```
+Before: No keepalive → broken connections hang for minutes
+After:  PING every 30s → dead connections detected in 40s
+```
+
+**Timeout Strategy**:
+```
+Before: 60s dead timeout (way too short for prepare phases)
+After:  600s dead timeout (handles legitimate slow operations)
+```
+
+#### Migration Notes
+
+**No Breaking Changes**:
+- All existing configs work unchanged
+- Agent binaries backward compatible with old controllers
+- New controllers work with old agents (graceful degradation)
+
+**Recommended Actions**:
+- Update both controller and agents to v0.8.3 for full benefits
+- If you see "reconnect count" in STATUS.txt, it's now safe (agents recover)
+- Large prepare phases (100K+ objects) now complete reliably
+
+---
+
 ## [0.8.2] - 2025-11-21
 
 ### 🔍 Enhanced Agent Status Visibility
