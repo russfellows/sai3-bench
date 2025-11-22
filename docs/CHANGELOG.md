@@ -2,6 +2,65 @@
 
 All notable changes to sai3-bench will be documented in this file.
 
+## [0.8.2] - 2025-11-21
+
+### 🔍 Enhanced Agent Status Visibility
+
+**Improved agent status display and connection diagnostics** for distributed testing.
+
+#### "X of Y Agents" Display (v0.8.2)
+
+**Live Stats Format**:
+- Changed from `"2 agents"` to `"2 of 2 Agents"`
+- Shows communicating agents vs. expected agents
+- During disconnection: `"1 of 2 Agents (⚠️ 1 dead)"`
+- After recovery: `"2 of 2 Agents"`
+
+**Benefits**:
+- Immediate visibility into agent communication status
+- Clear indication of partial availability during issues
+- Distinguishes expected vs. actual agent count
+
+#### Reconnection Tracking (v0.8.2)
+
+**STATUS.txt Enhancement**:
+- New `Disconnect/Reconnect Count` field
+- Tracks total disconnect/reconnect events across all agents
+- Distinguishes between current vs. recovered connection issues
+
+**Example Output**:
+```
+=== Summary ===
+Total agents: 8
+Completed: 8
+Failed: 0
+Disconnected: 0
+Disconnect/Reconnect Count: 3
+```
+
+**Interpretation**:
+- `Disconnected: 0` = No agents currently disconnected (all recovered)
+- `Disconnect/Reconnect Count: 3` = Three temporary connection issues occurred and were recovered
+
+**Log Messages**:
+- Recovery events logged: `"🔄 Agent X RECOVERED from DISCONNECTED → Running (reconnect #N)"`
+- Provides diagnostic visibility into connection stability
+
+#### Benefits
+
+**Connection Diagnostics**:
+- Identifies network instability even when test succeeds
+- Helps diagnose intermittent gRPC backpressure
+- Reveals timeout threshold tuning needs
+- Useful for production deployment validation
+
+**Operational Visibility**:
+- Test shows SUCCESS but reconnect count reveals issues
+- Enables proactive network troubleshooting
+- Distinguishes clean runs from recovered-failure runs
+
+---
+
 ## [0.8.1] - 2025-11-21
 
 ### 📊 Operation Logging Support for Distributed Agents
