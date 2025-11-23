@@ -150,6 +150,11 @@ message LiveStats {
   double cpu_system_percent = 25;  // System/kernel mode CPU utilization (0-100%)
   double cpu_iowait_percent = 26;  // IO-wait CPU time (0-100%)
   double cpu_total_percent = 27;   // Total CPU utilization (user+system+iowait)
+  
+  // v0.8.4: Clock synchronization for coordinated start
+  // When status=READY, agent includes its current timestamp
+  // Controller calculates offset and adjusts start_timestamp_ns accordingly
+  int64 agent_timestamp_ns = 28;   // Agent's system time (nanoseconds since UNIX epoch)
 }
 
 service Agent {

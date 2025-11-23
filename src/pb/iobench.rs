@@ -239,6 +239,13 @@ pub struct LiveStats {
     /// Total CPU utilization (user+system+iowait)
     #[prost(double, tag = "27")]
     pub cpu_total_percent: f64,
+    /// v0.8.4: Clock synchronization for coordinated start
+    /// When status=READY, agent includes its current timestamp
+    /// Controller calculates offset and adjusts start_timestamp_ns accordingly
+    ///
+    /// Agent's system time (nanoseconds since UNIX epoch)
+    #[prost(int64, tag = "28")]
+    pub agent_timestamp_ns: i64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

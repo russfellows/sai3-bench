@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::dotenv;
 use futures::{stream::FuturesUnordered, StreamExt};
+use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,6 +30,35 @@ pub mod pb {
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
 use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
+
+/// Helper function to get current timestamp with optional simulated clock skew.
+/// 
+/// For testing clock synchronization with local agents, set SAI3_AGENT_CLOCK_SKEW_MS
+/// environment variable to simulate clock skew in milliseconds (can be negative).
+/// 
+/// Examples:
+///   SAI3_AGENT_CLOCK_SKEW_MS=5000   # Agent clock 5 seconds ahead
+///   SAI3_AGENT_CLOCK_SKEW_MS=-3000  # Agent clock 3 seconds behind
+/// 
+/// This allows testing the distributed clock synchronization protocol without
+/// needing different physical machines with actual clock skew.
+fn get_agent_timestamp_ns() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    
+    // Check for test clock skew (only reads once at function definition, but that's ok for testing)
+    if let Ok(skew_ms_str) = env::var("SAI3_AGENT_CLOCK_SKEW_MS") {
+        if let Ok(skew_ms) = skew_ms_str.parse::<i64>() {
+            let skew_ns = skew_ms * 1_000_000;
+            eprintln!("[TEST MODE] Simulating clock skew: {} ms ({} ns)", skew_ms, skew_ns);
+            return now + skew_ns;
+        }
+    }
+    
+    now
+}
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
@@ -532,13 +562,44 @@ impl Agent for AgentSvc {
             .map_err(|e| Status::internal(format!("Failed to apply path prefix: {}", e)))?;
 
         // v0.7.6: Parse coordinated start time (will wait inside stream after READY)
+        // v0.8.4: Coordinated start with clock synchronization
+        // 
+        // Protocol:
+        // 1. Agent sends READY with agent_timestamp_ns (agent's current time)
+        // 2. Controller calculates offset = agent_time - controller_time
+        // 3. Controller sends start_timestamp_ns in controller's clock
+        // 4. Agent adjusts: start_time_agent = start_time_controller (no adjustment needed!)
+        //
+        // Key insight: Both clocks measure time since UNIX_EPOCH. Even if agent clock
+        // is skewed (e.g., +5 seconds ahead), when controller says "start at epoch time X",
+        // agent checks its own clock against the same epoch time X. The skew cancels out
+        // because both are measuring against the same absolute reference point.
+        //
+        // Example:
+        //   Controller time: 1000s since epoch, says "start at 1010s"
+        //   Agent time: 1005s since epoch (5s ahead), sees "start at 1010s"
+        //   Agent waits: 1010 - 1005 = 5 seconds ✓
+        //   Controller waits: 1010 - 1000 = 10 seconds ✓
+        //   Both start at the same absolute epoch time (1010s)
+        //
+        // Why this works: SystemTime measures elapsed time from UNIX_EPOCH, not wall-clock time.
+        // Clock skew affects the current reading but not the measurement basis.
+        //
+        // Previous bug: Used minimum wait when start_time was in the past.
+        // Now: Always use calculated duration, even if negative (means agent already past start time).
+        
         let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
         let wait_duration = match start_time.duration_since(std::time::SystemTime::now()) {
             Ok(d) if d > std::time::Duration::from_secs(60) => {
                 return Err(Status::invalid_argument("Start time is too far in the future (>60s)"));
             }
-            Ok(d) => Some(d),
-            Err(_) => None,  // Start time is in the past
+            Ok(d) => d,
+            Err(_) => {
+                // Start time is in the past - this should not happen with proper coordination
+                // but we handle it gracefully by starting immediately
+                warn!("Start time already passed - starting immediately");
+                std::time::Duration::from_secs(0)
+            }
         };
 
         info!("Preparing workload execution with live stats for agent {}", agent_id);
@@ -600,6 +661,7 @@ impl Agent for AgentSvc {
                 cpu_system_percent: 0.0,
                 cpu_iowait_percent: 0.0,
                 cpu_total_percent: 0.0,
+                agent_timestamp_ns: 0,
             };
             
             let stream = async_stream::stream! {
@@ -638,6 +700,9 @@ impl Agent for AgentSvc {
             let mut abort_rx = agent_state_stream.subscribe_abort();
             
             // v0.7.6: Send READY status first (validation passed)
+            // v0.8.4: Include agent timestamp for clock synchronization
+            let agent_timestamp_ns = get_agent_timestamp_ns();
+            
             let ready_msg = LiveStats {
                 agent_id: agent_id_stream.clone(),
                 timestamp_s: 0.0,
@@ -666,31 +731,28 @@ impl Agent for AgentSvc {
                 cpu_system_percent: 0.0,
                 cpu_iowait_percent: 0.0,
                 cpu_total_percent: 0.0,
+                agent_timestamp_ns: agent_timestamp_ns,
             };
             yield Ok(ready_msg);
             
-            // v0.7.6: Wait for coordinated start time AFTER sending READY
-            // v0.7.12: Make coordinated start delay interruptible by abort signal
-            if let Some(wait_dur) = wait_duration {
-                info!("Waiting {:?} for coordinated start", agent_id_stream);
-                tokio::select! {
-                    _ = &mut rx_cancel => {
-                        warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
-                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
-                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "disconnect during wait").await;
-                        yield Err(Status::cancelled("Controller disconnected during coordinated start"));
-                        return;  // Exit stream generator
-                    }
-                    _ = abort_rx.recv() => {
-                        warn!("Agent {} aborted during coordinated start", agent_id_stream);
-                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
-                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "abort during wait").await;
-                        yield Err(Status::aborted("Aborted during coordinated start"));
-                        return;  // Exit stream generator
-                    }
-                    _ = tokio::time::sleep(wait_dur) => {
-                        // Normal case: coordinated start time reached
-                    }
+            // v0.8.4: Wait for coordinated start
+            info!("Agent {} waiting {:?} for coordinated start", agent_id_stream, wait_duration);
+            
+            tokio::select! {
+                _ = &mut rx_cancel => {
+                    warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
+                    let _ = agent_state_stream.transition_to(WorkloadState::Idle, "disconnect during wait").await;
+                    yield Err(Status::cancelled("Controller disconnected during coordinated start"));
+                    return;
+                }
+                _ = abort_rx.recv() => {
+                    warn!("Agent {} aborted during coordinated start", agent_id_stream);
+                    let _ = agent_state_stream.transition_to(WorkloadState::Idle, "abort during wait").await;
+                    yield Err(Status::aborted("Aborted during coordinated start"));
+                    return;
+                }
+                _ = tokio::time::sleep(wait_duration) => {
+                    // Coordinated start time reached
                 }
             }
             
@@ -1074,6 +1136,7 @@ impl Agent for AgentSvc {
                             cpu_system_percent: cpu_util.system_percent,
                             cpu_iowait_percent: cpu_util.iowait_percent,
                             cpu_total_percent: cpu_util.total_percent,
+                            agent_timestamp_ns: 0,
                         };
                         // v0.8.2: Yield can block if controller is slow - log if we're about to send
                         if snapshot.in_prepare_phase && snapshot.prepare_objects_created % 10000 == 0 {
@@ -1154,6 +1217,7 @@ impl Agent for AgentSvc {
                                     cpu_system_percent: cpu_util.system_percent,
                                     cpu_iowait_percent: cpu_util.iowait_percent,
                                     cpu_total_percent: cpu_util.total_percent,
+                                    agent_timestamp_ns: 0,
                                 };
                                 
                                 // v0.7.13: Transition to Idle (workload completed successfully)

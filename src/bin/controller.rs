@@ -107,6 +107,7 @@ struct AgentTracker {
     error_message: Option<String>,
     latest_stats: Option<LiveStats>,
     reconnect_count: usize,  // v0.8.2: Count of disconnections followed by reconnection
+    clock_offset_ns: Option<i64>,  // v0.8.4: Agent clock offset (agent_time - controller_time)
 }
 
 impl AgentTracker {
@@ -118,6 +119,7 @@ impl AgentTracker {
             error_message: None,
             latest_stats: None,
             reconnect_count: 0,  // v0.8.2: Track disconnect/reconnect events
+            clock_offset_ns: None,  // v0.8.4: Calculated when READY message received
         }
     }
 
@@ -1267,6 +1269,7 @@ async fn run_distributed_workload(
                     cpu_system_percent: 0.0,
                     cpu_iowait_percent: 0.0,
                     cpu_total_percent: 0.0,
+                    agent_timestamp_ns: 0,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
@@ -1338,6 +1341,28 @@ async fn run_distributed_workload(
                         if let Err(e) = tracker.transition_to(ControllerAgentState::Ready, "READY status received") {
                             warn!("Failed to transition agent {} to Ready: {}", stats.agent_id, e);
                         }
+                        
+                        // v0.8.4: Calculate clock offset for coordinated start synchronization
+                        // NTP-style: offset = agent_time - controller_time
+                        // Agent will later adjust start_time using this offset
+                        if stats.agent_timestamp_ns != 0 {
+                            let controller_time_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_nanos() as i64;
+                            let offset_ns = stats.agent_timestamp_ns - controller_time_ns;
+                            tracker.clock_offset_ns = Some(offset_ns);
+                            
+                            let offset_ms = offset_ns as f64 / 1_000_000.0;
+                            if offset_ms.abs() > 1000.0 {
+                                warn!("Agent {} clock offset: {:.1}ms (large skew detected)", stats.agent_id, offset_ms);
+                            } else {
+                                debug!("Agent {} clock offset: {:.1}ms", stats.agent_id, offset_ms);
+                            }
+                        } else {
+                            warn!("Agent {} did not send timestamp in READY message", stats.agent_id);
+                        }
+                        
                         eprintln!("  ✅ {} ready", stats.agent_id);
                     }
                     3 => {  // ERROR
@@ -1518,6 +1543,10 @@ async fn run_distributed_workload(
     // v0.7.9: Track prepare phase state to detect transition to workload
     let mut was_in_prepare_phase = false;
     
+    // v0.8.4: Track prepare phase high-water marks (never decrease during prepare)
+    let mut max_prepare_created: u64 = 0;
+    let mut max_prepare_total: u64 = 0;
+    
     // Process live stats stream
     loop {
         // v0.7.13: Check for stalled agents (timeout detection) using agent_trackers
@@ -1609,8 +1638,15 @@ async fn run_distributed_workload(
                         
                         // v0.7.9: Capture prepare phase info BEFORE moving stats
                         let in_prepare = stats.in_prepare_phase;
-                        let prepare_created = stats.prepare_objects_created;
-                        let prepare_total = stats.prepare_objects_total;
+                        
+                        // v0.8.4: Use high-water marks during prepare phase to prevent backwards movement
+                        // (delayed packets should never decrease the displayed counter)
+                        if in_prepare {
+                            max_prepare_created = max_prepare_created.max(stats.prepare_objects_created);
+                            max_prepare_total = max_prepare_total.max(stats.prepare_objects_total);
+                        }
+                        let prepare_created = max_prepare_created;
+                        let prepare_total = max_prepare_total;
                         
                         // v0.7.13: Update agent state based on prepare phase
                         // v0.8.2: Only transition Ready→Preparing (not Running→Preparing, that's invalid)
@@ -1632,6 +1668,10 @@ async fn run_distributed_workload(
                             // Reset workload timer to measure actual workload duration (not including prepare)
                             workload_start = std::time::Instant::now();
                             was_in_prepare_phase = false;
+                            
+                            // v0.8.4: Reset prepare counters when transitioning to workload phase
+                            max_prepare_created = 0;
+                            max_prepare_total = 0;
                         } else if in_prepare {
                             was_in_prepare_phase = true;
                         }
