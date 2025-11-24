@@ -118,6 +118,7 @@ pub async fn prepare_objects(
     config: &PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    concurrency: usize,
 ) -> Result<(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)> {
     let prepare_start = Instant::now();
     
@@ -164,11 +165,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref()).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref()).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency).await?
         }
     };
     
@@ -207,6 +208,7 @@ async fn prepare_sequential(
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     tree_manifest: Option<&TreeManifest>,
+    concurrency: usize,
 ) -> Result<Vec<PreparedObject>> {
     let mut all_prepared = Vec::new();
     
@@ -412,8 +414,8 @@ async fn prepare_sequential(
                         missing_indices.len(), to_create);
                 }
                 
-                // Determine concurrency for prepare (use 32 like default workload concurrency)
-                let concurrency = 32;
+                // Use workload concurrency for prepare phase (passed from config)
+                // Note: concurrency parameter comes from Config.concurrency
                 
                 info!("  Creating {} additional {} objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
                     to_create, prefix, concurrency, size_generator.description(), spec.fill, 
@@ -622,6 +624,7 @@ async fn prepare_parallel(
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     tree_manifest: Option<&TreeManifest>,
+    concurrency: usize,
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use rand::seq::SliceRandom;
@@ -1007,7 +1010,8 @@ async fn prepare_parallel(
     // Phase 4: Execute all tasks in parallel with unified progress bar
     info!("Creating {} total objects in parallel (sizes shuffled for even distribution)", total_to_create);
     
-    let concurrency = 32; // Match sequential strategy
+    // Use workload concurrency for prepare phase (passed from config)
+    // Note: concurrency parameter comes from Config.concurrency
     
     // v0.7.9: Set prepare phase progress in live stats tracker
     if let Some(ref tracker) = live_stats_tracker {
@@ -1847,7 +1851,8 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> Result<()> 
     
     let delete_count = to_delete.len();
     
-    // Use same concurrency as prepare stage (32 workers)
+    // TODO: Accept concurrency parameter from caller (for now, use reasonable default)
+    // This function is called during cleanup and doesn't have access to config
     let concurrency = 32;
     info!("Cleaning up {} prepared objects with {} workers", delete_count, concurrency);
     

@@ -451,7 +451,7 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None)
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None, config.concurrency)
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
@@ -1046,7 +1046,7 @@ impl Agent for AgentSvc {
                     result = async {
                         // Execute prepare phase if configured
                         let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone())).await {
+                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
                                 Ok((prepared, manifest, prepare_metrics)) => {
                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                     
@@ -1857,7 +1857,7 @@ impl Agent for AgentSvc {
                                     
                                     // Execute prepare phase if configured (same as run_workload_with_live_stats)
                                     let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                                        match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone())).await {
+                                        match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
                                             Ok((prepared, manifest, prepare_metrics)) => {
                                                 info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                                 
