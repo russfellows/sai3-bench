@@ -1530,15 +1530,19 @@ impl Agent for AgentSvc {
                 info!("Stats writer: Sent READY message with timestamp {} ns", agent_timestamp_ns);
                 
                 // Wait for workload to start (transition to Running)
+                // Block here - do NOT send any more messages until workload starts
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     let state = agent_state.get_state().await;
                     if state == WorkloadState::Running {
+                        info!("Stats writer: Workload started, beginning stats transmission");
                         break;
                     } else if state == WorkloadState::Failed || state == WorkloadState::Idle || state == WorkloadState::Aborting {
                         // Workload cancelled or failed before starting
+                        info!("Stats writer: Workload cancelled or failed, exiting (state: {:?})", state);
                         return;
                     }
+                    // Still in READY state - keep waiting silently
                 }
                 
                 // Get LiveStatsTracker from state (set during workload spawn)
@@ -1741,17 +1745,63 @@ impl Agent for AgentSvc {
         // Process control messages from controller
         let agent_state_reader = agent_state.clone();
         let agent_op_log_path_reader = agent_op_log_path.clone();
+        let tx_stats_for_control = tx_stats.clone();
         
-        // Spawn control message processor
+        // Spawn control message processor with timeout enforcement
         tokio::spawn(async move {
-            while let Some(control_msg_result) = control_stream.next().await {
-                match control_msg_result {
-                    Ok(control_msg) => {
-                        match Command::try_from(control_msg.command) {
-                            Ok(Command::Ping) => {
-                                debug!("Control reader: Received PING keepalive");
-                                // Just a keepalive - no action needed
-                            }
+            // Timeout configuration based on state machine
+            const IDLE_TIMEOUT_SECS: u64 = 30;        // Waiting for initial START
+            const PREPARE_TIMEOUT_SECS: u64 = 30;    // Prepare phase execution
+            const READY_TIMEOUT_SECS: u64 = 60;      // Waiting for coordinated START
+            
+            let mut last_message_time = tokio::time::Instant::now();
+            let mut timeout_monitor = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            timeout_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            
+            loop {
+                tokio::select! {
+                    // Receive control messages from controller
+                    control_msg_result = control_stream.next() => {
+                        match control_msg_result {
+                            Some(Ok(control_msg)) => {
+                                last_message_time = tokio::time::Instant::now();
+                                
+                                match Command::try_from(control_msg.command) {
+                                    Ok(Command::Ping) => {
+                                        debug!("Control reader: Received PING keepalive");
+                                        
+                                        // Respond with ACKNOWLEDGE message
+                                        let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                        let ack_msg = LiveStats {
+                                            agent_id: agent_id.clone(),
+                                            timestamp_s: 0.0,
+                                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                            meta_ops: 0, meta_mean_us: 0.0,
+                                            elapsed_s: 0.0,
+                                            completed: false,
+                                            final_summary: None,
+                                            status: 6,  // ACKNOWLEDGE (new status code for PING response)
+                                            error_message: String::new(),
+                                            in_prepare_phase: false,
+                                            prepare_objects_created: 0,
+                                            prepare_objects_total: 0,
+                                            prepare_summary: None,
+                                            cpu_user_percent: 0.0,
+                                            cpu_system_percent: 0.0,
+                                            cpu_iowait_percent: 0.0,
+                                            cpu_total_percent: 0.0,
+                                            agent_timestamp_ns: 0,
+                                            sequence: 0,
+                                        };
+                                        
+                                        if let Err(e) = tx_stats_for_control.send(ack_msg).await {
+                                            error!("Control reader: Failed to send ACKNOWLEDGE: {}", e);
+                                            break;
+                                        }
+                                        
+                                        debug!("Control reader: Sent ACKNOWLEDGE response to PING");
+                                    }
                             Ok(Command::Start) => {
                                 let start_timestamp_ns = control_msg.start_timestamp_ns;
                                 
@@ -2010,17 +2060,55 @@ impl Agent for AgentSvc {
                             Ok(Command::Abort) => {
                                 warn!("Control reader: Received ABORT command");
                                 
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?}, initiating abort", current_state);
+                                
                                 // Send abort signal (workload task listening via subscribe_abort())
                                 agent_state_reader.send_abort();
                                 
                                 // Transition to Aborting
-                                let _ = agent_state_reader.transition_to(WorkloadState::Aborting, "ABORT command").await;
+                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Aborting, "ABORT command").await {
+                                    error!("Control reader: Failed to transition to Aborting: {}", e);
+                                }
                                 
-                                // Wait briefly for cleanup
+                                // Send ABORTED status immediately
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let aborted_msg = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: 5,  // ABORTED
+                                    error_message: "Aborted by controller".to_string(),
+                                    in_prepare_phase: false,
+                                    prepare_objects_created: 0,
+                                    prepare_objects_total: 0,
+                                    prepare_summary: None,
+                                    cpu_user_percent: 0.0,
+                                    cpu_system_percent: 0.0,
+                                    cpu_iowait_percent: 0.0,
+                                    cpu_total_percent: 0.0,
+                                    agent_timestamp_ns: 0,
+                                    sequence: 0,
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
+                                    error!("Control reader: Failed to send ABORTED status: {}", e);
+                                }
+                                
+                                // Wait briefly for workload cleanup
                                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                                 
                                 // Reset to Idle
-                                let _ = agent_state_reader.transition_to(WorkloadState::Idle, "abort complete").await;
+                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Idle, "abort complete").await {
+                                    error!("Control reader: Failed to transition to Idle after abort: {}", e);
+                                }
+                                
+                                info!("Control reader: Abort complete, agent returned to Idle");
                             }
                             Ok(Command::Acknowledge) => {
                                 debug!("Control reader: Received ACK for sequence {}", control_msg.ack_sequence);
@@ -2031,20 +2119,111 @@ impl Agent for AgentSvc {
                             }
                         }
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         error!("Control reader: Error receiving control message: {}", e);
+                        
+                        // Connection lost - send error and exit
+                        let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                        let error_msg = LiveStats {
+                            agent_id,
+                            timestamp_s: 0.0,
+                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                            meta_ops: 0, meta_mean_us: 0.0,
+                            elapsed_s: 0.0,
+                            completed: false,
+                            final_summary: None,
+                            status: 3,  // ERROR
+                            error_message: format!("Connection error: {}", e),
+                            in_prepare_phase: false,
+                            prepare_objects_created: 0,
+                            prepare_objects_total: 0,
+                            prepare_summary: None,
+                            cpu_user_percent: 0.0,
+                            cpu_system_percent: 0.0,
+                            cpu_iowait_percent: 0.0,
+                            cpu_total_percent: 0.0,
+                            agent_timestamp_ns: 0,
+                            sequence: 0,
+                        };
+                        
+                        let _ = tx_stats_for_control.send(error_msg).await;
+                        break;
+                    }
+                    None => {
+                        info!("Control reader: Stream ended (controller disconnected gracefully)");
                         break;
                     }
                 }
             }
+            
+            // Timeout monitoring - check for hung states
+            _ = timeout_monitor.tick() => {
+                let current_state = agent_state_reader.get_state().await;
+                let elapsed = last_message_time.elapsed();
+                
+                let timeout_exceeded = match current_state {
+                    WorkloadState::Idle => elapsed.as_secs() > IDLE_TIMEOUT_SECS,
+                    WorkloadState::Ready => elapsed.as_secs() > READY_TIMEOUT_SECS,
+                    _ => false,  // Only monitor IDLE and READY states
+                };
+                
+                if timeout_exceeded {
+                    error!(
+                        "Control reader: Timeout in {:?} state ({}s since last message, limit {}s)",
+                        current_state,
+                        elapsed.as_secs(),
+                        match current_state {
+                            WorkloadState::Idle => IDLE_TIMEOUT_SECS,
+                            WorkloadState::Ready => READY_TIMEOUT_SECS,
+                            _ => 0,
+                        }
+                    );
+                    
+                    // Send ERROR status
+                    let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                    let timeout_msg = LiveStats {
+                        agent_id,
+                        timestamp_s: 0.0,
+                        get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                        put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                        meta_ops: 0, meta_mean_us: 0.0,
+                        elapsed_s: 0.0,
+                        completed: false,
+                        final_summary: None,
+                        status: 3,  // ERROR
+                        error_message: format!("Timeout in {:?} state after {}s", current_state, elapsed.as_secs()),
+                        in_prepare_phase: false,
+                        prepare_objects_created: 0,
+                        prepare_objects_total: 0,
+                        prepare_summary: None,
+                        cpu_user_percent: 0.0,
+                        cpu_system_percent: 0.0,
+                        cpu_iowait_percent: 0.0,
+                        cpu_total_percent: 0.0,
+                        agent_timestamp_ns: 0,
+                        sequence: 0,
+                    };
+                    
+                    let _ = tx_stats_for_control.send(timeout_msg).await;
+                    
+                    // Transition to Failed
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "timeout").await;
+                    
+                    break;
+                }
+            }
+        }
+    }
             
             info!("Control reader: Stream ended (controller disconnected)");
             
             // Send abort signal to workload task (if running)
             agent_state_reader.send_abort();
             
-            // Reset to Idle
-            let _ = agent_state_reader.transition_to(WorkloadState::Idle, "controller disconnected").await;
+            // Transition to Failed first, then Idle (cleanup)
+            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected").await;
+            let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
         });
         
         // Convert stats channel to stream, wrapping each LiveStats in Ok()

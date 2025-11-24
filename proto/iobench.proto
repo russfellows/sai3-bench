@@ -133,9 +133,11 @@ message LiveStats {
     RUNNING = 2;     // Workload is executing (normal stats messages)
     ERROR = 3;       // Agent encountered startup error (see error_message)
     COMPLETED = 4;   // Workload finished successfully
+    ABORTED = 5;     // Agent gracefully aborted by controller
+    ACKNOWLEDGE = 6; // Response to PING command
   }
   Status status = 18;
-  string error_message = 19;     // Details if status == ERROR
+  string error_message = 19;     // Details if status == ERROR or ABORTED
   
   // v0.7.9: Prepare phase progress tracking
   bool in_prepare_phase = 20;    // True if currently in prepare phase

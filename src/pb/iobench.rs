@@ -208,7 +208,7 @@ pub struct LiveStats {
     pub final_summary: ::core::option::Option<WorkloadSummary>,
     #[prost(enumeration = "live_stats::Status", tag = "18")]
     pub status: i32,
-    /// Details if status == ERROR
+    /// Details if status == ERROR or ABORTED
     #[prost(string, tag = "19")]
     pub error_message: ::prost::alloc::string::String,
     /// v0.7.9: Prepare phase progress tracking
@@ -276,6 +276,10 @@ pub mod live_stats {
         Error = 3,
         /// Workload finished successfully
         Completed = 4,
+        /// Agent gracefully aborted by controller
+        Aborted = 5,
+        /// Response to PING command
+        Acknowledge = 6,
     }
     impl Status {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -289,6 +293,8 @@ pub mod live_stats {
                 Self::Running => "RUNNING",
                 Self::Error => "ERROR",
                 Self::Completed => "COMPLETED",
+                Self::Aborted => "ABORTED",
+                Self::Acknowledge => "ACKNOWLEDGE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -299,6 +305,8 @@ pub mod live_stats {
                 "RUNNING" => Some(Self::Running),
                 "ERROR" => Some(Self::Error),
                 "COMPLETED" => Some(Self::Completed),
+                "ABORTED" => Some(Self::Aborted),
+                "ACKNOWLEDGE" => Some(Self::Acknowledge),
                 _ => None,
             }
         }
