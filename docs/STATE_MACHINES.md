@@ -1,10 +1,109 @@
-# State Machine Architecture (v0.8.0)
+# State Machine Architecture (v0.8.4)
 
 ## Overview
 
 sai3-bench uses formal state machines for reliable distributed execution:
 - **Agent**: 5-state machine for workload lifecycle
 - **Controller**: 9-state machine for tracking agent health
+- **v0.8.4 NEW**: Bidirectional streaming with separate control and stats channels
+
+## Communication Architecture (v0.8.4)
+
+### Two-Channel Design
+
+**Problem Solved**: Single server-streaming RPC (agent→controller) creates blocking issues:
+- Agent blocked during coordinated start wait → no stats sent → controller appears frozen
+- gRPC backpressure during large prepares → agent blocks on yield → timeout false positives
+- No way for controller to send control messages while stats streaming active
+
+**Solution**: Bidirectional streaming with logical separation:
+
+```
+Controller ←──────── Stats Channel ←────────── Agent
+           (LiveStats messages)
+
+Controller ───────→ Control Channel ──────→ Agent
+           (ControlMessage: PING, START, ABORT, ACK)
+```
+
+**Key Benefits**:
+1. **Non-blocking stats**: Agent can always send stats updates regardless of control state
+2. **Failsafe control**: Controller can send PING/ABORT even if stats channel congested
+3. **Explicit acknowledgment**: Controller ACKs critical messages (READY status)
+4. **Coordinated start**: Controller sends START command when all agents ready
+5. **Timeout resilience**: Keepalive PINGs prevent false positive timeouts
+
+### RPC Definition (proto/iobench.proto)
+
+```protobuf
+service Agent {
+  // v0.8.4: Bidirectional streaming for robust control and stats
+  // Controller sends: PING (keepalive), START (begin workload), ABORT (cancel)
+  // Agent sends: READY, progress stats, COMPLETED
+  rpc ExecuteWorkload(stream ControlMessage) returns (stream LiveStats);
+}
+
+message ControlMessage {
+  enum Command {
+    PING = 0;           // Keepalive / connection check
+    START = 1;          // Begin workload execution at specified time
+    ABORT = 2;          // Cancel workload immediately
+    ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
+  }
+  Command command = 1;
+  
+  // For START command: workload configuration
+  string config_yaml = 2;
+  string agent_id = 3;
+  string path_prefix = 4;
+  int64 start_timestamp_ns = 5;
+  bool shared_storage = 6;
+  
+  // For ACKNOWLEDGE: which message we're acknowledging
+  int64 ack_sequence = 7;
+}
+
+message LiveStats {
+  // ... existing fields ...
+  int64 sequence = 29;  // NEW: Message sequence for acknowledgment
+}
+```
+
+### Message Flow
+
+**Startup Phase**:
+```
+1. Controller opens bidirectional stream
+2. Controller → Agent: ControlMessage(START, config_yaml, start_timestamp_ns)
+3. Agent validates config
+4. Agent → Controller: LiveStats(status=READY, sequence=1, agent_timestamp_ns)
+5. Controller → Agent: ControlMessage(ACKNOWLEDGE, ack_sequence=1)
+6. [Repeat 2-5 for all agents]
+7. Controller calculates final start_timestamp_ns (after clock sync)
+8. Controller → All agents: ControlMessage(START, final_timestamp_ns)
+```
+
+**Workload Phase**:
+```
+Loop every 1 second:
+  Agent → Controller: LiveStats(status=RUNNING, ops, bytes, latencies, sequence=N)
+  Controller → Agent: ControlMessage(PING) [optional keepalive]
+```
+
+**Completion**:
+```
+Agent → Controller: LiveStats(status=COMPLETED, completed=true, final_summary)
+Controller → Agent: ControlMessage(ACKNOWLEDGE)
+Stream closes gracefully
+```
+
+**Abort**:
+```
+User presses Ctrl-C on controller
+Controller → All agents: ControlMessage(ABORT)
+Agents cancel workload, clean up
+Agent → Controller: LiveStats(status=ERROR or COMPLETED)
+```
 
 ## Agent State Machine (5 States)
 
@@ -150,11 +249,24 @@ See `tests/multi_process_tests.rs` and `tests/config_tests.rs` for state transit
 
 ## Future Enhancements
 
-Potential improvements for v0.8.1+:
-- gRPC keepalive for faster disconnect detection
-- Reconnect support (DISCONNECTED → CONNECTING)
+Potential improvements for v0.8.5+:
+- Message sequence gap detection (detect dropped messages)
+- Reconnect support with state restoration (DISCONNECTED → CONNECTING)
 - Pause/resume states for long-running workloads
 - More granular abort reasons (user vs timeout vs disconnect)
+- Adaptive timeout based on workload size
+
+## v0.8.4 Migration Notes
+
+**Breaking Changes**:
+- `RunWorkloadWithLiveStats` RPC **deprecated** (still available for compatibility)
+- New deployments should use `ExecuteWorkload` bidirectional streaming
+- Agents now require START command before beginning workload (explicit coordination)
+
+**Backward Compatibility**:
+- Old `RunWorkloadWithLiveStats` still functional for existing integrations
+- Agents auto-detect which RPC is used and adjust behavior
+- Remove deprecated RPC in v0.9.0
 
 ## References
 

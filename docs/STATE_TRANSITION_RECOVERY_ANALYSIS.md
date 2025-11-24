@@ -1,21 +1,210 @@
 # State Transition and Recovery Analysis
 
-**Date**: November 21, 2025  
-**Version**: v0.8.2  
-**Author**: Bug fix and verification for distributed agent timeout/recovery
+**Date**: November 24, 2025  
+**Version**: v0.8.4  
+**Author**: Two-channel bidirectional streaming architecture
 
 ---
 
 ## Executive Summary
 
-This document describes a comprehensive analysis and fix for state transition bugs discovered during production testing with 8 cloud VMs running a 400K+ object prepare phase. The core issues involved:
+This document describes the evolution from single-stream to **two-channel bidirectional streaming** architecture to solve fundamental communication reliability issues in distributed execution.
 
-1. **Invalid state transitions** preventing normal operation
-2. **Insufficient timeout values** causing false positives during gRPC backpressure
-3. **No recovery mechanism** when agents were incorrectly marked as disconnected
-4. **Incomplete "back on" logic** verification for recovery scenarios
+### Issues Addressed in v0.8.2 (Single-Stream Era)
 
-All issues have been identified, fixed, and verified. The system now supports **full automatic recovery** without persistent degraded state.
+1. **Invalid state transitions** preventing normal operation → FIXED
+2. **Insufficient timeout values** causing false positives during gRPC backpressure → WORKAROUND (60s timeout)
+3. **No recovery mechanism** when agents incorrectly marked disconnected → FIXED
+4. **Incomplete "back on" logic** verification → VERIFIED
+
+### Remaining Issues (Single-Stream Limitations)
+
+5. **Stream blocking during coordinated start** → Controller frozen while agents wait
+6. **gRPC backpressure prevents keepalives** → False positive timeouts inevitable
+7. **No failsafe control channel** → Cannot abort/ping when stats channel congested
+
+### v0.8.4 Solution: Two-Channel Architecture
+
+All remaining issues solved by switching to **bidirectional streaming with logical channel separation**:
+
+```
+Old (v0.8.2):  Agent ──stats→ Controller  (server streaming, one-way)
+
+New (v0.8.4):  Agent ←──stats──→ Controller  (bidirectional)
+                    ←─control─→
+```
+
+**Key Innovation**: Same gRPC stream, but logically separated message types:
+- **Stats channel** (agent→controller): LiveStats messages with sequence numbers
+- **Control channel** (controller→agent): ControlMessage (PING, START, ABORT, ACK)
+
+---
+
+## Root Cause Analysis: Why Single-Stream Failed
+
+### Problem 1: Blocking During Coordinated Start
+
+**Scenario**:
+```
+1. Agent validates config
+2. Agent sends READY status
+3. Agent calls tokio::time::sleep(start_delay) // BLOCKS HERE
+4. Stream cannot yield any messages while sleeping
+5. Controller sees no updates for 2+ seconds
+6. Controller appears frozen ("0 ops/s" forever)
+```
+
+**Why This Happens**: async-stream macro generates a state machine where `yield` points are await points. Any other await (like `sleep`) blocks the entire stream generator.
+
+**v0.8.2 Attempted Fix**: Send keepalive stats every 1s during wait
+- **Problem**: Still blocks between keepalives, adds complexity
+- **Problem**: What if start_delay is 60s? Send 60 keepalives?
+
+**v0.8.4 Solution**: Controller sends START command when ready
+```
+1. Agent validates config
+2. Agent sends READY status  
+3. Agent awaits START command on control channel (non-blocking)
+4. Meanwhile, agent sends keepalive stats every 1s
+5. Controller receives READY from all agents
+6. Controller sends START to all agents simultaneously
+7. All agents begin workload at exact same moment
+```
+
+### Problem 2: gRPC Backpressure Blocks Everything
+
+**Scenario**:
+```
+1. Agent processes 400K objects in prepare phase
+2. Agent sends stats every 1s (400+ messages total)
+3. Controller slow to process messages (busy rendering progress bar)
+4. gRPC stream buffer fills up (default 256KB)
+5. Agent's yield Ok(stats) BLOCKS waiting for buffer space
+6. Agent cannot send ANY messages while blocked (even keepalives!)
+7. Controller sees no updates for 60+ seconds
+8. Controller marks agent as DISCONNECTED (false positive)
+```
+
+**Why This Happens**: Single stream means **stats and keepalives compete for same buffer**. If stats fill buffer, keepalives cannot be sent.
+
+**v0.8.2 Attempted Fix**: Increase timeout to 60s
+- **Problem**: Band-aid over root cause
+- **Problem**: Truly dead agents now take 60s to detect
+- **Problem**: Doesn't solve the blocking, just tolerates it longer
+
+**v0.8.4 Solution**: Separate control channel never blocks on stats
+```
+1. Stats channel fills up due to backpressure
+2. Controller sends PING on control channel (different buffer)
+3. Agent receives PING, responds on control channel
+4. Controller knows agent is alive even if stats delayed
+5. When stats buffer clears, agent resumes sending stats
+6. No false positive timeout
+```
+
+### Problem 3: No Failsafe Abort Mechanism
+
+**Scenario**:
+```
+1. User presses Ctrl-C on controller
+2. Controller wants to send ABORT to agents
+3. But agents only listen on incoming RPC stream (server-side streaming)
+4. Controller cannot send anything to agents after stream started!
+5. Controller forced to close stream abruptly
+6. Agents detect disconnect, abort via rx_cancel channel
+7. Ugly error handling, not graceful
+```
+
+**v0.8.2 Limitation**: Separate `AbortWorkload()` RPC
+- **Problem**: Requires new gRPC connection while workload running
+- **Problem**: May fail if agent process overloaded
+- **Problem**: Two separate communication paths = race conditions
+
+**v0.8.4 Solution**: ABORT command on existing control channel
+```
+1. User presses Ctrl-C on controller
+2. Controller sends ControlMessage(ABORT) on bidirectional stream
+3. Agent receives ABORT immediately (same connection)
+4. Agent cancels workload gracefully
+5. Agent sends final LiveStats with error status
+6. Clean shutdown, all messages delivered
+```
+
+---
+
+## v0.8.4 Architecture: Two Logical Channels
+
+### Implementation Strategy
+
+**Single gRPC stream, two message types**:
+```rust
+// Agent side
+let (mut tx_control, mut rx_control) = /* bidirectional stream */;
+
+tokio::spawn(async move {
+    // Control channel reader (controller→agent)
+    while let Some(msg) = rx_control.next().await {
+        match msg.command {
+            PING => send_pong(),
+            START => start_workload(),
+            ABORT => cancel_workload(),
+            ACKNOWLEDGE => mark_received(msg.ack_sequence),
+        }
+    }
+});
+
+// Stats channel writer (agent→controller) - separate task
+tokio::spawn(async move {
+    let mut seq = 0;
+    loop {
+        let stats = tracker.snapshot();
+        seq += 1;
+        tx_control.send(LiveStats { sequence: seq, ...stats }).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+});
+```
+
+**Key Design Points**:
+1. **Two separate tasks**: Control reader and stats writer don't block each other
+2. **Sequence numbers**: Enable ACK/NACK and gap detection
+3. **Bounded buffers**: Control channel uses separate buffer from stats
+4. **Graceful degradation**: If stats blocked, control still works
+
+### Message Flow Diagram
+
+```
+Controller                                    Agent
+  │                                             │
+  ├─────── ControlMessage(START) ─────────────→│
+  │                                             ├─ Validate config
+  │                                             │
+  │←──────── LiveStats(READY, seq=1) ──────────┤
+  ├─────── ControlMessage(ACK, seq=1) ────────→│
+  │                                             │
+  │                                             ├─ Wait for START
+  │←──────── LiveStats(keepalive) ─────────────┤  (non-blocking)
+  │←──────── LiveStats(keepalive) ─────────────┤
+  │                                             │
+  ├─────── ControlMessage(START, final_ts) ───→│
+  │                                             ├─ Begin workload
+  │                                             │
+  │←──────── LiveStats(RUNNING, seq=2) ────────┤
+  │←──────── LiveStats(RUNNING, seq=3) ────────┤
+  │                                             │
+  │         [gRPC backpressure - stats blocked] │
+  ├─────── ControlMessage(PING) ──────────────→│  (still works!)
+  │←──────── LiveStats(PONG, seq=4) ───────────┤
+  │                                             │
+  │         [backpressure clears]               │
+  │←──────── LiveStats(RUNNING, seq=5) ────────┤
+  │←──────── LiveStats(RUNNING, seq=6) ────────┤
+  │                                             │
+  │←──────── LiveStats(COMPLETED) ─────────────┤
+  ├─────── ControlMessage(ACK) ───────────────→│
+  │                                             │
+ END                                          END
+```
 
 ---
 
@@ -424,10 +613,101 @@ All identified state transition bugs have been fixed with comprehensive verifica
 Any active state → [Aborting] → [Completed]/[Failed]/[Disconnected]
 ```
 
-**Key**: All states can transition to Disconnected. **NEW**: Disconnected can transition back to active states (recovery).
+**Key**: All states can transition to Disconnected. **v0.8.2**: Disconnected can transition back to active states (recovery). **v0.8.4**: Two-channel design eliminates most disconnect scenarios.
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: November 21, 2025  
-**Status**: Fixes implemented and verified
+**Document Version**: 2.0  
+**Last Updated**: November 24, 2025  
+**Status**: v0.8.4 two-channel architecture design complete, implementation in progress
+
+---
+
+## v0.8.4 Implementation Plan
+
+### Phase 1: Protobuf and Code Generation ✅
+- [x] Add `ExecuteWorkload` bidirectional RPC to proto
+- [x] Add `ControlMessage` message type  
+- [x] Add `sequence` field to `LiveStats`
+- [x] Regenerate Rust bindings
+
+### Phase 2: Agent Implementation
+- [ ] Implement `execute_workload()` RPC handler
+- [ ] Split into two tasks: control reader + stats writer
+- [ ] Handle START command with config validation
+- [ ] Handle PING command with PONG response
+- [ ] Handle ABORT command with graceful cancellation
+- [ ] Increment sequence numbers on all LiveStats messages
+- [ ] Keep old `run_workload_with_live_stats()` for compatibility
+
+### Phase 3: Controller Implementation
+- [ ] Implement `ExecuteWorkload` client
+- [ ] Send START command with config
+- [ ] Wait for READY from all agents
+- [ ] Calculate clock offsets from READY timestamps
+- [ ] Send final START with coordinated timestamp
+- [ ] Process LiveStats stream (existing aggregation logic)
+- [ ] Send periodic PING keepalives
+- [ ] Send ABORT on Ctrl-C
+- [ ] Acknowledge critical messages (READY, COMPLETED)
+
+### Phase 4: Testing
+- [ ] Unit tests for message sequencing
+- [ ] Integration tests with simulated backpressure
+- [ ] Cloud VM testing with 8+ agents
+- [ ] Coordinated start timing verification
+- [ ] Abort handling verification
+- [ ] Migration from old RPC (compatibility test)
+
+### Phase 5: Documentation
+- [ ] Update user guide with new architecture
+- [ ] Document migration from v0.8.3
+- [ ] Add troubleshooting guide for two-channel issues
+- [ ] Update CHANGELOG.md
+
+---
+
+## Expected Benefits
+
+### Reliability
+- ✅ No false positive timeouts (control channel never blocked)
+- ✅ Graceful abort even during backpressure
+- ✅ Explicit acknowledgment of critical messages
+- ✅ Gap detection via sequence numbers
+
+### Performance
+- ✅ No blocking during coordinated start
+- ✅ Stats can flow at full rate without control overhead
+- ✅ Controller can ping without disrupting stats stream
+- ✅ Lower latency for control operations
+
+### Maintainability
+- ✅ Clear separation of concerns (control vs stats)
+- ✅ Easier to debug (separate logs for each channel)
+- ✅ Future-proof for new control commands
+- ✅ Testable in isolation (mock each channel)
+
+---
+
+## Backward Compatibility Strategy
+
+### Transition Period (v0.8.4 - v0.8.6)
+Both RPCs available:
+- **Old**: `RunWorkloadWithLiveStats` (deprecated, maintained for compatibility)
+- **New**: `ExecuteWorkload` (recommended for all new deployments)
+
+### Deprecation (v0.9.0)
+Remove `RunWorkloadWithLiveStats`:
+- All users migrated to `ExecuteWorkload`
+- Simplify codebase by removing old RPC
+- Focus maintenance on single architecture
+
+### Auto-Detection
+Controller attempts `ExecuteWorkload` first, falls back to `RunWorkloadWithLiveStats` if not supported:
+```rust
+let result = client.execute_workload(config).await;
+if result.is_err() && result.code() == Code::Unimplemented {
+    warn!("Agent doesn't support ExecuteWorkload, falling back to old RPC");
+    client.run_workload_with_live_stats(config).await?;
+}
+```
