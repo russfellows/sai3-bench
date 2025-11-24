@@ -1270,6 +1270,7 @@ async fn run_distributed_workload(
                     cpu_iowait_percent: 0.0,
                     cpu_total_percent: 0.0,
                     agent_timestamp_ns: 0,
+                    sequence: 0,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
