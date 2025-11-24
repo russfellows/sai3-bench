@@ -1753,206 +1753,259 @@ impl Agent for AgentSvc {
                                 // Just a keepalive - no action needed
                             }
                             Ok(Command::Start) => {
-                                info!("Control reader: Received START command");
+                                let start_timestamp_ns = control_msg.start_timestamp_ns;
                                 
-                                // Extract config from START message
-                                let config_yaml = control_msg.config_yaml;
-                                let agent_id = control_msg.agent_id;
-                                let path_prefix = control_msg.path_prefix;
-                                let shared_storage = control_msg.shared_storage;
+                                // Determine if this is initial START (validation) or coordinated START (execution)
+                                let current_state = agent_state_reader.get_state().await;
                                 
-                                // Store agent_id in state for stats writer
-                                agent_state_reader.set_agent_id(agent_id.clone()).await;
-                                
-                                // Store config_yaml for later use
-                                agent_state_reader.set_config_yaml(config_yaml.clone()).await;
-                                
-                                // Parse and validate config
-                                let mut config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        error!("Control reader: Invalid YAML config: {}", e);
-                                        let _ = agent_state_reader.transition_to(WorkloadState::Failed, "invalid config").await;
-                                        agent_state_reader.set_error(format!("Invalid YAML: {}", e)).await;
-                                        
-                                        // Send ERROR via stats writer (it will pick up the error from state)
-                                        let _ = tx_done.send(Err(format!("Invalid YAML config: {}", e))).await;
+                                if current_state == WorkloadState::Idle {
+                                    // First START: Validate config and send READY
+                                    info!("Control reader: Received initial START command - validating config");
+                                    
+                                    // Extract config from START message
+                                    let config_yaml = control_msg.config_yaml;
+                                    let agent_id = control_msg.agent_id;
+                                    let path_prefix = control_msg.path_prefix;
+                                    let shared_storage = control_msg.shared_storage;
+                                    
+                                    // Store agent_id in state for stats writer
+                                    agent_state_reader.set_agent_id(agent_id.clone()).await;
+                                    
+                                    // Store config_yaml for later use
+                                    agent_state_reader.set_config_yaml(config_yaml.clone()).await;
+                                    
+                                    // Parse and validate config
+                                    let mut config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            error!("Control reader: Invalid YAML config: {}", e);
+                                            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "invalid config").await;
+                                            agent_state_reader.set_error(format!("Invalid YAML: {}", e)).await;
+                                            
+                                            // Send ERROR via stats writer (it will pick up the error from state)
+                                            let _ = tx_done.send(Err(format!("Invalid YAML config: {}", e))).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
+                                        error!("Control reader: Failed to apply agent prefix: {}", e);
+                                        let _ = agent_state_reader.transition_to(WorkloadState::Failed, "prefix application failed").await;
+                                        let _ = tx_done.send(Err(format!("Failed to apply path prefix: {}", e))).await;
                                         return;
                                     }
-                                };
-                                
-                                if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
-                                    error!("Control reader: Failed to apply agent prefix: {}", e);
-                                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "prefix application failed").await;
-                                    let _ = tx_done.send(Err(format!("Failed to apply path prefix: {}", e))).await;
-                                    return;
-                                }
-                                
-                                // Validate config
-                                if let Err(e) = validate_workload_config(&config).await {
-                                    error!("Control reader: Config validation failed: {}", e);
-                                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "validation failed").await;
-                                    let _ = tx_done.send(Err(format!("Config validation failed: {}", e))).await;
-                                    return;
-                                }
-                                
-                                // Check current state - only accept START if Idle
-                                let current_state = agent_state_reader.get_state().await;
-                                if current_state != WorkloadState::Idle {
-                                    error!("Control reader: Rejecting START - agent in {:?} state", current_state);
-                                    let _ = tx_done.send(Err(format!("Agent busy: state is {:?}", current_state))).await;
-                                    return;
-                                }
-                                
-                                // Transition to Ready (validation passed)
-                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Ready, "validation passed").await {
-                                    error!("Control reader: Failed to transition to Ready: {}", e);
-                                    let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
-                                    return;
-                                }
-                                
-                                info!("Control reader: Config validated, agent ready to start workload");
-                                
-                                // Stats writer will now send READY message and wait for us to spawn workload
-                                
-                                // Wait briefly for READY message to be sent
-                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                
-                                // Transition to Running
-                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Running, "starting workload").await {
-                                    error!("Control reader: Failed to transition to Running: {}", e);
-                                    let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
-                                    return;
-                                }
-                                
-                                // Create live stats tracker
-                                let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
-                                
-                                // Store tracker in state for stats writer
-                                agent_state_reader.set_tracker(tracker.clone()).await;
-                                
-                                // Setup op_log_path
-                                let final_op_log_path = config.op_log_path.as_ref()
-                                    .or(agent_op_log_path_reader.as_ref())
-                                    .cloned();
-                                
-                                agent_state_reader.set_op_log_path(
-                                    final_op_log_path.as_ref().map(|p| p.display().to_string())
-                                ).await;
-                                
-                                // Spawn workload execution task
-                                let mut config_exec = config.clone();
-                                let agent_id_exec = agent_id.clone();
-                                let tx_done_exec = tx_done.clone();
-                                let tx_prepare_exec = tx_prepare.clone();
-                                let agent_op_log_path_exec = agent_op_log_path_reader.clone();
-                                let tracker_for_prepare = tracker.clone();
-                                let agent_state_for_task = agent_state_reader.clone();
-                                
-                                tokio::spawn(async move {
-                                    // Subscribe to abort signals for this workload
-                                    let mut abort_rx_task = agent_state_for_task.subscribe_abort();
-                                    // Wire tracker into config for live stats collection
-                                    config_exec.live_stats_tracker = Some(tracker_for_prepare.clone());
                                     
-                                    // Execute prepare phase if configured (same as run_workload_with_live_stats)
-                                    let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                                        match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
-                                            Ok((prepared, manifest, prepare_metrics)) => {
-                                                info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
-                                                
-                                                // Send prepare metrics to stats writer
-                                                let _ = tx_prepare_exec.send(prepare_metrics).await;
-                                                
-                                                // Reset stats counters before workload
-                                                tracker_for_prepare.reset_for_workload();
-                                                
-                                                if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
-                                                    tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                                    // Validate config
+                                    if let Err(e) = validate_workload_config(&config).await {
+                                        error!("Control reader: Config validation failed: {}", e);
+                                        let _ = agent_state_reader.transition_to(WorkloadState::Failed, "validation failed").await;
+                                        let _ = tx_done.send(Err(format!("Config validation failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    // Transition to Ready (validation passed)
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Ready, "validation passed").await {
+                                        error!("Control reader: Failed to transition to Ready: {}", e);
+                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    info!("Control reader: Config validated, agent ready - waiting for coordinated START");
+                                    
+                                    // Stats writer will send READY message with agent_timestamp_ns
+                                    // Controller will calculate clock offset and send second START with start_timestamp_ns
+                                    
+                                } else if current_state == WorkloadState::Ready && start_timestamp_ns != 0 {
+                                    // Second START: Coordinated start with timestamp
+                                    info!("Control reader: Received coordinated START (timestamp: {} ns)", start_timestamp_ns);
+                                    
+                                    // Calculate wait duration until coordinated start time
+                                    // Controller sends absolute Unix epoch timestamp (controller_now + delay)
+                                    // Agent waits until local clock reaches that timestamp
+                                    // NO clock offset adjustment needed - Unix timestamps are universal
+                                    let now_ns = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_nanos() as i64;
+                                    
+                                    let wait_ns = start_timestamp_ns - now_ns;
+                                    
+                                    if wait_ns > 0 {
+                                        let wait_duration = std::time::Duration::from_nanos(wait_ns as u64);
+                                        let wait_ms = wait_duration.as_millis();
+                                        info!("Control reader: Waiting {}ms until coordinated start", wait_ms);
+                                        tokio::time::sleep(wait_duration).await;
+                                        info!("Control reader: Coordinated start time reached - spawning workload");
+                                    } else {
+                                        warn!("Control reader: Start timestamp is in the past by {}ms - starting immediately", 
+                                              (-wait_ns) / 1_000_000);
+                                    }
+                                    
+                                    // Transition to Running
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Running, "coordinated start").await {
+                                        error!("Control reader: Failed to transition to Running: {}", e);
+                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    // Retrieve stored config from Phase 1 validation
+                                    let config_yaml = match agent_state_reader.get_config_yaml().await {
+                                        Some(yaml) => yaml,
+                                        None => {
+                                            error!("Control reader: No config_yaml found in state");
+                                            let _ = tx_done.send(Err("Missing config_yaml".to_string())).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    // Parse config (already validated in Phase 1, should not fail)
+                                    let config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            error!("Control reader: Failed to parse stored config: {}", e);
+                                            let _ = tx_done.send(Err(format!("Config parse error: {}", e))).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    // Get agent_id from state
+                                    let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                    
+                                    // Create live stats tracker
+                                    let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
+                                    
+                                    // Store tracker in state for stats writer
+                                    agent_state_reader.set_tracker(tracker.clone()).await;
+                                    
+                                    // Setup op_log_path
+                                    let final_op_log_path = config.op_log_path.as_ref()
+                                        .or(agent_op_log_path_reader.as_ref())
+                                        .cloned();
+                                    
+                                    agent_state_reader.set_op_log_path(
+                                        final_op_log_path.as_ref().map(|p| p.display().to_string())
+                                    ).await;
+                                    
+                                    // Spawn workload execution task
+                                    let mut config_exec = config.clone();
+                                    let agent_id_exec = agent_id.clone();
+                                    let tx_done_exec = tx_done.clone();
+                                    let tx_prepare_exec = tx_prepare.clone();
+                                    let agent_op_log_path_exec = agent_op_log_path_reader.clone();
+                                    let tracker_for_prepare = tracker.clone();
+                                    let agent_state_for_task = agent_state_reader.clone();
+                                    
+                                    tokio::spawn(async move {
+                                        // Subscribe to abort signals for this workload
+                                        let mut abort_rx_task = agent_state_for_task.subscribe_abort();
+                                        // Wire tracker into config for live stats collection
+                                        config_exec.live_stats_tracker = Some(tracker_for_prepare.clone());
+                                        
+                                        // Execute prepare phase if configured (same as run_workload_with_live_stats)
+                                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
+                                                Ok((prepared, manifest, prepare_metrics)) => {
+                                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                                                    
+                                                    // Send prepare metrics to stats writer
+                                                    let _ = tx_prepare_exec.send(prepare_metrics).await;
+                                                    
+                                                    // Reset stats counters before workload
+                                                    tracker_for_prepare.reset_for_workload();
+                                                    
+                                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                                                    }
+                                                    manifest
                                                 }
-                                                manifest
+                                                Err(e) => {
+                                                    let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                                    return;
+                                                }
                                             }
-                                            Err(e) => {
-                                                let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        // Setup operation logger if configured
+                                        if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path_exec.as_ref()) {
+                                            let op_log_path = if let Some(parent) = op_log_base.parent() {
+                                                let filename = op_log_base.file_name()
+                                                    .and_then(|f| f.to_str())
+                                                    .unwrap_or("oplog.tsv.zst");
+                                                let base_name = if filename.ends_with(".tsv.zst") {
+                                                    filename.strip_suffix(".tsv.zst").unwrap()
+                                                } else if filename.ends_with(".tsv") {
+                                                    filename.strip_suffix(".tsv").unwrap()
+                                                } else {
+                                                    filename
+                                                };
+                                                let extension = if filename.ends_with(".tsv.zst") {
+                                                    ".tsv.zst"
+                                                } else if filename.ends_with(".tsv") {
+                                                    ".tsv"
+                                                } else {
+                                                    ""
+                                                };
+                                                parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
+                                            } else {
+                                                let filename = op_log_base.file_name()
+                                                    .and_then(|f| f.to_str())
+                                                    .unwrap_or("oplog.tsv.zst");
+                                                std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
+                                            };
+                                            
+                                            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
+                                            if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
+                                                error!("Failed to initialize operation logger: {}", e);
+                                                let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
                                                 return;
                                             }
                                         }
-                                    } else {
-                                        None
-                                    };
-                                    
-                                    // Setup operation logger if configured
-                                    if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path_exec.as_ref()) {
-                                        let op_log_path = if let Some(parent) = op_log_base.parent() {
-                                            let filename = op_log_base.file_name()
-                                                .and_then(|f| f.to_str())
-                                                .unwrap_or("oplog.tsv.zst");
-                                            let base_name = if filename.ends_with(".tsv.zst") {
-                                                filename.strip_suffix(".tsv.zst").unwrap()
-                                            } else if filename.ends_with(".tsv") {
-                                                filename.strip_suffix(".tsv").unwrap()
-                                            } else {
-                                                filename
-                                            };
-                                            let extension = if filename.ends_with(".tsv.zst") {
-                                                ".tsv.zst"
-                                            } else if filename.ends_with(".tsv") {
-                                                ".tsv"
-                                            } else {
-                                                ""
-                                            };
-                                            parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
-                                        } else {
-                                            let filename = op_log_base.file_name()
-                                                .and_then(|f| f.to_str())
-                                                .unwrap_or("oplog.tsv.zst");
-                                            std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
-                                        };
                                         
-                                        info!("Initializing s3dlio operation logger: {}", op_log_path.display());
-                                        if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
-                                            error!("Failed to initialize operation logger: {}", e);
-                                            let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
-                                            return;
+                                        // Execute workload
+                                        tokio::select! {
+                                            result = sai3_bench::workload::run(&config_exec, tree_manifest) => {
+                                                // Finalize oplog
+                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                                    info!("Finalizing s3dlio operation logger");
+                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                        error!("Failed to finalize operation logger: {}", e);
+                                                    }
+                                                }
+                                                
+                                                match result {
+                                                    Ok(summary) => {
+                                                        info!("Workload completed successfully for agent {}", agent_id_exec);
+                                                        let _ = tx_done_exec.send(Ok(summary)).await;
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
+                                                        let _ = tx_done_exec.send(Err(e.to_string())).await;
+                                                    }
+                                                }
+                                            }
+                                            _ = abort_rx_task.recv() => {
+                                                warn!("Workload aborted for agent {}", agent_id_exec);
+                                                // Finalize oplog
+                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                        error!("Failed to finalize operation logger: {}", e);
+                                                    }
+                                                }
+                                                let _ = tx_done_exec.send(Err("Workload cancelled".to_string())).await;
+                                            }
                                         }
-                                    }
+                                    });
                                     
-                                    // Execute workload
-                                    tokio::select! {
-                                        result = sai3_bench::workload::run(&config_exec, tree_manifest) => {
-                                            // Finalize oplog
-                                            if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                info!("Finalizing s3dlio operation logger");
-                                                if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                    error!("Failed to finalize operation logger: {}", e);
-                                                }
-                                            }
-                                            
-                                            match result {
-                                                Ok(summary) => {
-                                                    info!("Workload completed successfully for agent {}", agent_id_exec);
-                                                    let _ = tx_done_exec.send(Ok(summary)).await;
-                                                }
-                                                Err(e) => {
-                                                    error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
-                                                    let _ = tx_done_exec.send(Err(e.to_string())).await;
-                                                }
-                                            }
-                                        }
-                                        _ = abort_rx_task.recv() => {
-                                            warn!("Workload aborted for agent {}", agent_id_exec);
-                                            // Finalize oplog
-                                            if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                    error!("Failed to finalize operation logger: {}", e);
-                                                }
-                                            }
-                                            let _ = tx_done_exec.send(Err("Workload cancelled".to_string())).await;
-                                        }
-                                    }
-                                });
-                                
-                                info!("Control reader: Workload task spawned");
+                                    info!("Control reader: Workload task spawned after coordinated start");
+                                    
+                                } else {
+                                    // Unexpected state or duplicate START
+                                    error!("Control reader: Rejecting START - agent in {:?} state (expected Idle or Ready)", current_state);
+                                    let _ = tx_done.send(Err(format!("Agent in unexpected state: {:?}", current_state))).await;
+                                    return;
+                                }
                             }
                             Ok(Command::Abort) => {
                                 warn!("Control reader: Received ABORT command");
