@@ -149,6 +149,58 @@ pub const DEFAULT_AGENT_STARTUP_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_AGENT_HEARTBEAT_SECS: u64 = 1;
 
 // =============================================================================
+// Bidirectional Streaming Timeouts (v0.8.4+)
+// =============================================================================
+
+/// Agent IDLE state timeout (seconds)
+/// Agent must receive initial START command within this time
+pub const AGENT_IDLE_TIMEOUT_SECS: u64 = 30;
+
+/// Agent prepare phase timeout (seconds)
+/// Prepare phase (config validation + file creation) must complete within this time
+pub const AGENT_PREPARE_TIMEOUT_SECS: u64 = 30;
+
+/// Agent READY state timeout (seconds)
+/// Agent must receive coordinated START command within this time after becoming READY
+pub const AGENT_READY_TIMEOUT_SECS: u64 = 60;
+
+/// Controller connection timeout (seconds)
+/// Controller waits this long for gRPC connection to agent
+pub const CONTROLLER_CONNECTION_TIMEOUT_SECS: u64 = 5;
+
+/// Controller connection retry count
+/// Number of times to retry failed connections with exponential backoff
+pub const CONTROLLER_CONNECTION_RETRIES: u32 = 3;
+
+/// Controller prepare phase timeout (seconds)
+/// Controller waits this long for all agents to send READY
+pub const CONTROLLER_PREPARE_TIMEOUT_SECS: u64 = 30;
+
+/// Controller coordinated start timeout (seconds)
+/// Controller waits this long for all agents to send first RUNNING after START(timestamp)
+pub const CONTROLLER_START_TIMEOUT_SECS: u64 = 10;
+
+/// Controller PING timeout (seconds)
+/// Controller waits this long for ACKNOWLEDGE after sending PING
+pub const CONTROLLER_PING_TIMEOUT_SECS: u64 = 5;
+
+/// Controller PING retry count
+/// Number of times to retry PING before marking agent as failed
+pub const CONTROLLER_PING_RETRIES: u32 = 3;
+
+/// Controller no-stats timeout (seconds)
+/// If no stats received for this long, controller sends PING
+pub const CONTROLLER_NO_STATS_PING_THRESHOLD_SECS: u64 = 10;
+
+/// Controller agent hang timeout (seconds)
+/// If no stats received for this long (after PING retries), mark agent as failed
+pub const CONTROLLER_AGENT_HANG_TIMEOUT_SECS: u64 = 60;
+
+/// Timeout monitor check interval (seconds)
+/// How often to check for timeouts in agent control reader
+pub const TIMEOUT_MONITOR_INTERVAL_SECS: u64 = 5;
+
+// =============================================================================
 // Prepare Phase Defaults
 // =============================================================================
 

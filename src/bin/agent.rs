@@ -1749,13 +1749,17 @@ impl Agent for AgentSvc {
         
         // Spawn control message processor with timeout enforcement
         tokio::spawn(async move {
-            // Timeout configuration based on state machine
-            const IDLE_TIMEOUT_SECS: u64 = 30;        // Waiting for initial START
-            const PREPARE_TIMEOUT_SECS: u64 = 30;    // Prepare phase execution
-            const READY_TIMEOUT_SECS: u64 = 60;      // Waiting for coordinated START
+            // Import timeout configuration from constants module
+            use sai3_bench::constants::{
+                AGENT_IDLE_TIMEOUT_SECS,
+                AGENT_READY_TIMEOUT_SECS,
+                TIMEOUT_MONITOR_INTERVAL_SECS,
+            };
             
             let mut last_message_time = tokio::time::Instant::now();
-            let mut timeout_monitor = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            let mut timeout_monitor = tokio::time::interval(
+                tokio::time::Duration::from_secs(TIMEOUT_MONITOR_INTERVAL_SECS)
+            );
             timeout_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
             loop {
@@ -2163,8 +2167,8 @@ impl Agent for AgentSvc {
                 let elapsed = last_message_time.elapsed();
                 
                 let timeout_exceeded = match current_state {
-                    WorkloadState::Idle => elapsed.as_secs() > IDLE_TIMEOUT_SECS,
-                    WorkloadState::Ready => elapsed.as_secs() > READY_TIMEOUT_SECS,
+                    WorkloadState::Idle => elapsed.as_secs() > AGENT_IDLE_TIMEOUT_SECS,
+                    WorkloadState::Ready => elapsed.as_secs() > AGENT_READY_TIMEOUT_SECS,
                     _ => false,  // Only monitor IDLE and READY states
                 };
                 
@@ -2174,8 +2178,8 @@ impl Agent for AgentSvc {
                         current_state,
                         elapsed.as_secs(),
                         match current_state {
-                            WorkloadState::Idle => IDLE_TIMEOUT_SECS,
-                            WorkloadState::Ready => READY_TIMEOUT_SECS,
+                            WorkloadState::Idle => AGENT_IDLE_TIMEOUT_SECS,
+                            WorkloadState::Ready => AGENT_READY_TIMEOUT_SECS,
                             _ => 0,
                         }
                     );
