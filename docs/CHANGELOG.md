@@ -6,6 +6,60 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.6] - 2025-11-25
+
+### Added
+
+- **Prand data generation support** using s3dlio v0.9.21
+  - New `fill: prand` option for pseudo-random data generation
+  - 31% faster than `random` (1340µs vs 1954µs per operation)
+  - **⚠️ WARNING**: Produces 87-90% compressible data (unrealistic for storage testing)
+  - Use only when data generation CPU is a proven bottleneck
+
+### Changed
+
+- **Updated s3dlio dependency** from v0.9.10 to v0.9.21 (git tag)
+  - Adds DataGenAlgorithm enum (Random, Prand)
+  - Adds clock offset support for distributed op-log synchronization
+  - See s3dlio v0.9.21 changelog for full details
+
+### Documentation
+
+- **Added performance comparison** to DATA_GENERATION.md
+  - Measured compressibility: random 0%, prand 90%, zero 100%
+  - Measured latency: random 1954µs, prand 1340µs, zero 2910µs
+  - **Clear guidance**: Always use `fill: random` for storage testing
+  
+- **Added Data Generation section** to USAGE.md
+  - Performance comparison table with measured metrics
+  - Explanation of why compressibility matters for benchmarking
+  - When to use each fill method
+
+- **Enhanced DATA_GENERATION.md**
+  - Added "Storage Test Quality" column to comparison table
+  - Clarified that high compressibility is BAD for storage testing
+  - Updated recommendations to strongly prefer `random` over `prand`
+
+### Testing
+
+- ✅ Validated all three fill methods (random, prand, zero)
+- ✅ Compression test: 64KB samples with zstd -19
+  - Random: 0% compressed (truly incompressible)
+  - Prand: 90% compressed (unrealistic)
+  - Zero: 100% compressed (completely unrealistic)
+- ✅ Performance test: prepare phase metrics extraction
+- ✅ All 148 tests pass, zero warnings
+
+### Migration Notes
+
+**No breaking changes.** Existing configs work without modification.
+
+**New fill option**: `fill: prand` now available but NOT recommended for storage testing. Continue using `fill: random` (or omit fill parameter, as `random` is now the effective default for realistic testing).
+
+**s3dlio upgrade**: Using s3dlio v0.9.21 from GitHub (git tag dependency).
+
+---
+
 ## [0.8.5] - 2025-11-24
 
 ### Major Changes: Bidirectional Streaming Architecture

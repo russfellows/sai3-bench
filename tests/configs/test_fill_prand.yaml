@@ -1,0 +1,24 @@
+# Test config for Prand data generation method
+# Tests s3dlio's prand algorithm (consistent 3-4 GB/s performance)
+
+target: "file:///tmp/sai3-test-prand/"
+
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test-prand/"
+      count: 20
+      min_size: 524288  # 512 KB
+      max_size: 2097152  # 2 MB
+      fill: prand
+      dedup_factor: 1
+      compress_factor: 1
+  post_prepare_delay: 1
+
+duration: 5s
+concurrency: 2
+
+workload:
+  - op: get
+    path: "*.dat"
+    weight: 100

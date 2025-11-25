@@ -147,7 +147,42 @@ The controller will use agents from the config file when `--agents` is not speci
 If the agent cert doesn't include the default DNS
 name the controller uses, add --agent-domain.
 
-# 2 Quick Start — Single Host (PLAINTEXT)
+# 2 Data Generation Methods
+
+## Fill Patterns: Random vs Prand
+
+sai3-bench supports three data generation methods: `zero`, `random`, and `prand`. For realistic storage performance testing, **always use `fill: random`**.
+
+### Performance Comparison (Measured)
+
+| Method | Latency | Throughput | Compressibility | Storage Test Quality |
+|--------|---------|------------|-----------------|----------------------|
+| `random` | 1954µs | 234 MiB/s | 0% (65,549 bytes from 64KB) | ✅ **RECOMMENDED** |
+| `prand` | 1340µs | 254 MiB/s | 90% (8,995 bytes from 64KB) | ⚠️ NOT RECOMMENDED |
+| `zero` | 2910µs | 273 MiB/s | 100% (22 bytes from 64KB) | ❌ UNREALISTIC |
+
+**Why this matters**: Storage systems perform differently with compressible vs incompressible data. Using `prand` or `zero` will show artificially high performance that doesn't represent real-world behavior.
+
+**When to use each method**:
+- **`random`** (default): ✅ All storage performance testing - produces truly incompressible data
+- **`prand`**: ⚠️ Only when data generation CPU is a proven bottleneck (31% faster but 90% compressible)
+- **`zero`**: ❌ Only for testing all-zero data behavior (100% compressible, completely unrealistic)
+
+### Configuration Example
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/test-data/"
+      count: 1000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random              # ✅ ALWAYS use this for storage testing
+```
+
+For detailed documentation on data generation, see [DATA_GENERATION.md](DATA_GENERATION.md).
+
+# 3 Quick Start — Single Host (PLAINTEXT)
 In one terminal:
 
 ## Run agent without TLS on port 7761
@@ -161,7 +196,7 @@ In another terminal:
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/path/ --jobs 8
 
-# 3 Multi-Host (PLAINTEXT)
+# 4 Multi-Host (PLAINTEXT)
 On each agent host (e.g., node1, node2):
 
 ./sai3bench-agent --listen 0.0.0.0:7761
@@ -172,12 +207,12 @@ From the controller host:
 ./sai3bench-ctl --agents node1:7761,node2:7761 get \
   --uri s3://my-bucket/data/ --jobs 16
 
-# 4 TLS with Self‑Signed Certificates (No CA hassles)
+# 5 TLS with Self‑Signed Certificates (No CA hassles)
 You can enable TLS on the agent with an ephemeral self‑signed certificate
 generated at startup. You do not need a public CA. The controller just needs
 the generated cert to trust the agent connection.
 
-## 4.1 Start the Agent with TLS and write the cert
+## 5.1 Start the Agent with TLS and write the cert
 Pick a DNS name (CN) you’ll use from the controller—typically the agent’s
 resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 
@@ -205,7 +240,7 @@ Copy the certificate to the controller host (key stays on the agent):
 ### From controller host:
 scp user@loki-node3:/tmp/agent-ca/agent_cert.pem /tmp/agent_ca.pem
 
-## 4.2 Connect from the Controller (TLS)
+## 5.2 Connect from the Controller (TLS)
 Single agent:
 
 ```
@@ -245,7 +280,7 @@ Multiple agents (all in TLS mode):
 **Important:** When the agent is running with --tls, the controller must also use --tls --agent-ca <path>.
 By default, both use plaintext (no flags needed).
 
-# 5 Distributed Live Stats (v0.7.6+)
+# 6 Distributed Live Stats (v0.7.6+)
 
 ## Real-Time Progress Display
 
@@ -371,7 +406,7 @@ The default start delay is 2 seconds (on top of the 10-second coordinated start)
 
 For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEMENTATION.md`.
 
-# 6 Examples for Workloads
+# 7 Examples for Workloads
 GET (download) via controller
 ### PLAINTEXT (Default)
 ```
@@ -413,7 +448,7 @@ PUT (upload) via controller
   --concurrency 8
 ```
 
-# 7 Localhost Demo (No Makefile Needed)
+# 8 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
 ./target/release/sai3bench-agent --listen 127.0.0.1:7761
@@ -448,8 +483,7 @@ PUT (upload) via controller
   ping
 ```
 
-# 8 Troubleshooting
-# 8 Troubleshooting
+# 9 Troubleshooting
 TLS is enabled ... but --agent-ca was not provided
 You're connecting to a TLS-enabled agent, but the controller is missing
 --agent-ca. Provide the agent's agent_cert.pem or run the controller with
@@ -612,7 +646,7 @@ high latency, stalled agents).
 All latency metrics are reported in microseconds (µs) for precision with
 fast operations.
 
-# 10 Running Tests
+# 11 Running Tests
 Unit + integration tests:
 
 cargo test
@@ -620,7 +654,7 @@ The gRPC integration test starts a local agent, then checks controller
 connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
-# 11 Versioning
+# 12 Versioning
 The agent reports its version on ping:
 
 ```

@@ -334,7 +334,7 @@ pub struct EnsureSpec {
     #[serde(default, alias = "size_distribution")]
     pub size_spec: Option<SizeSpec>,
     
-    /// Fill pattern: "zero" or "random"
+    /// Fill pattern: "zero", "random", or "prand" (pseudo-random, faster)
     #[serde(default = "default_fill")]
     pub fill: FillPattern,
     
@@ -386,6 +386,7 @@ impl EnsureSpec {
 pub enum FillPattern {
     Zero,
     Random,
+    Prand,  // Pseudo-random (faster, uses old BASE_BLOCK algorithm)
 }
 
 fn default_min_size() -> u64 { 

@@ -182,7 +182,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             
             // Display fill pattern
             println!("│   Fill Pattern:     {:?}", spec.fill);
-            if matches!(spec.fill, crate::config::FillPattern::Random) {
+            if matches!(spec.fill, crate::config::FillPattern::Random | crate::config::FillPattern::Prand) {
                 let dedup_desc = if spec.dedup_factor == 1 { 
                     "all unique".to_string() 
                 } else { 

@@ -2,16 +2,51 @@
 
 ## Overview
 
-sai3-bench supports configurable data generation to test storage deduplication and compression. Two fill patterns are available: `zero` and `random`.
+sai3-bench supports configurable data generation to test storage deduplication and compression. Three fill patterns are available: `zero`, `random`, and `prand` (pseudo-random).
 
-**⚠️ RECOMMENDATION**: Use `fill: random` for realistic storage testing. The `zero` fill pattern produces artificially high compression ratios and does not represent real-world data. Only use `fill: zero` if you specifically need to test all-zero data behavior.
+**⚠️ RECOMMENDATION**: Always use `fill: random` for storage performance testing. Both `zero` and `prand` produce artificially compressible data (100% and 90% respectively) that results in unrealistic performance measurements. Use `fill: prand` only when data generation CPU overhead is a proven bottleneck.
 
 ## Fill Patterns
 
-| Pattern | Implementation | Parameters | Use Case |
-|---------|---------------|------------|----------|
-| `zero` | `vec![0u8; size]` | size only | **⚠️ Unrealistic** - All zeros, extreme compression. Use only for specific zero-data testing. |
-| `random` | `s3dlio::generate_controlled_data()` | size, dedup_factor, compress_factor | **✅ RECOMMENDED** - Realistic data for storage testing |
+| Pattern | Implementation | Compressibility | Performance | Parameters | Use Case |
+|---------|---------------|-----------------|-------------|------------|----------|
+| `zero` | `vec![0u8; size]` | 100% (22 bytes) | Fastest | size only | **⚠️ Unrealistic** - All zeros, extreme compression. Use only for specific zero-data testing. |
+| `random` | `s3dlio::generate_controlled_data()` (new algorithm) | 0% (uncompressible) | 1954µs/op | size, dedup_factor, compress_factor | **✅ RECOMMENDED** - Truly incompressible data for realistic storage testing |
+| `prand` | `s3dlio::generate_controlled_data_prand()` (old algorithm) | 87-90% (8995 bytes) | 1340µs/op | size, dedup_factor, compress_factor | **⚠️ NOT RECOMMENDED** - Faster CPU but artificially compressible, unrealistic for storage testing |
+
+### Random vs Prand: Critical Performance Comparison
+
+**Why compressibility matters**: Storage benchmarking should use **uncompressible data** to accurately measure storage system performance. Compressible data produces artificially high throughput and doesn't represent real-world workloads.
+
+**Measured characteristics** (64KB samples with zstd -19):
+- `random`: 0% compressed (65,549 bytes from 64KB) - ✅ **Perfect for storage testing**
+- `prand`: 87-90% compressed (8,995 bytes from 64KB) - ❌ **Unrealistic, artificially high performance**
+- `zero`: 100% compressed (22 bytes from 64KB) - ❌ **Completely unrealistic**
+
+**Performance comparison** (prepare phase metrics):
+```
+Method   Latency     Throughput   Ops/sec   Compressibility   Storage Test Quality
+random   1954µs      234 MiB/s    195/s     0% (realistic)    ✅ RECOMMENDED
+prand    1340µs      254 MiB/s    197/s     90% (artificial)  ⚠️ USE WITH CAUTION
+zero     2910µs      273 MiB/s    194/s     100% (artificial) ❌ NOT RECOMMENDED
+```
+
+**When to use `random` (default and recommended)**:
+- ✅ All realistic storage performance testing
+- ✅ Measuring true backend throughput without compression artifacts
+- ✅ Comparing storage systems fairly
+- ✅ Production-representative workloads
+- ✅ Default choice for 99% of use cases
+
+**When to use `prand` (use sparingly)**:
+- ⚠️ ONLY when data generation CPU is the bottleneck (rare)
+- ⚠️ Testing with known-compressible data patterns
+- ⚠️ **Understand tradeoff**: 31% faster generation but produces unrealistic data
+- ⚠️ Results NOT comparable to `random` fill tests
+
+**Algorithm differences**:
+- `random`: Xoshiro256++ RNG, no shared template → truly incompressible
+- `prand`: ThreadRng with shared BASE_BLOCK template → cross-block patterns enable 90% compression
 
 ### Configuration Syntax
 
@@ -23,25 +58,26 @@ prepare:
       min_size: 1048576
       max_size: 1048576
       fill: random            # ✅ RECOMMENDED - realistic data for storage testing
+                              # "prand" for maximum CPU efficiency
                               # "zero" produces unrealistic compression ratios
-      dedup_factor: 1         # default: 1 (all unique), only applies to "random"
-      compress_factor: 1      # default: 1 (uncompressible), only applies to "random"
+      dedup_factor: 1         # default: 1 (all unique), applies to "random" and "prand"
+      compress_factor: 1      # default: 1 (uncompressible), applies to "random" and "prand"
 ```
 
-**Note**: While `fill` defaults to `zero`, you should **explicitly set `fill: random`** for realistic storage testing. The `zero` pattern is only appropriate when specifically testing all-zero data behavior.
+**Note**: While `fill` defaults to `zero`, you should **explicitly set `fill: random`** for realistic storage testing. The `zero` pattern is only appropriate when specifically testing all-zero data behavior. Use `fill: prand` when CPU efficiency is more important than data realism.
 
-**Parameter defaults**: `dedup_factor` and `compress_factor` both default to 1. They are ONLY used when `fill: random`.
+**Parameter defaults**: `dedup_factor` and `compress_factor` both default to 1. They are ONLY used when `fill: random` or `fill: prand`.
 
 ## Parameters
 
-### `dedup_factor` (default: 1, only for `fill: random`)
+### `dedup_factor` (default: 1, only for `fill: random` or `fill: prand`)
 Controls block-level deduplication:
 - **1** = All unique blocks (no deduplication)
 - **2** = 50% dedup ratio (blocks repeat 2x)
 - **3** = 66.7% dedup ratio (blocks repeat 3x)
 - **N** = (N-1)/N dedup ratio
 
-### `compress_factor` (default: 1, only for `fill: random`)
+### `compress_factor` (default: 1, only for `fill: random` or `fill: prand`)
 Controls compressibility (zero-to-random byte ratio):
 - **1** = Fully random (uncompressible)
 - **2** = ~50% zeros (2:1 compression)
@@ -50,18 +86,26 @@ Controls compressibility (zero-to-random byte ratio):
 
 ## Examples
 
-### Realistic Random Data (Recommended) - No Dedup, No Compression
+### Realistic Random Data (REQUIRED FOR STORAGE TESTING)
 ```yaml
 - base_uri: "s3://bucket/random/"
   count: 1000
   min_size: 1048576
   max_size: 1048576
-  fill: random              # ✅ RECOMMENDED - this should be your default
+  fill: random              # ✅ ALWAYS USE THIS - produces truly incompressible data
   # dedup_factor: 1 (default)
   # compress_factor: 1 (default)
-  fill: random
-  # dedup_factor: 1 (default, not required)
-  # compress_factor: 1 (default, not required)
+```
+
+### Pseudo-Random (NOT RECOMMENDED FOR STORAGE TESTING)
+```yaml
+- base_uri: "s3://bucket/prand/"
+  count: 1000
+  min_size: 1048576
+  max_size: 1048576
+  fill: prand               # ⚠️ WARNING: 90% compressible, unrealistic performance
+  # dedup_factor: 1 (default)  # Only use if data generation CPU is proven bottleneck
+  # compress_factor: 1 (default)
 ```
 
 ### High Compressibility
