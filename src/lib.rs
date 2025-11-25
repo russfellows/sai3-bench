@@ -2,6 +2,13 @@
 
 use regex::escape;
 
+// Protobuf-generated gRPC definitions (generated at build time)
+pub mod pb {
+    pub mod iobench {
+        include!("pb/iobench.rs");
+    }
+}
+
 pub mod config;
 pub mod constants; // Central constants and defaults (v0.8.0+)
 pub mod cpu_monitor;

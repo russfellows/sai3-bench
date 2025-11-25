@@ -79,7 +79,7 @@ path = "src/main.rs"
 name = "sai3bench-agent"
 path = "src/bin/agent.rs"
 
-# new controller (coordinates benchmark across agents)
+# controller (coordinates benchmark across agents)
 [[bin]]
 name = "sai3bench-ctl"
 path = "src/bin/controller.rs"

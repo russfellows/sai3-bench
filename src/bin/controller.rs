@@ -1,8 +1,15 @@
 // src/bin/controller.rs
+//
+// Distributed workload controller with bidirectional streaming (v0.8.4+)
+//
+// Uses execute_workload RPC with separate control/stats channels to eliminate
+// repeated READY messages and enable proper PING/PONG, ABORT, and state management.
+// Replaces old run_workload_with_live_stats unidirectional streaming approach.
 
 use anyhow::{anyhow, Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
+use tokio_stream::wrappers::ReceiverStream;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -23,7 +30,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message};
 
 /// v0.7.13: Controller's view of agent states
 /// 
@@ -1212,22 +1219,101 @@ async fn run_distributed_workload(
                 .await
                 .with_context(|| format!("connect to agent {}", addr))?;
 
-            debug!("Connected to agent {}, starting streaming workload", addr);
+            debug!("Connected to agent {}, opening bidirectional stream", addr);
 
-            // Send streaming workload request
+            // PHASE 4: Open bidirectional stream (control + stats channels)
+            let (tx_control, rx_control) = tokio::sync::mpsc::channel::<ControlMessage>(32);
+            let control_stream = ReceiverStream::new(rx_control);
+            
             let mut stream = client
-                .run_workload_with_live_stats(RunWorkloadRequest {
-                    config_yaml: config,
-                    agent_id: agent_id.clone(),
-                    path_prefix: effective_prefix.clone(),
-                    start_timestamp_ns: start_ns,
-                    shared_storage: shared,
-                })
+                .execute_workload(control_stream)
                 .await
-                .with_context(|| format!("run_workload_with_live_stats on agent {}", addr))?
+                .with_context(|| format!("execute_workload on agent {}", addr))?
                 .into_inner();
 
-            debug!("Agent {} streaming started", addr);
+            debug!("Agent {} bidirectional stream opened", addr);
+            
+            // Phase 1: Send START command with config
+            let config_msg = ControlMessage {
+                command: control_message::Command::Start as i32,
+                config_yaml: config.clone(),
+                agent_id: agent_id.clone(),
+                path_prefix: effective_prefix.clone(),
+                shared_storage: shared,
+                start_timestamp_ns: 0,  // Phase 1: no timestamp yet
+                ack_sequence: 0,
+            };
+            
+            if let Err(e) = tx_control.send(config_msg).await {
+                return Err(anyhow!("Failed to send config to agent {}: {}", agent_id, e));
+            }
+            
+            debug!("Agent {} sent config via control channel", addr);
+            
+            // Wait for READY status (status=1) with agent timestamp
+            let mut ready_received = false;
+            let ready_timeout = tokio::time::Duration::from_secs(30);
+            let ready_deadline = tokio::time::Instant::now() + ready_timeout;
+            
+            while !ready_received && tokio::time::Instant::now() < ready_deadline {
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    stream.message()
+                ).await {
+                    Ok(Ok(Some(stats))) => {
+                        if stats.status == 1 {  // READY
+                            ready_received = true;
+                            debug!("Agent {} sent READY with timestamp {}ns", agent_id, stats.agent_timestamp_ns);
+                            
+                            // Forward READY to main loop for state tracking
+                            if let Err(e) = tx.send(stats) {
+                                error!("Failed to forward READY from agent {}: {}", addr, e);
+                                break;
+                            }
+                        } else if stats.status == 3 {  // ERROR
+                            return Err(anyhow!("Agent {} rejected config: {}", agent_id, stats.error_message));
+                        } else {
+                            // Unexpected status during startup - forward and continue
+                            let _ = tx.send(stats);
+                        }
+                    }
+                    Ok(Ok(None)) => {
+                        // Stream ended unexpectedly
+                        return Err(anyhow!("Agent {} stream ended before READY", agent_id));
+                    }
+                    Ok(Err(e)) => {
+                        // gRPC error
+                        return Err(anyhow!("Agent {} gRPC error: {}", agent_id, e));
+                    }
+                    Err(_) => {
+                        // Timeout - continue waiting
+                        continue;
+                    }
+                }
+            }
+            
+            if !ready_received {
+                return Err(anyhow!("Agent {} did not send READY within {}s", agent_id, ready_timeout.as_secs()));
+            }
+            
+            // Phase 2: Send START command with coordinated timestamp
+            // This happens after ALL agents are READY (controlled by main loop)
+            // For now, send it immediately after READY for backward compatibility with test
+            let start_msg = ControlMessage {
+                command: control_message::Command::Start as i32,
+                config_yaml: String::new(),  // Already sent in Phase 1
+                agent_id: agent_id.clone(),
+                path_prefix: String::new(),
+                shared_storage: false,
+                start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
+                ack_sequence: 0,
+            };
+            
+            if let Err(e) = tx_control.send(start_msg).await {
+                return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+            }
+            
+            debug!("Agent {} sent start timestamp {}ns via control channel", addr, start_ns);
             
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
