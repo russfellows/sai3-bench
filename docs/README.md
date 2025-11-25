@@ -12,7 +12,7 @@
 - **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.8.4+)
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history (v0.8.5+, see archive/ for earlier versions)
 - **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
 - **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
 - **[BIDIRECTIONAL_STREAMING.md](BIDIRECTIONAL_STREAMING.md)** - Architecture and state machines (v0.8.4+)
@@ -34,7 +34,8 @@
 
 ## Archived Documentation
 
-- **[archive/](archive/)** - Completed implementation details and historical releases (12 docs)
+- **[archive/](archive/)** - Completed implementation details and historical releases (13 docs)
+  - **CHANGELOG_v0.1.0-v0.8.4.md** - Complete version history through v0.8.4
   - v0.8.0: STATE_MACHINE_DESIGN_v0.8.0_detailed.md, PRIORITY_FIXES_v0.8.0.md, V0.8.0_IMPLEMENTATION_PLAN.md
   - v0.7.6: DISTRIBUTED_LIVE_STATS_IMPLEMENTATION_v0.7.6.md
   - v0.7.1: RELEASE_v0.7.1.md
@@ -47,9 +48,10 @@
 
 ## Maintenance
 
-**Last Cleanup**: November 24, 2025 (v0.8.4)
+**Last Cleanup**: November 24, 2025 (v0.8.5)
 - **Added**: BIDIRECTIONAL_STREAMING.md - Consolidated architecture guide for v0.8.4+ bidirectional streaming
-- **Removed**: STATE_MACHINES.md, STATE_TRANSITION_RECOVERY_ANALYSIS.md, AGENT_STATE_MACHINE.md, CONTROLLER_STATE_MACHINE.md, TWO_CHANNEL_IMPLEMENTATION_PLAN.md, PHASE4_IMPLEMENTATION_STATUS.md, ROBUSTNESS_ANALYSIS.md (7 files - now obsolete/redundant)
+- **Added**: New CHANGELOG.md (v0.8.5+) - Archived old changelog (v0.1.0-v0.8.4) to archive/
+- **Removed**: 7 detailed implementation docs (now obsolete/redundant, consolidated into BIDIRECTIONAL_STREAMING.md)
 - **Simplified**: Reduced from 7 detailed implementation docs to 1 concise architecture guide
 - **Status**: Bidirectional streaming fully implemented, tested, and production-ready
 
@@ -58,8 +60,8 @@
 **Documentation Structure**:
 - **16 active docs** in main directory (user guides, references, performance analysis)
 - **5 planning docs** for future features and designs
-- **12 archived docs** preserving implementation history
-- **Total**: 33 documentation files
+- **13 archived docs** preserving implementation history (including CHANGELOG v0.1.0-v0.8.4)
+- **Total**: 34 documentation files
 
 **Cleanup Policy**:
 - All release information goes into CHANGELOG.md (single source of truth)
