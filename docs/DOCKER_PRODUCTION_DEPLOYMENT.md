@@ -39,15 +39,11 @@ echo "View logs: docker logs -f sai3-agent-${AGENT_ID}"
 echo "Or: tail -f ${LOG_DIR}/agent-${AGENT_ID}.log"
 ```
 
-### Controller Deployment (tmux + Daemon with Logs)
+### Controller Deployment (tmux + Interactive Shell)
 
 ```bash
 #!/bin/bash
-# run_sai3-controller.sh - Improved version with tmux and logging
-
-CONFIG="${1:-./config.yaml}"
-LOG_DIR="/home/ubuntu/sai3-logs"
-mkdir -p "$LOG_DIR"
+# run_sai3-controller.sh - Interactive shell for controller operations
 
 # Check if already in tmux
 if [ -z "$TMUX" ]; then
@@ -59,21 +55,20 @@ fi
 # Stop any existing controller
 docker rm -f sai3-controller 2>/dev/null
 
-echo "Starting controller in foreground mode (inside tmux)..."
-echo "Logs will be saved to: ${LOG_DIR}/controller.log"
+echo "Starting interactive controller shell (inside tmux)..."
+echo "You can now run sai3bench-ctl commands, view logs, etc."
 echo ""
 
-# Run interactively (we're inside tmux, so SSH disconnect is OK)
+# Run interactive bash shell (we're inside tmux, so SSH disconnect is OK)
 docker run -it --rm \
     --name sai3-controller \
     --net=host \
     -v /home/ubuntu:/home/ubuntu \
-    -v ${LOG_DIR}:/logs \
     -e AWS_SECRET_ACCESS_KEY \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_REGION \
     sai3-tools \
-    bash -c "/usr/local/bin/sai3bench-ctl run --config ${CONFIG} 2>&1 | tee /logs/controller.log"
+    /bin/bash
 ```
 
 ### Complete Deployment Workflow
@@ -104,10 +99,15 @@ ssh ubuntu@controller-host
 tmux new -s sai3-test
 # OR if session exists: tmux attach -t sai3-test
 
-# Inside tmux: Start controller
-./run_sai3-controller.sh ./resnet50_8-hosts.yaml
+# Inside tmux: Start controller shell
+./run_sai3-controller.sh
 
-# Watch it run...
+# Now you're in an interactive bash shell inside the container
+# Run whatever commands you want:
+root@controller:/# sai3bench-ctl run --config /home/ubuntu/resnet50_8-hosts.yaml
+root@controller:/# ls /home/ubuntu/
+root@controller:/# cat results/STATUS.txt
+
 # If SSH disconnects, reconnect and: tmux attach -t sai3-test
 ```
 
@@ -116,17 +116,20 @@ tmux new -s sai3-test
 **From another terminal (or after SSH reconnect):**
 
 ```bash
-# Controller output
-tail -f /home/ubuntu/sai3-logs/controller.log
-
 # Agent outputs (on each agent host)
 tail -f /home/ubuntu/sai3-logs/agent-*.log
+
+# Or view docker logs
+docker logs -f sai3-agent-agent-1
 
 # All docker containers
 docker ps
 
 # Agent CPU/memory
 docker stats sai3-agent-agent-1
+
+# Controller shell - just attach to tmux
+tmux attach -t sai3-test
 ```
 
 ### Handling SSH Disconnections
@@ -134,7 +137,19 @@ docker stats sai3-agent-agent-1
 #### If Controller SSH Disconnects:
 1. SSH back to controller host
 2. `tmux attach -t sai3-test`
-3. You're back - test still running!
+3. You're back - shell still active, any running workload still running!
+
+**Tip: Logging controller output**
+If you want to save output for later analysis:
+```bash
+# Inside the controller shell, use tee:
+root@controller:/# sai3bench-ctl run --config /home/ubuntu/config.yaml 2>&1 | tee /home/ubuntu/controller.log
+
+# Or use script to capture entire session:
+root@controller:/# script -f /home/ubuntu/session.log
+root@controller:/# sai3bench-ctl run --config /home/ubuntu/config.yaml
+root@controller:/# exit  # Stop recording
+```
 
 #### If Agent SSH Disconnects:
 Agents run in daemon mode - they keep running. Check logs:
