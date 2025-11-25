@@ -12,11 +12,12 @@
 - **[CLOUD_STORAGE_SETUP.md](CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication guides
 
 ### Reference Documentation
-- **[CHANGELOG.md](CHANGELOG.md)** - Complete version history (v0.1.0 → v0.8.0)
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history (v0.8.5+, see archive/ for earlier versions)
 - **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** - YAML configuration file reference
 - **[DATA_GENERATION.md](DATA_GENERATION.md)** - Data generation patterns and storage efficiency testing
-- **[STATE_MACHINES.md](STATE_MACHINES.md)** - Agent and controller state machine architecture (v0.8.0+)
+- **[BIDIRECTIONAL_STREAMING.md](BIDIRECTIONAL_STREAMING.md)** - Architecture and state machines (v0.8.4+)
 - **[IO_RATE_CONTROL_GUIDE.md](IO_RATE_CONTROL_GUIDE.md)** - I/O rate limiting and arrival patterns
+- **[TESTING_CLOCK_SYNC.md](TESTING_CLOCK_SYNC.md)** - Clock synchronization testing and verification
 
 ### Performance & Analysis
 - **[SCALE_OUT_VS_SCALE_UP.md](SCALE_OUT_VS_SCALE_UP.md)** - Performance comparison, cost analysis, deployment strategies
@@ -33,7 +34,8 @@
 
 ## Archived Documentation
 
-- **[archive/](archive/)** - Completed implementation details and historical releases (12 docs)
+- **[archive/](archive/)** - Completed implementation details and historical releases (13 docs)
+  - **CHANGELOG_v0.1.0-v0.8.4.md** - Complete version history through v0.8.4
   - v0.8.0: STATE_MACHINE_DESIGN_v0.8.0_detailed.md, PRIORITY_FIXES_v0.8.0.md, V0.8.0_IMPLEMENTATION_PLAN.md
   - v0.7.6: DISTRIBUTED_LIVE_STATS_IMPLEMENTATION_v0.7.6.md
   - v0.7.1: RELEASE_v0.7.1.md
@@ -46,22 +48,20 @@
 
 ## Maintenance
 
-**Last Cleanup**: November 20, 2025 (v0.8.0)
-- **Added**: STATE_MACHINES.md - Concise reference for agent/controller state machines
-- **Reorganized**: Combined RDF_BENCH_REFERENCE.md and rdf-bench comparison into planning/RDF_BENCH_FEATURE_COMPARISON.md
-- **Moved to planning/**: rdf-bench feature comparison (now serves as implementation planning reference)
-- **Moved to archive/**: Original rdf-bench reference docs (replaced by combined planning doc)
-- **Archived**: Moved completed v0.8.0 implementation docs to archive/ (4 docs)
-- **Updated**: CHANGELOG.md with comprehensive v0.8.0 release notes (formal state machines, error handling, auto-reset)
-- **Updated**: USAGE.md with v0.8.0 error handling, auto-reset, and verbosity level documentation
+**Last Cleanup**: November 24, 2025 (v0.8.5)
+- **Added**: BIDIRECTIONAL_STREAMING.md - Consolidated architecture guide for v0.8.4+ bidirectional streaming
+- **Added**: New CHANGELOG.md (v0.8.5+) - Archived old changelog (v0.1.0-v0.8.4) to archive/
+- **Removed**: 7 detailed implementation docs (now obsolete/redundant, consolidated into BIDIRECTIONAL_STREAMING.md)
+- **Simplified**: Reduced from 7 detailed implementation docs to 1 concise architecture guide
+- **Status**: Bidirectional streaming fully implemented, tested, and production-ready
 
-**Previous cleanup**: October 31, 2025 (v0.7.0) - Added directory tree and filesystem guides
+**Previous cleanup**: November 20, 2025 (v0.8.0) - State machine documentation reorganization
 
 **Documentation Structure**:
-- **15 active docs** in main directory (user guides, references, performance analysis)
+- **16 active docs** in main directory (user guides, references, performance analysis)
 - **5 planning docs** for future features and designs
-- **12 archived docs** preserving implementation history
-- **Total**: 32 documentation files
+- **13 archived docs** preserving implementation history (including CHANGELOG v0.1.0-v0.8.4)
+- **Total**: 34 documentation files
 
 **Cleanup Policy**:
 - All release information goes into CHANGELOG.md (single source of truth)

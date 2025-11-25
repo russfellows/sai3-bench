@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.3"
+version = "0.8.5"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,11 +22,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio (version 0.9.18 - Xoshiro256++ RNG, 5-24% performance improvement)
-# Use git tag for standalone builds (no local s3dlio directory required)
+# s3dlio (main branch - always latest)
+# Use main branch to automatically get latest stable releases
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.18" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.18" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
 # s3dlio = { path = "../s3dlio" }
 # s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
@@ -79,7 +79,7 @@ path = "src/main.rs"
 name = "sai3bench-agent"
 path = "src/bin/agent.rs"
 
-# new controller (coordinates benchmark across agents)
+# controller (coordinates benchmark across agents)
 [[bin]]
 name = "sai3bench-ctl"
 path = "src/bin/controller.rs"

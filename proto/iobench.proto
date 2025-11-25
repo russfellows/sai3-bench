@@ -133,9 +133,11 @@ message LiveStats {
     RUNNING = 2;     // Workload is executing (normal stats messages)
     ERROR = 3;       // Agent encountered startup error (see error_message)
     COMPLETED = 4;   // Workload finished successfully
+    ABORTED = 5;     // Agent gracefully aborted by controller
+    ACKNOWLEDGE = 6; // Response to PING command
   }
   Status status = 18;
-  string error_message = 19;     // Details if status == ERROR
+  string error_message = 19;     // Details if status == ERROR or ABORTED
   
   // v0.7.9: Prepare phase progress tracking
   bool in_prepare_phase = 20;    // True if currently in prepare phase
@@ -150,6 +152,15 @@ message LiveStats {
   double cpu_system_percent = 25;  // System/kernel mode CPU utilization (0-100%)
   double cpu_iowait_percent = 26;  // IO-wait CPU time (0-100%)
   double cpu_total_percent = 27;   // Total CPU utilization (user+system+iowait)
+  
+  // v0.8.4: Clock synchronization for coordinated start
+  // When status=READY, agent includes its current timestamp
+  // Controller calculates offset and adjusts start_timestamp_ns accordingly
+  int64 agent_timestamp_ns = 28;   // Agent's system time (nanoseconds since UNIX epoch)
+  
+  // v0.8.4: Sequence number for message tracking and acknowledgment
+  // Allows controller to confirm receipt of specific messages (e.g., READY status)
+  int64 sequence = 29;
 }
 
 service Agent {
@@ -163,5 +174,32 @@ service Agent {
   
   // v0.7.11: Abort ongoing workload (controller failure, user interrupt, etc.)
   rpc AbortWorkload(Empty) returns (Empty);
+  
+  // v0.8.4: Bidirectional streaming for robust control and stats
+  // Controller sends control messages (start, abort, ping)
+  // Agent sends stats updates (ready, progress, completed)
+  // Allows real-time coordination without blocking either side
+  rpc ExecuteWorkload(stream ControlMessage) returns (stream LiveStats);
+}
+
+// v0.8.4: Control messages from controller to agent
+message ControlMessage {
+  enum Command {
+    PING = 0;           // Keepalive / connection check
+    START = 1;          // Begin workload execution
+    ABORT = 2;          // Cancel workload immediately
+    ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
+  }
+  Command command = 1;
+  
+  // For START command: workload configuration
+  string config_yaml = 2;
+  string agent_id = 3;
+  string path_prefix = 4;
+  int64 start_timestamp_ns = 5;
+  bool shared_storage = 6;
+  
+  // For ACKNOWLEDGE: which message we're acknowledging
+  int64 ack_sequence = 7;
 }
 

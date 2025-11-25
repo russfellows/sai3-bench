@@ -1,8 +1,8 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.3-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.5-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-159%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-148%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
@@ -15,7 +15,7 @@ A comprehensive storage performance testing tool supporting multiple backends th
 3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends
 4. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
 5. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay
-6. **Distributed Architecture**: gRPC-based agent/controller for coordinated multi-node load generation
+6. **Robust Distributed Execution**: Bidirectional streaming with sub-millisecond agent synchronization (v0.8.5+)
 7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
 8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
 9. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis

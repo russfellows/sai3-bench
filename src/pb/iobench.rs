@@ -208,7 +208,7 @@ pub struct LiveStats {
     pub final_summary: ::core::option::Option<WorkloadSummary>,
     #[prost(enumeration = "live_stats::Status", tag = "18")]
     pub status: i32,
-    /// Details if status == ERROR
+    /// Details if status == ERROR or ABORTED
     #[prost(string, tag = "19")]
     pub error_message: ::prost::alloc::string::String,
     /// v0.7.9: Prepare phase progress tracking
@@ -239,6 +239,17 @@ pub struct LiveStats {
     /// Total CPU utilization (user+system+iowait)
     #[prost(double, tag = "27")]
     pub cpu_total_percent: f64,
+    /// v0.8.4: Clock synchronization for coordinated start
+    /// When status=READY, agent includes its current timestamp
+    /// Controller calculates offset and adjusts start_timestamp_ns accordingly
+    ///
+    /// Agent's system time (nanoseconds since UNIX epoch)
+    #[prost(int64, tag = "28")]
+    pub agent_timestamp_ns: i64,
+    /// v0.8.4: Sequence number for message tracking and acknowledgment
+    /// Allows controller to confirm receipt of specific messages (e.g., READY status)
+    #[prost(int64, tag = "29")]
+    pub sequence: i64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {
@@ -265,6 +276,10 @@ pub mod live_stats {
         Error = 3,
         /// Workload finished successfully
         Completed = 4,
+        /// Agent gracefully aborted by controller
+        Aborted = 5,
+        /// Response to PING command
+        Acknowledge = 6,
     }
     impl Status {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -278,6 +293,8 @@ pub mod live_stats {
                 Self::Running => "RUNNING",
                 Self::Error => "ERROR",
                 Self::Completed => "COMPLETED",
+                Self::Aborted => "ABORTED",
+                Self::Acknowledge => "ACKNOWLEDGE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -288,6 +305,77 @@ pub mod live_stats {
                 "RUNNING" => Some(Self::Running),
                 "ERROR" => Some(Self::Error),
                 "COMPLETED" => Some(Self::Completed),
+                "ABORTED" => Some(Self::Aborted),
+                "ACKNOWLEDGE" => Some(Self::Acknowledge),
+                _ => None,
+            }
+        }
+    }
+}
+/// v0.8.4: Control messages from controller to agent
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ControlMessage {
+    #[prost(enumeration = "control_message::Command", tag = "1")]
+    pub command: i32,
+    /// For START command: workload configuration
+    #[prost(string, tag = "2")]
+    pub config_yaml: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub path_prefix: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub start_timestamp_ns: i64,
+    #[prost(bool, tag = "6")]
+    pub shared_storage: bool,
+    /// For ACKNOWLEDGE: which message we're acknowledging
+    #[prost(int64, tag = "7")]
+    pub ack_sequence: i64,
+}
+/// Nested message and enum types in `ControlMessage`.
+pub mod control_message {
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Command {
+        /// Keepalive / connection check
+        Ping = 0,
+        /// Begin workload execution
+        Start = 1,
+        /// Cancel workload immediately
+        Abort = 2,
+        /// Acknowledge receipt of agent message
+        Acknowledge = 3,
+    }
+    impl Command {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Ping => "PING",
+                Self::Start => "START",
+                Self::Abort => "ABORT",
+                Self::Acknowledge => "ACKNOWLEDGE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "PING" => Some(Self::Ping),
+                "START" => Some(Self::Start),
+                "ABORT" => Some(Self::Abort),
+                "ACKNOWLEDGE" => Some(Self::Acknowledge),
                 _ => None,
             }
         }
@@ -508,6 +596,34 @@ pub mod agent_client {
                 .insert(GrpcMethod::new("iobench.Agent", "AbortWorkload"));
             self.inner.unary(req, path, codec).await
         }
+        /// v0.8.4: Bidirectional streaming for robust control and stats
+        /// Controller sends control messages (start, abort, ping)
+        /// Agent sends stats updates (ready, progress, completed)
+        /// Allows real-time coordination without blocking either side
+        pub async fn execute_workload(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<Message = super::ControlMessage>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::LiveStats>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/ExecuteWorkload",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "ExecuteWorkload"));
+            self.inner.streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -558,6 +674,23 @@ pub mod agent_server {
             &self,
             request: tonic::Request<super::Empty>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
+        /// Server streaming response type for the ExecuteWorkload method.
+        type ExecuteWorkloadStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::LiveStats, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// v0.8.4: Bidirectional streaming for robust control and stats
+        /// Controller sends control messages (start, abort, ping)
+        /// Agent sends stats updates (ready, progress, completed)
+        /// Allows real-time coordination without blocking either side
+        async fn execute_workload(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::ControlMessage>>,
+        ) -> std::result::Result<
+            tonic::Response<Self::ExecuteWorkloadStream>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct AgentServer<T> {
@@ -893,6 +1026,52 @@ pub mod agent_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/ExecuteWorkload" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteWorkloadSvc<T: Agent>(pub Arc<T>);
+                    impl<T: Agent> tonic::server::StreamingService<super::ControlMessage>
+                    for ExecuteWorkloadSvc<T> {
+                        type Response = super::LiveStats;
+                        type ResponseStream = T::ExecuteWorkloadStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                tonic::Streaming<super::ControlMessage>,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::execute_workload(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteWorkloadSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

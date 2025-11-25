@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::dotenv;
 use futures::{stream::FuturesUnordered, StreamExt};
+use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,7 +29,36 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command};
+
+/// Helper function to get current timestamp with optional simulated clock skew.
+/// 
+/// For testing clock synchronization with local agents, set SAI3_AGENT_CLOCK_SKEW_MS
+/// environment variable to simulate clock skew in milliseconds (can be negative).
+/// 
+/// Examples:
+///   SAI3_AGENT_CLOCK_SKEW_MS=5000   # Agent clock 5 seconds ahead
+///   SAI3_AGENT_CLOCK_SKEW_MS=-3000  # Agent clock 3 seconds behind
+/// 
+/// This allows testing the distributed clock synchronization protocol without
+/// needing different physical machines with actual clock skew.
+fn get_agent_timestamp_ns() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    
+    // Check for test clock skew (only reads once at function definition, but that's ok for testing)
+    if let Ok(skew_ms_str) = env::var("SAI3_AGENT_CLOCK_SKEW_MS") {
+        if let Ok(skew_ms) = skew_ms_str.parse::<i64>() {
+            let skew_ns = skew_ms * 1_000_000;
+            eprintln!("[TEST MODE] Simulating clock skew: {} ms ({} ns)", skew_ms, skew_ns);
+            return now + skew_ns;
+        }
+    }
+    
+    now
+}
 
 #[derive(Parser)]
 #[command(name = "sai3bench-agent", version, about = "SAI3 Benchmark Agent (gRPC)")]
@@ -81,6 +111,14 @@ struct AgentState {
     error_message: Arc<Mutex<Option<String>>>,
     /// Optional operation log path (from CLI --op-log flag)
     agent_op_log_path: Option<std::path::PathBuf>,
+    /// v0.8.4: Agent ID for current workload (for execute_workload RPC)
+    agent_id: Arc<Mutex<Option<String>>>,
+    /// v0.8.4: Config YAML for current workload (for execute_workload RPC)
+    config_yaml: Arc<Mutex<Option<String>>>,
+    /// v0.8.4: LiveStatsTracker for current workload (for execute_workload RPC)
+    tracker: Arc<Mutex<Option<Arc<sai3_bench::live_stats::LiveStatsTracker>>>>,
+    /// v0.8.4: Operation log path for current workload (for execute_workload RPC)
+    op_log_path: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +140,10 @@ impl AgentState {
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
             error_message: Arc::new(Mutex::new(None)),
             agent_op_log_path,
+            agent_id: Arc::new(Mutex::new(None)),
+            config_yaml: Arc::new(Mutex::new(None)),
+            tracker: Arc::new(Mutex::new(None)),
+            op_log_path: Arc::new(Mutex::new(None)),
         }
     }
     
@@ -175,6 +217,44 @@ impl AgentState {
     /// Subscribe to completion signals
     fn subscribe_completion(&self) -> broadcast::Receiver<()> {
         self.completion_tx.subscribe()
+    }
+    
+    // v0.8.4: Additional state management for execute_workload RPC
+    
+    async fn set_agent_id(&self, id: String) {
+        let mut agent_id = self.agent_id.lock().await;
+        *agent_id = Some(id);
+    }
+    
+    async fn get_agent_id(&self) -> Option<String> {
+        self.agent_id.lock().await.clone()
+    }
+    
+    async fn set_config_yaml(&self, yaml: String) {
+        let mut config_yaml = self.config_yaml.lock().await;
+        *config_yaml = Some(yaml);
+    }
+    
+    async fn get_config_yaml(&self) -> Option<String> {
+        self.config_yaml.lock().await.clone()
+    }
+    
+    async fn set_tracker(&self, t: Arc<sai3_bench::live_stats::LiveStatsTracker>) {
+        let mut tracker = self.tracker.lock().await;
+        *tracker = Some(t);
+    }
+    
+    async fn get_tracker(&self) -> Option<Arc<sai3_bench::live_stats::LiveStatsTracker>> {
+        self.tracker.lock().await.clone()
+    }
+    
+    async fn set_op_log_path(&self, path: Option<String>) {
+        let mut op_log_path = self.op_log_path.lock().await;
+        *op_log_path = path;
+    }
+    
+    async fn get_op_log_path(&self) -> Option<String> {
+        self.op_log_path.lock().await.clone()
     }
 }
 
@@ -371,7 +451,7 @@ impl Agent for AgentSvc {
         // Execute prepare phase if configured
         let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
             debug!("Executing prepare phase");
-            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None)
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None, config.concurrency)
                 .await
                 .map_err(|e| {
                     error!("Prepare phase failed: {}", e);
@@ -508,6 +588,10 @@ impl Agent for AgentSvc {
     /// v0.7.5: Server streaming RPC for live progress updates during distributed execution
     type RunWorkloadWithLiveStatsStream = 
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<LiveStats, Status>> + Send>>;
+    
+    // v0.8.4: Bidirectional streaming type
+    type ExecuteWorkloadStream = 
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<LiveStats, Status>> + Send>>;
 
     async fn run_workload_with_live_stats(
         &self,
@@ -532,13 +616,44 @@ impl Agent for AgentSvc {
             .map_err(|e| Status::internal(format!("Failed to apply path prefix: {}", e)))?;
 
         // v0.7.6: Parse coordinated start time (will wait inside stream after READY)
+        // v0.8.4: Coordinated start with clock synchronization
+        // 
+        // Protocol:
+        // 1. Agent sends READY with agent_timestamp_ns (agent's current time)
+        // 2. Controller calculates offset = agent_time - controller_time
+        // 3. Controller sends start_timestamp_ns in controller's clock
+        // 4. Agent adjusts: start_time_agent = start_time_controller (no adjustment needed!)
+        //
+        // Key insight: Both clocks measure time since UNIX_EPOCH. Even if agent clock
+        // is skewed (e.g., +5 seconds ahead), when controller says "start at epoch time X",
+        // agent checks its own clock against the same epoch time X. The skew cancels out
+        // because both are measuring against the same absolute reference point.
+        //
+        // Example:
+        //   Controller time: 1000s since epoch, says "start at 1010s"
+        //   Agent time: 1005s since epoch (5s ahead), sees "start at 1010s"
+        //   Agent waits: 1010 - 1005 = 5 seconds ✓
+        //   Controller waits: 1010 - 1000 = 10 seconds ✓
+        //   Both start at the same absolute epoch time (1010s)
+        //
+        // Why this works: SystemTime measures elapsed time from UNIX_EPOCH, not wall-clock time.
+        // Clock skew affects the current reading but not the measurement basis.
+        //
+        // Previous bug: Used minimum wait when start_time was in the past.
+        // Now: Always use calculated duration, even if negative (means agent already past start time).
+        
         let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
         let wait_duration = match start_time.duration_since(std::time::SystemTime::now()) {
             Ok(d) if d > std::time::Duration::from_secs(60) => {
                 return Err(Status::invalid_argument("Start time is too far in the future (>60s)"));
             }
-            Ok(d) => Some(d),
-            Err(_) => None,  // Start time is in the past
+            Ok(d) => d,
+            Err(_) => {
+                // Start time is in the past - this should not happen with proper coordination
+                // but we handle it gracefully by starting immediately
+                warn!("Start time already passed - starting immediately");
+                std::time::Duration::from_secs(0)
+            }
         };
 
         info!("Preparing workload execution with live stats for agent {}", agent_id);
@@ -600,6 +715,8 @@ impl Agent for AgentSvc {
                 cpu_system_percent: 0.0,
                 cpu_iowait_percent: 0.0,
                 cpu_total_percent: 0.0,
+                agent_timestamp_ns: 0,
+                sequence: 0,
             };
             
             let stream = async_stream::stream! {
@@ -638,6 +755,9 @@ impl Agent for AgentSvc {
             let mut abort_rx = agent_state_stream.subscribe_abort();
             
             // v0.7.6: Send READY status first (validation passed)
+            // v0.8.4: Include agent timestamp for clock synchronization
+            let agent_timestamp_ns = get_agent_timestamp_ns();
+            
             let ready_msg = LiveStats {
                 agent_id: agent_id_stream.clone(),
                 timestamp_s: 0.0,
@@ -666,30 +786,65 @@ impl Agent for AgentSvc {
                 cpu_system_percent: 0.0,
                 cpu_iowait_percent: 0.0,
                 cpu_total_percent: 0.0,
+                agent_timestamp_ns: agent_timestamp_ns,
+                sequence: 0,
             };
             yield Ok(ready_msg);
             
-            // v0.7.6: Wait for coordinated start time AFTER sending READY
-            // v0.7.12: Make coordinated start delay interruptible by abort signal
-            if let Some(wait_dur) = wait_duration {
-                info!("Waiting {:?} for coordinated start", agent_id_stream);
+            // v0.8.4: Wait for coordinated start while sending periodic keepalive stats
+            // CRITICAL: Don't block the stream during wait - send stats every 1s to keep controller informed
+            info!("Agent {} waiting {:?} for coordinated start", agent_id_stream, wait_duration);
+            
+            let target_start_time = tokio::time::Instant::now() + wait_duration;
+            let mut keepalive_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            
+            loop {
                 tokio::select! {
                     _ = &mut rx_cancel => {
                         warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
-                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
                         let _ = agent_state_stream.transition_to(WorkloadState::Idle, "disconnect during wait").await;
                         yield Err(Status::cancelled("Controller disconnected during coordinated start"));
-                        return;  // Exit stream generator
+                        return;
                     }
                     _ = abort_rx.recv() => {
                         warn!("Agent {} aborted during coordinated start", agent_id_stream);
-                        // v0.7.13: Reset to Idle (no cleanup needed, just waiting)
                         let _ = agent_state_stream.transition_to(WorkloadState::Idle, "abort during wait").await;
                         yield Err(Status::aborted("Aborted during coordinated start"));
-                        return;  // Exit stream generator
+                        return;
                     }
-                    _ = tokio::time::sleep(wait_dur) => {
-                        // Normal case: coordinated start time reached
+                    _ = keepalive_interval.tick() => {
+                        // Send keepalive stats to controller (agent still waiting for coordinated start)
+                        // Status=1 (READY) indicates agent is validated and waiting
+                        let keepalive_stats = LiveStats {
+                            agent_id: agent_id_stream.clone(),
+                            timestamp_s: 0.0,
+                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                            meta_ops: 0, meta_mean_us: 0.0,
+                            elapsed_s: 0.0,
+                            completed: false,
+                            final_summary: None,
+                            status: 1,  // READY (waiting for start)
+                            error_message: String::new(),
+                            in_prepare_phase: false,
+                            prepare_objects_created: 0,
+                            prepare_objects_total: 0,
+                            prepare_summary: None,
+                            cpu_user_percent: 0.0,
+                            cpu_system_percent: 0.0,
+                            cpu_iowait_percent: 0.0,
+                            cpu_total_percent: 0.0,
+                            agent_timestamp_ns: 0,
+                            sequence: 0,
+                        };
+                        debug!("Sending keepalive stats during coordinated start wait");
+                        yield Ok(keepalive_stats);
+                        
+                        // Check if we've reached the start time
+                        if tokio::time::Instant::now() >= target_start_time {
+                            break;
+                        }
                     }
                 }
             }
@@ -891,7 +1046,7 @@ impl Agent for AgentSvc {
                     result = async {
                         // Execute prepare phase if configured
                         let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone())).await {
+                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
                                 Ok((prepared, manifest, prepare_metrics)) => {
                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                     
@@ -1074,6 +1229,8 @@ impl Agent for AgentSvc {
                             cpu_system_percent: cpu_util.system_percent,
                             cpu_iowait_percent: cpu_util.iowait_percent,
                             cpu_total_percent: cpu_util.total_percent,
+                            agent_timestamp_ns: 0,
+                            sequence: 0,
                         };
                         // v0.8.2: Yield can block if controller is slow - log if we're about to send
                         if snapshot.in_prepare_phase && snapshot.prepare_objects_created % 10000 == 0 {
@@ -1154,6 +1311,8 @@ impl Agent for AgentSvc {
                                     cpu_system_percent: cpu_util.system_percent,
                                     cpu_iowait_percent: cpu_util.iowait_percent,
                                     cpu_total_percent: cpu_util.total_percent,
+                                    agent_timestamp_ns: 0,
+                                    sequence: 0,
                                 };
                                 
                                 // v0.7.13: Transition to Idle (workload completed successfully)
@@ -1274,6 +1433,808 @@ impl Agent for AgentSvc {
                 Ok(Response::new(Empty {}))
             }
         }
+    }
+
+    // v0.8.4: Bidirectional streaming RPC for robust control and stats
+    // 
+    // Two-channel architecture (one stream, two logical channels, two independent tasks):
+    // 
+    // 1. Control Reader Task (this function): Processes ControlMessage from controller
+    //    - START: Validate config, spawn workload, signal stats writer
+    //    - PING: Keepalive to prevent false timeout
+    //    - ABORT: Cancel workload immediately
+    //    - ACKNOWLEDGE: Controller confirms receipt of our message
+    // 
+    // 2. Stats Writer Task (spawned here): Sends LiveStats to controller
+    //    - READY: Validation passed, agent waiting for START
+    //    - RUNNING: Progress stats every 1s (with sequence numbers)
+    //    - COMPLETED: Final summary with results
+    // 
+    // Key benefits over RunWorkloadWithLiveStats:
+    // - No blocking during coordinated start (explicit START command)
+    // - Independent buffers prevent gRPC backpressure from blocking control
+    // - Control channel always available for PING/ABORT even during stats congestion
+    // - Sequence numbers enable gap detection and acknowledgment
+    async fn execute_workload(
+        &self,
+        req: Request<tonic::Streaming<ControlMessage>>,
+    ) -> Result<Response<Self::ExecuteWorkloadStream>, Status> {
+        info!("Received execute_workload request (bidirectional streaming mode)");
+        
+        let mut control_stream = req.into_inner();
+        
+        // Channel for stats writer to send LiveStats
+        let (tx_stats, rx_stats) = tokio::sync::mpsc::channel::<LiveStats>(32);
+        
+        // Channel to signal workload completion (for stats writer)
+        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
+        
+        // Channel to send prepare metrics from workload task to stats writer
+        let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
+        
+        // Clone state for use in tasks
+        let agent_state = self.state.clone();
+        let agent_op_log_path = self.state.agent_op_log_path.clone();
+        
+        // Spawn stats writer task (sends LiveStats to controller)
+        // Task runs independently and exits when rx_done receives completion or channel closes
+        {
+            let tx_stats = tx_stats.clone();
+            let agent_state = agent_state.clone();
+            
+            tokio::spawn(async move {
+                let mut sequence: i64 = 0;
+                
+                // Wait for START command validation to complete (signaled by transition to Ready)
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    let state = agent_state.get_state().await;
+                    if state == WorkloadState::Ready {
+                        break;
+                    } else if state == WorkloadState::Failed || state == WorkloadState::Idle {
+                        // Validation failed or agent reset - exit early
+                        return;
+                    }
+                }
+                
+                // Get agent_id from state (stored during validation)
+                let agent_id = agent_state.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                
+                // Send READY status with agent timestamp for clock synchronization
+                let agent_timestamp_ns = get_agent_timestamp_ns();
+                let ready_msg = LiveStats {
+                    agent_id: agent_id.clone(),
+                    timestamp_s: 0.0,
+                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                    meta_ops: 0, meta_mean_us: 0.0,
+                    elapsed_s: 0.0,
+                    completed: false,
+                    final_summary: None,
+                    status: 1,  // READY
+                    error_message: String::new(),
+                    in_prepare_phase: false,
+                    prepare_objects_created: 0,
+                    prepare_objects_total: 0,
+                    prepare_summary: None,
+                    cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0, cpu_total_percent: 0.0,
+                    agent_timestamp_ns,
+                    sequence,
+                };
+                sequence += 1;
+                
+                if tx_stats.send(ready_msg).await.is_err() {
+                    error!("Stats writer: Failed to send READY message (controller disconnected?)");
+                    return;
+                }
+                info!("Stats writer: Sent READY message with timestamp {} ns", agent_timestamp_ns);
+                
+                // Wait for workload to start (transition to Running)
+                // Block here - do NOT send any more messages until workload starts
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    let state = agent_state.get_state().await;
+                    if state == WorkloadState::Running {
+                        info!("Stats writer: Workload started, beginning stats transmission");
+                        break;
+                    } else if state == WorkloadState::Failed || state == WorkloadState::Idle || state == WorkloadState::Aborting {
+                        // Workload cancelled or failed before starting
+                        info!("Stats writer: Workload cancelled or failed, exiting (state: {:?})", state);
+                        return;
+                    }
+                    // Still in READY state - keep waiting silently
+                }
+                
+                // Get LiveStatsTracker from state (set during workload spawn)
+                let tracker = match agent_state.get_tracker().await {
+                    Some(t) => t,
+                    None => {
+                        error!("Stats writer: No LiveStatsTracker found in state");
+                        return;
+                    }
+                };
+                
+                // Initialize CPU monitor
+                let mut cpu_monitor = CpuMonitor::new();
+                
+                // Send RUNNING stats every 1 second until completion
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                
+                // Track prepare phase metrics
+                let mut prepare_proto: Option<PrepareSummary> = None;
+                
+                loop {
+                    tokio::select! {
+                        // Check for prepare metrics from workload task
+                        Some(prepare_metrics) = rx_prepare.recv() => {
+                            info!("Stats writer: Received prepare metrics");
+                            // Convert to PrepareSummary proto (reuse existing conversion logic)
+                            prepare_proto = prepare_metrics_to_proto(&agent_id, &prepare_metrics).await.ok();
+                        }
+                        
+                        // Check for workload completion
+                        result = rx_done.recv() => {
+                            match result {
+                                Some(Ok(summary)) => {
+                                    info!("Stats writer: Workload completed successfully");
+                                    
+                                    // Get config_yaml and op_log_path from state
+                                    let config_yaml = agent_state.get_config_yaml().await.unwrap_or_default();
+                                    let op_log_path = agent_state.get_op_log_path().await;
+                                    
+                                    // Convert to proto
+                                    let proto_summary = summary_to_proto(&agent_id, &config_yaml, &summary, op_log_path)
+                                        .await
+                                        .ok();
+                                    
+                                    // Get final snapshot and CPU stats
+                                    let snapshot = tracker.snapshot();
+                                    let cpu_util = cpu_monitor.sample()
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(CpuUtilization {
+                                            user_percent: 0.0,
+                                            system_percent: 0.0,
+                                            iowait_percent: 0.0,
+                                            total_percent: 0.0,
+                                        });
+                                    
+                                    // Send COMPLETED message
+                                    let completed_msg = LiveStats {
+                                        agent_id: agent_id.clone(),
+                                        timestamp_s: snapshot.timestamp_secs() as f64,
+                                        get_ops: snapshot.get_ops,
+                                        get_bytes: snapshot.get_bytes,
+                                        get_mean_us: snapshot.get_mean_us as f64,
+                                        get_p50_us: snapshot.get_p50_us as f64,
+                                        get_p95_us: snapshot.get_p95_us as f64,
+                                        put_ops: snapshot.put_ops,
+                                        put_bytes: snapshot.put_bytes,
+                                        put_mean_us: snapshot.put_mean_us as f64,
+                                        put_p50_us: snapshot.put_p50_us as f64,
+                                        put_p95_us: snapshot.put_p95_us as f64,
+                                        meta_ops: snapshot.meta_ops,
+                                        meta_mean_us: snapshot.meta_mean_us as f64,
+                                        elapsed_s: snapshot.elapsed_secs(),
+                                        completed: true,
+                                        final_summary: proto_summary,
+                                        status: 4,  // COMPLETED
+                                        error_message: String::new(),
+                                        in_prepare_phase: false,
+                                        prepare_objects_created: 0,
+                                        prepare_objects_total: 0,
+                                        prepare_summary: prepare_proto.clone(),
+                                        cpu_user_percent: cpu_util.user_percent,
+                                        cpu_system_percent: cpu_util.system_percent,
+                                        cpu_iowait_percent: cpu_util.iowait_percent,
+                                        cpu_total_percent: cpu_util.total_percent,
+                                        agent_timestamp_ns: 0,
+                                        sequence,
+                                    };
+                                    
+                                    if tx_stats.send(completed_msg).await.is_err() {
+                                        error!("Stats writer: Failed to send COMPLETED message");
+                                    }
+                                    
+                                    // Transition to Idle
+                                    let _ = agent_state.transition_to(WorkloadState::Idle, "workload completed").await;
+                                    
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    error!("Stats writer: Workload failed: {}", e);
+                                    
+                                    // Send ERROR message
+                                    let error_msg = LiveStats {
+                                        agent_id: agent_id.clone(),
+                                        timestamp_s: 0.0,
+                                        get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                        put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                        meta_ops: 0, meta_mean_us: 0.0,
+                                        elapsed_s: 0.0,
+                                        completed: false,
+                                        final_summary: None,
+                                        status: 3,  // ERROR
+                                        error_message: e.clone(),
+                                        in_prepare_phase: false,
+                                        prepare_objects_created: 0,
+                                        prepare_objects_total: 0,
+                                        prepare_summary: None,
+                                        cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0, cpu_total_percent: 0.0,
+                                        agent_timestamp_ns: 0,
+                                        sequence,
+                                    };
+                                    
+                                    if tx_stats.send(error_msg).await.is_err() {
+                                        error!("Stats writer: Failed to send ERROR message");
+                                    }
+                                    
+                                    // Transition to Idle
+                                    let _ = agent_state.transition_to(WorkloadState::Failed, &e).await;
+                                    let _ = agent_state.transition_to(WorkloadState::Idle, "error sent").await;
+                                    
+                                    break;
+                                }
+                                None => {
+                                    error!("Stats writer: Workload task terminated unexpectedly");
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Send periodic RUNNING stats
+                        _ = interval.tick() => {
+                            let snapshot = tracker.snapshot();
+                            let cpu_util = cpu_monitor.sample()
+                                .ok()
+                                .flatten()
+                                .unwrap_or(CpuUtilization {
+                                    user_percent: 0.0,
+                                    system_percent: 0.0,
+                                    iowait_percent: 0.0,
+                                    total_percent: 0.0,
+                                });
+                            
+                            let running_msg = LiveStats {
+                                agent_id: agent_id.clone(),
+                                timestamp_s: snapshot.timestamp_secs() as f64,
+                                get_ops: snapshot.get_ops,
+                                get_bytes: snapshot.get_bytes,
+                                get_mean_us: snapshot.get_mean_us as f64,
+                                get_p50_us: snapshot.get_p50_us as f64,
+                                get_p95_us: snapshot.get_p95_us as f64,
+                                put_ops: snapshot.put_ops,
+                                put_bytes: snapshot.put_bytes,
+                                put_mean_us: snapshot.put_mean_us as f64,
+                                put_p50_us: snapshot.put_p50_us as f64,
+                                put_p95_us: snapshot.put_p95_us as f64,
+                                meta_ops: snapshot.meta_ops,
+                                meta_mean_us: snapshot.meta_mean_us as f64,
+                                elapsed_s: snapshot.elapsed_secs(),
+                                completed: false,
+                                final_summary: None,
+                                status: 2,  // RUNNING
+                                error_message: String::new(),
+                                in_prepare_phase: snapshot.in_prepare_phase,
+                                prepare_objects_created: snapshot.prepare_objects_created,
+                                prepare_objects_total: snapshot.prepare_objects_total,
+                                prepare_summary: None,
+                                cpu_user_percent: cpu_util.user_percent,
+                                cpu_system_percent: cpu_util.system_percent,
+                                cpu_iowait_percent: cpu_util.iowait_percent,
+                                cpu_total_percent: cpu_util.total_percent,
+                                agent_timestamp_ns: 0,
+                                sequence,
+                            };
+                            sequence += 1;
+                            
+                            if tx_stats.send(running_msg).await.is_err() {
+                                error!("Stats writer: Failed to send RUNNING message (controller disconnected?)");
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                info!("Stats writer task exiting");
+            });
+        }
+        
+        // Control reader task (this function continues)
+        // Process control messages from controller
+        let agent_state_reader = agent_state.clone();
+        let agent_op_log_path_reader = agent_op_log_path.clone();
+        let tx_stats_for_control = tx_stats.clone();
+        
+        // Spawn control message processor with timeout enforcement
+        tokio::spawn(async move {
+            // Import timeout configuration from constants module
+            use sai3_bench::constants::{
+                AGENT_IDLE_TIMEOUT_SECS,
+                AGENT_READY_TIMEOUT_SECS,
+                TIMEOUT_MONITOR_INTERVAL_SECS,
+            };
+            
+            let mut last_message_time = tokio::time::Instant::now();
+            let mut timeout_monitor = tokio::time::interval(
+                tokio::time::Duration::from_secs(TIMEOUT_MONITOR_INTERVAL_SECS)
+            );
+            timeout_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            
+            loop {
+                tokio::select! {
+                    // Receive control messages from controller
+                    control_msg_result = control_stream.next() => {
+                        match control_msg_result {
+                            Some(Ok(control_msg)) => {
+                                last_message_time = tokio::time::Instant::now();
+                                
+                                match Command::try_from(control_msg.command) {
+                                    Ok(Command::Ping) => {
+                                        debug!("Control reader: Received PING keepalive");
+                                        
+                                        // Respond with ACKNOWLEDGE message
+                                        let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                        let ack_msg = LiveStats {
+                                            agent_id: agent_id.clone(),
+                                            timestamp_s: 0.0,
+                                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                            meta_ops: 0, meta_mean_us: 0.0,
+                                            elapsed_s: 0.0,
+                                            completed: false,
+                                            final_summary: None,
+                                            status: 6,  // ACKNOWLEDGE (new status code for PING response)
+                                            error_message: String::new(),
+                                            in_prepare_phase: false,
+                                            prepare_objects_created: 0,
+                                            prepare_objects_total: 0,
+                                            prepare_summary: None,
+                                            cpu_user_percent: 0.0,
+                                            cpu_system_percent: 0.0,
+                                            cpu_iowait_percent: 0.0,
+                                            cpu_total_percent: 0.0,
+                                            agent_timestamp_ns: 0,
+                                            sequence: 0,
+                                        };
+                                        
+                                        if let Err(e) = tx_stats_for_control.send(ack_msg).await {
+                                            error!("Control reader: Failed to send ACKNOWLEDGE: {}", e);
+                                            break;
+                                        }
+                                        
+                                        debug!("Control reader: Sent ACKNOWLEDGE response to PING");
+                                    }
+                            Ok(Command::Start) => {
+                                let start_timestamp_ns = control_msg.start_timestamp_ns;
+                                
+                                // Determine if this is initial START (validation) or coordinated START (execution)
+                                let current_state = agent_state_reader.get_state().await;
+                                
+                                if current_state == WorkloadState::Idle {
+                                    // First START: Validate config and send READY
+                                    info!("Control reader: Received initial START command - validating config");
+                                    
+                                    // Extract config from START message
+                                    let config_yaml = control_msg.config_yaml;
+                                    let agent_id = control_msg.agent_id;
+                                    let path_prefix = control_msg.path_prefix;
+                                    let shared_storage = control_msg.shared_storage;
+                                    
+                                    // Store agent_id in state for stats writer
+                                    agent_state_reader.set_agent_id(agent_id.clone()).await;
+                                    
+                                    // Store config_yaml for later use
+                                    agent_state_reader.set_config_yaml(config_yaml.clone()).await;
+                                    
+                                    // Parse and validate config
+                                    let mut config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            error!("Control reader: Invalid YAML config: {}", e);
+                                            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "invalid config").await;
+                                            agent_state_reader.set_error(format!("Invalid YAML: {}", e)).await;
+                                            
+                                            // Send ERROR via stats writer (it will pick up the error from state)
+                                            let _ = tx_done.send(Err(format!("Invalid YAML config: {}", e))).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
+                                        error!("Control reader: Failed to apply agent prefix: {}", e);
+                                        let _ = agent_state_reader.transition_to(WorkloadState::Failed, "prefix application failed").await;
+                                        let _ = tx_done.send(Err(format!("Failed to apply path prefix: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    // Validate config
+                                    if let Err(e) = validate_workload_config(&config).await {
+                                        error!("Control reader: Config validation failed: {}", e);
+                                        let _ = agent_state_reader.transition_to(WorkloadState::Failed, "validation failed").await;
+                                        let _ = tx_done.send(Err(format!("Config validation failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    // Transition to Ready (validation passed)
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Ready, "validation passed").await {
+                                        error!("Control reader: Failed to transition to Ready: {}", e);
+                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    info!("Control reader: Config validated, agent ready - waiting for coordinated START");
+                                    
+                                    // Stats writer will send READY message with agent_timestamp_ns
+                                    // Controller will calculate clock offset and send second START with start_timestamp_ns
+                                    
+                                } else if current_state == WorkloadState::Ready && start_timestamp_ns != 0 {
+                                    // Second START: Coordinated start with timestamp
+                                    info!("Control reader: Received coordinated START (timestamp: {} ns)", start_timestamp_ns);
+                                    
+                                    // Calculate wait duration until coordinated start time
+                                    // Controller sends absolute Unix epoch timestamp (controller_now + delay)
+                                    // Agent waits until local clock reaches that timestamp
+                                    // NO clock offset adjustment needed - Unix timestamps are universal
+                                    let now_ns = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_nanos() as i64;
+                                    
+                                    let wait_ns = start_timestamp_ns - now_ns;
+                                    
+                                    if wait_ns > 0 {
+                                        let wait_duration = std::time::Duration::from_nanos(wait_ns as u64);
+                                        let wait_ms = wait_duration.as_millis();
+                                        info!("Control reader: Waiting {}ms until coordinated start", wait_ms);
+                                        tokio::time::sleep(wait_duration).await;
+                                        info!("Control reader: Coordinated start time reached - spawning workload");
+                                    } else {
+                                        warn!("Control reader: Start timestamp is in the past by {}ms - starting immediately", 
+                                              (-wait_ns) / 1_000_000);
+                                    }
+                                    
+                                    // Transition to Running
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Running, "coordinated start").await {
+                                        error!("Control reader: Failed to transition to Running: {}", e);
+                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
+                                    // Retrieve stored config from Phase 1 validation
+                                    let config_yaml = match agent_state_reader.get_config_yaml().await {
+                                        Some(yaml) => yaml,
+                                        None => {
+                                            error!("Control reader: No config_yaml found in state");
+                                            let _ = tx_done.send(Err("Missing config_yaml".to_string())).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    // Parse config (already validated in Phase 1, should not fail)
+                                    let config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            error!("Control reader: Failed to parse stored config: {}", e);
+                                            let _ = tx_done.send(Err(format!("Config parse error: {}", e))).await;
+                                            return;
+                                        }
+                                    };
+                                    
+                                    // Get agent_id from state
+                                    let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                    
+                                    // Create live stats tracker
+                                    let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
+                                    
+                                    // Store tracker in state for stats writer
+                                    agent_state_reader.set_tracker(tracker.clone()).await;
+                                    
+                                    // Setup op_log_path
+                                    let final_op_log_path = config.op_log_path.as_ref()
+                                        .or(agent_op_log_path_reader.as_ref())
+                                        .cloned();
+                                    
+                                    agent_state_reader.set_op_log_path(
+                                        final_op_log_path.as_ref().map(|p| p.display().to_string())
+                                    ).await;
+                                    
+                                    // Spawn workload execution task
+                                    let mut config_exec = config.clone();
+                                    let agent_id_exec = agent_id.clone();
+                                    let tx_done_exec = tx_done.clone();
+                                    let tx_prepare_exec = tx_prepare.clone();
+                                    let agent_op_log_path_exec = agent_op_log_path_reader.clone();
+                                    let tracker_for_prepare = tracker.clone();
+                                    let agent_state_for_task = agent_state_reader.clone();
+                                    
+                                    tokio::spawn(async move {
+                                        // Subscribe to abort signals for this workload
+                                        let mut abort_rx_task = agent_state_for_task.subscribe_abort();
+                                        // Wire tracker into config for live stats collection
+                                        config_exec.live_stats_tracker = Some(tracker_for_prepare.clone());
+                                        
+                                        // Execute prepare phase if configured (same as run_workload_with_live_stats)
+                                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
+                                                Ok((prepared, manifest, prepare_metrics)) => {
+                                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
+                                                    
+                                                    // Send prepare metrics to stats writer
+                                                    let _ = tx_prepare_exec.send(prepare_metrics).await;
+                                                    
+                                                    // Reset stats counters before workload
+                                                    tracker_for_prepare.reset_for_workload();
+                                                    
+                                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
+                                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
+                                                    }
+                                                    manifest
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                                    return;
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        // Setup operation logger if configured
+                                        if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path_exec.as_ref()) {
+                                            let op_log_path = if let Some(parent) = op_log_base.parent() {
+                                                let filename = op_log_base.file_name()
+                                                    .and_then(|f| f.to_str())
+                                                    .unwrap_or("oplog.tsv.zst");
+                                                let base_name = if filename.ends_with(".tsv.zst") {
+                                                    filename.strip_suffix(".tsv.zst").unwrap()
+                                                } else if filename.ends_with(".tsv") {
+                                                    filename.strip_suffix(".tsv").unwrap()
+                                                } else {
+                                                    filename
+                                                };
+                                                let extension = if filename.ends_with(".tsv.zst") {
+                                                    ".tsv.zst"
+                                                } else if filename.ends_with(".tsv") {
+                                                    ".tsv"
+                                                } else {
+                                                    ""
+                                                };
+                                                parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
+                                            } else {
+                                                let filename = op_log_base.file_name()
+                                                    .and_then(|f| f.to_str())
+                                                    .unwrap_or("oplog.tsv.zst");
+                                                std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
+                                            };
+                                            
+                                            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
+                                            if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
+                                                error!("Failed to initialize operation logger: {}", e);
+                                                let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
+                                                return;
+                                            }
+                                        }
+                                        
+                                        // Execute workload
+                                        tokio::select! {
+                                            result = sai3_bench::workload::run(&config_exec, tree_manifest) => {
+                                                // Finalize oplog
+                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                                    info!("Finalizing s3dlio operation logger");
+                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                        error!("Failed to finalize operation logger: {}", e);
+                                                    }
+                                                }
+                                                
+                                                match result {
+                                                    Ok(summary) => {
+                                                        info!("Workload completed successfully for agent {}", agent_id_exec);
+                                                        let _ = tx_done_exec.send(Ok(summary)).await;
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
+                                                        let _ = tx_done_exec.send(Err(e.to_string())).await;
+                                                    }
+                                                }
+                                            }
+                                            _ = abort_rx_task.recv() => {
+                                                warn!("Workload aborted for agent {}", agent_id_exec);
+                                                // Finalize oplog
+                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                        error!("Failed to finalize operation logger: {}", e);
+                                                    }
+                                                }
+                                                let _ = tx_done_exec.send(Err("Workload cancelled".to_string())).await;
+                                            }
+                                        }
+                                    });
+                                    
+                                    info!("Control reader: Workload task spawned after coordinated start");
+                                    
+                                } else {
+                                    // Unexpected state or duplicate START
+                                    error!("Control reader: Rejecting START - agent in {:?} state (expected Idle or Ready)", current_state);
+                                    let _ = tx_done.send(Err(format!("Agent in unexpected state: {:?}", current_state))).await;
+                                    return;
+                                }
+                            }
+                            Ok(Command::Abort) => {
+                                warn!("Control reader: Received ABORT command");
+                                
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?}, initiating abort", current_state);
+                                
+                                // Send abort signal (workload task listening via subscribe_abort())
+                                agent_state_reader.send_abort();
+                                
+                                // Transition to Aborting
+                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Aborting, "ABORT command").await {
+                                    error!("Control reader: Failed to transition to Aborting: {}", e);
+                                }
+                                
+                                // Send ABORTED status immediately
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let aborted_msg = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: 5,  // ABORTED
+                                    error_message: "Aborted by controller".to_string(),
+                                    in_prepare_phase: false,
+                                    prepare_objects_created: 0,
+                                    prepare_objects_total: 0,
+                                    prepare_summary: None,
+                                    cpu_user_percent: 0.0,
+                                    cpu_system_percent: 0.0,
+                                    cpu_iowait_percent: 0.0,
+                                    cpu_total_percent: 0.0,
+                                    agent_timestamp_ns: 0,
+                                    sequence: 0,
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
+                                    error!("Control reader: Failed to send ABORTED status: {}", e);
+                                }
+                                
+                                // Wait briefly for workload cleanup
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                
+                                // Reset to Idle
+                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Idle, "abort complete").await {
+                                    error!("Control reader: Failed to transition to Idle after abort: {}", e);
+                                }
+                                
+                                info!("Control reader: Abort complete, agent returned to Idle");
+                            }
+                            Ok(Command::Acknowledge) => {
+                                debug!("Control reader: Received ACK for sequence {}", control_msg.ack_sequence);
+                                // Controller acknowledged our message - could use this for reliability
+                            }
+                            Err(e) => {
+                                warn!("Control reader: Unknown command: {}", e);
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        error!("Control reader: Error receiving control message: {}", e);
+                        
+                        // Connection lost - send error and exit
+                        let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                        let error_msg = LiveStats {
+                            agent_id,
+                            timestamp_s: 0.0,
+                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                            meta_ops: 0, meta_mean_us: 0.0,
+                            elapsed_s: 0.0,
+                            completed: false,
+                            final_summary: None,
+                            status: 3,  // ERROR
+                            error_message: format!("Connection error: {}", e),
+                            in_prepare_phase: false,
+                            prepare_objects_created: 0,
+                            prepare_objects_total: 0,
+                            prepare_summary: None,
+                            cpu_user_percent: 0.0,
+                            cpu_system_percent: 0.0,
+                            cpu_iowait_percent: 0.0,
+                            cpu_total_percent: 0.0,
+                            agent_timestamp_ns: 0,
+                            sequence: 0,
+                        };
+                        
+                        let _ = tx_stats_for_control.send(error_msg).await;
+                        break;
+                    }
+                    None => {
+                        info!("Control reader: Stream ended (controller disconnected gracefully)");
+                        break;
+                    }
+                }
+            }
+            
+            // Timeout monitoring - check for hung states
+            _ = timeout_monitor.tick() => {
+                let current_state = agent_state_reader.get_state().await;
+                let elapsed = last_message_time.elapsed();
+                
+                let timeout_exceeded = match current_state {
+                    WorkloadState::Idle => elapsed.as_secs() > AGENT_IDLE_TIMEOUT_SECS,
+                    WorkloadState::Ready => elapsed.as_secs() > AGENT_READY_TIMEOUT_SECS,
+                    _ => false,  // Only monitor IDLE and READY states
+                };
+                
+                if timeout_exceeded {
+                    error!(
+                        "Control reader: Timeout in {:?} state ({}s since last message, limit {}s)",
+                        current_state,
+                        elapsed.as_secs(),
+                        match current_state {
+                            WorkloadState::Idle => AGENT_IDLE_TIMEOUT_SECS,
+                            WorkloadState::Ready => AGENT_READY_TIMEOUT_SECS,
+                            _ => 0,
+                        }
+                    );
+                    
+                    // Send ERROR status
+                    let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                    let timeout_msg = LiveStats {
+                        agent_id,
+                        timestamp_s: 0.0,
+                        get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                        put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                        meta_ops: 0, meta_mean_us: 0.0,
+                        elapsed_s: 0.0,
+                        completed: false,
+                        final_summary: None,
+                        status: 3,  // ERROR
+                        error_message: format!("Timeout in {:?} state after {}s", current_state, elapsed.as_secs()),
+                        in_prepare_phase: false,
+                        prepare_objects_created: 0,
+                        prepare_objects_total: 0,
+                        prepare_summary: None,
+                        cpu_user_percent: 0.0,
+                        cpu_system_percent: 0.0,
+                        cpu_iowait_percent: 0.0,
+                        cpu_total_percent: 0.0,
+                        agent_timestamp_ns: 0,
+                        sequence: 0,
+                    };
+                    
+                    let _ = tx_stats_for_control.send(timeout_msg).await;
+                    
+                    // Transition to Failed
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "timeout").await;
+                    
+                    break;
+                }
+            }
+        }
+    }
+            
+            info!("Control reader: Stream ended (controller disconnected)");
+            
+            // Send abort signal to workload task (if running)
+            agent_state_reader.send_abort();
+            
+            // Transition to Failed first, then Idle (cleanup)
+            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected").await;
+            let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
+        });
+        
+        // Convert stats channel to stream, wrapping each LiveStats in Ok()
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx_stats)
+            .map(|stats| Ok(stats));
+        
+        Ok(Response::new(Box::pin(output_stream)))
     }
 }
 

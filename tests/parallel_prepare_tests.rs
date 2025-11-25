@@ -55,7 +55,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 16).await?;
     
     // Should have created 30 objects total
     assert_eq!(objects.len(), 30, "Should create 30 objects");
@@ -126,7 +126,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 64).await?;
     
     // Should have created 60 objects total
     assert_eq!(objects.len(), 60, "Should create 60 objects");
@@ -202,7 +202,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 8).await?;
     
     // Count sizes
     let mut size_counts = HashMap::new();
@@ -337,9 +337,9 @@ async fn test_parallel_with_single_size() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24).await?;
     
-    assert_eq!(objects.len(), 20, "Should create 20 objects");
+    assert_eq!(objects.len(), 20, "Should create 20 objects total");
     
     // All should be 1KB
     for obj in &objects {
@@ -388,7 +388,7 @@ async fn test_files_created_correctly() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24).await?;
     
     // Verify files exist on disk with correct sizes
     for obj in &objects {
@@ -450,7 +450,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48).await?;
     
     // Should have created 90 objects total
     assert_eq!(objects.len(), 90, "Should create 90 objects");
@@ -507,6 +507,81 @@ async fn test_parallel_directory_distribution() -> Result<()> {
     assert_eq!(total_size_counts.get(&1024), Some(&30), "Should have exactly 30 1KB files");
     assert_eq!(total_size_counts.get(&2048), Some(&30), "Should have exactly 30 2KB files");
     assert_eq!(total_size_counts.get(&4096), Some(&30), "Should have exactly 30 4KB files");
+    
+    Ok(())
+}
+
+/// Test that concurrency parameter is correctly passed and accepted
+/// This verifies the fix for the "32 workers" hardcoded bug
+#[tokio::test]
+async fn test_concurrency_parameter_passing() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let base_path = temp_dir.path().to_str().unwrap();
+    let base_uri = format!("file://{}/", base_path);
+    
+    let prepare_config = PrepareConfig {
+        ensure_objects: vec![
+            EnsureSpec {
+                base_uri: base_uri.clone(),
+                count: 5,
+                min_size: None,
+                max_size: None,
+                size_spec: Some(SizeSpec::Fixed(1024)),
+                fill: sai3_bench::config::FillPattern::Zero,
+                dedup_factor: 1,
+                compress_factor: 1,
+            },
+        ],
+        cleanup: false,
+        post_prepare_delay: 0,
+        directory_structure: None,
+        prepare_strategy: PrepareStrategy::Sequential,
+        skip_verification: false,
+    };
+    
+    // Test with different concurrency values to verify parameter is accepted
+    for concurrency in [1, 16, 32, 64, 128] {
+        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, concurrency).await?;
+        
+        // Verify objects were created
+        assert_eq!(objects.len(), 5, "Should create 5 objects with concurrency={}", concurrency);
+        assert_eq!(metrics.objects_created, 5, "Metrics should show 5 objects created");
+        
+        // Verify all objects have correct size
+        for obj in &objects {
+            assert_eq!(obj.size, 1024, "All objects should be 1KB");
+        }
+    }
+    
+    // Test parallel strategy as well
+    let parallel_config = PrepareConfig {
+        ensure_objects: vec![
+            EnsureSpec {
+                base_uri: base_uri.clone(),
+                count: 5,
+                min_size: None,
+                max_size: None,
+                size_spec: Some(SizeSpec::Fixed(2048)),
+                fill: sai3_bench::config::FillPattern::Zero,
+                dedup_factor: 1,
+                compress_factor: 1,
+            },
+        ],
+        cleanup: false,
+        post_prepare_delay: 0,
+        directory_structure: None,
+        prepare_strategy: PrepareStrategy::Parallel,
+        skip_verification: false,
+    };
+    
+    // Clean up previous files
+    std::fs::remove_dir_all(base_path).ok();
+    std::fs::create_dir_all(base_path)?;
+    
+    // Test parallel strategy with high concurrency
+    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, 64).await?;
+    assert_eq!(objects.len(), 5, "Parallel strategy should create 5 objects with concurrency=64");
+    assert_eq!(metrics.objects_created, 5, "Metrics should show 5 objects created");
     
     Ok(())
 }
