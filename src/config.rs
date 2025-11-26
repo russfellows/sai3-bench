@@ -318,6 +318,13 @@ pub struct PrepareConfig {
     #[serde(default)]
     pub cleanup: bool,
     
+    /// Skip workload and only run cleanup (v0.8.7+)
+    /// When true, skips prepare and workload phases, only performs cleanup
+    /// Used for resuming interrupted cleanup operations or cleaning up after manual testing
+    /// Default: false (run normal prepare -> workload -> cleanup sequence)
+    #[serde(default)]
+    pub cleanup_only: Option<bool>,
+    
     /// Delay in seconds after prepare phase completes (for cloud storage eventual consistency)
     /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
     #[serde(default)]
