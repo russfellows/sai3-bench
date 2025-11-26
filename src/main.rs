@@ -76,6 +76,11 @@ enum Commands {
         #[arg(long)]
         prepare_only: bool,
         
+        /// Only execute cleanup step, then exit (for cleaning up after previous runs)
+        /// Requires 'prepare' section in config. Uses cleanup_mode from config (default: tolerant).
+        #[arg(long)]
+        cleanup_only: bool,
+        
         /// Verify that prepared objects exist and are accessible, then exit
         #[arg(long)]
         verify: bool,
@@ -287,8 +292,8 @@ fn main() -> Result<()> {
     
     // Execute command
     match cli.command {
-        Commands::Run { config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name } => {
-            run_workload(&config, dry_run, prepare_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref(), cli.op_log.as_deref())?
+        Commands::Run { config, dry_run, prepare_only, cleanup_only, verify, skip_prepare, no_cleanup, tsv_name } => {
+            run_workload(&config, dry_run, prepare_only, cleanup_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref(), cli.op_log.as_deref())?
         }
         Commands::Replay { op_log, target, remap, speed, continue_on_error, dry_run } => {
             replay_cmd(op_log, target, remap, speed, continue_on_error, dry_run)?
@@ -852,7 +857,8 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
 fn run_workload(
     config_path: &str, 
     dry_run: bool, 
-    prepare_only: bool, 
+    prepare_only: bool,
+    cleanup_only: bool,
     verify: bool, 
     skip_prepare: bool, 
     no_cleanup: bool, 
@@ -878,6 +884,18 @@ fn run_workload(
     }
     if prepare_only && skip_prepare {
         bail!("Cannot use both --prepare-only and --skip-prepare");
+    }
+    if prepare_only && cleanup_only {
+        bail!("Cannot use both --prepare-only and --cleanup-only");
+    }
+    if cleanup_only && skip_prepare {
+        bail!("Cannot use both --cleanup-only and --skip-prepare (cleanup requires knowing what objects were prepared)");
+    }
+    if cleanup_only && verify {
+        bail!("Cannot use both --cleanup-only and --verify");
+    }
+    if cleanup_only && no_cleanup {
+        bail!("Cannot use --cleanup-only with --no-cleanup");
     }
     if verify && skip_prepare {
         bail!("Cannot use both --verify and --skip-prepare");
@@ -1008,7 +1026,14 @@ fn run_workload(
             results_dir.write_console(prepare_header)?;
             
             info!("Executing prepare step");
-            let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(prepare_config, Some(&config.workload), None, config.concurrency))?;
+            let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(
+                prepare_config, 
+                Some(&config.workload), 
+                None, 
+                config.concurrency,
+                0,  // agent_id (standalone mode)
+                1,  // num_agents (standalone mode)
+            ))?;
             
             let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
                 prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
@@ -1098,6 +1123,100 @@ fn run_workload(
         return Ok(());
     }
     
+    // If cleanup-only mode, skip to cleanup phase
+    if cleanup_only {
+        if config.prepare.is_none() {
+            bail!("--cleanup-only requires 'prepare' section in config");
+        }
+        
+        let cleanup_header = "\n=== Cleanup-Only Mode ===";
+        println!("{}", cleanup_header);
+        results_dir.write_console(cleanup_header)?;
+        
+        info!("Cleanup-only mode: cleaning up prepared objects");
+        
+        // For cleanup-only, we need to reconstruct the list of objects to delete
+        // This uses the same logic as prepare to determine what objects should exist
+        let prepare_config = config.prepare.as_ref().unwrap();
+        
+        // Recreate the tree manifest if directory_structure is configured
+        let tree_manifest_for_cleanup = if prepare_config.directory_structure.is_some() {
+            info!("Recreating directory tree structure for cleanup...");
+            let base_uri = prepare_config.ensure_objects.first()
+                .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry"))?
+                .base_uri.as_str();
+            
+            Some(sai3_bench::prepare::create_tree_manifest_only(
+                prepare_config, 
+                0,  // agent_id
+                1,  // num_agents
+                base_uri
+            )?)
+        } else {
+            None
+        };
+        
+        // Reconstruct object list (same logic as prepare, but we mark all as created=true)
+        let mut objects_to_cleanup = Vec::new();
+        for spec in &prepare_config.ensure_objects {
+            let prefix = spec.base_uri.trim_end_matches('/');
+            let prefix_name = prefix.rsplit('/').next().unwrap_or("prepared");
+            
+            if let Some(ref manifest) = tree_manifest_for_cleanup {
+                // Tree mode: enumerate all file paths
+                for file_idx in 0..manifest.total_files {
+                    if let Some(relative_path) = manifest.get_file_path(file_idx) {
+                        let uri = if spec.base_uri.ends_with('/') {
+                            format!("{}{}", spec.base_uri, relative_path)
+                        } else {
+                            format!("{}/{}", spec.base_uri, relative_path)
+                        };
+                        objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
+                            uri,
+                            size: 0,  // Size doesn't matter for cleanup
+                            created: true,
+                        });
+                    }
+                }
+            } else {
+                // Flat mode: enumerate numbered files
+                for idx in 0..spec.count {
+                    let key = format!("{}-{:08}.dat", prefix_name, idx);
+                    let uri = if spec.base_uri.ends_with('/') {
+                        format!("{}{}", spec.base_uri, key)
+                    } else {
+                        format!("{}/{}", spec.base_uri, key)
+                    };
+                    objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
+                        uri,
+                        size: 0,
+                        created: true,
+                    });
+                }
+            }
+        }
+        
+        let cleanup_msg = format!("Cleaning up {} objects...", objects_to_cleanup.len());
+        println!("{}", cleanup_msg);
+        results_dir.write_console(&cleanup_msg)?;
+        
+        rt.block_on(workload::cleanup_prepared_objects(
+            &objects_to_cleanup,
+            tree_manifest_for_cleanup.as_ref(),
+            0,  // agent_id (standalone mode)
+            1,  // num_agents (standalone mode)
+            prepare_config.cleanup_mode,
+            None,  // No live stats tracker in standalone mode
+        ))?;
+        
+        let done_msg = "Cleanup complete";
+        println!("{}", done_msg);
+        results_dir.write_console(done_msg)?;
+        
+        results_dir.finalize(0.0)?; // No wall time for cleanup-only
+        return Ok(());
+    }
+    
     // Always show preparation status
     let test_header = "\n=== Test Phase ===";
     println!("{}", test_header);
@@ -1141,18 +1260,18 @@ fn run_workload(
         match processing_mode {
             sai3_bench::config::ProcessingMode::MultiProcess => {
                 // Multi-process mode: spawn N child processes
-                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest, op_log_path))?
+                rt.block_on(sai3_bench::multiprocess::run_multiprocess(&config, tree_manifest.clone(), op_log_path))?
             }
             sai3_bench::config::ProcessingMode::MultiRuntime => {
                 // Multi-runtime mode: spawn N tokio runtimes in threads
                 // Note: op_log not passed - all workers use global logger in single process
-                sai3_bench::multiruntime::run_multiruntime(&config, num_processes, tree_manifest)?
+                sai3_bench::multiruntime::run_multiruntime(&config, num_processes, tree_manifest.clone())?
             }
         }
     } else {
         // Single worker - use traditional execution
         info!("Single worker mode (processes={})", num_processes);
-        rt.block_on(workload::run(&config, tree_manifest))?
+        rt.block_on(workload::run(&config, tree_manifest.clone()))?
     };
     
     // Merge worker op-log files if multi-worker mode was used with op_log enabled
@@ -1329,7 +1448,14 @@ fn run_workload(
             results_dir.write_console(cleanup_header)?;
             
             info!("Cleaning up prepared objects");
-            rt.block_on(workload::cleanup_prepared_objects(&prepared_objects))?;
+            rt.block_on(workload::cleanup_prepared_objects(
+                &prepared_objects,
+                tree_manifest.as_ref(),
+                0,  // agent_id (standalone mode)
+                1,  // num_agents (standalone mode)
+                prepare_config.cleanup_mode,
+                None,  // No live stats tracker in standalone mode
+            ))?;
             
             let cleanup_msg = "Cleanup complete";
             println!("{}", cleanup_msg);

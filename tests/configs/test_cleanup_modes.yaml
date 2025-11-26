@@ -1,0 +1,28 @@
+# Test configuration for demonstrating cleanup modes
+# This config is used to test:
+# 1. Normal cleanup after workload (cleanup: true)
+# 2. Cleanup-only mode (--cleanup-only flag)
+# 3. Error tolerance modes (strict, tolerant, best-effort)
+
+duration: "5s"
+concurrency: 10
+target: "file:///tmp/sai3-cleanup-test/"
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 30
+
+prepare:
+  cleanup: true  # Clean up after workload by default
+  cleanup_mode: tolerant  # Handle already-deleted objects gracefully
+  
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-cleanup-test/"
+      count: 100
+      size_spec: 1048576  # 1 MiB fixed size
+      fill: zero

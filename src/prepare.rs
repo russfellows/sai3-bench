@@ -114,11 +114,28 @@ fn compute_op_agg(hists: &crate::metrics::OpHists, total_bytes: u64, total_ops: 
 /// v0.7.2+: Supports prepare_strategy for sequential vs parallel execution
 /// 
 /// v0.7.2+: Returns PrepareMetrics with full HDR histogram metrics collection
+/// Prepare objects for workload execution
+/// 
+/// # Arguments
+/// * `config` - Prepare configuration (object counts, sizes, etc.)
+/// * `workload` - Optional workload operations (used to determine if separate pools are needed)
+/// * `live_stats_tracker` - Optional live stats tracker for progress reporting
+/// * `concurrency` - Number of parallel workers for object creation
+/// * `agent_id` - 0-based agent index (0, 1, 2, ...)
+/// * `num_agents` - Total number of agents in distributed execution
+/// 
+/// # Behavior
+/// - If num_agents == 1: Creates all objects (standalone mode)
+/// - If num_agents > 1: Each agent creates only its assigned subset using modulo distribution
+///   - Agent i creates object j if (j % num_agents == agent_id)
+///   - Ensures no overlap and complete coverage across all agents
 pub async fn prepare_objects(
     config: &PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     concurrency: usize,
+    agent_id: usize,
+    num_agents: usize,
 ) -> Result<(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)> {
     let prepare_start = Instant::now();
     
@@ -144,17 +161,22 @@ pub async fn prepare_objects(
     // v0.7.9: Create tree manifest FIRST if directory_structure is configured
     // This way file creation can use proper directory paths
     let tree_manifest = if config.directory_structure.is_some() {
-        info!("Creating directory tree structure...");
-        let agent_id = 0;
-        let num_agents = 1;
+        info!("Creating directory tree structure (agent {}/{})...", agent_id, num_agents);
         
         let base_uri = config.ensure_objects.first()
             .map(|spec| spec.base_uri.as_str())
             .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
         
         let manifest = create_tree_manifest_only(config, agent_id, num_agents, base_uri)?;
-        info!("Tree structure: {} directories, {} files total", 
-            manifest.total_dirs, manifest.total_files);
+        
+        if num_agents > 1 {
+            info!("Tree structure: {} directories, {} files total ({} assigned to this agent)", 
+                manifest.total_dirs, manifest.total_files, 
+                manifest.get_agent_file_indices(agent_id, num_agents).len());
+        } else {
+            info!("Tree structure: {} directories, {} files total", 
+                manifest.total_dirs, manifest.total_files);
+        }
         
         Some(manifest)
     } else {
@@ -165,11 +187,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
     };
     
@@ -209,6 +231,8 @@ async fn prepare_sequential(
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
+    agent_id: usize,
+    num_agents: usize,
 ) -> Result<Vec<PreparedObject>> {
     let mut all_prepared = Vec::new();
     
@@ -338,6 +362,7 @@ async fn prepare_sequential(
                 spec.count - existing_count
             };
             
+            
             // 2.5. Record existing objects if all requirements met
             if to_create == 0 && tree_manifest.is_some() {
                 // All objects exist - reconstruct PreparedObject entries from manifest
@@ -396,42 +421,55 @@ async fn prepare_sequential(
                 
                 info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
                 let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
-                for _ in 0..spec.count {
+                for i in 0..spec.count {
                     all_sizes.push(size_generator.generate());
+                    if i == 0 {
+                    }
                 }
                 
                 // Identify missing indices (gaps to fill)
-                let missing_indices: Vec<u64> = (0..spec.count)
+                let mut missing_indices: Vec<u64> = (0..spec.count)
                     .filter(|i| !existing_indices.contains(i))
                     .collect();
+                
+                // v0.8.7: Filter for distributed prepare
+                // Each agent only creates its assigned subset using modulo distribution
+                if num_agents > 1 {
+                    missing_indices.retain(|&idx| (idx as usize % num_agents) == agent_id);
+                    info!("  [Distributed prepare] Agent {}/{} responsible for {} of {} missing objects",
+                        agent_id, num_agents, missing_indices.len(), to_create);
+                }
+                
+                // v0.8.7: After filtering, update to_create to reflect actual count for this agent
+                let actual_to_create = missing_indices.len() as u64;
                 
                 info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})", 
                     missing_indices.len(), 
                     &missing_indices[..std::cmp::min(10, missing_indices.len())]);
                 
-                if missing_indices.len() as u64 != to_create {
+                if actual_to_create != to_create && num_agents == 1 {
                     warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
-                        missing_indices.len(), to_create);
+                        actual_to_create, to_create);
                 }
                 
                 // Use workload concurrency for prepare phase (passed from config)
                 // Note: concurrency parameter comes from Config.concurrency
                 
                 info!("  Creating {} additional {} objects with {} workers (sizes: {}, fill: {:?}, dedup: {}, compress: {})", 
-                    to_create, prefix, concurrency, size_generator.description(), spec.fill, 
+                    actual_to_create, prefix, concurrency, size_generator.description(), spec.fill, 
                     spec.dedup_factor, spec.compress_factor);
                 
                 // v0.7.9: Set prepare phase progress in live stats tracker
                 if let Some(ref tracker) = live_stats_tracker {
-                    tracker.set_prepare_progress(0, to_create);
+                    tracker.set_prepare_progress(0, actual_to_create);
                 }
                 
                 // Create atomic counters for live stats
                 let live_ops = Arc::new(AtomicU64::new(0));
                 let live_bytes = Arc::new(AtomicU64::new(0));
                 
-                // Create progress bar for preparation
-                let pb = ProgressBar::new(to_create);
+                // Create progress bar for preparation - use actual_to_create for correct length
+                let pb = ProgressBar::new(actual_to_create);
                 pb.set_style(ProgressStyle::with_template(
                     "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
                 )?);
@@ -569,7 +607,7 @@ async fn prepare_sequential(
                         // v0.7.9: Update prepare progress in live stats tracker
                         if let Some(ref t) = tracker {
                             let created = pb2.position();
-                            let total = pb2.length().unwrap_or(to_create);
+                            let total = pb2.length().unwrap_or(actual_to_create);
                             t.set_prepare_progress(created, total);
                         }
                         
@@ -578,7 +616,7 @@ async fn prepare_sequential(
                 }
                 
                 // Collect results as they complete
-                let mut created_objects = Vec::with_capacity(to_create as usize);
+                let mut created_objects = Vec::with_capacity(actual_to_create as usize);
                 while let Some(result) = futs.next().await {
                     let (uri, size, latency_us) = result
                         .context("Task join error")??;
@@ -600,7 +638,7 @@ async fn prepare_sequential(
                 // Wait for monitoring task to complete cleanly
                 monitor_handle.await.ok();
                 
-                pb.finish_with_message(format!("created {} {} objects", to_create, prefix));
+                pb.finish_with_message(format!("created {} {} objects", actual_to_create, prefix));
                 
                 // v0.7.9: Clear prepare progress after pool complete
                 if let Some(ref tracker) = live_stats_tracker {
@@ -628,6 +666,8 @@ async fn prepare_parallel(
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
+    agent_id: usize,
+    num_agents: usize,
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use rand::seq::SliceRandom;
@@ -811,21 +851,32 @@ async fn prepare_parallel(
                 }
                 
                 // Identify missing indices (gaps to fill)
-                let missing_indices: Vec<u64> = (0..spec.count)
+                let mut missing_indices: Vec<u64> = (0..spec.count)
                     .filter(|i| !existing_indices.contains(i))
                     .collect();
+                
+                // v0.8.7: Filter for distributed prepare
+                // Each agent only creates its assigned subset using modulo distribution
+                if num_agents > 1 {
+                    missing_indices.retain(|&idx| (idx as usize % num_agents) == agent_id);
+                    info!("  [Distributed prepare] Agent {}/{} responsible for {} of {} missing objects",
+                        agent_id, num_agents, missing_indices.len(), to_create);
+                }
+                
+                // v0.8.7: After filtering, update to_create to reflect actual count for this agent
+                let actual_to_create = missing_indices.len() as u64;
                 
                 info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})",
                     missing_indices.len(),
                     &missing_indices[..std::cmp::min(10, missing_indices.len())]);
                 
-                if missing_indices.len() as u64 != to_create {
+                if actual_to_create != to_create && num_agents == 1 {
                     warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
-                        missing_indices.len(), to_create);
+                        actual_to_create, to_create);
                 }
                 
                 info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})",
-                    to_create, prefix, size_generator.description(), spec.fill,
+                    actual_to_create, prefix, size_generator.description(), spec.fill,
                     spec.dedup_factor, spec.compress_factor);
                 
                 // Generate task specs for missing indices with pre-generated sizes
@@ -843,7 +894,7 @@ async fn prepare_parallel(
                     });
                 }
                 
-                total_to_create += to_create;
+                total_to_create += actual_to_create;
             }
         }
     }
@@ -1168,7 +1219,11 @@ async fn prepare_parallel(
 
 /// Create tree manifest without creating files or directories
 /// v0.7.9: Split from create_directory_tree to support file creation first, mkdir second
-fn create_tree_manifest_only(
+/// Create tree manifest without executing any I/O operations
+/// 
+/// This is used for cleanup-only mode where we need to reconstruct
+/// the directory structure to determine which files should be deleted.
+pub fn create_tree_manifest_only(
     config: &PrepareConfig,
     _agent_id: usize,
     num_agents: usize,
@@ -1842,59 +1897,208 @@ impl PathSelector {
 }
 
 /// Cleanup prepared objects
-pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> Result<()> {
+/// Cleanup prepared objects with distributed execution support (v0.8.7+)
+/// 
+/// Supports three execution modes:
+/// 1. Single-agent mode: num_agents == 1, processes all objects
+/// 2. Distributed flat mode: tree_manifest is None, uses index-based distribution
+/// 3. Distributed tree mode: tree_manifest provided, uses deterministic file assignment
+/// 
+/// Error handling modes (cleanup_mode):
+/// - Strict: Report all errors (best for first-time cleanup)
+/// - Tolerant: Ignore "not found" errors (best for resuming interrupted cleanup)
+/// - BestEffort: Ignore all errors (best for uncertain object state)
+pub async fn cleanup_prepared_objects(
+    objects: &[PreparedObject],
+    tree_manifest: Option<&crate::directory_tree::TreeManifest>,
+    agent_id: usize,
+    num_agents: usize,
+    cleanup_mode: crate::config::CleanupMode,
+    live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+) -> Result<()> {
     if objects.is_empty() {
         return Ok(());
     }
     
     use futures::stream::{FuturesUnordered, StreamExt};
+    use std::collections::HashSet;
     
-    let to_delete: Vec<_> = objects.iter()
-        .filter(|obj| obj.created)
-        .collect();
+    // Filter to objects this agent should handle
+    let my_objects: Vec<_> = if let Some(manifest) = tree_manifest {
+        // Tree mode: use deterministic file assignment
+        let my_paths: HashSet<String> = manifest
+            .get_agent_file_paths(agent_id, num_agents)
+            .into_iter()
+            .collect();
+        
+        objects.iter()
+            .filter(|obj| obj.created)
+            .filter(|obj| {
+                // Extract relative path from URI for comparison
+                // URI format: "scheme://host/path/to/file.dat"
+                // Need to extract: "path/to/file.dat" portion
+                if let Some(pos) = obj.uri.rfind('/') {
+                    let filename = &obj.uri[pos+1..];
+                    // Check if this file is in our assigned paths
+                    my_paths.iter().any(|p| p.ends_with(filename))
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        // Flat mode: distribute by file index (parsed from URI)
+        // URI format: "file:///path/to/prepared-00000042.dat" or "deletable-00000042.dat"
+        objects.iter()
+            .filter(|obj| {
+                if !obj.created {
+                    return false;
+                }
+                
+                if num_agents <= 1 {
+                    return true;
+                }
+                
+                // Extract file index from URI
+                // Look for pattern: "prepared-NNNNNNNN.dat" or "deletable-NNNNNNNN.dat"
+                if let Some(filename_start) = obj.uri.rfind('/') {
+                    let filename = &obj.uri[filename_start + 1..];
+                    // Parse index from "prepared-00000042.dat" or "deletable-00000042.dat"
+                    if let Some(dash_pos) = filename.find('-') {
+                        if let Some(dot_pos) = filename.find('.') {
+                            let index_str = &filename[dash_pos + 1..dot_pos];
+                            if let Ok(file_index) = index_str.parse::<usize>() {
+                                return file_index % num_agents == agent_id;
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback: if we can't parse index, don't delete
+                tracing::warn!("Could not parse file index from URI: {}", obj.uri);
+                false
+            })
+            .collect()
+    };
     
-    if to_delete.is_empty() {
-        info!("No objects to clean up");
+    if my_objects.is_empty() {
+        if num_agents > 1 {
+            info!("Agent {}/{}: No objects to clean up", agent_id + 1, num_agents);
+        } else {
+            info!("No objects to clean up");
+        }
         return Ok(());
     }
     
-    let delete_count = to_delete.len();
+    let delete_count = my_objects.len();
     
     // TODO: Accept concurrency parameter from caller (for now, use reasonable default)
     // This function is called during cleanup and doesn't have access to config
     let concurrency = 32;
-    info!("Cleaning up {} prepared objects with {} workers", delete_count, concurrency);
+    
+    if num_agents > 1 {
+        info!("Agent {}/{}: Cleaning up {} objects with {} workers", 
+            agent_id + 1, num_agents, delete_count, concurrency);
+    } else {
+        info!("Cleaning up {} prepared objects with {} workers", delete_count, concurrency);
+    }
     
     // Create progress bar for cleanup
     let pb = ProgressBar::new(delete_count as u64);
     pb.set_style(ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects ({per_sec}) {msg}"
     )?);
-    pb.set_message(format!("cleaning up with {} workers", concurrency));
+    
+    let msg = if num_agents > 1 {
+        format!("agent {}/{} cleaning with {} workers", agent_id + 1, num_agents, concurrency)
+    } else {
+        format!("cleaning with {} workers", concurrency)
+    };
+    pb.set_message(msg);
+    
+    // Track error statistics
+    let error_count = Arc::new(AtomicU64::new(0));
+    let not_found_count = Arc::new(AtomicU64::new(0));
+    let success_count = Arc::new(AtomicU64::new(0));
     
     // Execute DELETE operations in parallel with semaphore-controlled concurrency
     let sem = Arc::new(Semaphore::new(concurrency));
     let mut futs = FuturesUnordered::new();
     let pb_clone = pb.clone();
     
-    for obj in to_delete {
+    for obj in my_objects {
         let sem2 = sem.clone();
         let pb2 = pb_clone.clone();
         let uri = obj.uri.clone();
+        let mode = cleanup_mode;
+        let errors = error_count.clone();
+        let not_founds = not_found_count.clone();
+        let successes = success_count.clone();
+        let tracker = live_stats_tracker.clone();
         
         futs.push(tokio::spawn(async move {
             let _permit = sem2.acquire_owned().await.unwrap();
             
+            // Start timing for latency tracking
+            let start = std::time::Instant::now();
+            
             // Create store and delete object
-            // Note: We intentionally don't fail the entire cleanup if a single delete fails
-            // Instead, we log warnings and continue with remaining deletions
             match create_store_for_uri(&uri) {
                 Ok(store) => {
-                    if let Err(e) = store.delete(&uri).await {
-                        tracing::warn!("Failed to delete {}: {}", uri, e);
+                    match store.delete(&uri).await {
+                        Ok(_) => {
+                            successes.fetch_add(1, Ordering::Relaxed);
+                            // Record successful DELETE as META operation
+                            if let Some(ref t) = tracker {
+                                t.record_meta(start.elapsed());
+                            }
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string().to_lowercase();
+                            let is_not_found = err_str.contains("not found") 
+                                || err_str.contains("404") 
+                                || err_str.contains("nosuchkey")
+                                || err_str.contains("does not exist");
+                            
+                            if is_not_found {
+                                not_founds.fetch_add(1, Ordering::Relaxed);
+                                // Record "not found" DELETE as META operation (tolerant/best-effort mode)
+                                if let Some(ref t) = tracker {
+                                    t.record_meta(start.elapsed());
+                                }
+                                match mode {
+                                    crate::config::CleanupMode::Strict => {
+                                        tracing::warn!("Object not found (strict mode): {}", uri);
+                                        errors.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    crate::config::CleanupMode::Tolerant | crate::config::CleanupMode::BestEffort => {
+                                        tracing::debug!("Object already deleted: {}", uri);
+                                    }
+                                }
+                            } else {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                                // Record failed DELETE as META operation
+                                if let Some(ref t) = tracker {
+                                    t.record_meta(start.elapsed());
+                                }
+                                match mode {
+                                    crate::config::CleanupMode::BestEffort => {
+                                        tracing::warn!("Failed to delete {} (best-effort, continuing): {}", uri, e);
+                                    }
+                                    _ => {
+                                        tracing::warn!("Failed to delete {}: {}", uri, e);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    // Record store creation failure as META operation
+                    if let Some(ref t) = tracker {
+                        t.record_meta(start.elapsed());
+                    }
                     tracing::warn!("Failed to create store for {}: {}", uri, e);
                 }
             }
@@ -1912,8 +2116,90 @@ pub async fn cleanup_prepared_objects(objects: &[PreparedObject]) -> Result<()> 
         }
     }
     
-    pb.finish_with_message(format!("deleted {} objects", delete_count));
+    let final_errors = error_count.load(Ordering::Relaxed);
+    let final_not_found = not_found_count.load(Ordering::Relaxed);
+    let final_success = success_count.load(Ordering::Relaxed);
+    
+    let summary = format!(
+        "deleted {} objects ({} succeeded, {} already deleted, {} errors)",
+        delete_count, final_success, final_not_found, final_errors
+    );
+    pb.finish_with_message(summary.clone());
+    
+    // Log final statistics
+    if num_agents > 1 {
+        info!("Agent {}/{}: {}", agent_id + 1, num_agents, summary);
+    } else {
+        info!("{}", summary);
+    }
+    
+    // Return error only in strict mode with actual errors
+    if cleanup_mode == crate::config::CleanupMode::Strict && final_errors > 0 {
+        anyhow::bail!("Cleanup failed with {} errors (strict mode)", final_errors);
+    }
+    
     Ok(())
+}
+
+/// Generate list of objects for cleanup-only mode (v0.8.7+)
+/// 
+/// Creates PreparedObject list based on config WITHOUT listing existing objects.
+/// Uses same deterministic algorithm as prepare phase (modulo distribution).
+/// 
+/// This function is used when:
+/// - cleanup_only mode (duration=0, workload=[], cleanup=true)
+/// - skip_verification=true (do NOT list existing objects)
+/// 
+/// Each agent generates ONLY the objects it would have created:
+/// - Agent 0: indices 0, 2, 4, 6, ... (i % num_agents == 0)
+/// - Agent 1: indices 1, 3, 5, 7, ... (i % num_agents == 1)
+pub fn generate_cleanup_objects(
+    config: &PrepareConfig,
+    agent_id: usize,
+    num_agents: usize,
+) -> Result<Vec<PreparedObject>> {
+    let mut objects = Vec::new();
+    
+    for spec in &config.ensure_objects {
+        // Determine which pool(s) to clean
+        // For simplicity, cleanup both prepared and deletable if they exist
+        let pools = vec!["prepared", "deletable"];
+        
+        for prefix in pools {
+            for i in 0..spec.count {
+                let index = i as usize;
+                
+                // Distributed mode: only handle objects for this agent
+                if num_agents > 1 && index % num_agents != agent_id {
+                    continue;
+                }
+                
+                // Generate URI using same naming convention as prepare
+                let key = format!("{}-{:08}.dat", prefix, i);
+                let uri = if spec.base_uri.ends_with('/') {
+                    format!("{}{}", spec.base_uri, key)
+                } else {
+                    format!("{}/{}", spec.base_uri, key)
+                };
+                
+                // Mark as created=true so cleanup will process them
+                objects.push(PreparedObject {
+                    uri,
+                    size: 0,  // Size doesn't matter for cleanup
+                    created: true,
+                });
+            }
+        }
+    }
+    
+    if num_agents > 1 {
+        info!("Agent {}/{}: Generated {} objects for cleanup (skip_verification=true)", 
+              agent_id + 1, num_agents, objects.len());
+    } else {
+        info!("Generated {} objects for cleanup (skip_verification=true)", objects.len());
+    }
+    
+    Ok(objects)
 }
 
 /// Verify that prepared objects exist and are accessible

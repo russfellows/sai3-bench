@@ -1,0 +1,33 @@
+# Test config for cleanup-only operation
+# Runs ONLY cleanup phase to verify standalone cleanup works
+# Must run test_distributed_no_cleanup.yaml first to create files
+
+target: "file:///tmp/sai3-test-no-cleanup/"
+duration: "0s"
+concurrency: 4  # Workers for parallel cleanup
+
+prepare:
+  cleanup: true  # Cleanup existing objects
+  cleanup_mode: tolerant  # Ignore "not found" errors
+  skip_verification: true  # DO NOT LIST - use deterministic algorithm
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test-no-cleanup/"
+      count: 30
+      fill: zero
+      size_spec: 2048
+      dedup_factor: 1
+      compress_factor: 1
+
+# No workload - empty workload means prepare + cleanup only
+workload: []
+
+# Distributed Configuration (2 local agents)
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+    - address: "127.0.0.1:7762"
+      id: "agent-2"

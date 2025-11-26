@@ -684,6 +684,37 @@ impl TreeManifest {
             .unwrap_or_default()
     }
     
+    /// Determine if an agent should handle a specific file (for distributed cleanup)
+    /// Uses modulo distribution: file_idx % num_agents == agent_id
+    /// This ensures deterministic, non-overlapping assignment across agents
+    pub fn should_agent_handle_file(&self, global_file_idx: usize, agent_id: usize, num_agents: usize) -> bool {
+        if num_agents <= 1 {
+            return true;  // Single agent handles all files
+        }
+        global_file_idx % num_agents == agent_id
+    }
+    
+    /// Get all file indices assigned to a specific agent (for distributed cleanup)
+    /// Returns indices in ascending order for efficient iteration
+    pub fn get_agent_file_indices(&self, agent_id: usize, num_agents: usize) -> Vec<usize> {
+        if num_agents <= 1 {
+            return (0..self.total_files).collect();
+        }
+        
+        (0..self.total_files)
+            .filter(|&idx| idx % num_agents == agent_id)
+            .collect()
+    }
+    
+    /// Get all file paths assigned to a specific agent (for distributed cleanup)
+    /// Returns full relative paths like "d1_w1.dir/d2_w1.dir/file_00000000.dat"
+    pub fn get_agent_file_paths(&self, agent_id: usize, num_agents: usize) -> Vec<String> {
+        self.get_agent_file_indices(agent_id, num_agents)
+            .into_iter()
+            .filter_map(|idx| self.get_file_path(idx))
+            .collect()
+    }
+    
     /// Validate config hash matches expected
     pub fn validate_config(&self, config: &DirectoryStructureConfig) -> bool {
         Self::hash_config(config) == self.config_hash

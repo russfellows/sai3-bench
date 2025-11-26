@@ -33,6 +33,10 @@ message RunWorkloadRequest {
   string path_prefix = 3;          // Per-agent path isolation prefix (e.g., "agent-1/")
   int64 start_timestamp_ns = 4;    // Coordinated start time (nanoseconds since UNIX epoch)
   bool shared_storage = 5;         // True if storage is shared (S3/GCS/Azure), false if local per-agent
+  
+  // v0.8.7: For distributed prepare/cleanup with shared storage
+  uint32 agent_index = 6;          // 0-based agent index (0, 1, 2, ...)
+  uint32 num_agents = 7;           // Total number of agents in distributed execution
 }
 
 message OpAggregateMetrics {
@@ -201,5 +205,12 @@ message ControlMessage {
   
   // For ACKNOWLEDGE: which message we're acknowledging
   int64 ack_sequence = 7;
+  
+  // v0.8.7: For distributed cleanup with shared storage
+  // agent_index: 0-based agent index (0, 1, 2, ...)
+  // num_agents: total number of agents in the distributed execution
+  // Used for deterministic object distribution: file_idx % num_agents == agent_index
+  uint32 agent_index = 8;
+  uint32 num_agents = 9;
 }
 

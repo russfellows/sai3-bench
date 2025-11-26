@@ -1,0 +1,33 @@
+# Test configuration for distributed cleanup with 2 agents
+# Each agent handles its own subset of objects via modulo distribution
+
+target: "file:///tmp/sai3-distributed-cleanup-test/"
+duration: "5s"
+concurrency: 4
+
+prepare:
+  cleanup: true
+  cleanup_mode: tolerant
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-distributed-cleanup-test/"
+      count: 100
+      fill: zero
+      size_spec: 1048576  # 1 MB fixed size
+      dedup_factor: 1
+      compress_factor: 1
+
+workload:
+  - op: get
+    path: "*"
+    weight: 100
+
+# Distributed Configuration (2 local agents)
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+    - address: "127.0.0.1:7762"
+      id: "agent-2"
