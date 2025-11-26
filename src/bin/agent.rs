@@ -93,7 +93,8 @@ struct Cli {
     /// Optional operation log path (s3dlio oplog) - applies to all workloads executed by this agent
     /// Can be overridden per-workload via config YAML op_log_path field
     /// Agent appends agent_id to filename to avoid collisions (e.g., oplog-agent1.tsv.zst)
-    /// Supports environment variables: S3DLIO_OPLOG_SORT, S3DLIO_OPLOG_BUF, etc.
+    /// Supports environment variables: S3DLIO_OPLOG_BUF=8192 (buffer size)
+    /// Note: For sorted oplogs, use 'sai3-bench sort' post-processing after capture
     #[arg(long)]
     op_log: Option<std::path::PathBuf>,
 }
@@ -2014,6 +2015,35 @@ impl Agent for AgentSvc {
                                                 error!("Failed to initialize operation logger: {}", e);
                                                 let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
                                                 return;
+                                            }
+                                            
+                                            // v0.8.6: Set client_id for this agent
+                                            if let Err(e) = s3dlio::set_client_id(&agent_id_exec) {
+                                                warn!("Failed to set client_id for oplog: {} (continuing anyway)", e);
+                                            } else {
+                                                info!("Set operation logger client_id: {}", agent_id_exec);
+                                            }
+                                            
+                                            // v0.8.6: Set clock offset for synchronized timestamps across agents
+                                            // Controller sends start_timestamp_ns as absolute Unix epoch time
+                                            // Calculate offset: agent_local_time - controller_reference_time
+                                            // This aligns all agent timestamps to controller's reference clock
+                                            let agent_local_time_ns = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_nanos() as i64;
+                                            
+                                            // Clock offset = (agent_time - controller_time)
+                                            // s3dlio will subtract this offset from all logged timestamps
+                                            // Result: all agents log timestamps relative to controller's reference time
+                                            let clock_offset_ns = agent_local_time_ns - start_timestamp_ns;
+                                            
+                                            if let Err(e) = s3dlio::set_clock_offset(clock_offset_ns) {
+                                                warn!("Failed to set clock offset for oplog: {} (continuing anyway)", e);
+                                            } else {
+                                                info!("Set clock offset: {} ms (agent {} ms ahead of controller)", 
+                                                      clock_offset_ns / 1_000_000, 
+                                                      clock_offset_ns / 1_000_000);
                                             }
                                         }
                                         

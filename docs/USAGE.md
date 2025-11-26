@@ -76,7 +76,7 @@ FLAGS/OPTIONS:
   --op-log <path>       Optional s3dlio operation log path (e.g., /data/oplogs/trace.tsv.zst)
                         Agent appends agent_id to filename to prevent collisions
                         Can be overridden per-workload via config YAML op_log_path field
-                        Supports all s3dlio oplog environment variables (S3DLIO_OPLOG_SORT, etc.)
+                        Supports s3dlio oplog environment variable: S3DLIO_OPLOG_BUF (buffer size)
 ```
 
 ```
@@ -578,6 +578,36 @@ Control error/retry logging with verbosity flags:
 
 Capture detailed operation traces for performance analysis and replay using s3dlio oplogs.
 
+**Oplog Format** (s3dlio v0.9.22+):
+```
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+```
+
+**Key Fields**:
+- `client_id`: Agent identifier (set automatically, or via SAI3_CLIENT_ID env var)
+- `first_byte`: Approximate time-to-first-byte for GET operations (see limitations below)
+- `start`/`end`: ISO 8601 timestamps (synchronized to controller time in distributed mode)
+- `duration_ns`: Operation duration in nanoseconds
+
+**Clock Synchronization** (Distributed Mode):
+- Agent automatically calculates clock offset from controller's start_timestamp_ns
+- All operation timestamps adjusted to controller's reference time
+- Enables accurate cross-agent analysis even with clock skew
+
+**Client Identification**:
+- Standalone mode: Uses "standalone" or SAI3_CLIENT_ID env var
+- Distributed mode: Uses agent_id from config (e.g., "agent-1", "agent-2")
+- Enables per-agent filtering in merged oplogs
+
+**First Byte Tracking** (Approximate):
+- GET operations: first_byte ≈ end (when complete data available)
+- PUT operations: first_byte = start (upload begins immediately)
+- Metadata operations (LIST/HEAD/DELETE): first_byte empty (not applicable)
+- **Limitation**: Current implementation captures when `get()` completes, not when first byte arrives
+- **Use for**: Throughput analysis, relative comparisons, small object benchmarking
+- **Don't use for**: Precise TTFB metrics on large objects (>10MB)
+- See [s3dlio OPERATION_LOGGING.md](https://github.com/russfellows/s3dlio/blob/main/docs/OPERATION_LOGGING.md) for detailed explanation
+
 **CLI Flag** (applies to all workloads on agent):
 ```bash
 # Enable oplog via CLI flag
@@ -602,16 +632,33 @@ Results in per-agent files:
 - `/shared/storage/oplogs/benchmark-agent1.tsv.zst`
 - `/shared/storage/oplogs/benchmark-agent2.tsv.zst`
 
-**Environment Variables** (all s3dlio oplog settings supported):
+**Environment Variables** (s3dlio oplog settings):
 ```bash
-# Optional: enable automatic operation log sorting
-export S3DLIO_OPLOG_SORT=1
-
 # Optional: configure buffer size (default: 64KB)
 export S3DLIO_OPLOG_BUF=131072
 
 ./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
 ```
+
+**Post-Processing: Sorting Oplogs**:
+
+Operation logs are NOT sorted during capture due to concurrent writes. To sort chronologically:
+
+```bash
+# Sort by start timestamp (creates .sorted.tsv.zst files)
+./sai3-bench sort --files /data/oplogs/trace-agent1.tsv.zst /data/oplogs/trace-agent2.tsv.zst
+
+# Or in-place (overwrites originals)
+./sai3-bench sort --files /data/oplogs/*.tsv.zst --in-place
+
+# Validate sorting
+./sai3-bench replay --op-log /data/oplogs/trace-agent1.sorted.tsv.zst --dry-run
+```
+
+**Benefits of Sorting**:
+- Better compression (sorted files are ~30-40% smaller)
+- Enables chronological replay for debugging
+- Required for accurate latency analysis
 
 **Oplog Analysis**:
 ```bash
@@ -621,8 +668,8 @@ zstd -d < /data/oplogs/trace-agent1.tsv.zst | head -20
 # Count operations
 zstd -d < /data/oplogs/trace-agent1.tsv.zst | wc -l
 
-# Sort operations by latency (requires S3DLIO_OPLOG_SORT=1 at capture time)
-zstd -d < /data/oplogs/trace-agent1.tsv.zst | sort -t$'\t' -k12 -n | tail -10
+# Sort operations by latency (column 13: duration_ns)
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | tail -n +2 | sort -t$'\t' -k13 -n | tail -10
 ```
 
 **Use Cases**:

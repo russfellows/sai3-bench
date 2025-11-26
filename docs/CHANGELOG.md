@@ -6,6 +6,72 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [Unreleased] - Operation Logging Enhancements
+
+### Added
+
+- **Operation logging with client identification** (requires s3dlio v0.9.22+)
+  - Standalone mode: client_id = "standalone" or SAI3_CLIENT_ID env var
+  - Distributed mode: client_id = agent_id (e.g., "agent-1", "agent-2")
+  - Enables per-agent filtering in merged oplogs
+  
+- **Clock offset synchronization for distributed oplogs**
+  - Agent automatically calculates offset from controller's start_timestamp_ns
+  - All operation timestamps adjusted to controller's reference time
+  - Enables accurate cross-agent timeline reconstruction
+  
+- **Approximate first_byte tracking** (via s3dlio v0.9.22)
+  - GET operations: first_byte ≈ end (when complete data available)
+  - PUT operations: first_byte = start (upload begins)
+  - Metadata operations: first_byte = None (not applicable)
+  - See s3dlio OPERATION_LOGGING.md for detailed explanation and limitations
+
+### Changed
+
+- **Updated s3dlio dependency** to local path (will switch to v0.9.22 git tag after release)
+  - Added s3dlio-oplog workspace member dependency
+  - Enables new client_id and first_byte tracking features
+
+### Documentation
+
+- **Enhanced USAGE.md** with oplog format documentation
+  - Explained client_id field and clock synchronization
+  - Documented first_byte tracking with clear limitations
+  - Added link to comprehensive s3dlio OPERATION_LOGGING.md guide
+  
+- **Corrected oplog sorting documentation**
+  - Removed references to non-existent S3DLIO_OPLOG_SORT environment variable
+  - Clarified that oplogs are NOT sorted during capture (concurrent writes)
+  - Added proper post-processing workflow using `sai3-bench sort` command
+  - Updated: src/config.rs, src/bin/agent.rs, docs/USAGE.md, docs/CONFIG_SYNTAX.md
+  - Added: docs/OPLOG_SORTING_CLARIFICATION.md (comprehensive guide)
+  - Note: Sorted oplogs compress ~30-40% better than unsorted
+  
+- **Important**: first_byte is an *approximation* due to ObjectStore trait limitations
+  - Use for: Throughput analysis, relative comparisons, small object benchmarking
+  - Don't use for: Precise TTFB metrics on large objects (>10MB)
+
+### Testing
+
+- ✅ Verified client_id populated in standalone mode ("standalone")
+- ✅ Verified SAI3_CLIENT_ID env var override works
+- ✅ Verified first_byte timestamps present for GET operations
+- ✅ Verified first_byte empty for LIST (metadata-only) operations
+- ✅ Verified oplog sorting: Unsorted (319KB) → Sorted (199KB, 38% reduction)
+
+### Migration Notes
+
+**No breaking changes.** Existing oplogs continue to work (client_id was always present but empty before).
+
+**New capabilities**:
+- Set custom client_id via SAI3_CLIENT_ID environment variable
+- first_byte field now populated (was empty before v0.9.22)
+- Distributed agents automatically sync timestamps to controller
+
+**Requirements**: s3dlio v0.9.22+ (will update dependency after s3dlio release)
+
+---
+
 ## [0.8.6] - 2025-11-25
 
 ### Added

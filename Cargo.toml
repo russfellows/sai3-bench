@@ -22,10 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio v0.9.21 (includes clock offset and prand support)
+# s3dlio v0.9.22 (includes client_id, first_byte, clock offset, and prand support)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.21" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.21" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.22" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.22" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

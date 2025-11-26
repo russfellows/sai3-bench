@@ -892,6 +892,23 @@ fn run_workload(
     
     info!("Configuration loaded successfully");
     
+    // Initialize operation logger if --op-log flag provided (v0.8.6+)
+    if let Some(ref op_log_path) = op_log_path {
+        workload::init_operation_logger(op_log_path)
+            .with_context(|| format!("Failed to initialize operation logger at {}", op_log_path.display()))?;
+        info!("Initialized operation logger: {}", op_log_path.display());
+        
+        // Set client_id for standalone mode (v0.8.6+)
+        // Use "standalone" as default, or could use hostname
+        let client_id = std::env::var("SAI3_CLIENT_ID").unwrap_or_else(|_| "standalone".to_string());
+        s3dlio::set_client_id(&client_id)
+            .context("Failed to set client_id for operation logger")?;
+        info!("Set operation logger client_id: {}", client_id);
+        
+        // For standalone client, no clock offset needed (local time is reference)
+        // s3dlio oplog will use local timestamps
+    }
+    
     // Create results directory (v0.6.4+)
     use sai3_bench::results_dir::ResultsDir;
     let config_path_buf = std::path::PathBuf::from(config_path);
