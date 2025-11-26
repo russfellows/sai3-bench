@@ -76,7 +76,7 @@ FLAGS/OPTIONS:
   --op-log <path>       Optional s3dlio operation log path (e.g., /data/oplogs/trace.tsv.zst)
                         Agent appends agent_id to filename to prevent collisions
                         Can be overridden per-workload via config YAML op_log_path field
-                        Supports all s3dlio oplog environment variables (S3DLIO_OPLOG_SORT, etc.)
+                        Supports s3dlio oplog environment variable: S3DLIO_OPLOG_BUF (buffer size)
 ```
 
 ```
@@ -147,7 +147,42 @@ The controller will use agents from the config file when `--agents` is not speci
 If the agent cert doesn't include the default DNS
 name the controller uses, add --agent-domain.
 
-# 2 Quick Start — Single Host (PLAINTEXT)
+# 2 Data Generation Methods
+
+## Fill Patterns: Random vs Prand
+
+sai3-bench supports three data generation methods: `zero`, `random`, and `prand`. For realistic storage performance testing, **always use `fill: random`**.
+
+### Performance Comparison (Measured)
+
+| Method | Latency | Throughput | Compressibility | Storage Test Quality |
+|--------|---------|------------|-----------------|----------------------|
+| `random` | 1954µs | 234 MiB/s | 0% (65,549 bytes from 64KB) | ✅ **RECOMMENDED** |
+| `prand` | 1340µs | 254 MiB/s | 90% (8,995 bytes from 64KB) | ⚠️ NOT RECOMMENDED |
+| `zero` | 2910µs | 273 MiB/s | 100% (22 bytes from 64KB) | ❌ UNREALISTIC |
+
+**Why this matters**: Storage systems perform differently with compressible vs incompressible data. Using `prand` or `zero` will show artificially high performance that doesn't represent real-world behavior.
+
+**When to use each method**:
+- **`random`** (default): ✅ All storage performance testing - produces truly incompressible data
+- **`prand`**: ⚠️ Only when data generation CPU is a proven bottleneck (31% faster but 90% compressible)
+- **`zero`**: ❌ Only for testing all-zero data behavior (100% compressible, completely unrealistic)
+
+### Configuration Example
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/test-data/"
+      count: 1000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random              # ✅ ALWAYS use this for storage testing
+```
+
+For detailed documentation on data generation, see [DATA_GENERATION.md](DATA_GENERATION.md).
+
+# 3 Quick Start — Single Host (PLAINTEXT)
 In one terminal:
 
 ## Run agent without TLS on port 7761
@@ -161,7 +196,7 @@ In another terminal:
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
   --uri s3://my-bucket/path/ --jobs 8
 
-# 3 Multi-Host (PLAINTEXT)
+# 4 Multi-Host (PLAINTEXT)
 On each agent host (e.g., node1, node2):
 
 ./sai3bench-agent --listen 0.0.0.0:7761
@@ -172,12 +207,12 @@ From the controller host:
 ./sai3bench-ctl --agents node1:7761,node2:7761 get \
   --uri s3://my-bucket/data/ --jobs 16
 
-# 4 TLS with Self‑Signed Certificates (No CA hassles)
+# 5 TLS with Self‑Signed Certificates (No CA hassles)
 You can enable TLS on the agent with an ephemeral self‑signed certificate
 generated at startup. You do not need a public CA. The controller just needs
 the generated cert to trust the agent connection.
 
-## 4.1 Start the Agent with TLS and write the cert
+## 5.1 Start the Agent with TLS and write the cert
 Pick a DNS name (CN) you’ll use from the controller—typically the agent’s
 resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 
@@ -205,7 +240,7 @@ Copy the certificate to the controller host (key stays on the agent):
 ### From controller host:
 scp user@loki-node3:/tmp/agent-ca/agent_cert.pem /tmp/agent_ca.pem
 
-## 4.2 Connect from the Controller (TLS)
+## 5.2 Connect from the Controller (TLS)
 Single agent:
 
 ```
@@ -245,7 +280,7 @@ Multiple agents (all in TLS mode):
 **Important:** When the agent is running with --tls, the controller must also use --tls --agent-ca <path>.
 By default, both use plaintext (no flags needed).
 
-# 5 Distributed Live Stats (v0.7.6+)
+# 6 Distributed Live Stats (v0.7.6+)
 
 ## Real-Time Progress Display
 
@@ -371,7 +406,7 @@ The default start delay is 2 seconds (on top of the 10-second coordinated start)
 
 For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEMENTATION.md`.
 
-# 6 Examples for Workloads
+# 7 Examples for Workloads
 GET (download) via controller
 ### PLAINTEXT (Default)
 ```
@@ -413,7 +448,7 @@ PUT (upload) via controller
   --concurrency 8
 ```
 
-# 7 Localhost Demo (No Makefile Needed)
+# 8 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
 ./target/release/sai3bench-agent --listen 127.0.0.1:7761
@@ -448,8 +483,7 @@ PUT (upload) via controller
   ping
 ```
 
-# 8 Troubleshooting
-# 8 Troubleshooting
+# 9 Troubleshooting
 TLS is enabled ... but --agent-ca was not provided
 You're connecting to a TLS-enabled agent, but the controller is missing
 --agent-ca. Provide the agent's agent_cert.pem or run the controller with
@@ -544,6 +578,36 @@ Control error/retry logging with verbosity flags:
 
 Capture detailed operation traces for performance analysis and replay using s3dlio oplogs.
 
+**Oplog Format** (s3dlio v0.9.22+):
+```
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+```
+
+**Key Fields**:
+- `client_id`: Agent identifier (set automatically, or via SAI3_CLIENT_ID env var)
+- `first_byte`: Approximate time-to-first-byte for GET operations (see limitations below)
+- `start`/`end`: ISO 8601 timestamps (synchronized to controller time in distributed mode)
+- `duration_ns`: Operation duration in nanoseconds
+
+**Clock Synchronization** (Distributed Mode):
+- Agent automatically calculates clock offset from controller's start_timestamp_ns
+- All operation timestamps adjusted to controller's reference time
+- Enables accurate cross-agent analysis even with clock skew
+
+**Client Identification**:
+- Standalone mode: Uses "standalone" or SAI3_CLIENT_ID env var
+- Distributed mode: Uses agent_id from config (e.g., "agent-1", "agent-2")
+- Enables per-agent filtering in merged oplogs
+
+**First Byte Tracking** (Approximate):
+- GET operations: first_byte ≈ end (when complete data available)
+- PUT operations: first_byte = start (upload begins immediately)
+- Metadata operations (LIST/HEAD/DELETE): first_byte empty (not applicable)
+- **Limitation**: Current implementation captures when `get()` completes, not when first byte arrives
+- **Use for**: Throughput analysis, relative comparisons, small object benchmarking
+- **Don't use for**: Precise TTFB metrics on large objects (>10MB)
+- See [s3dlio OPERATION_LOGGING.md](https://github.com/russfellows/s3dlio/blob/main/docs/OPERATION_LOGGING.md) for detailed explanation
+
 **CLI Flag** (applies to all workloads on agent):
 ```bash
 # Enable oplog via CLI flag
@@ -568,16 +632,33 @@ Results in per-agent files:
 - `/shared/storage/oplogs/benchmark-agent1.tsv.zst`
 - `/shared/storage/oplogs/benchmark-agent2.tsv.zst`
 
-**Environment Variables** (all s3dlio oplog settings supported):
+**Environment Variables** (s3dlio oplog settings):
 ```bash
-# Optional: enable automatic operation log sorting
-export S3DLIO_OPLOG_SORT=1
-
 # Optional: configure buffer size (default: 64KB)
 export S3DLIO_OPLOG_BUF=131072
 
 ./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
 ```
+
+**Post-Processing: Sorting Oplogs**:
+
+Operation logs are NOT sorted during capture due to concurrent writes. To sort chronologically:
+
+```bash
+# Sort by start timestamp (creates .sorted.tsv.zst files)
+./sai3-bench sort --files /data/oplogs/trace-agent1.tsv.zst /data/oplogs/trace-agent2.tsv.zst
+
+# Or in-place (overwrites originals)
+./sai3-bench sort --files /data/oplogs/*.tsv.zst --in-place
+
+# Validate sorting
+./sai3-bench replay --op-log /data/oplogs/trace-agent1.sorted.tsv.zst --dry-run
+```
+
+**Benefits of Sorting**:
+- Better compression (sorted files are ~30-40% smaller)
+- Enables chronological replay for debugging
+- Required for accurate latency analysis
 
 **Oplog Analysis**:
 ```bash
@@ -587,8 +668,8 @@ zstd -d < /data/oplogs/trace-agent1.tsv.zst | head -20
 # Count operations
 zstd -d < /data/oplogs/trace-agent1.tsv.zst | wc -l
 
-# Sort operations by latency (requires S3DLIO_OPLOG_SORT=1 at capture time)
-zstd -d < /data/oplogs/trace-agent1.tsv.zst | sort -t$'\t' -k12 -n | tail -10
+# Sort operations by latency (column 13: duration_ns)
+zstd -d < /data/oplogs/trace-agent1.tsv.zst | tail -n +2 | sort -t$'\t' -k13 -n | tail -10
 ```
 
 **Use Cases**:
@@ -612,7 +693,7 @@ high latency, stalled agents).
 All latency metrics are reported in microseconds (µs) for precision with
 fast operations.
 
-# 10 Running Tests
+# 11 Running Tests
 Unit + integration tests:
 
 cargo test
@@ -620,7 +701,7 @@ The gRPC integration test starts a local agent, then checks controller
 connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
-# 11 Versioning
+# 12 Versioning
 The agent reports its version on ping:
 
 ```

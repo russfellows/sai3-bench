@@ -93,7 +93,8 @@ struct Cli {
     /// Optional operation log path (s3dlio oplog) - applies to all workloads executed by this agent
     /// Can be overridden per-workload via config YAML op_log_path field
     /// Agent appends agent_id to filename to avoid collisions (e.g., oplog-agent1.tsv.zst)
-    /// Supports environment variables: S3DLIO_OPLOG_SORT, S3DLIO_OPLOG_BUF, etc.
+    /// Supports environment variables: S3DLIO_OPLOG_BUF=8192 (buffer size)
+    /// Note: For sorted oplogs, use 'sai3-bench sort' post-processing after capture
     #[arg(long)]
     op_log: Option<std::path::PathBuf>,
 }
@@ -2015,6 +2016,35 @@ impl Agent for AgentSvc {
                                                 let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
                                                 return;
                                             }
+                                            
+                                            // v0.8.6: Set client_id for this agent
+                                            if let Err(e) = s3dlio::set_client_id(&agent_id_exec) {
+                                                warn!("Failed to set client_id for oplog: {} (continuing anyway)", e);
+                                            } else {
+                                                info!("Set operation logger client_id: {}", agent_id_exec);
+                                            }
+                                            
+                                            // v0.8.6: Set clock offset for synchronized timestamps across agents
+                                            // Controller sends start_timestamp_ns as absolute Unix epoch time
+                                            // Calculate offset: agent_local_time - controller_reference_time
+                                            // This aligns all agent timestamps to controller's reference clock
+                                            let agent_local_time_ns = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_nanos() as i64;
+                                            
+                                            // Clock offset = (agent_time - controller_time)
+                                            // s3dlio will subtract this offset from all logged timestamps
+                                            // Result: all agents log timestamps relative to controller's reference time
+                                            let clock_offset_ns = agent_local_time_ns - start_timestamp_ns;
+                                            
+                                            if let Err(e) = s3dlio::set_clock_offset(clock_offset_ns) {
+                                                warn!("Failed to set clock offset for oplog: {} (continuing anyway)", e);
+                                            } else {
+                                                info!("Set clock offset: {} ms (agent {} ms ahead of controller)", 
+                                                      clock_offset_ns / 1_000_000, 
+                                                      clock_offset_ns / 1_000_000);
+                                            }
                                         }
                                         
                                         // Execute workload
@@ -2124,34 +2154,40 @@ impl Agent for AgentSvc {
                         }
                     }
                     Some(Err(e)) => {
-                        error!("Control reader: Error receiving control message: {}", e);
-                        
-                        // Connection lost - send error and exit
-                        let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
-                        let error_msg = LiveStats {
-                            agent_id,
-                            timestamp_s: 0.0,
-                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
-                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
-                            meta_ops: 0, meta_mean_us: 0.0,
-                            elapsed_s: 0.0,
-                            completed: false,
-                            final_summary: None,
-                            status: 3,  // ERROR
-                            error_message: format!("Connection error: {}", e),
-                            in_prepare_phase: false,
-                            prepare_objects_created: 0,
-                            prepare_objects_total: 0,
-                            prepare_summary: None,
-                            cpu_user_percent: 0.0,
-                            cpu_system_percent: 0.0,
-                            cpu_iowait_percent: 0.0,
-                            cpu_total_percent: 0.0,
-                            agent_timestamp_ns: 0,
-                            sequence: 0,
-                        };
-                        
-                        let _ = tx_stats_for_control.send(error_msg).await;
+                        // Check if workload is already complete - if so, this is normal disconnect
+                        let current_state = agent_state_reader.get_state().await;
+                        if current_state == WorkloadState::Idle {
+                            info!("Control reader: Stream error after workload completion (normal): {}", e);
+                        } else {
+                            error!("Control reader: Error receiving control message: {}", e);
+                            
+                            // Connection lost during active workload - send error and exit
+                            let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                            let error_msg = LiveStats {
+                                agent_id,
+                                timestamp_s: 0.0,
+                                get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
+                                put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
+                                meta_ops: 0, meta_mean_us: 0.0,
+                                elapsed_s: 0.0,
+                                completed: false,
+                                final_summary: None,
+                                status: 3,  // ERROR
+                                error_message: format!("Connection error: {}", e),
+                                in_prepare_phase: false,
+                                prepare_objects_created: 0,
+                                prepare_objects_total: 0,
+                                prepare_summary: None,
+                                cpu_user_percent: 0.0,
+                                cpu_system_percent: 0.0,
+                                cpu_iowait_percent: 0.0,
+                                cpu_total_percent: 0.0,
+                                agent_timestamp_ns: 0,
+                                sequence: 0,
+                            };
+                            
+                            let _ = tx_stats_for_control.send(error_msg).await;
+                        }
                         break;
                     }
                     None => {
@@ -2222,12 +2258,25 @@ impl Agent for AgentSvc {
             
             info!("Control reader: Stream ended (controller disconnected)");
             
-            // Send abort signal to workload task (if running)
-            agent_state_reader.send_abort();
-            
-            // Transition to Failed first, then Idle (cleanup)
-            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected").await;
-            let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
+            // Check if workload completed successfully vs abnormal disconnect
+            let current_state = agent_state_reader.get_state().await;
+            match current_state {
+                WorkloadState::Idle => {
+                    // Workload already completed - this is normal controller disconnect after receiving results
+                    info!("Control reader: Normal disconnect (workload completed, agent idle)");
+                }
+                WorkloadState::Ready | WorkloadState::Running | WorkloadState::Aborting => {
+                    // Abnormal disconnect during workload - send abort and transition to Failed
+                    warn!("Control reader: Abnormal disconnect during {:?} state", current_state);
+                    agent_state_reader.send_abort();
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during workload").await;
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after abnormal disconnect").await;
+                }
+                WorkloadState::Failed => {
+                    // Already failed - just log
+                    info!("Control reader: Disconnect after failure (expected)");
+                }
+            }
         });
         
         // Convert stats channel to stream, wrapping each LiveStats in Ok()

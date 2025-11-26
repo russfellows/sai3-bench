@@ -54,7 +54,8 @@ page_cache_mode: auto         # Page cache hint for file:// URIs (optional)
 op_log_path: /data/oplog.tsv.zst  # s3dlio operation log path (optional, v0.8.1+)
                                    # For distributed agents, overrides CLI --op-log flag
                                    # Agent appends agent_id to prevent collisions
-                                   # Supports S3DLIO_OPLOG_SORT and other env vars
+                                   # Supports S3DLIO_OPLOG_BUF env var (buffer size)
+                                   # Note: Sorting requires post-processing (sai3-bench sort)
 
 # Prepare stage (optional)
 prepare:
@@ -227,17 +228,20 @@ distributed:
 
 ### Environment Variables
 
-All s3dlio oplog environment variables are supported:
+s3dlio oplog environment variables:
 
 ```bash
-# Enable automatic operation log sorting (by timestamp)
-export S3DLIO_OPLOG_SORT=1
-
 # Configure buffer size (default: 64KB)
 export S3DLIO_OPLOG_BUF=131072
 
 # Configure compression level (default: 3)
 export S3DLIO_OPLOG_ZSTD_LEVEL=5
+```
+
+**Note**: Operation logs are NOT sorted during capture. Use post-processing:
+```bash
+# Sort by start timestamp after capture
+./sai3-bench sort --files /data/oplog.tsv.zst
 ```
 
 ### Oplog Format

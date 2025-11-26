@@ -72,7 +72,8 @@ pub struct Config {
     /// Optional operation log path for s3dlio oplog tracing (v0.8.2+)
     /// Captures all storage operations (GET/PUT/DELETE/LIST/etc.) with timestamps and latencies
     /// Output format: TSV (optionally zstd-compressed if path ends with .zst)
-    /// Supports environment variables: S3DLIO_OPLOG_SORT=1, S3DLIO_OPLOG_BUF=8192, etc.
+    /// Supports environment variables: S3DLIO_OPLOG_BUF=8192 (buffer size)
+    /// Note: Oplogs are NOT sorted during capture. Use 'sai3-bench sort' for post-processing.
     /// In distributed mode, overrides agent CLI --op-log flag if specified
     /// Default: None (no operation logging)
     #[serde(default)]
@@ -334,7 +335,7 @@ pub struct EnsureSpec {
     #[serde(default, alias = "size_distribution")]
     pub size_spec: Option<SizeSpec>,
     
-    /// Fill pattern: "zero" or "random"
+    /// Fill pattern: "zero", "random", or "prand" (pseudo-random, faster)
     #[serde(default = "default_fill")]
     pub fill: FillPattern,
     
@@ -386,6 +387,7 @@ impl EnsureSpec {
 pub enum FillPattern {
     Zero,
     Random,
+    Prand,  // Pseudo-random (faster, uses old BASE_BLOCK algorithm)
 }
 
 fn default_min_size() -> u64 { 

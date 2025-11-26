@@ -1,0 +1,24 @@
+# Test config for Random data generation method
+# Tests s3dlio's random algorithm (variable 1-7 GB/s performance)
+
+target: "file:///tmp/sai3-test-random/"
+
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test-random/"
+      count: 20
+      min_size: 524288  # 512 KB
+      max_size: 2097152  # 2 MB
+      fill: random
+      dedup_factor: 1
+      compress_factor: 1
+  post_prepare_delay: 1
+
+duration: 5s
+concurrency: 2
+
+workload:
+  - op: get
+    path: "*.dat"
+    weight: 100

@@ -787,7 +787,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -3502,7 +3502,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -3542,7 +3542,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -4049,8 +4049,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "s3dlio"
-version = "0.9.20"
-source = "git+https://github.com/russfellows/s3dlio.git?branch=main#12bbd6a654f73eeb14f2c96ef622e27a389023e4"
+version = "0.9.22"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.22#359704f9acee841ed429a85bf4803f3f439fe52d"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4116,8 +4116,8 @@ dependencies = [
 
 [[package]]
 name = "s3dlio-oplog"
-version = "0.9.20"
-source = "git+https://github.com/russfellows/s3dlio.git?branch=main#12bbd6a654f73eeb14f2c96ef622e27a389023e4"
+version = "0.9.22"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.22#359704f9acee841ed429a85bf4803f3f439fe52d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4136,7 +4136,7 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "assert_cmd",

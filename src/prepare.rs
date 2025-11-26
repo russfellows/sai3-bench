@@ -540,6 +540,9 @@ async fn prepare_sequential(
                             FillPattern::Random => {
                                 s3dlio::generate_controlled_data(size as usize, dedup, compress)
                             }
+                            FillPattern::Prand => {
+                                s3dlio::generate_controlled_data_prand(size as usize, dedup, compress)
+                            }
                         };
                         
                         // Create store instance for this task
@@ -1093,6 +1096,9 @@ async fn prepare_parallel(
                 FillPattern::Random => {
                     s3dlio::generate_controlled_data(task.size as usize, task.dedup, task.compress)
                 }
+                FillPattern::Prand => {
+                    s3dlio::generate_controlled_data_prand(task.size as usize, task.dedup, task.compress)
+                }
             };
             
             // Create store instance for this task
@@ -1509,6 +1515,9 @@ pub async fn create_directory_tree(
                                 FillPattern::Zero => vec![0u8; size as usize],
                                 FillPattern::Random => {
                                     s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                                }
+                                FillPattern::Prand => {
+                                    s3dlio::generate_controlled_data_prand(size as usize, dedup_factor, compress_factor)
                                 }
                             };
                             
