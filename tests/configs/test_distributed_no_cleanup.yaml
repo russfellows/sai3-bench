@@ -1,0 +1,36 @@
+# Test config for distributed prepare + workload WITHOUT cleanup
+# Leaves files in place for separate cleanup-only test
+
+target: "file:///tmp/sai3-test-no-cleanup/"
+duration: "3s"
+concurrency: 4
+
+prepare:
+  cleanup: false  # Do NOT cleanup - leave files for separate test
+  cleanup_mode: tolerant
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test-no-cleanup/"
+      count: 30
+      fill: zero
+      size_spec: 2048
+      dedup_factor: 1
+      compress_factor: 1
+
+workload:
+  - op: get
+    path: "*"
+    weight: 70
+  - op: stat
+    path: "*"
+    weight: 30
+
+# Distributed Configuration (2 local agents)
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+    - address: "127.0.0.1:7762"
+      id: "agent-2"

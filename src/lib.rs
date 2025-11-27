@@ -10,6 +10,7 @@ pub mod pb {
 }
 
 pub mod config;
+pub mod cleanup; // Cleanup operations for prepared objects (v0.8.7+)
 pub mod constants; // Central constants and defaults (v0.8.0+)
 pub mod cpu_monitor;
 pub mod directory_tree; // Directory structure generation (width/depth model)

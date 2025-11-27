@@ -4,6 +4,10 @@
 target: "file:///mnt/test/sai3-distributed-test/"
 
 prepare:
+  cleanup: true
+  cleanup_only: true  # Skip workload, only cleanup
+  cleanup_mode: tolerant
+  skip_verification: true
   prepare_strategy: parallel
   directory_structure:
     width: 3

@@ -463,6 +463,23 @@ prepare:
   # Recommended: 2-5 for cloud storage (S3, GCS, Azure)
   post_prepare_delay: 5
   
+  # Cleanup-only mode: skip workload and only run cleanup (v0.8.7+)
+  # Use this to delete objects from interrupted benchmarks without re-running prepare
+  cleanup_only: true  # Optional, defaults to false
+  
+  # Cleanup mode: error handling strategy for deletions (v0.8.7+)
+  # Values: strict, tolerant (default), best_effort
+  # - strict: Fail on any error (including "not found")
+  # - tolerant: Ignore "not found" errors, fail on other errors  
+  # - best_effort: Log all errors but continue (never fail)
+  cleanup_mode: tolerant
+  
+  # Skip verification: don't list existing objects before prepare (v0.8.7+)
+  # When true: Generate object list from config (fast, no storage listing)
+  # When false: List existing objects first (expensive for large datasets)
+  # Recommended: true for cleanup-only mode (avoids N×listing in distributed mode)
+  skip_verification: true
+  
   ensure_objects:
     - base_uri: "gs://bucket/data/"
       count: 2000            # Create 2000 objects
@@ -473,6 +490,39 @@ prepare:
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test
 ```
+
+### Cleanup-Only Mode (v0.8.7+)
+
+Run cleanup without prepare or workload phases - useful for cleaning up after interrupted benchmarks:
+
+```yaml
+duration: "0s"  # Skip workload
+workload: []    # No operations
+
+prepare:
+  cleanup_only: true         # Skip prepare, only run cleanup
+  cleanup_mode: tolerant     # Ignore "not found" errors
+  skip_verification: true    # Don't list objects (use config to generate list)
+  cleanup: true              # Required for cleanup to execute
+  ensure_objects:
+    - base_uri: "s3://bucket/test/"
+      count: 1000000          # Number of objects that were created
+      size_spec: {fixed: 2048}  # Not used for cleanup, but required
+```
+
+**When to use**:
+- Interrupted benchmarks left objects behind
+- Need to clean up distributed prepare phase across multiple agents
+- Testing cleanup logic independently
+
+**Performance notes**:
+- `skip_verification: true` is **highly recommended** for large datasets
+  - Avoids expensive storage listing (can take 30+ minutes for millions of objects)
+  - Uses deterministic algorithm to generate deletion list from config
+  - Each agent knows exactly which objects to delete (via modulo distribution)
+- `skip_verification: false` lists existing objects first
+  - Expensive: N agents × full object listing
+  - Only use for small datasets or when unsure which objects exist
 
 ### Prepare Strategies
 

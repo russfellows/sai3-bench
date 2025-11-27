@@ -59,6 +59,14 @@ pub struct RunWorkloadRequest {
     /// True if storage is shared (S3/GCS/Azure), false if local per-agent
     #[prost(bool, tag = "5")]
     pub shared_storage: bool,
+    /// v0.8.7: For distributed prepare/cleanup with shared storage
+    ///
+    /// 0-based agent index (0, 1, 2, ...)
+    #[prost(uint32, tag = "6")]
+    pub agent_index: u32,
+    /// Total number of agents in distributed execution
+    #[prost(uint32, tag = "7")]
+    pub num_agents: u32,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct OpAggregateMetrics {
@@ -331,6 +339,14 @@ pub struct ControlMessage {
     /// For ACKNOWLEDGE: which message we're acknowledging
     #[prost(int64, tag = "7")]
     pub ack_sequence: i64,
+    /// v0.8.7: For distributed cleanup with shared storage
+    /// agent_index: 0-based agent index (0, 1, 2, ...)
+    /// num_agents: total number of agents in the distributed execution
+    /// Used for deterministic object distribution: file_idx % num_agents == agent_index
+    #[prost(uint32, tag = "8")]
+    pub agent_index: u32,
+    #[prost(uint32, tag = "9")]
+    pub num_agents: u32,
 }
 /// Nested message and enum types in `ControlMessage`.
 pub mod control_message {

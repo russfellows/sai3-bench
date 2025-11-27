@@ -279,6 +279,34 @@ impl Default for PrepareStrategy {
     }
 }
 
+/// Cleanup error handling mode (v0.8.7+)
+/// 
+/// Controls how cleanup handles objects that are already deleted or missing.
+/// This is important for resuming interrupted cleanup operations.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CleanupMode {
+    /// Strict mode: Report errors for any failed deletion
+    /// Best for: First-time cleanup where all objects should exist
+    Strict,
+    
+    /// Tolerant mode: Ignore "not found" errors, report other errors
+    /// Best for: Resuming interrupted cleanup operations
+    /// Objects that were already deleted will be silently skipped
+    Tolerant,
+    
+    /// Best-effort mode: Ignore all deletion errors
+    /// Best for: Cleanup after test failures where object state is uncertain
+    /// All errors are logged as warnings but don't affect cleanup success
+    BestEffort,
+}
+
+impl Default for CleanupMode {
+    fn default() -> Self {
+        CleanupMode::Tolerant  // Default to tolerant for resumability
+    }
+}
+
 /// Prepare configuration for pre-populating objects before testing
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PrepareConfig {
@@ -289,6 +317,13 @@ pub struct PrepareConfig {
     /// Whether to cleanup prepared objects after test
     #[serde(default)]
     pub cleanup: bool,
+    
+    /// Skip workload and only run cleanup (v0.8.7+)
+    /// When true, skips prepare and workload phases, only performs cleanup
+    /// Used for resuming interrupted cleanup operations or cleaning up after manual testing
+    /// Default: false (run normal prepare -> workload -> cleanup sequence)
+    #[serde(default)]
+    pub cleanup_only: Option<bool>,
     
     /// Delay in seconds after prepare phase completes (for cloud storage eventual consistency)
     /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
@@ -312,6 +347,12 @@ pub struct PrepareConfig {
     /// Default: false (always verify and create missing files)
     #[serde(default)]
     pub skip_verification: bool,
+    
+    /// Cleanup error handling mode (v0.8.7+)
+    /// Controls how cleanup handles objects that are already deleted or missing
+    /// Default: tolerant (allows resuming interrupted cleanup operations)
+    #[serde(default)]
+    pub cleanup_mode: CleanupMode,
 }
 
 /// Specification for ensuring objects exist
@@ -551,8 +592,8 @@ impl Config {
         // The workload execution will resolve them against the modified target.
 
         // Apply prefix to prepare config ONLY if storage is NOT shared
-        // Shared storage (S3/GCS/Azure): all agents use same prepared data
-        // Local storage (file://): each agent prepares its own data
+        // Shared storage: all agents use same prepared data
+        // Per-agent storage: each agent prepares its own data
         if !shared_storage {
             if let Some(ref mut prepare) = self.prepare {
                 // For local storage, we need to update prepare base_uris to match the modified target
@@ -763,10 +804,11 @@ pub struct DistributedConfig {
     #[serde(default = "default_path_template")]
     pub path_template: String,
     
-    /// Whether target filesystem is shared across agents (REQUIRED - no default)
-    /// Must be explicitly set to true or false
-    /// - true: Shared filesystem (NFS, Lustre, S3, GCS, Azure) - agents may access same paths
-    /// - false: Local per-agent storage - each agent has independent namespace
+    /// Whether target storage is shared across agents (REQUIRED - no default)
+    /// Must be explicitly set to true or false based on your actual deployment
+    /// - true: Shared storage - agents access same data (e.g., NFS, Lustre, shared S3 bucket)
+    /// - false: Per-agent storage - each agent has isolated namespace (e.g., local disks, agent-specific S3 prefixes)
+    /// Note: This is independent of storage TYPE - file://, s3://, az://, gs:// can all be shared OR per-agent
     pub shared_filesystem: bool,
     
     /// How agents create directory tree structure (REQUIRED - no default)

@@ -6,6 +6,68 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.7] - 2025-11-26
+
+### Added
+
+- **Dedicated cleanup module** (`src/cleanup.rs`)
+  - `list_existing_objects()`: Lists ALL existing objects without creating any new ones
+  - Simplified from `prepare_objects()` - removed all file creation logic
+  - Supports both flat and directory tree modes
+  - Proper separation: prepare creates, cleanup deletes
+
+- **Cleanup-only mode with storage listing** (`cleanup_only: true, skip_verification: false`)
+  - Lists existing objects from storage (expensive for large datasets on shared storage)
+  - No file creation during cleanup-only mode
+  - Each agent sees ALL objects, distribution handled via modulo in cleanup function
+  - Proper URI handling: uses full URIs from store.list(), passes to store.delete()
+  
+- **Cleanup as counted workload** (v0.8.7)
+  - DELETE operations tracked as META via LiveStatsTracker
+  - Minimum 3-second stats reporting for fast-completing workloads
+  - Prevents controller panic on instant completion
+  - Workload completes when N deletions finish (event-based, not timed)
+
+### Changed
+
+- **Moved cleanup_prepared_objects()** from `prepare.rs` to `cleanup.rs`
+  - Re-exported via `workload.rs` for backward compatibility
+  - Clean module organization and separation of concerns
+
+- **Fixed cleanup distribution logic**
+  - `list_existing_objects()` returns complete list (no filtering)
+  - `cleanup_prepared_objects()` handles modulo distribution
+  - Previously each agent only saw ~50% of files (incorrect filtering during listing)
+
+### Fixed
+
+- **cleanup_only flag detection** - Use `PrepareConfig.cleanup_only` exclusively
+  - Removed duration==0 checks (incorrect heuristic)
+  - All code paths now check cleanup_only flag properly
+
+- **Workload timer synchronization** - Reset timer on prepare→workload transition
+  - Controller timer now matches agent reporting exactly
+  - Fixed: timer included prepare time before
+
+- **Minimum stats duration** - Agents send stats for 3 seconds minimum
+  - Prevents controller panic when workload completes in <2ms
+  - Continues sending final cumulative values until minimum met
+
+### Documentation
+
+- Updated module organization documentation
+- Added warnings about N×listing overhead for shared storage with many files
+- Clarified cleanup-only mode behavior (listing vs generation)
+
+### Testing
+
+- ✅ 55 passing Rust tests (previously 148 combined integration + unit)
+- ✅ Verified cleanup-only with skip_verification=false deletes all files
+- ✅ Tested distributed cleanup across 2 agents (45 files deleted correctly)
+- ✅ Verified proper modulo distribution (23 + 22 = 45 total deletions)
+
+---
+
 ## [Unreleased] - Operation Logging Enhancements
 
 ### Added

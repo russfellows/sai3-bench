@@ -120,6 +120,10 @@ struct AgentState {
     tracker: Arc<Mutex<Option<Arc<sai3_bench::live_stats::LiveStatsTracker>>>>,
     /// v0.8.4: Operation log path for current workload (for execute_workload RPC)
     op_log_path: Arc<Mutex<Option<String>>>,
+    /// v0.8.7: Agent index for distributed cleanup (0-based)
+    agent_index: Arc<Mutex<Option<u32>>>,
+    /// v0.8.7: Total number of agents for distributed cleanup
+    num_agents: Arc<Mutex<Option<u32>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +149,8 @@ impl AgentState {
             config_yaml: Arc::new(Mutex::new(None)),
             tracker: Arc::new(Mutex::new(None)),
             op_log_path: Arc::new(Mutex::new(None)),
+            agent_index: Arc::new(Mutex::new(None)),
+            num_agents: Arc::new(Mutex::new(None)),
         }
     }
     
@@ -256,6 +262,24 @@ impl AgentState {
     
     async fn get_op_log_path(&self) -> Option<String> {
         self.op_log_path.lock().await.clone()
+    }
+    
+    async fn set_agent_index(&self, index: u32) {
+        let mut agent_index = self.agent_index.lock().await;
+        *agent_index = Some(index);
+    }
+    
+    async fn get_agent_index(&self) -> Option<u32> {
+        *self.agent_index.lock().await
+    }
+    
+    async fn set_num_agents(&self, num: u32) {
+        let mut num_agents = self.num_agents.lock().await;
+        *num_agents = Some(num);
+    }
+    
+    async fn get_num_agents(&self) -> Option<u32> {
+        *self.num_agents.lock().await
     }
 }
 
@@ -407,9 +431,12 @@ impl Agent for AgentSvc {
             path_prefix,
             start_timestamp_ns,
             shared_storage,
+            agent_index,
+            num_agents,
         } = req.into_inner();
 
         debug!("Agent ID: {}, Path prefix: {}, Shared storage: {}", agent_id, path_prefix, shared_storage);
+        debug!("Agent index: {}/{}", agent_index, num_agents);
         debug!("Config YAML: {} bytes", config_yaml.len());
 
         // Parse the YAML configuration
@@ -449,16 +476,63 @@ impl Agent for AgentSvc {
 
         info!("Starting workload execution for agent {}", agent_id);
 
-        // Execute prepare phase if configured
-        let (_prepared_objects, tree_manifest) = if let Some(ref prepare_config) = config.prepare {
+        // v0.8.7: Detect cleanup-only mode (checks cleanup_only flag)
+        let is_cleanup_only = config.prepare.as_ref()
+            .map(|p| p.cleanup_only.unwrap_or(false))
+            .unwrap_or(false);
+
+        // Execute prepare phase or generate cleanup list
+        let (prepared_objects, tree_manifest) = if is_cleanup_only {
+            // Cleanup-only mode: Generate list of objects to clean up
+            if let Some(ref prepare_config) = config.prepare {
+                if prepare_config.skip_verification {
+                    // Generate from config without listing
+                    info!("Cleanup-only mode (skip_verification=true): Generating object list from config");
+                    let objects = sai3_bench::workload::generate_cleanup_objects(
+                        prepare_config,
+                        agent_index as usize,
+                        num_agents as usize,
+                    ).map_err(|e| {
+                        error!("Failed to generate cleanup objects: {}", e);
+                        Status::internal(format!("Failed to generate cleanup objects: {}", e))
+                    })?;
+                    info!("Generated {} objects for cleanup", objects.len());
+                    (objects, None)
+                } else {
+                    // List existing objects WITHOUT creating any (use new list_existing_objects function)
+                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects only");
+                    if num_agents > 1 {
+                        warn!("Note: In shared storage mode with {} agents, each will list ALL objects then filter to their subset.", num_agents);
+                        warn!("For large datasets (>10k files), strongly recommend skip_verification=true to avoid listing overhead.");
+                    }
+                    
+                    sai3_bench::cleanup::list_existing_objects(
+                        prepare_config,
+                        agent_index as usize,
+                        num_agents as usize,
+                    ).await.map_err(|e| {
+                        error!("Failed to list objects: {}", e);
+                        Status::internal(format!("Failed to list objects: {}", e))
+                    })?
+                }
+            } else {
+                (Vec::new(), None)
+            }
+        } else if let Some(ref prepare_config) = config.prepare {
+            // Normal mode: Execute prepare phase
             debug!("Executing prepare phase");
-            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(prepare_config, Some(&config.workload), None, config.concurrency)
-                .await
-                .map_err(|e| {
-                    error!("Prepare phase failed: {}", e);
-                    Status::internal(format!("Prepare phase failed: {}", e))
-                })?;
-            info!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
+            let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(
+                prepare_config,
+                Some(&config.workload),
+                None,
+                config.concurrency,
+                agent_index as usize,
+                num_agents as usize,
+            ).await.map_err(|e| {
+                error!("Prepare phase failed: {}", e);
+                Status::internal(format!("Prepare phase failed: {}", e))
+            })?;
+            info!("Prepared {} objects ({} created, {} existed) in {:.2}s",
                 prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
             
             // Print prepare performance summary
@@ -554,24 +628,136 @@ impl Agent for AgentSvc {
         }
 
         // Execute the workload using existing workload::run function
-        let summary = sai3_bench::workload::run(&config, tree_manifest)
-            .await
-            .map_err(|e| {
-                error!("Workload execution failed: {}", e);
-                // Finalize oplog on error
-                if final_op_log_path.is_some() {
-                    if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger() {
-                        error!("Failed to finalize operation logger: {}", finalize_err);
-                    }
-                }
-                Status::internal(format!("Workload execution failed: {}", e))
+        // In cleanup-only mode, run cleanup AS the workload
+        let is_cleanup_only = config.prepare.as_ref()
+            .map(|p| p.cleanup_only.unwrap_or(false))
+            .unwrap_or(false);
+        
+        let summary = if is_cleanup_only {
+            info!("Cleanup-only mode: Running cleanup as workload");
+            
+            // Get tracker for stats reporting
+            let tracker = self.state.get_tracker().await;
+            let start_time = std::time::Instant::now();
+            
+            // Get cleanup mode from config
+            let cleanup_mode = config.prepare.as_ref()
+                .map(|p| p.cleanup_mode)
+                .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
+            
+            // Run cleanup with stats tracking
+            sai3_bench::cleanup::cleanup_prepared_objects(
+                &prepared_objects,
+                tree_manifest.as_ref(),
+                agent_index as usize,
+                num_agents as usize,
+                cleanup_mode,
+                tracker.clone(),
+            ).await.map_err(|e| {
+                error!("Cleanup execution failed: {}", e);
+                Status::internal(format!("Cleanup execution failed: {}", e))
             })?;
+            
+            // Generate summary from tracker stats
+            if let Some(t) = tracker {
+                let snapshot = t.snapshot();
+                let elapsed = start_time.elapsed().as_secs_f64();
+                
+                sai3_bench::workload::Summary {
+                    wall_seconds: elapsed,
+                    total_ops: snapshot.meta_ops,
+                    total_bytes: 0,  // DELETE operations don't transfer bytes
+                    p50_us: 0,
+                    p95_us: 0,
+                    p99_us: 0,
+                    get: Default::default(),
+                    put: Default::default(),
+                    meta: sai3_bench::workload::OpAgg {
+                        ops: snapshot.meta_ops,
+                        bytes: 0,
+                        mean_us: snapshot.meta_mean_us,
+                        p50_us: 0,
+                        p95_us: 0,
+                        p99_us: 0,
+                    },
+                    get_bins: Default::default(),
+                    put_bins: Default::default(),
+                    meta_bins: Default::default(),
+                    get_hists: Default::default(),
+                    put_hists: Default::default(),
+                    meta_hists: Default::default(),
+                    total_errors: 0,
+                    error_rate: 0.0,
+                }
+            } else {
+                // No tracker - return empty summary
+                sai3_bench::workload::Summary {
+                    wall_seconds: start_time.elapsed().as_secs_f64(),
+                    total_ops: 0,
+                    total_bytes: 0,
+                    p50_us: 0,
+                    p95_us: 0,
+                    p99_us: 0,
+                    get: Default::default(),
+                    put: Default::default(),
+                    meta: Default::default(),
+                    get_bins: Default::default(),
+                    put_bins: Default::default(),
+                    meta_bins: Default::default(),
+                    get_hists: Default::default(),
+                    put_hists: Default::default(),
+                    meta_hists: Default::default(),
+                    total_errors: 0,
+                    error_rate: 0.0,
+                }
+            }
+        } else {
+            sai3_bench::workload::run(&config, tree_manifest.clone())
+                .await
+                .map_err(|e| {
+                    error!("Workload execution failed: {}", e);
+                    // Finalize oplog on error
+                    if final_op_log_path.is_some() {
+                        if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger() {
+                            error!("Failed to finalize operation logger: {}", finalize_err);
+                        }
+                    }
+                    Status::internal(format!("Workload execution failed: {}", e))
+                })?
+        };
 
         // Finalize s3dlio oplog if initialized
         if final_op_log_path.is_some() {
             info!("Finalizing s3dlio operation logger");
             if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
                 error!("Failed to finalize operation logger: {}", e);
+            }
+        }
+        
+        // v0.8.7: Execute cleanup phase if configured (skip if cleanup-only since we already did it)
+        if !is_cleanup_only {
+            if let Some(ref prepare_config) = config.prepare {
+                if prepare_config.cleanup {
+                    let cleanup_mode = prepare_config.cleanup_mode;
+                    info!("Starting cleanup phase (agent {}/{}, mode: {:?})", 
+                          agent_index, num_agents, cleanup_mode);
+                    
+                    // Get tracker for live stats reporting during cleanup
+                    let tracker = self.state.get_tracker().await;
+                    
+                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
+                        &prepared_objects,
+                        tree_manifest.as_ref(),
+                        agent_index as usize,
+                        num_agents as usize,
+                        cleanup_mode,
+                        tracker,
+                    ).await {
+                        error!("Cleanup phase failed for agent {}: {}", agent_id, e);
+                    } else {
+                        info!("Cleanup phase completed for agent {}", agent_id);
+                    }
+                }
             }
         }
 
@@ -606,6 +792,8 @@ impl Agent for AgentSvc {
             path_prefix,
             start_timestamp_ns,
             shared_storage,
+            agent_index,
+            num_agents,
         } = req.into_inner();
 
         // Parse and apply config (same as run_workload)
@@ -1047,7 +1235,14 @@ impl Agent for AgentSvc {
                     result = async {
                         // Execute prepare phase if configured
                         let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
+                            match sai3_bench::workload::prepare_objects(
+                                prepare_config, 
+                                Some(&config_exec.workload), 
+                                Some(tracker_for_prepare.clone()), 
+                                config_exec.concurrency,
+                                agent_index as usize,
+                                num_agents as usize,
+                            ).await {
                                 Ok((prepared, manifest, prepare_metrics)) => {
                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                     
@@ -1601,7 +1796,72 @@ impl Agent for AgentSvc {
                                             total_percent: 0.0,
                                         });
                                     
-                                    // Send COMPLETED message
+                                    // v0.8.7: For fast-completing workloads (counted workloads like cleanup),
+                                    // continue sending stats updates for minimum duration to give controller
+                                    // time to process and display results properly.
+                                    //
+                                    // Protocol: Agents send cumulative stats every 1s. Controller calculates
+                                    // deltas for display. When workload completes quickly, agent continues
+                                    // sending same final values for up to 10 seconds, then sends COMPLETED.
+                                    let elapsed_secs = snapshot.elapsed_secs();
+                                    const MIN_STATS_DURATION_SECS: f64 = 3.0;  // Send stats for at least 3 seconds
+                                    
+                                    if elapsed_secs < MIN_STATS_DURATION_SECS {
+                                        let remaining_secs = MIN_STATS_DURATION_SECS - elapsed_secs;
+                                        let remaining_intervals = (remaining_secs.ceil() as u64).max(1);
+                                        
+                                        info!("Stats writer: Workload completed in {:.2}s, continuing stats for {} more intervals", 
+                                              elapsed_secs, remaining_intervals);
+                                        
+                                        // Send RUNNING stats with final values for remaining intervals
+                                        for i in 0..remaining_intervals {
+                                            sequence += 1;
+                                            let running_msg = LiveStats {
+                                                agent_id: agent_id.clone(),
+                                                timestamp_s: snapshot.timestamp_secs() as f64,
+                                                get_ops: snapshot.get_ops,
+                                                get_bytes: snapshot.get_bytes,
+                                                get_mean_us: snapshot.get_mean_us as f64,
+                                                get_p50_us: snapshot.get_p50_us as f64,
+                                                get_p95_us: snapshot.get_p95_us as f64,
+                                                put_ops: snapshot.put_ops,
+                                                put_bytes: snapshot.put_bytes,
+                                                put_mean_us: snapshot.put_mean_us as f64,
+                                                put_p50_us: snapshot.put_p50_us as f64,
+                                                put_p95_us: snapshot.put_p95_us as f64,
+                                                meta_ops: snapshot.meta_ops,
+                                                meta_mean_us: snapshot.meta_mean_us as f64,
+                                                elapsed_s: elapsed_secs + (i as f64 + 1.0),  // Increment elapsed time
+                                                completed: false,  // Still sending updates
+                                                final_summary: None,
+                                                status: 2,  // RUNNING
+                                                error_message: String::new(),
+                                                in_prepare_phase: false,
+                                                prepare_objects_created: 0,
+                                                prepare_objects_total: 0,
+                                                prepare_summary: prepare_proto.clone(),
+                                                cpu_user_percent: cpu_util.user_percent,
+                                                cpu_system_percent: cpu_util.system_percent,
+                                                cpu_iowait_percent: cpu_util.iowait_percent,
+                                                cpu_total_percent: cpu_util.total_percent,
+                                                agent_timestamp_ns: 0,
+                                                sequence,
+                                            };
+                                            
+                                            if tx_stats.send(running_msg).await.is_err() {
+                                                error!("Stats writer: Failed to send running stats (interval {})", i);
+                                                break;
+                                            }
+                                            
+                                            // Wait 1 second before next update (except last iteration)
+                                            if i < remaining_intervals - 1 {
+                                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Now send COMPLETED message
+                                    sequence += 1;
                                     let completed_msg = LiveStats {
                                         agent_id: agent_id.clone(),
                                         timestamp_s: snapshot.timestamp_secs() as f64,
@@ -1617,7 +1877,7 @@ impl Agent for AgentSvc {
                                         put_p95_us: snapshot.put_p95_us as f64,
                                         meta_ops: snapshot.meta_ops,
                                         meta_mean_us: snapshot.meta_mean_us as f64,
-                                        elapsed_s: snapshot.elapsed_secs(),
+                                        elapsed_s: snapshot.elapsed_secs().max(MIN_STATS_DURATION_SECS),
                                         completed: true,
                                         final_summary: proto_summary,
                                         status: 4,  // COMPLETED
@@ -1822,9 +2082,15 @@ impl Agent for AgentSvc {
                                     let agent_id = control_msg.agent_id;
                                     let path_prefix = control_msg.path_prefix;
                                     let shared_storage = control_msg.shared_storage;
+                                    let agent_index = control_msg.agent_index;
+                                    let num_agents = control_msg.num_agents;
                                     
                                     // Store agent_id in state for stats writer
                                     agent_state_reader.set_agent_id(agent_id.clone()).await;
+                                    
+                                    // Store agent_index and num_agents for distributed cleanup
+                                    agent_state_reader.set_agent_index(agent_index).await;
+                                    agent_state_reader.set_num_agents(num_agents).await;
                                     
                                     // Store config_yaml for later use
                                     agent_state_reader.set_config_yaml(config_yaml.clone()).await;
@@ -1956,9 +2222,56 @@ impl Agent for AgentSvc {
                                         // Wire tracker into config for live stats collection
                                         config_exec.live_stats_tracker = Some(tracker_for_prepare.clone());
                                         
-                                        // Execute prepare phase if configured (same as run_workload_with_live_stats)
-                                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency).await {
+                                        // Get agent_index and num_agents for distributed prepare/cleanup
+                                        let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0) as usize;
+                                        let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1) as usize;
+                                        
+                                        // v0.8.7: Detect cleanup-only mode (ONLY checks cleanup flag)
+                                        let is_cleanup_only = config_exec.prepare.as_ref()
+                                            .map(|p| p.cleanup_only.unwrap_or(false))
+                                            .unwrap_or(false);
+                                        
+                                        // Execute prepare phase or generate cleanup list
+                                        let (prepared_objects, tree_manifest) = if is_cleanup_only {
+                                            // Cleanup-only mode: Generate list of objects to clean up
+                                            if let Some(ref prepare_config) = config_exec.prepare {
+                                                if prepare_config.skip_verification {
+                                                    // Generate from config without listing
+                                                    info!("Cleanup-only mode (skip_verification=true): Generating object list from config");
+                                                    match sai3_bench::workload::generate_cleanup_objects(prepare_config, agent_index, num_agents) {
+                                                        Ok(objects) => {
+                                                            info!("Generated {} objects for cleanup", objects.len());
+                                                            (objects, None)
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_done_exec.send(Err(format!("Failed to generate cleanup objects: {}", e))).await;
+                                                            return;
+                                                        }
+                                                    }
+                                                } else {
+                                                    // List existing objects WITHOUT creating any (use new list_existing_objects function)
+                                                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects only");
+                                                    if num_agents > 1 {
+                                                        warn!("Note: In shared storage mode with {} agents, each will list ALL objects then filter to their subset.", num_agents);
+                                                        warn!("For large datasets (>10k files), strongly recommend skip_verification=true to avoid listing overhead.");
+                                                    }
+                                                    
+                                                    match sai3_bench::cleanup::list_existing_objects(prepare_config, agent_index, num_agents).await {
+                                                        Ok((prepared, manifest)) => {
+                                                            info!("Found {} existing objects to cleanup", prepared.len());
+                                                            (prepared, manifest)
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_done_exec.send(Err(format!("Failed to list objects: {}", e))).await;
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                (Vec::new(), None)
+                                            }
+                                        } else if let Some(ref prepare_config) = config_exec.prepare {
+                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency, agent_index, num_agents).await {
                                                 Ok((prepared, manifest, prepare_metrics)) => {
                                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                                     
@@ -1971,7 +2284,7 @@ impl Agent for AgentSvc {
                                                     if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                                                         tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
                                                     }
-                                                    manifest
+                                                    (prepared, manifest)  // Store prepared objects for cleanup
                                                 }
                                                 Err(e) => {
                                                     let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
@@ -1979,7 +2292,7 @@ impl Agent for AgentSvc {
                                                 }
                                             }
                                         } else {
-                                            None
+                                            (Vec::new(), None)
                                         };
                                         
                                         // Setup operation logger if configured
@@ -2047,20 +2360,149 @@ impl Agent for AgentSvc {
                                             }
                                         }
                                         
-                                        // Execute workload
+                                        // Execute workload OR cleanup (cleanup-only mode runs cleanup as the workload)
+                                        let result = if is_cleanup_only {
+                                            info!("Cleanup-only mode: Running cleanup as workload");
+                                            
+                                            // Get tracker for stats reporting
+                                            let tracker = agent_state_for_task.get_tracker().await;
+                                            let start_time = std::time::Instant::now();
+                                            
+                                            // Run cleanup with stats tracking
+                                            let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
+                                            let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
+                                            let cleanup_mode = config_exec.prepare.as_ref()
+                                                .map(|p| p.cleanup_mode)
+                                                .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
+                                            
+                                            match sai3_bench::cleanup::cleanup_prepared_objects(
+                                                &prepared_objects,
+                                                tree_manifest.as_ref(),
+                                                agent_index as usize,
+                                                num_agents as usize,
+                                                cleanup_mode,
+                                                tracker.clone(),
+                                            ).await {
+                                                Ok(_) => {
+                                                    info!("Cleanup completed successfully");
+                                                    
+                                                    // Generate summary from tracker stats
+                                                    if let Some(t) = tracker {
+                                                        let snapshot = t.snapshot();
+                                                        let elapsed = start_time.elapsed().as_secs_f64();
+                                                        
+                                                        Ok(sai3_bench::workload::Summary {
+                                                            wall_seconds: elapsed,
+                                                            total_ops: snapshot.meta_ops,
+                                                            total_bytes: 0,  // DELETE operations don't transfer bytes
+                                                            p50_us: 0,  // Only have mean for meta
+                                                            p95_us: 0,
+                                                            p99_us: 0,
+                                                            get: Default::default(),
+                                                            put: Default::default(),
+                                                            meta: sai3_bench::workload::OpAgg {
+                                                                ops: snapshot.meta_ops,
+                                                                bytes: 0,
+                                                                mean_us: snapshot.meta_mean_us,
+                                                                p50_us: 0,
+                                                                p95_us: 0,
+                                                                p99_us: 0,
+                                                            },
+                                                            get_bins: Default::default(),
+                                                            put_bins: Default::default(),
+                                                            meta_bins: Default::default(),
+                                                            get_hists: Default::default(),
+                                                            put_hists: Default::default(),
+                                                            meta_hists: Default::default(),  // Would need histogram export method
+                                                            total_errors: 0,
+                                                            error_rate: 0.0,
+                                                        })
+                                                    } else {
+                                                        // No tracker - return empty summary
+                                                        Ok(sai3_bench::workload::Summary {
+                                                            wall_seconds: start_time.elapsed().as_secs_f64(),
+                                                            total_ops: 0,
+                                                            total_bytes: 0,
+                                                            p50_us: 0,
+                                                            p95_us: 0,
+                                                            p99_us: 0,
+                                                            get: Default::default(),
+                                                            put: Default::default(),
+                                                            meta: Default::default(),
+                                                            get_bins: Default::default(),
+                                                            put_bins: Default::default(),
+                                                            meta_bins: Default::default(),
+                                                            get_hists: Default::default(),
+                                                            put_hists: Default::default(),
+                                                            meta_hists: Default::default(),
+                                                            total_errors: 0,
+                                                            error_rate: 0.0,
+                                                        })
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Cleanup failed: {}", e);
+                                                    Err(e)
+                                                }
+                                            }
+                                        } else {
+                                            sai3_bench::workload::run(&config_exec, tree_manifest.clone()).await
+                                        };
+                                        
+                                        // Finalize oplog
+                                        if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                            info!("Finalizing s3dlio operation logger");
+                                            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                error!("Failed to finalize operation logger: {}", e);
+                                            }
+                                        }
+                                        
                                         tokio::select! {
-                                            result = sai3_bench::workload::run(&config_exec, tree_manifest) => {
+                                            _ = abort_rx_task.recv() => {
+                                                warn!("Workload task aborted");
                                                 // Finalize oplog
                                                 if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                    info!("Finalizing s3dlio operation logger");
                                                     if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
                                                         error!("Failed to finalize operation logger: {}", e);
                                                     }
                                                 }
-                                                
+                                                let _ = tx_done_exec.send(Err("Aborted".to_string())).await;
+                                            }
+                                            _ = async {
                                                 match result {
                                                     Ok(summary) => {
                                                         info!("Workload completed successfully for agent {}", agent_id_exec);
+                                                        
+                                                        // v0.8.7: Execute cleanup phase if configured (skip in cleanup-only mode)
+                                                        if !is_cleanup_only {
+                                                            if let Some(ref prepare_config) = config_exec.prepare {
+                                                                if prepare_config.cleanup {
+                                                                    let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
+                                                                    let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
+                                                                    let cleanup_mode = prepare_config.cleanup_mode;
+                                                                    
+                                                                    info!("Starting cleanup phase (agent {}/{}, mode: {:?})", 
+                                                                          agent_index, num_agents, cleanup_mode);
+                                                                    
+                                                                    // Get tracker for live stats reporting during cleanup
+                                                                    let tracker = agent_state_for_task.get_tracker().await;
+                                                                    
+                                                                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
+                                                                        &prepared_objects,
+                                                                        tree_manifest.as_ref(),
+                                                                        agent_index as usize,
+                                                                        num_agents as usize,
+                                                                        cleanup_mode,
+                                                                        tracker,
+                                                                    ).await {
+                                                                        error!("Cleanup phase failed for agent {}: {}", agent_id_exec, e);
+                                                                    } else {
+                                                                        info!("Cleanup phase completed for agent {}", agent_id_exec);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        
                                                         let _ = tx_done_exec.send(Ok(summary)).await;
                                                     }
                                                     Err(e) => {
@@ -2068,17 +2510,7 @@ impl Agent for AgentSvc {
                                                         let _ = tx_done_exec.send(Err(e.to_string())).await;
                                                     }
                                                 }
-                                            }
-                                            _ = abort_rx_task.recv() => {
-                                                warn!("Workload aborted for agent {}", agent_id_exec);
-                                                // Finalize oplog
-                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                        error!("Failed to finalize operation logger: {}", e);
-                                                    }
-                                                }
-                                                let _ = tx_done_exec.send(Err("Workload cancelled".to_string())).await;
-                                            }
+                                            } => {}
                                         }
                                     });
                                     
@@ -2599,8 +3031,12 @@ async fn list_keys_async(bucket: &str, prefix: &str) -> Result<Vec<String>> {
 async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result<()> {
     use sai3_bench::config::OpSpec;
     
-    // Check that workload has operations configured
-    if config.workload.is_empty() {
+    // Check that workload has operations configured (unless cleanup-only mode)
+    let is_cleanup_only = config.prepare.as_ref()
+        .map(|p| p.cleanup_only.unwrap_or(false))
+        .unwrap_or(false);
+    
+    if config.workload.is_empty() && !is_cleanup_only {
         anyhow::bail!("No operations configured in workload");
     }
     

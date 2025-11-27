@@ -469,10 +469,9 @@ impl AggregateStats {
         let put_p95_str = format_latency(self.put_p95_us);
         let meta_mean_str = format_latency(self.meta_mean_us);
 
-        // Only show META line if there are META operations
-        if self.total_meta_ops > 0 {
-            format!(
-                "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
+        // Always show META line (for cleanup/list operations visibility)
+        format!(
+            "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
                 self.num_agents,
                 self.expected_agents,
                 get_ops_s,
@@ -489,24 +488,6 @@ impl AggregateStats {
                 meta_mean_str,
                 cpu_line,
             )
-        } else {
-            format!(
-                "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {}){}",
-                self.num_agents,
-                self.expected_agents,
-                get_ops_s,
-                get_bandwidth,
-                get_mean_str,
-                get_p50_str,
-                get_p95_str,
-                put_ops_s,
-                put_bandwidth,
-                put_mean_str,
-                put_p50_str,
-                put_p95_str,
-                cpu_line,
-            )
-        }
     }
 }
 
@@ -1073,8 +1054,8 @@ async fn run_distributed_workload(
 
     // Determine if storage is shared:
     // 1. CLI flag --shared-prepare takes highest priority (explicit override)
-    // 2. Config file's distributed.shared_filesystem setting
-    // 3. Auto-detect from URI scheme (fallback for backward compatibility)
+    // 2. Config file's distributed.shared_filesystem setting (REQUIRED)
+    // Note: shared_filesystem applies to ANY storage type (file://, s3://, az://, gs://, etc.)
     let is_shared_storage = if let Some(explicit) = shared_prepare {
         debug!("Using explicit --shared-prepare CLI flag: {}", explicit);
         explicit
@@ -1082,9 +1063,7 @@ async fn run_distributed_workload(
         debug!("Using config file's shared_filesystem setting: {}", distributed.shared_filesystem);
         distributed.shared_filesystem
     } else {
-        let is_shared = detect_shared_storage(&config);
-        debug!("Auto-detected shared storage: {} (based on URI scheme - no config setting found)", is_shared);
-        is_shared
+        bail!("Distributed execution requires either --shared-prepare CLI flag or distributed.shared_filesystem in config.\n\nExample config:\n  distributed:\n    shared_filesystem: true  # or false for per-agent storage\n    tree_creation_mode: concurrent\n    path_selection: random");
     };
 
     let header = "=== Distributed Workload ===";
@@ -1103,7 +1082,7 @@ async fn run_distributed_workload(
     println!("{}", delay_msg);
     results_dir.write_console(&delay_msg)?;
     
-    let storage_msg = format!("Storage mode: {}", if is_shared_storage { "shared (S3/GCS/Azure/NFS)" } else { "local (per-agent)" });
+    let storage_msg = format!("Storage mode: {}", if is_shared_storage { "shared (all agents access same data)" } else { "per-agent (isolated storage)" });
     println!("{}", storage_msg);
     results_dir.write_console(&storage_msg)?;
     
@@ -1187,6 +1166,9 @@ async fn run_distributed_workload(
     //   - Guarantees: tracker.touch() happens immediately, agents never timeout due to slow processing
     let (tx_stats, mut rx_stats) = tokio::sync::mpsc::unbounded_channel::<LiveStats>();
     
+    // v0.8.7: Calculate num_agents once outside the loop (avoid borrowing agent_addrs in async tasks)
+    let num_agents = agent_addrs.len() as u32;
+    
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
@@ -1242,6 +1224,8 @@ async fn run_distributed_workload(
                 shared_storage: shared,
                 start_timestamp_ns: 0,  // Phase 1: no timestamp yet
                 ack_sequence: 0,
+                agent_index: idx as u32,  // v0.8.7: For distributed cleanup
+                num_agents,               // v0.8.7: For distributed cleanup
             };
             
             if let Err(e) = tx_control.send(config_msg).await {
@@ -1307,6 +1291,8 @@ async fn run_distributed_workload(
                 shared_storage: false,
                 start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
                 ack_sequence: 0,
+                agent_index: idx as u32,  // v0.8.7: Redundant but consistent
+                num_agents,               // v0.8.7: Redundant but consistent
             };
             
             if let Err(e) = tx_control.send(start_msg).await {
@@ -1944,6 +1930,9 @@ async fn run_distributed_workload(
              final_stats.put_mean_us,
              final_stats.put_p50_us,
              final_stats.put_p95_us);
+    println!("META: {:.0} ops/s (mean: {:.0}µs)",
+             final_stats.total_meta_ops as f64 / final_stats.elapsed_s,
+             final_stats.meta_mean_us);
     
     // v0.7.11: Display CPU utilization summary if available
     if final_stats.cpu_total_percent > 0.0 {
@@ -2858,33 +2847,10 @@ fn collect_aggregate_row(
 /// Detect if storage is shared based on URI scheme
 /// Shared storage: s3://, az://, gs://, and potentially file:// (if NFS-mounted)
 /// Local storage: file://, direct://
-fn detect_shared_storage(config: &sai3_bench::config::Config) -> bool {
-    // Check target URI if present
-    if let Some(ref target) = config.target {
-        return is_shared_uri(target);
-    }
-    
-    // Check prepare config URIs
-    if let Some(ref prepare) = config.prepare {
-        for ensure_spec in &prepare.ensure_objects {
-            if is_shared_uri(&ensure_spec.base_uri) {
-                return true;
-            }
-        }
-    }
-    
-    // Default to local if no clear indication
-    false
-}
-
-/// Check if a URI represents shared storage
-fn is_shared_uri(uri: &str) -> bool {
-    uri.starts_with("s3://") 
-        || uri.starts_with("az://") 
-        || uri.starts_with("gs://")
-        // Note: file:// could be shared (NFS) or local - we assume local by default
-        // Users can override with --shared-prepare if using NFS
-}
+// Removed detect_shared_storage() and is_shared_uri() functions.
+// Shared storage configuration is now EXPLICIT via CLI flag or config file.
+// Any storage type (file://, s3://, az://, gs://, direct://) can be shared or per-agent.
+// Users must specify their setup correctly in the config.
 
 /// v0.7.13: Validate workload configuration before execution
 /// Checks for common errors that would cause workload startup to fail
