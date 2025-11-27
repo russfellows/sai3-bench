@@ -32,6 +32,7 @@ async fn test_single_agent_prepare() {
         post_prepare_delay: 0,
         cleanup: false,
         cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
     };
     println!("Config created");
     

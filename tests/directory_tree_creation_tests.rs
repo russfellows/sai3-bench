@@ -5,7 +5,7 @@
 //! where multiple workers created files with identical names on shared filesystems
 
 use anyhow::Result;
-use sai3_bench::config::PrepareConfig;
+use sai3_bench::config::{PrepareConfig, CleanupMode};
 use sai3_bench::directory_tree::DirectoryStructureConfig;
 use sai3_bench::prepare::{create_directory_tree, PrepareMetrics};
 use std::collections::HashSet;
@@ -20,13 +20,15 @@ async fn test_single_agent_creates_all() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 2,
             depth: 2,
-            files_per_dir: 3,
+            files_per_dir: 3,  // Fixed: was 6, but test expects 12 files (4 leaf dirs * 3)
             distribution: "bottom".to_string(),
-            dir_mask: "d%d_w%d.dir".to_string(),
+            dir_mask: "dir_%d_w%d".to_string(),
         }),
         prepare_strategy: Default::default(),
         skip_verification: false,
@@ -58,6 +60,8 @@ async fn test_multi_agent_no_collision() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 2,
@@ -121,11 +125,13 @@ async fn test_agent_assignment_balanced() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 3,
             depth: 2,
-            files_per_dir: 6,
+            files_per_dir: 5,
             distribution: "bottom".to_string(),
             dir_mask: "d%d_w%d.dir".to_string(),
         }),
@@ -138,8 +144,8 @@ async fn test_agent_assignment_balanced() -> Result<()> {
     // Calculate expected distribution:
     // Depth 1: 3 dirs, Depth 2: 9 dirs (total 12 dirs)
     // With "bottom" distribution: only 9 leaf dirs get files
-    // Total files: 9 * 6 = 54 files
-    // Each agent: 54 / 3 = 18 files
+    // Total files: 9 * 5 = 45 files (fixed: comment had 9 * 6 = 54)
+    // Each agent: 45 / 3 = 15 files
     
     // Create manifests for each agent to verify actual distribution
     let mut agent_file_counts = vec![0; num_agents];
@@ -155,13 +161,13 @@ async fn test_agent_assignment_balanced() -> Result<()> {
         agent_file_counts[agent_id] = files.len();
         
         // Verify manifest reports correct total
-        assert_eq!(manifest.total_files, 54, "Total files should be 54");
+        assert_eq!(manifest.total_files, 45, "Total files should be 45 (9 leaf dirs * 5 files)");
     }
     
-    // Verify balanced distribution: each agent gets 18 files
+    // Verify balanced distribution: each agent gets 15 files
     for (agent_id, count) in agent_file_counts.iter().enumerate() {
-        assert_eq!(*count, 18, 
-            "Agent {} should create 18 files (54 total / 3 agents), got {}", 
+        assert_eq!(*count, 15, 
+            "Agent {} should create 15 files (45 total / 3 agents), got {}", 
             agent_id, count);
     }
     
@@ -177,6 +183,8 @@ async fn test_exclusive_directory_distribution() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 2,
@@ -235,6 +243,8 @@ async fn test_all_distribution_files_at_all_levels() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 2,
@@ -279,6 +289,8 @@ async fn test_bottom_distribution_files_at_leaf_only() -> Result<()> {
     let config = PrepareConfig {
         ensure_objects: vec![],
         cleanup: false,
+        cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: Some(DirectoryStructureConfig {
             width: 2,

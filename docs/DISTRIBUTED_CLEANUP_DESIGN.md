@@ -122,11 +122,24 @@ When `shared_filesystem: false`:
 
 ### Implementation Location
 
-The deterministic deletion logic should be in:
-- `src/prepare.rs`: Function that generates object URIs from config
-- Uses same algorithm as prepare phase for consistency
+**As of v0.8.7**, cleanup logic is organized in dedicated module:
+- `src/cleanup.rs`: Dedicated cleanup module
+  - `list_existing_objects()`: Lists ALL objects without filtering (cleanup distributes work)
+  - `cleanup_prepared_objects()`: Deletes objects with modulo distribution and error tolerance
+  - Clean separation from prepare.rs (prepare creates, cleanup deletes)
+
+- `src/prepare.rs`: Prepare-phase logic only
+  - `prepare_objects()`: Creates/verifies objects during prepare phase
+  - `generate_cleanup_objects()`: Generates deletion list from config (for skip_verification=true)
+
+**Key architectural insight**: 
+- `list_existing_objects()` returns the COMPLETE list of objects found in storage
+- `cleanup_prepared_objects()` handles the modulo distribution across agents
+- This ensures each agent sees all objects and can filter to its subset correctly
+
+The deterministic deletion logic uses the same algorithm as prepare phase:
 - Takes: `PrepareConfig`, `agent_id`, `num_agents`
-- Returns: List of URIs this agent should delete
+- Returns: List of URIs this agent should delete (via modulo: `index % num_agents == agent_id`)
 
 ### Example Scenario
 

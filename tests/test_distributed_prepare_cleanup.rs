@@ -38,6 +38,7 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
         post_prepare_delay: 0,
         cleanup: true,
         cleanup_mode: CleanupMode::Tolerant,
+        cleanup_only: Some(false),
     }
 }
 

@@ -2280,6 +2280,8 @@ mod tests {
         let config = PrepareConfig {
             ensure_objects: vec![],
             cleanup: false,
+            cleanup_mode: crate::config::CleanupMode::Tolerant,
+            cleanup_only: Some(false),
             post_prepare_delay: 0,
             directory_structure: None,
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
@@ -2298,7 +2300,7 @@ mod tests {
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, test_concurrency).await
+            prepare_objects(&config, None, None, 0, 1, test_concurrency).await
         });
         
         // Should succeed with empty object list
@@ -2315,6 +2317,8 @@ mod tests {
         let config = PrepareConfig {
             ensure_objects: vec![],
             cleanup: false,
+            cleanup_mode: crate::config::CleanupMode::Tolerant,
+            cleanup_only: Some(false),
             post_prepare_delay: 0,
             directory_structure: None,
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
@@ -2324,7 +2328,7 @@ mod tests {
         // Test with various concurrency values
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, concurrency).await
+                prepare_objects(&config, None, None, 0, 1, concurrency).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);

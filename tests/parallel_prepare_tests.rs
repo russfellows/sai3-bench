@@ -49,13 +49,15 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Sequential,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 16).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 16, 0, 1).await?;
     
     // Should have created 30 objects total
     assert_eq!(objects.len(), 30, "Should create 30 objects");
@@ -120,13 +122,15 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 64).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 64, 0, 1).await?;
     
     // Should have created 60 objects total
     assert_eq!(objects.len(), 60, "Should create 60 objects");
@@ -196,13 +200,17 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 8).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48, 0, 1).await?;
+    
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 8, 0, 1).await?;
     
     // Count sizes
     let mut size_counts = HashMap::new();
@@ -331,13 +339,15 @@ async fn test_parallel_with_single_size() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24, 0, 1).await?;
     
     assert_eq!(objects.len(), 20, "Should create 20 objects total");
     
@@ -382,13 +392,15 @@ async fn test_files_created_correctly() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24, 0, 1).await?;
     
     // Verify files exist on disk with correct sizes
     for obj in &objects {
@@ -444,13 +456,15 @@ async fn test_parallel_directory_distribution() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,  // No directory tree - test file ordering
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48, 0, 1).await?;
     
     // Should have created 90 objects total
     assert_eq!(objects.len(), 90, "Should create 90 objects");
@@ -533,6 +547,8 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Sequential,
@@ -541,7 +557,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     
     // Test with different concurrency values to verify parameter is accepted
     for concurrency in [1, 16, 32, 64, 128] {
-        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, concurrency).await?;
+        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, concurrency, 0, 1).await?;
         
         // Verify objects were created
         assert_eq!(objects.len(), 5, "Should create 5 objects with concurrency={}", concurrency);
@@ -568,6 +584,8 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
             },
         ],
         cleanup: false,
+        cleanup_mode: sai3_bench::config::CleanupMode::Tolerant,
+        cleanup_only: Some(false),
         post_prepare_delay: 0,
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
@@ -579,7 +597,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     std::fs::create_dir_all(base_path)?;
     
     // Test parallel strategy with high concurrency
-    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, 64).await?;
+    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, 64, 0, 1).await?;
     assert_eq!(objects.len(), 5, "Parallel strategy should create 5 objects with concurrency=64");
     assert_eq!(metrics.objects_created, 5, "Metrics should show 5 objects created");
     
