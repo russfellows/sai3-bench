@@ -32,10 +32,13 @@ use s3dlio::{init_op_logger, finalize_op_logger, global_logger};
 
 // Re-export prepare module functions for convenience
 pub use crate::prepare::{
-    prepare_objects, cleanup_prepared_objects, verify_prepared_objects,
+    prepare_objects, verify_prepared_objects,
     generate_cleanup_objects,
     PathSelector, PreparedObject, PrepareMetrics,
 };
+
+// Re-export cleanup module functions
+pub use crate::cleanup::cleanup_prepared_objects;
 
 // -----------------------------------------------------------------------------
 // Import chunked read constants from constants module

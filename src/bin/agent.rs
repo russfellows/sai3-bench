@@ -483,9 +483,10 @@ impl Agent for AgentSvc {
 
         // Execute prepare phase or generate cleanup list
         let (prepared_objects, tree_manifest) = if is_cleanup_only {
-            // Cleanup-only mode: Generate objects WITHOUT listing (if skip_verification=true)
+            // Cleanup-only mode: Generate list of objects to clean up
             if let Some(ref prepare_config) = config.prepare {
                 if prepare_config.skip_verification {
+                    // Generate from config without listing
                     info!("Cleanup-only mode (skip_verification=true): Generating object list from config");
                     let objects = sai3_bench::workload::generate_cleanup_objects(
                         prepare_config,
@@ -498,20 +499,21 @@ impl Agent for AgentSvc {
                     info!("Generated {} objects for cleanup", objects.len());
                     (objects, None)
                 } else {
-                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects");
-                    // Run normal prepare to discover what exists
-                    let (prepared, manifest, _) = sai3_bench::workload::prepare_objects(
+                    // List existing objects WITHOUT creating any (use new list_existing_objects function)
+                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects only");
+                    if num_agents > 1 {
+                        warn!("Note: In shared storage mode with {} agents, each will list ALL objects then filter to their subset.", num_agents);
+                        warn!("For large datasets (>10k files), strongly recommend skip_verification=true to avoid listing overhead.");
+                    }
+                    
+                    sai3_bench::cleanup::list_existing_objects(
                         prepare_config,
-                        Some(&config.workload),
-                        None,
-                        config.concurrency,
                         agent_index as usize,
                         num_agents as usize,
                     ).await.map_err(|e| {
-                        error!("Prepare phase failed: {}", e);
-                        Status::internal(format!("Prepare phase failed: {}", e))
-                    })?;
-                    (prepared, manifest)
+                        error!("Failed to list objects: {}", e);
+                        Status::internal(format!("Failed to list objects: {}", e))
+                    })?
                 }
             } else {
                 (Vec::new(), None)
@@ -644,7 +646,7 @@ impl Agent for AgentSvc {
                 .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
             
             // Run cleanup with stats tracking
-            sai3_bench::workload::cleanup_prepared_objects(
+            sai3_bench::cleanup::cleanup_prepared_objects(
                 &prepared_objects,
                 tree_manifest.as_ref(),
                 agent_index as usize,
@@ -743,7 +745,7 @@ impl Agent for AgentSvc {
                     // Get tracker for live stats reporting during cleanup
                     let tracker = self.state.get_tracker().await;
                     
-                    if let Err(e) = sai3_bench::workload::cleanup_prepared_objects(
+                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
                         &prepared_objects,
                         tree_manifest.as_ref(),
                         agent_index as usize,
@@ -2231,9 +2233,10 @@ impl Agent for AgentSvc {
                                         
                                         // Execute prepare phase or generate cleanup list
                                         let (prepared_objects, tree_manifest) = if is_cleanup_only {
-                                            // Cleanup-only mode
+                                            // Cleanup-only mode: Generate list of objects to clean up
                                             if let Some(ref prepare_config) = config_exec.prepare {
                                                 if prepare_config.skip_verification {
+                                                    // Generate from config without listing
                                                     info!("Cleanup-only mode (skip_verification=true): Generating object list from config");
                                                     match sai3_bench::workload::generate_cleanup_objects(prepare_config, agent_index, num_agents) {
                                                         Ok(objects) => {
@@ -2246,11 +2249,20 @@ impl Agent for AgentSvc {
                                                         }
                                                     }
                                                 } else {
-                                                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects");
-                                                    match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency, agent_index, num_agents).await {
-                                                        Ok((prepared, manifest, _)) => (prepared, manifest),
+                                                    // List existing objects WITHOUT creating any (use new list_existing_objects function)
+                                                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects only");
+                                                    if num_agents > 1 {
+                                                        warn!("Note: In shared storage mode with {} agents, each will list ALL objects then filter to their subset.", num_agents);
+                                                        warn!("For large datasets (>10k files), strongly recommend skip_verification=true to avoid listing overhead.");
+                                                    }
+                                                    
+                                                    match sai3_bench::cleanup::list_existing_objects(prepare_config, agent_index, num_agents).await {
+                                                        Ok((prepared, manifest)) => {
+                                                            info!("Found {} existing objects to cleanup", prepared.len());
+                                                            (prepared, manifest)
+                                                        }
                                                         Err(e) => {
-                                                            let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
+                                                            let _ = tx_done_exec.send(Err(format!("Failed to list objects: {}", e))).await;
                                                             return;
                                                         }
                                                     }
@@ -2363,7 +2375,7 @@ impl Agent for AgentSvc {
                                                 .map(|p| p.cleanup_mode)
                                                 .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
                                             
-                                            match sai3_bench::workload::cleanup_prepared_objects(
+                                            match sai3_bench::cleanup::cleanup_prepared_objects(
                                                 &prepared_objects,
                                                 tree_manifest.as_ref(),
                                                 agent_index as usize,
@@ -2475,7 +2487,7 @@ impl Agent for AgentSvc {
                                                                     // Get tracker for live stats reporting during cleanup
                                                                     let tracker = agent_state_for_task.get_tracker().await;
                                                                     
-                                                                    if let Err(e) = sai3_bench::workload::cleanup_prepared_objects(
+                                                                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
                                                                         &prepared_objects,
                                                                         tree_manifest.as_ref(),
                                                                         agent_index as usize,
