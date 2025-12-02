@@ -5,7 +5,7 @@
 // of I/O operations.
 
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// Metadata information for an object
 #[derive(Debug, Clone)]
@@ -148,7 +148,7 @@ async fn fetch_metadata_for_uri(uri: &str) -> ObjectMetadata {
         // Fetch metadata using tokio's fs (async)
         match tokio::fs::metadata(path_str).await {
             Ok(meta) => {
-                debug!("Prefetched metadata for {}: {} bytes", uri, meta.len());
+                trace!("Prefetched metadata for {}: {} bytes", uri, meta.len());
                 Some(meta.len())
             }
             Err(e) => {

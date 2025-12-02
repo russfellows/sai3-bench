@@ -152,16 +152,12 @@ pub const DEFAULT_AGENT_HEARTBEAT_SECS: u64 = 1;
 // Bidirectional Streaming Timeouts (v0.8.4+)
 // =============================================================================
 
-/// Agent IDLE state timeout (seconds)
-/// Agent must receive initial START command within this time
-pub const AGENT_IDLE_TIMEOUT_SECS: u64 = 30;
-
-/// Agent prepare phase timeout (seconds)
-/// Prepare phase (config validation + file creation) must complete within this time
-pub const AGENT_PREPARE_TIMEOUT_SECS: u64 = 30;
+// NOTE: IDLE state has NO timeout - agents wait indefinitely for controllers.
+// This allows agents to run as long-lived services that accept connections on demand.
 
 /// Agent READY state timeout (seconds)
 /// Agent must receive coordinated START command within this time after becoming READY
+/// If exceeded, agent returns to IDLE state and is ready for new connections
 pub const AGENT_READY_TIMEOUT_SECS: u64 = 60;
 
 /// Controller connection timeout (seconds)

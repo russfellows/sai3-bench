@@ -38,50 +38,67 @@ The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.7.0 (October 2025) - Directory Tree Support with Multi-Client Coordination
+**Current Version**: v0.8.7 (November 2025) - Bidirectional Streaming with Dedicated Cleanup Module
 
-**v0.7.0 Key Features**:
-- rdf-bench-style hierarchical directory trees (width/depth model)
-- Multi-client coordination modes: isolated, coordinator, concurrent
-- Path selection strategies for contention control: random, partitioned, exclusive, weighted
-- Explicit shared filesystem configuration (no auto-detection)
+**v0.8.7 Key Features**:
+- Dedicated cleanup module (`src/cleanup.rs`) with `list_existing_objects()`
+- Cleanup-only mode with storage listing (no file creation)
+- Cleanup as counted workload with live stats tracking (DELETE → META)
+- Minimum 3-second stats reporting for fast-completing workloads
 
-**v0.6.11 Key Features**:
-- SSH automation for zero-touch distributed deployment
-- Config-driven agent specification (no CLI flags needed)
-- Flexible container runtime (Docker/Podman) via YAML
-- Per-agent customization (target override, concurrency, env vars)
-- GCP automation scripts with full lifecycle management
+**v0.8.5 Key Features** (Bidirectional Streaming Architecture):
+- Single gRPC bidirectional stream (`ExecuteWorkload`) for reliable distributed execution
+- Agent state machine: Idle → Ready → Running → Idle
+- Controller state machine: Connecting → ConfigSent → Ready → StartSent → CollectingStats → Completed
+- Live stats streaming every 1 second during workload execution
 
-**v0.6.10 Critical Findings**: Pre-stat and RangeEngine optimizations provide **NO performance benefit** for same-region, high-bandwidth cloud storage scenarios. Pre-stat now gated behind `range_engine.enabled` flag to avoid 250ms overhead. RangeEngine is 35% SLOWER than single-stream downloads when network-bound.
+**v0.8.6 Features**:
+- Prand data generation (`fill: prand`) - 31% faster, but 87-90% compressible (use sparingly)
+- Operation logging with client_id and clock offset synchronization
+- first_byte tracking for GET operations (approximate TTFB)
 
-## v0.7.0 Implementation Status
+## Module Architecture (v0.8.7)
 
-**Design Status:** ✅ Complete  
-**Config Status:** ✅ Complete (30 tests passing)  
-**Implementation Status:** 🔄 In Progress (see gap analysis below)
+### Core Source Modules (`src/`)
+- **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`
+- **`bin/agent.rs`** - gRPC agent with bidirectional streaming (state machine: Idle→Ready→Running)
+- **`bin/controller.rs`** - Coordinator with bidirectional streaming (orchestrates multi-agent workloads)
+- **`config.rs`** - YAML config parsing with PrepareConfig, WorkloadConfig, CleanupMode
+- **`constants.rs`** - Centralized constants (timeouts, defaults, thresholds) - **check here first**
+- **`workload.rs`** - Workload execution engine with weighted operations
+- **`prepare.rs`** - Object preparation with parallel/sequential strategies
+- **`cleanup.rs`** - Dedicated cleanup module with `list_existing_objects()` and `cleanup_prepared_objects()`
+- **`live_stats.rs`** - Thread-safe LiveStatsTracker for real-time metrics streaming
+- **`rate_controller.rs`** - I/O rate limiting (deterministic, uniform, exponential)
+- **`validation.rs`** - Config validation with detailed error messages
+- **`size_generator.rs`** - Size distributions (Fixed, Uniform, Lognormal)
+- **`directory_tree.rs`** - Directory tree generation (width/depth model)
+- **`multiprocess.rs`** - Local multi-process scaling
+- **`cpu_monitor.rs`** - CPU utilization monitoring during workloads
 
-**Critical Document:** See [`docs/v0.7.0-gap-analysis.md`](../docs/v0.7.0-gap-analysis.md) for:
-- Feature parity assessment with rdf-bench (current: 65%, projected: 85%)
-- Implementation gaps and roadmap (Phases 1-3, ~7-10 days)
-- Strategic positioning (complementary tool, not replacement)
-- Recommendation for TreeManifest (shared logical map)
+### Key Constants (`src/constants.rs`)
+All magic numbers are centralized here - **always check this file first** when tuning:
+```rust
+// Error handling
+DEFAULT_MAX_ERRORS: u64 = 100
+DEFAULT_ERROR_RATE_THRESHOLD: f64 = 5.0
+DEFAULT_BACKOFF_DURATION: Duration = 5s
 
-**What Works:**
-- DirectoryTree module with width/depth model
-- Config structs for all coordination modes
-- Metadata operations (mkdir/rmdir)
-- Path selection strategy enums
+// Workload defaults  
+DEFAULT_DURATION_SECS: u64 = 60
+DEFAULT_CONCURRENCY: usize = 16
 
-**What's Missing:**
-- PrepareConfig → DirectoryTree integration
-- Tree creation in prepare phase
-- Path selection in workload
-- Agent coordination for concurrent mode
+// Direct I/O optimization
+DIRECT_IO_CHUNK_SIZE: usize = 4 MiB  // 1.73 GiB/s vs 0.01 GiB/s
+CHUNKED_READ_THRESHOLD: u64 = 8 MiB
 
-**Next Action:** Implement Phase 1 (Tree Creation Logic) from gap analysis.
+// gRPC timeouts (for distributed mode)
+AGENT_READY_TIMEOUT: Duration = 40s
+COORDINATED_START_TIMEOUT: Duration = 30s
+STATS_INTERVAL: Duration = 1s
+```
 
-## Testing Requirements (CRITICAL - v0.7.0+)
+## Testing Requirements (CRITICAL - v0.8.0+)
 
 ### Starting Local Test Agents
 
@@ -182,7 +199,7 @@ Added 21 new tests in `tests/distributed_config_tests.rs`:
 - 1 serialize/deserialize round-trip test
 - Updated 9 existing tests to include new required fields
 
-**Current test count**: 30 tests in `tests/distributed_config_tests.rs`, 34 tests in `src/lib.rs`
+**Current test count**: 55+ Rust tests across multiple test files
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`
@@ -246,7 +263,7 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
     store_for_uri(uri).context("Failed to create object store")
 }
 ```
-**Key**: Currently using s3dlio v0.9.10 via local path dependency `../s3dlio`.
+**Key**: Currently using s3dlio v0.9.22 via git tag dependency.
 
 ### Pre-stat Optimization Gating (v0.6.10)
 Pre-stat (batch HEAD requests to populate size cache) is **gated behind RangeEngine flag** due to performance findings:
