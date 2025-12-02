@@ -30,7 +30,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage};
 
 /// v0.7.13: Controller's view of agent states
 /// 
@@ -49,8 +49,9 @@ enum ControllerAgentState {
     Connecting,   // Stream opened
     Validating,   // First message, validation in progress
     Ready,        // READY(1) received
-    Preparing,    // in_prepare_phase=true
-    Running,      // RUNNING(2) received
+    Preparing,    // in_prepare_phase=true (STAGE_PREPARE)
+    Running,      // RUNNING(2) received (STAGE_WORKLOAD)
+    Cleaning,     // v0.8.9: Cleanup phase (STAGE_CLEANUP)
     Completed,    // Workload done
     Failed,       // ERROR(3) received
     Disconnected, // Stream closed or timeout
@@ -71,18 +72,23 @@ impl ControllerAgentState {
             | (Ready, Preparing)       // Prepare phase starts
             | (Ready, Running)         // No prepare, direct to running
             | (Preparing, Running)     // Prepare → workload
-            | (Running, Completed)     // Success
+            | (Running, Cleaning)      // v0.8.9: Workload → cleanup
+            | (Running, Completed)     // Success (no cleanup)
+            | (Cleaning, Completed)    // v0.8.9: Cleanup → success
             | (Running, Failed)        // Error
+            | (Cleaning, Failed)       // v0.8.9: Error during cleanup
             // Disconnect/timeout
             | (Connecting, Disconnected)
             | (Validating, Disconnected)
             | (Ready, Disconnected)
             | (Preparing, Disconnected)
             | (Running, Disconnected)
+            | (Cleaning, Disconnected) // v0.8.9: Lost during cleanup
             // Abort paths
             | (Ready, Aborting)
             | (Preparing, Aborting)
             | (Running, Aborting)
+            | (Cleaning, Aborting)     // v0.8.9: Abort during cleanup
             | (Aborting, Completed)    // Cleanup done
             | (Aborting, Failed)       // Abort failed
             | (Aborting, Disconnected) // Lost during abort
@@ -94,6 +100,7 @@ impl ControllerAgentState {
             // Solution: Allow transitions FROM Disconnected based on message content
             | (Disconnected, Preparing)  // Reconnect during prepare phase
             | (Disconnected, Running)    // Reconnect during workload phase
+            | (Disconnected, Cleaning)   // v0.8.9: Reconnect during cleanup phase
             | (Disconnected, Completed)  // Reconnect with completion message
             // Stay in terminal states
             | (Completed, Completed)
@@ -1347,6 +1354,8 @@ async fn run_distributed_workload(
                     cpu_total_percent: 0.0,
                     agent_timestamp_ns: 0,
                     sequence: 0,
+                    // v0.8.9: Stage tracking (error state)
+                    current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
@@ -1617,12 +1626,16 @@ async fn run_distributed_workload(
     // v0.7.5: Track last console.log write time (write every 1 second)
     let mut last_console_log = std::time::Instant::now();
     
-    // v0.7.9: Track prepare phase state to detect transition to workload
-    let mut was_in_prepare_phase = false;
+    // v0.8.9: Track stage for transition detection (replaces was_in_prepare_phase)
+    let mut last_stage = WorkloadStage::StageUnknown;
     
     // v0.8.4: Track prepare phase high-water marks (never decrease during prepare)
     let mut max_prepare_created: u64 = 0;
     let mut max_prepare_total: u64 = 0;
+    
+    // v0.8.9: Track cleanup phase high-water marks (never decrease during cleanup)
+    let mut max_cleanup_current: u64 = 0;
+    let mut max_cleanup_total: u64 = 0;
     
     // Process live stats stream
     loop {
@@ -1693,12 +1706,17 @@ async fn run_distributed_workload(
                                 }
                             }
                             
+                            // v0.8.9: Use current_stage for recovery state
+                            let recovery_stage = WorkloadStage::try_from(stats.current_stage)
+                                .unwrap_or(WorkloadStage::StageUnknown);
                             let new_state = if stats.completed {
                                 ControllerAgentState::Completed
-                            } else if stats.in_prepare_phase {
-                                ControllerAgentState::Preparing
                             } else {
-                                ControllerAgentState::Running
+                                match recovery_stage {
+                                    WorkloadStage::StagePrepare => ControllerAgentState::Preparing,
+                                    WorkloadStage::StageCleanup => ControllerAgentState::Cleaning,
+                                    _ => ControllerAgentState::Running,
+                                }
                             };
                             
                             // v0.8.2: Increment reconnect counter for diagnostics
@@ -1713,44 +1731,65 @@ async fn run_distributed_workload(
                             }
                         }
                         
-                        // v0.7.9: Capture prepare phase info BEFORE moving stats
-                        let in_prepare = stats.in_prepare_phase;
+                        // v0.8.9: Use current_stage enum for flexible multi-stage support
+                        // Replaces in_prepare_phase bool for cleaner stage transitions
+                        let current_stage = WorkloadStage::try_from(stats.current_stage)
+                            .unwrap_or(WorkloadStage::StageUnknown);
                         
                         // v0.8.4: Use high-water marks during prepare phase to prevent backwards movement
                         // (delayed packets should never decrease the displayed counter)
-                        if in_prepare {
+                        if current_stage == WorkloadStage::StagePrepare {
                             max_prepare_created = max_prepare_created.max(stats.prepare_objects_created);
                             max_prepare_total = max_prepare_total.max(stats.prepare_objects_total);
                         }
                         let prepare_created = max_prepare_created;
                         let prepare_total = max_prepare_total;
                         
-                        // v0.7.13: Update agent state based on prepare phase
-                        // v0.8.2: Only transition Ready→Preparing (not Running→Preparing, that's invalid)
-                        // BUG FIX: Previously checked (Ready || Running), but Running→Preparing is
-                        // not an allowed transition. Agents should never go backwards in phases.
-                        if in_prepare && tracker.state == ControllerAgentState::Ready {
-                            let _ = tracker.transition_to(ControllerAgentState::Preparing, "prepare phase started");
-                        } else if !in_prepare && tracker.state == ControllerAgentState::Preparing {
-                            let _ = tracker.transition_to(ControllerAgentState::Running, "workload phase started");
-                        } else if !in_prepare && tracker.state == ControllerAgentState::Ready {
-                            // No prepare phase, direct to running
-                            let _ = tracker.transition_to(ControllerAgentState::Running, "workload started (no prepare)");
+                        // v0.8.9: Track cleanup progress with high-water marks
+                        if current_stage == WorkloadStage::StageCleanup {
+                            max_cleanup_current = max_cleanup_current.max(stats.stage_progress_current);
+                            max_cleanup_total = max_cleanup_total.max(stats.stage_progress_total);
+                        }
+                        let cleanup_current = max_cleanup_current;
+                        let cleanup_total = max_cleanup_total;
+                        let stage_elapsed_s = stats.stage_elapsed_s;  // Capture before move
+                        
+                        // v0.8.9: Update agent state based on current_stage enum
+                        match current_stage {
+                            WorkloadStage::StagePrepare => {
+                                if tracker.state == ControllerAgentState::Ready {
+                                    let _ = tracker.transition_to(ControllerAgentState::Preparing, "prepare phase started");
+                                }
+                            }
+                            WorkloadStage::StageWorkload => {
+                                if tracker.state == ControllerAgentState::Preparing {
+                                    let _ = tracker.transition_to(ControllerAgentState::Running, "workload phase started");
+                                } else if tracker.state == ControllerAgentState::Ready {
+                                    let _ = tracker.transition_to(ControllerAgentState::Running, "workload started (no prepare)");
+                                }
+                            }
+                            WorkloadStage::StageCleanup => {
+                                if tracker.state == ControllerAgentState::Running {
+                                    let _ = tracker.transition_to(ControllerAgentState::Cleaning, "cleanup phase started");
+                                }
+                            }
+                            _ => {}  // Unknown or Custom stages don't trigger state changes
                         }
                         
+                        // v0.8.9: Track last known stage for phase transition detection
+                        let prev_stage = last_stage;
+                        last_stage = current_stage;
+                        
                         // v0.7.9: Detect transition from prepare to workload and reset aggregator
-                        if was_in_prepare_phase && !in_prepare {
+                        if prev_stage == WorkloadStage::StagePrepare && current_stage == WorkloadStage::StageWorkload {
                             debug!("Prepare phase completed, resetting aggregator for workload-only stats");
                             aggregator.reset_stats();
                             // Reset workload timer to measure actual workload duration (not including prepare)
                             workload_start = std::time::Instant::now();
-                            was_in_prepare_phase = false;
                             
                             // v0.8.4: Reset prepare counters when transitioning to workload phase
                             max_prepare_created = 0;
                             max_prepare_total = 0;
-                        } else if in_prepare {
-                            was_in_prepare_phase = true;
                         }
                         
                         // v0.7.5: Extract final summary if completed
@@ -1817,49 +1856,61 @@ async fn run_distributed_workload(
                             let agg = aggregator.aggregate();
                             let dead_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Disconnected).count();
                             
-                            // v0.7.9: Use captured prepare phase info
-                            let msg = if in_prepare && prepare_total > 0 {
-                                // Show prepare progress as "created/total (percentage)"
-                                let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
-                                if dead_count == 0 {
-                                    format!("📦 Preparing: {}/{} objects ({}%) {}", 
-                                            prepare_created, prepare_total, pct, agg.format_progress())
-                                } else {
-                                    format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}", 
-                                            prepare_created, prepare_total, pct, dead_count, agg.format_progress())
+                            // v0.8.9: Use current_stage for stage-aware display
+                            let (msg, progress_pos, progress_len, progress_unit) = match current_stage {
+                                WorkloadStage::StagePrepare if prepare_total > 0 => {
+                                    // Show prepare progress as "created/total (percentage)"
+                                    let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
+                                    let msg = if dead_count == 0 {
+                                        format!("📦 Preparing: {}/{} objects ({}%) {}", 
+                                                prepare_created, prepare_total, pct, agg.format_progress())
+                                    } else {
+                                        format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}", 
+                                                prepare_created, prepare_total, pct, dead_count, agg.format_progress())
+                                    };
+                                    (msg, prepare_created, prepare_total, "objects")
                                 }
-                            } else if dead_count == 0 {
-                                agg.format_progress()
-                            } else {
-                                format!("{} (⚠️ {} dead)", agg.format_progress(), dead_count)
+                                WorkloadStage::StageCleanup if cleanup_total > 0 => {
+                                    // Show cleanup progress as "deleted/total (percentage)"
+                                    let pct = (cleanup_current as f64 / cleanup_total as f64 * 100.0) as u32;
+                                    // v0.8.9: Format cleanup-specific progress (DELETE ops/s)
+                                    let cleanup_rate = if stage_elapsed_s > 0.0 {
+                                        cleanup_current as f64 / stage_elapsed_s
+                                    } else {
+                                        0.0
+                                    };
+                                    let msg = if dead_count == 0 {
+                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s", 
+                                                cleanup_current, cleanup_total, pct, cleanup_rate)
+                                    } else {
+                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s (⚠️ {} dead)", 
+                                                cleanup_current, cleanup_total, pct, cleanup_rate, dead_count)
+                                    };
+                                    (msg, cleanup_current, cleanup_total, "deleted")
+                                }
+                                _ => {
+                                    // Workload phase (or unknown): show elapsed time and ops/s
+                                    let msg = if dead_count == 0 {
+                                        agg.format_progress()
+                                    } else {
+                                        format!("{} (⚠️ {} dead)", agg.format_progress(), dead_count)
+                                    };
+                                    let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
+                                    (msg, elapsed_secs, duration_secs, "s")
+                                }
                             };
                             progress_bar.set_message(msg.clone());
                             
-                            // v0.7.9: Update progress bar based on phase
-                            if in_prepare && prepare_total > 0 {
-                                // During prepare: show objects created out of total
-                                progress_bar.set_length(prepare_total);
-                                progress_bar.set_position(prepare_created);
-                                // Update style to show 'objects' unit
-                                progress_bar.set_style(
-                                    ProgressStyle::default_bar()
-                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7} objects\n{msg}")
-                                        .expect("Invalid progress template")
-                                        .progress_chars("█▓▒░ ")
-                                );
-                            } else {
-                                // During workload: show elapsed time out of duration
-                                progress_bar.set_length(duration_secs);
-                                let elapsed_secs = workload_start.elapsed().as_secs().min(duration_secs);
-                                progress_bar.set_position(elapsed_secs);
-                                // Update style to show 's' (seconds) unit
-                                progress_bar.set_style(
-                                    ProgressStyle::default_bar()
-                                        .template("{bar:40.cyan/blue} {pos:>7}/{len:7}s\n{msg}")
-                                        .expect("Invalid progress template")
-                                        .progress_chars("█▓▒░ ")
-                                );
-                            }
+                            // v0.8.9: Update progress bar based on current stage
+                            progress_bar.set_length(progress_len);
+                            progress_bar.set_position(progress_pos);
+                            let template = format!("{{bar:40.cyan/blue}} {{pos:>7}}/{{len:7}} {}\n{{msg}}", progress_unit);
+                            progress_bar.set_style(
+                                ProgressStyle::default_bar()
+                                    .template(&template)
+                                    .expect("Invalid progress template")
+                                    .progress_chars("█▓▒░ ")
+                            );
                             
                             last_update = std::time::Instant::now();
                             

@@ -168,15 +168,27 @@ pub async fn cleanup_prepared_objects(
     info!("Agent {}/{}: Responsible for {} of {} objects", 
           agent_id, num_agents, my_objects_count, objects.len());
     
+    if my_objects.is_empty() {
+        info!("Agent {}/{}: No objects to delete (all assigned to other agents)", agent_id, num_agents);
+        return Ok(());
+    }
+    
+    // v0.8.9: Create store ONCE using first object's URI (all objects share same backend)
+    // This fixes a major performance issue where create_store_for_uri was called per-object
+    let first_uri = &my_objects[0].uri;
+    let store = Arc::new(create_store_for_uri(first_uri)
+        .context("Failed to create object store for cleanup")?);
+    info!("Agent {}/{}: Created object store for cleanup", agent_id, num_agents);
+    
     // Delete objects in parallel
     use futures::stream::{self, StreamExt};
     
     let results: Vec<_> = stream::iter(my_objects)
         .map(|obj| {
             let tracker = live_stats_tracker.clone();
+            let store = store.clone();
             async move {
                 let start = std::time::Instant::now();
-                let store = create_store_for_uri(&obj.uri)?;
                 
                 // Delete using full URI (same as prepare.rs cleanup)
                 match store.delete(&obj.uri).await {
@@ -184,6 +196,8 @@ pub async fn cleanup_prepared_objects(
                         // Record successful DELETE as META operation
                         if let Some(ref t) = tracker {
                             t.record_meta(start.elapsed());
+                            // v0.8.9: Increment stage progress for cleanup
+                            t.increment_stage_progress();
                         }
                         Ok(DeleteResult::Success)
                     }
@@ -191,6 +205,10 @@ pub async fn cleanup_prepared_objects(
                         let err_msg = e.to_string().to_lowercase();
                         if err_msg.contains("not found") || err_msg.contains("no such") || err_msg.contains("404") {
                             // Object already deleted (tolerable in most modes)
+                            // v0.8.9: Increment stage progress even for already-deleted
+                            if let Some(ref t) = tracker {
+                                t.increment_stage_progress();
+                            }
                             match cleanup_mode {
                                 CleanupMode::Strict => Err(anyhow!("Object not found (strict mode): {}", obj.uri)),
                                 CleanupMode::Tolerant | CleanupMode::BestEffort => {

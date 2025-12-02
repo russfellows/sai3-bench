@@ -558,9 +558,13 @@ async fn prepare_sequential(
                 let pb_clone = pb.clone();
                 let tracker_clone = live_stats_tracker.clone();
                 
+                // v0.8.9: Create store ONCE before loop (was creating per-object, causing massive overhead)
+                let shared_store = Arc::new(create_store_for_uri(&spec.base_uri)
+                    .context("Failed to create object store for prepare")?);
+                
                 for (uri, size) in tasks {
                     let sem2 = sem.clone();
-                    let store_uri = spec.base_uri.clone();
+                    let store = shared_store.clone();
                     let fill = spec.fill;
                     let dedup = spec.dedup_factor;
                     let compress = spec.compress_factor;
@@ -583,10 +587,7 @@ async fn prepare_sequential(
                             }
                         };
                         
-                        // Create store instance for this task
-                        let store = create_store_for_uri(&store_uri)?;
-                        
-                        // PUT object with timing
+                        // PUT object with timing (using shared store)
                         let put_start = Instant::now();
                         store.put(&uri, &data).await
                             .with_context(|| format!("Failed to PUT {}", uri))?;
@@ -1131,12 +1132,26 @@ async fn prepare_parallel(
     let pb_clone = pb.clone();
     let tracker_clone = live_stats_tracker.clone();
     
+    // v0.8.9: Create store cache to avoid creating per-object (was causing massive overhead)
+    // Build cache of unique store_uris before entering the loop
+    let mut store_cache: std::collections::HashMap<String, Arc<Box<dyn s3dlio::ObjectStore>>> = std::collections::HashMap::new();
+    for task in &all_tasks {
+        if !store_cache.contains_key(&task.store_uri) {
+            let store = create_store_for_uri(&task.store_uri)
+                .with_context(|| format!("Failed to create store for {}", task.store_uri))?;
+            store_cache.insert(task.store_uri.clone(), Arc::new(store));
+        }
+    }
+    let store_cache = Arc::new(store_cache);
+    info!("Created {} cached object store(s) for prepare phase", store_cache.len());
+    
     for task in all_tasks {
         let sem2 = sem.clone();
         let pb2 = pb_clone.clone();
         let ops_counter = live_ops.clone();
         let bytes_counter = live_bytes.clone();
         let tracker = tracker_clone.clone();
+        let stores = store_cache.clone();
         
         futs.push(tokio::spawn(async move {
             let _permit = sem2.acquire_owned().await.unwrap();
@@ -1152,8 +1167,9 @@ async fn prepare_parallel(
                 }
             };
             
-            // Create store instance for this task
-            let store = create_store_for_uri(&task.store_uri)?;
+            // Get cached store instance
+            let store = stores.get(&task.store_uri)
+                .ok_or_else(|| anyhow::anyhow!("Store not found in cache for {}", task.store_uri))?;
             
             // PUT object with timing
             let put_start = Instant::now();

@@ -219,7 +219,7 @@ pub struct LiveStats {
     /// Details if status == ERROR or ABORTED
     #[prost(string, tag = "19")]
     pub error_message: ::prost::alloc::string::String,
-    /// v0.7.9: Prepare phase progress tracking
+    /// v0.7.9: Prepare phase progress tracking (DEPRECATED: use current_stage instead)
     ///
     /// True if currently in prepare phase
     #[prost(bool, tag = "20")]
@@ -258,6 +258,21 @@ pub struct LiveStats {
     /// Allows controller to confirm receipt of specific messages (e.g., READY status)
     #[prost(int64, tag = "29")]
     pub sequence: i64,
+    /// Current execution stage
+    #[prost(enumeration = "live_stats::WorkloadStage", tag = "30")]
+    pub current_stage: i32,
+    /// Human-readable stage name (esp. for CUSTOM)
+    #[prost(string, tag = "31")]
+    pub stage_name: ::prost::alloc::string::String,
+    /// Progress within stage (objects created/deleted, etc.)
+    #[prost(uint64, tag = "32")]
+    pub stage_progress_current: u64,
+    /// Total items for this stage (0 = time-based like workload)
+    #[prost(uint64, tag = "33")]
+    pub stage_progress_total: u64,
+    /// Seconds since this stage started
+    #[prost(double, tag = "34")]
+    pub stage_elapsed_s: f64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {
@@ -315,6 +330,59 @@ pub mod live_stats {
                 "COMPLETED" => Some(Self::Completed),
                 "ABORTED" => Some(Self::Aborted),
                 "ACKNOWLEDGE" => Some(Self::Acknowledge),
+                _ => None,
+            }
+        }
+    }
+    /// v0.8.9: Flexible stage system for multi-phase execution
+    /// Replaces the limited in_prepare_phase bool with a proper stage enum
+    /// Allows controller to display appropriate progress for each stage
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum WorkloadStage {
+        /// Unknown/unset (backward compat)
+        StageUnknown = 0,
+        /// Creating objects before workload
+        StagePrepare = 1,
+        /// Main benchmark execution (GET/PUT/etc.)
+        StageWorkload = 2,
+        /// Deleting objects after workload
+        StageCleanup = 3,
+        /// User-defined custom stage (use stage_name)
+        StageCustom = 10,
+    }
+    impl WorkloadStage {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::StageUnknown => "STAGE_UNKNOWN",
+                Self::StagePrepare => "STAGE_PREPARE",
+                Self::StageWorkload => "STAGE_WORKLOAD",
+                Self::StageCleanup => "STAGE_CLEANUP",
+                Self::StageCustom => "STAGE_CUSTOM",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STAGE_UNKNOWN" => Some(Self::StageUnknown),
+                "STAGE_PREPARE" => Some(Self::StagePrepare),
+                "STAGE_WORKLOAD" => Some(Self::StageWorkload),
+                "STAGE_CLEANUP" => Some(Self::StageCleanup),
+                "STAGE_CUSTOM" => Some(Self::StageCustom),
                 _ => None,
             }
         }
