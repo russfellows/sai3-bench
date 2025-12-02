@@ -645,6 +645,12 @@ impl Agent for AgentSvc {
                 .map(|p| p.cleanup_mode)
                 .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
             
+            // v0.8.9: Set stage to CLEANUP for proper progress display
+            if let Some(ref t) = tracker {
+                use sai3_bench::live_stats::WorkloadStage;
+                t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+            }
+            
             // Run cleanup with stats tracking
             sai3_bench::cleanup::cleanup_prepared_objects(
                 &prepared_objects,
@@ -712,6 +718,12 @@ impl Agent for AgentSvc {
                 }
             }
         } else {
+            // v0.8.9: Set stage to WORKLOAD for proper progress display
+            if let Some(ref t) = config.live_stats_tracker {
+                use sai3_bench::live_stats::WorkloadStage;
+                t.set_stage(WorkloadStage::Workload, 0);  // 0 = time-based, not count-based
+            }
+            
             sai3_bench::workload::run(&config, tree_manifest.clone())
                 .await
                 .map_err(|e| {
@@ -744,6 +756,12 @@ impl Agent for AgentSvc {
                     
                     // Get tracker for live stats reporting during cleanup
                     let tracker = self.state.get_tracker().await;
+                    
+                    // v0.8.9: Set stage to CLEANUP for proper progress display
+                    if let Some(ref t) = tracker {
+                        use sai3_bench::live_stats::WorkloadStage;
+                        t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+                    }
                     
                     if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
                         &prepared_objects,
@@ -906,6 +924,12 @@ impl Agent for AgentSvc {
                 cpu_total_percent: 0.0,
                 agent_timestamp_ns: 0,
                 sequence: 0,
+                // v0.8.9: Stage tracking (not in any stage yet)
+                current_stage: 0,
+                stage_name: String::new(),
+                stage_progress_current: 0,
+                stage_progress_total: 0,
+                stage_elapsed_s: 0.0,
             };
             
             let stream = async_stream::stream! {
@@ -977,6 +1001,12 @@ impl Agent for AgentSvc {
                 cpu_total_percent: 0.0,
                 agent_timestamp_ns: agent_timestamp_ns,
                 sequence: 0,
+                // v0.8.9: Stage tracking (not in any stage yet, waiting for start)
+                current_stage: 0,
+                stage_name: String::new(),
+                stage_progress_current: 0,
+                stage_progress_total: 0,
+                stage_elapsed_s: 0.0,
             };
             yield Ok(ready_msg);
             
@@ -1026,6 +1056,12 @@ impl Agent for AgentSvc {
                             cpu_total_percent: 0.0,
                             agent_timestamp_ns: 0,
                             sequence: 0,
+                            // v0.8.9: Stage tracking (not in any stage yet)
+                            current_stage: 0,
+                            stage_name: String::new(),
+                            stage_progress_current: 0,
+                            stage_progress_total: 0,
+                            stage_elapsed_s: 0.0,
                         };
                         debug!("Sending keepalive stats during coordinated start wait");
                         yield Ok(keepalive_stats);
@@ -1235,6 +1271,13 @@ impl Agent for AgentSvc {
                     result = async {
                         // Execute prepare phase if configured
                         let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
+                            // v0.8.9: Set stage to PREPARE (use sum of ensure_objects counts)
+                            let expected_objects: u64 = prepare_config.ensure_objects.iter().map(|e| e.count).sum();
+                            {
+                                use sai3_bench::live_stats::WorkloadStage;
+                                tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
+                            }
+                            
                             match sai3_bench::workload::prepare_objects(
                                 prepare_config, 
                                 Some(&config_exec.workload), 
@@ -1427,6 +1470,12 @@ impl Agent for AgentSvc {
                             cpu_total_percent: cpu_util.total_percent,
                             agent_timestamp_ns: 0,
                             sequence: 0,
+                            // v0.8.9: Stage tracking from snapshot
+                            current_stage: snapshot.current_stage.to_proto_i32(),
+                            stage_name: snapshot.stage_name.clone(),
+                            stage_progress_current: snapshot.stage_progress_current,
+                            stage_progress_total: snapshot.stage_progress_total,
+                            stage_elapsed_s: snapshot.stage_elapsed_s,
                         };
                         // v0.8.2: Yield can block if controller is slow - log if we're about to send
                         if snapshot.in_prepare_phase && snapshot.prepare_objects_created % 10000 == 0 {
@@ -1509,6 +1558,12 @@ impl Agent for AgentSvc {
                                     cpu_total_percent: cpu_util.total_percent,
                                     agent_timestamp_ns: 0,
                                     sequence: 0,
+                                    // v0.8.9: Stage tracking from snapshot (COMPLETED stage)
+                                    current_stage: snapshot.current_stage.to_proto_i32(),
+                                    stage_name: snapshot.stage_name.clone(),
+                                    stage_progress_current: snapshot.stage_progress_current,
+                                    stage_progress_total: snapshot.stage_progress_total,
+                                    stage_elapsed_s: snapshot.stage_elapsed_s,
                                 };
                                 
                                 // v0.7.13: Transition to Idle (workload completed successfully)
@@ -1716,6 +1771,8 @@ impl Agent for AgentSvc {
                     cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0, cpu_total_percent: 0.0,
                     agent_timestamp_ns,
                     sequence,
+                    // v0.8.9: Stage tracking (not in any stage yet)
+                    current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                 };
                 sequence += 1;
                 
@@ -1846,6 +1903,12 @@ impl Agent for AgentSvc {
                                                 cpu_total_percent: cpu_util.total_percent,
                                                 agent_timestamp_ns: 0,
                                                 sequence,
+                                                // v0.8.9: Stage tracking from snapshot
+                                                current_stage: snapshot.current_stage.to_proto_i32(),
+                                                stage_name: snapshot.stage_name.clone(),
+                                                stage_progress_current: snapshot.stage_progress_current,
+                                                stage_progress_total: snapshot.stage_progress_total,
+                                                stage_elapsed_s: snapshot.stage_elapsed_s,
                                             };
                                             
                                             if tx_stats.send(running_msg).await.is_err() {
@@ -1892,6 +1955,12 @@ impl Agent for AgentSvc {
                                         cpu_total_percent: cpu_util.total_percent,
                                         agent_timestamp_ns: 0,
                                         sequence,
+                                        // v0.8.9: Stage tracking from snapshot
+                                        current_stage: snapshot.current_stage.to_proto_i32(),
+                                        stage_name: snapshot.stage_name.clone(),
+                                        stage_progress_current: snapshot.stage_progress_current,
+                                        stage_progress_total: snapshot.stage_progress_total,
+                                        stage_elapsed_s: snapshot.stage_elapsed_s,
                                     };
                                     
                                     if tx_stats.send(completed_msg).await.is_err() {
@@ -1925,6 +1994,8 @@ impl Agent for AgentSvc {
                                         cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0, cpu_total_percent: 0.0,
                                         agent_timestamp_ns: 0,
                                         sequence,
+                                        // v0.8.9: Stage tracking (error state)
+                                        current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                     };
                                     
                                     if tx_stats.send(error_msg).await.is_err() {
@@ -1987,6 +2058,12 @@ impl Agent for AgentSvc {
                                 cpu_total_percent: cpu_util.total_percent,
                                 agent_timestamp_ns: 0,
                                 sequence,
+                                // v0.8.9: Stage tracking from snapshot
+                                current_stage: snapshot.current_stage.to_proto_i32(),
+                                stage_name: snapshot.stage_name.clone(),
+                                stage_progress_current: snapshot.stage_progress_current,
+                                stage_progress_total: snapshot.stage_progress_total,
+                                stage_elapsed_s: snapshot.stage_elapsed_s,
                             };
                             sequence += 1;
                             
@@ -2057,6 +2134,8 @@ impl Agent for AgentSvc {
                                             cpu_total_percent: 0.0,
                                             agent_timestamp_ns: 0,
                                             sequence: 0,
+                                            // v0.8.9: Stage tracking (ack has no stage)
+                                            current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                         };
                                         
                                         if let Err(e) = tx_stats_for_control.send(ack_msg).await {
@@ -2270,6 +2349,13 @@ impl Agent for AgentSvc {
                                                 (Vec::new(), None)
                                             }
                                         } else if let Some(ref prepare_config) = config_exec.prepare {
+                                            // v0.8.9: Set stage to PREPARE for progress display
+                                            {
+                                                use sai3_bench::live_stats::WorkloadStage;
+                                                let expected_objects: u64 = prepare_config.ensure_objects.iter().map(|e| e.count).sum();
+                                                tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
+                                            }
+                                            
                                             match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency, agent_index, num_agents).await {
                                                 Ok((prepared, manifest, prepare_metrics)) => {
                                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
@@ -2374,6 +2460,12 @@ impl Agent for AgentSvc {
                                                 .map(|p| p.cleanup_mode)
                                                 .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
                                             
+                                            // v0.8.9: Set stage to CLEANUP for proper progress display
+                                            if let Some(ref t) = tracker {
+                                                use sai3_bench::live_stats::WorkloadStage;
+                                                t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+                                            }
+                                            
                                             match sai3_bench::cleanup::cleanup_prepared_objects(
                                                 &prepared_objects,
                                                 tree_manifest.as_ref(),
@@ -2445,6 +2537,12 @@ impl Agent for AgentSvc {
                                                 }
                                             }
                                         } else {
+                                            // v0.8.9: Set stage to WORKLOAD for proper progress display
+                                            if let Some(ref t) = config_exec.live_stats_tracker {
+                                                use sai3_bench::live_stats::WorkloadStage;
+                                                t.set_stage(WorkloadStage::Workload, 0);  // 0 = time-based
+                                            }
+                                            
                                             sai3_bench::workload::run(&config_exec, tree_manifest.clone()).await
                                         };
                                         
@@ -2485,6 +2583,12 @@ impl Agent for AgentSvc {
                                                                     
                                                                     // Get tracker for live stats reporting during cleanup
                                                                     let tracker = agent_state_for_task.get_tracker().await;
+                                                                    
+                                                                    // v0.8.9: Set stage to CLEANUP for proper progress display
+                                                                    if let Some(ref t) = tracker {
+                                                                        use sai3_bench::live_stats::WorkloadStage;
+                                                                        t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+                                                                    }
                                                                     
                                                                     if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
                                                                         &prepared_objects,
@@ -2559,6 +2663,8 @@ impl Agent for AgentSvc {
                                     cpu_total_percent: 0.0,
                                     agent_timestamp_ns: 0,
                                     sequence: 0,
+                                    // v0.8.9: Stage tracking (aborted)
+                                    current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
@@ -2615,6 +2721,8 @@ impl Agent for AgentSvc {
                                 cpu_total_percent: 0.0,
                                 agent_timestamp_ns: 0,
                                 sequence: 0,
+                                // v0.8.9: Stage tracking (connection error)
+                                current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                             };
                             
                             let _ = tx_stats_for_control.send(error_msg).await;
@@ -2673,6 +2781,8 @@ impl Agent for AgentSvc {
                         cpu_total_percent: 0.0,
                         agent_timestamp_ns: 0,
                         sequence: 0,
+                        // v0.8.9: Stage tracking (timeout)
+                        current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                     };
                     
                     let _ = tx_stats_for_control.send(timeout_msg).await;

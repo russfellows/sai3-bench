@@ -505,7 +505,9 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 // ObjectStore caching for connection pool reuse (v0.7.3+)
 // -----------------------------------------------------------------------------
 
-type StoreCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>>;
+/// Store cache type for efficient connection pooling across operations.
+/// Uses base URI as key to reuse HTTP clients and connection pools.
+pub type StoreCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>>;
 
 /// Get or create an ObjectStore from cache
 /// Cache key is based on base URI + config settings to ensure correct store for each combination
@@ -723,6 +725,86 @@ pub async fn delete_object_no_log(uri: &str) -> anyhow::Result<()> {
     let store = create_store_for_uri(uri)?;
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))
+}
+
+// -----------------------------------------------------------------------------
+// Cached operations for replay (v0.8.9+) - efficient store reuse
+// -----------------------------------------------------------------------------
+
+/// Get or create an ObjectStore from cache (simple version for replay).
+/// Uses base URI as cache key for connection pool reuse.
+pub fn get_or_create_store(
+    uri: &str,
+    cache: &StoreCache,
+) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
+    // Extract base URI (protocol + bucket/container)
+    let base_uri = if let Some(idx) = uri.find("://") {
+        let after_proto = &uri[idx+3..];
+        if let Some(slash_idx) = after_proto.find('/') {
+            &uri[..idx+3+slash_idx]
+        } else {
+            uri
+        }
+    } else {
+        uri
+    };
+    
+    // Check cache first
+    {
+        let cache_lock = cache.lock().unwrap();
+        if let Some(store) = cache_lock.get(base_uri) {
+            return Ok(Arc::clone(store));
+        }
+    }
+    
+    // Not in cache - create new store
+    let store = create_store_for_uri(uri)?;
+    let arc_store = Arc::new(store);
+    
+    // Add to cache
+    {
+        let mut cache_lock = cache.lock().unwrap();
+        cache_lock.insert(base_uri.to_string(), Arc::clone(&arc_store));
+    }
+    
+    Ok(arc_store)
+}
+
+/// GET operation with cached store (for replay - no per-call store creation)
+pub async fn get_object_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<Vec<u8>> {
+    let store = get_or_create_store(uri, cache)?;
+    let bytes = store.get(uri).await
+        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+    Ok(bytes.to_vec())
+}
+
+/// PUT operation with cached store (for replay - no per-call store creation)
+pub async fn put_object_cached_simple(uri: &str, data: &[u8], cache: &StoreCache) -> anyhow::Result<()> {
+    let store = get_or_create_store(uri, cache)?;
+    store.put(uri, data).await
+        .with_context(|| format!("Failed to put object to URI: {}", uri))
+}
+
+/// DELETE operation with cached store (for replay - no per-call store creation)
+pub async fn delete_object_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<()> {
+    let store = get_or_create_store(uri, cache)?;
+    store.delete(uri).await
+        .with_context(|| format!("Failed to delete object from URI: {}", uri))
+}
+
+/// LIST operation with cached store (for replay - no per-call store creation)
+pub async fn list_objects_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<Vec<String>> {
+    let store = get_or_create_store(uri, cache)?;
+    store.list(uri, true).await
+        .with_context(|| format!("Failed to list objects from URI: {}", uri))
+}
+
+/// STAT operation with cached store (for replay - no per-call store creation)
+pub async fn stat_object_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<u64> {
+    let store = get_or_create_store(uri, cache)?;
+    let metadata = store.stat(uri).await
+        .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
+    Ok(metadata.size)
 }
 
 // -----------------------------------------------------------------------------

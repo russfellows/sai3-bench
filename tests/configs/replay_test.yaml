@@ -1,0 +1,27 @@
+# Replay test config - cleanup disabled for replay testing
+target: "file:///tmp/sai3bench-replay-test/"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-replay-test/data/"
+      count: 50
+      min_size: 8192
+      max_size: 8192
+      fill: random
+
+cleanup:
+  enabled: false  # Disabled for replay testing
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 4
+  - op: put
+    path: "uploads/"
+    weight: 30
+    size_distribution: 4096
+    concurrency: 4
+
+duration: "3s"
+concurrency: 4

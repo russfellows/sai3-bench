@@ -6,6 +6,83 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.9] - 2025-12-02
+
+### Added
+
+- **Flexible multi-stage system** for workload lifecycle tracking
+  - `WorkloadStage` enum: STAGE_PREPARE, STAGE_WORKLOAD, STAGE_CLEANUP, STAGE_CUSTOM
+  - Stage progress tracking: `stage_progress_current`, `stage_progress_total`, `stage_elapsed_s`
+  - Stage name field for custom/user-defined stages
+  - Proto fields: `current_stage`, `stage_name`, `stage_progress_current/total`, `stage_elapsed_s`
+
+- **Stage-aware controller display**
+  - Prepare phase: `📦 Preparing: 50000/100000 objects (50%)`
+  - Workload phase: `GET: 35726 ops/s, 2.5 GiB/s` (time-based progress bar)
+  - Cleanup phase: `🧹 Cleanup: 25/50 deleted (50%) | 167 DEL/s` (count-based progress bar)
+  - Progress bar dynamically switches between count-based and time-based display
+
+- **ControllerAgentState::Cleaning** - New state for cleanup phase in state machine
+  - Proper state transitions: Ready → Preparing → Running → Cleaning → Completed
+  - Recovery from disconnected state now handles cleanup phase
+
+### Changed
+
+- **LiveStatsTracker stage API**
+  - `set_stage(stage, total)`: Set current stage with progress total
+  - `set_stage_with_name(stage, name, total)`: Set stage with custom name
+  - `increment_stage_progress()`: Increment progress counter
+  - `set_stage_progress(current)`: Set progress to specific value
+  - Stage elapsed time automatically tracked from stage start
+
+- **Agent stage transitions**
+  - `set_stage(StagePrepare)` before prepare phase
+  - `set_stage(StageWorkload)` before workload execution
+  - `set_stage(StageCleanup)` before cleanup (with total object count)
+  - `increment_stage_progress()` called after each DELETE operation
+
+### Fixed
+
+- **Cleanup phase display** - Controller now shows cleanup DELETE progress instead of stale workload stats
+  - Previously: Controller displayed 35726 ops/s GET during cleanup
+  - Now: Controller displays `🧹 Cleanup: 50/100 deleted | 167 DEL/s`
+  - State machine transitions correctly: Running → Cleaning → Completed
+
+- **Critical store creation efficiency** - Fixed multiple locations where `create_store_for_uri()` was called per-operation
+  - **cleanup.rs**: Store created ONCE before parallel DELETE loop (was: per object)
+  - **prepare.rs**: Store/store cache created ONCE before parallel PUT loop (was: per object, 2 locations)
+  - **replay_streaming.rs**: Shared `StoreCache` across all replay operations (was: per operation)
+  - Impact at scale (100M objects): Eliminates 27+ hours of unnecessary overhead
+  - Root cause: Each `create_store_for_uri()` creates HTTP client, connection pool, credential provider
+
+- **Cleanup responsiveness** - Ctrl-C now works immediately during cleanup phase
+  - Previously: Heavy per-object initialization blocked tokio's task scheduler
+  - Now: Async runtime remains responsive with pre-initialized store
+
+- **Public StoreCache API** - Added `pub type StoreCache` and `get_or_create_store()` for efficient store reuse
+  - New functions: `get_object_cached_simple()`, `put_object_cached_simple()`, `delete_object_cached_simple()`
+  - Also: `list_objects_cached_simple()`, `stat_object_cached_simple()`
+  - Uses base URI as cache key for connection pool reuse
+
+- **Rate-control test configs using invalid prepare syntax**
+  - Fixed 4 configs: `rate_1000_exponential.yaml`, `rate_5000_uniform.yaml`, `rate_deterministic.yaml`, `rate_max.yaml`
+  - Old (invalid): `prepare.objects`, `prepare.object_size`, `prepare.pattern` fields
+  - New (correct): `prepare.ensure_objects` array with `base_uri`, `count`, `min_size`, `max_size`, `fill`
+  - Note: Old fields were silently ignored by serde, causing 0 objects to be prepared
+
+### Documentation
+
+- Updated `.github/copilot-instructions.md` with v0.8.9 stage system documentation
+- Verified CONFIG_SYNTAX.md and USAGE.md use correct `ensure_objects` syntax
+- All example configs validated with `--dry-run`
+
+### Testing
+
+- ✅ 57 unit tests passing
+- ✅ All rate-control configs now parse correctly and show proper prepare phase
+
+---
+
 ## [0.8.8] - 2025-12-02
 
 ### Changed

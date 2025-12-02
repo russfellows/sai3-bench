@@ -6,14 +6,23 @@
 use anyhow::{Context, Result};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 // Use s3dlio-oplog types instead of our own
 pub use s3dlio_oplog::{OpLogEntry, OpType, OpLogStreamReader};
 
-use crate::workload;
+use crate::workload::{
+    StoreCache,  // v0.8.9: Use shared cache type from workload
+    get_object_cached_simple, 
+    put_object_cached_simple, 
+    delete_object_cached_simple,
+    list_objects_cached_simple,
+    stat_object_cached_simple,
+};
 use crate::remap::{RemapConfig, RemapEngine};
 
 /// Replay configuration
@@ -100,6 +109,9 @@ pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplaySta
     let mut stats = ReplayStats::default();
     let mut tasks = FuturesUnordered::new();
     let max_concurrent = config.max_concurrent.unwrap_or(1000);
+    
+    // v0.8.9: Create shared store cache to avoid per-operation store creation
+    let store_cache: StoreCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // First pass: Get the first operation to establish epoch
     let mut stream_iter = stream;
@@ -127,6 +139,7 @@ pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplaySta
         replay_epoch,
         Duration::ZERO, // First operation has no delay
         config.clone(),
+        store_cache.clone(),
     );
     tasks.push(task);
 
@@ -174,7 +187,7 @@ pub async fn replay_workload_streaming(config: ReplayConfig) -> Result<ReplaySta
         };
 
         // Spawn operation
-        let task = spawn_operation(entry, replay_epoch, delay, config.clone());
+        let task = spawn_operation(entry, replay_epoch, delay, config.clone(), store_cache.clone());
         tasks.push(task);
 
         // Poll completed tasks to prevent unbounded growth
@@ -222,6 +235,7 @@ fn spawn_operation(
     replay_epoch: Instant,
     delay: Duration,
     config: ReplayConfig,
+    store_cache: StoreCache,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         // Calculate absolute target time
@@ -254,8 +268,8 @@ fn spawn_operation(
 
         debug!("Executing {:?} on {}", entry.op, uri);
 
-        // Execute operation
-        execute_operation(&entry, &uri).await
+        // Execute operation with cached store (v0.8.9: efficient store reuse)
+        execute_operation(&entry, &uri, &store_cache).await
     })
 }
 
@@ -289,25 +303,25 @@ fn handle_task_result(
     Ok(())
 }
 
-/// Execute a single operation using workload functions (WITHOUT logging)
-async fn execute_operation(entry: &OpLogEntry, uri: &str) -> Result<()> {
+/// Execute a single operation using cached store (v0.8.9: efficient store reuse)
+async fn execute_operation(entry: &OpLogEntry, uri: &str, cache: &StoreCache) -> Result<()> {
     match entry.op {
         OpType::GET => {
-            workload::get_object_no_log(uri).await?;
+            get_object_cached_simple(uri, cache).await?;
         }
         OpType::PUT => {
             // Generate data with s3dlio (dedup=1, compress=1 for random)
             let data = s3dlio::data_gen::generate_controlled_data(entry.bytes as usize, 1, 1);
-            workload::put_object_no_log(uri, &data).await?;
+            put_object_cached_simple(uri, &data, cache).await?;
         }
         OpType::DELETE => {
-            workload::delete_object_no_log(uri).await?;
+            delete_object_cached_simple(uri, cache).await?;
         }
         OpType::LIST => {
-            workload::list_objects_no_log(uri).await?;
+            list_objects_cached_simple(uri, cache).await?;
         }
         OpType::STAT => {
-            workload::stat_object_no_log(uri).await?;
+            stat_object_cached_simple(uri, cache).await?;
         }
     }
     Ok(())

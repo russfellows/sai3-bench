@@ -13,9 +13,12 @@ io_rate:
 target: "file:///tmp/sai3bench-rate-test"
 
 prepare:
-  objects: 100
-  object_size: 4096
-  pattern: "data/obj-{}"
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3bench-rate-test/data/"
+      count: 100
+      min_size: 4096
+      max_size: 4096
+      fill: random
 
 workload:
   - weight: 100
