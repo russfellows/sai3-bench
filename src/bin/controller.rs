@@ -742,21 +742,25 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging based on verbosity level
-    let level = match cli.verbose {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
+    // Map verbosity to appropriate levels for both controller and s3dlio:
+    // -v (1): controller=info, s3dlio=warn (default passthrough)
+    // -vv (2): controller=debug, s3dlio=info (detailed controller, operational s3dlio)
+    // -vvv (3+): controller=trace, s3dlio=debug (full debugging both crates)
+    let (ctl_level, s3dlio_level) = match cli.verbose {
+        0 => ("warn", "warn"),   // Default: only warnings and errors
+        1 => ("info", "warn"),   // -v: info level for controller, minimal s3dlio
+        2 => ("debug", "info"),  // -vv: debug controller, info s3dlio
+        _ => ("trace", "debug"), // -vvv+: trace controller, debug s3dlio
     };
     
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::new(format!("sai3bench_ctl={}", level));
+    let filter = EnvFilter::new(format!("sai3bench_ctl={},s3dlio={}", ctl_level, s3dlio_level));
     fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
 
-    debug!("Logging initialized at level: {}", level);
+    debug!("Logging initialized at level: {}", ctl_level);
 
     let agents: Vec<String> = cli
         .agents

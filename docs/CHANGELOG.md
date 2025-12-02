@@ -6,6 +6,36 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.8] - 2025-12-02
+
+### Changed
+
+- **Logging verbosity improvements**
+  - Per-I/O operation logs (GET/PUT/LIST/STAT/DELETE starting/completing) moved from DEBUG to TRACE level
+  - Status and coordination messages remain at DEBUG level
+  - `-vv` now shows operational information without flooding with per-operation details
+  - `-vvv` enables full per-I/O transaction logging for debugging
+
+- **s3dlio logging level offset** - All three binaries now properly offset s3dlio logging:
+  - `-v`: sai3-bench=info, s3dlio=warn
+  - `-vv`: sai3-bench=debug, s3dlio=info
+  - `-vvv`: sai3-bench=trace, s3dlio=debug
+  - Previously only `sai3-bench` CLI had this; now `sai3bench-agent` and `sai3bench-ctl` also include it
+
+### Fixed
+
+- **Agent idle timeout removed** - Agents now run indefinitely as long-lived services
+  - Removed 30-second IDLE timeout that caused agents to fail after inactivity
+  - READY timeout (60s) retained: auto-resets to IDLE if controller fails to send START
+  - Agents survive 5+ minutes idle and accept new workloads without restart
+
+### Documentation
+
+- Updated `.github/copilot-instructions.md` with v0.8.8 features
+- Clarified logging level behavior and s3dlio integration
+
+---
+
 ## [0.8.7] - 2025-11-26
 
 ### Added

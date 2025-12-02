@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn, error, trace};
 
 use rand::{rng, Rng};
 //use rand::rngs::SmallRng;
@@ -338,7 +338,7 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
 /// - direct:// whole-file:  0.01 GiB/s (CATASTROPHIC - 76 seconds!)
 /// - direct:// 4M chunks:   1.73 GiB/s (OPTIMAL - 0.6 seconds, 173x faster!)
 pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
-    debug!("GET operation starting for URI: {}", uri);
+    trace!("GET operation starting for URI: {}", uri);
     
     let is_direct_io = uri.starts_with("direct://");
     
@@ -352,17 +352,17 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
         match tokio::fs::metadata(path_str).await {
             Ok(meta) => {
                 let file_size = meta.len();
-                debug!("direct:// file size: {} bytes", file_size);
+                trace!("direct:// file size: {} bytes", file_size);
                 
                 // Use chunked reads for files larger than threshold
                 if file_size > CHUNKED_READ_THRESHOLD {
-                    debug!("Using chunked reads (4 MiB chunks) for {} byte file", file_size);
+                    trace!("Using chunked reads (4 MiB chunks) for {} byte file", file_size);
                     return get_object_chunked(uri, file_size).await;
                 }
             }
             Err(e) => {
                 // If metadata fetch fails, fall back to whole-file read
-                debug!("Failed to get file size for {}: {}, using whole-file read", uri, e);
+                trace!("Failed to get file size for {}: {}, using whole-file read", uri, e);
             }
         }
     }
@@ -381,21 +381,21 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
     
     let bytes = if uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("gcs://") || uri.starts_with("az://") {
         // Cloud storage: use get_optimized() to benefit from size cache
-        debug!("Using get_optimized() for cloud storage URI: {} (should use size cache if available)", uri);
+        trace!("Using get_optimized() for cloud storage URI: {} (should use size cache if available)", uri);
         let start = std::time::Instant::now();
         let result = store.get_optimized(uri).await
             .with_context(|| format!("Failed to get object from URI: {}", uri))?;
         let elapsed = start.elapsed();
-        debug!("get_optimized() completed for {}: {} bytes in {:?}", uri, result.len(), elapsed);
+        trace!("get_optimized() completed for {}: {} bytes in {:?}", uri, result.len(), elapsed);
         result
     } else {
         // Local storage: use regular get()
-        debug!("Using regular get() for local storage URI: {}", uri);
+        trace!("Using regular get() for local storage URI: {}", uri);
         store.get(uri).await
             .with_context(|| format!("Failed to get object from URI: {}", uri))?
     };
     
-    debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
+    trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes.to_vec())
 }
 
@@ -417,7 +417,7 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
     }
     
     let store = create_store_with_logger(uri)?;
-    debug!("Chunked read starting for URI: {}, size: {} bytes", uri, file_size);
+    trace!("Chunked read starting for URI: {}, size: {} bytes", uri, file_size);
     
     let mut result = Vec::with_capacity(file_size as usize);
     let mut offset = 0u64;
@@ -427,7 +427,7 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
         let remaining = file_size - offset;
         let chunk_len = remaining.min(chunk_size);
         
-        debug!("Fetching chunk at offset {} (length {})", offset, chunk_len);
+        trace!("Fetching chunk at offset {} (length {})", offset, chunk_len);
         
         // get_range(uri, offset, length)
         let chunk_bytes = store.get_range(uri, offset, Some(chunk_len)).await
@@ -437,7 +437,7 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
         offset += chunk_len;
     }
     
-    debug!("Chunked read completed: {} bytes in {} chunks", result.len(), 
+    trace!("Chunked read completed: {} bytes in {} chunks", result.len(), 
            (file_size + chunk_size - 1) / chunk_size);
     Ok(result)
 
@@ -445,59 +445,59 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
 
 /// Multi-backend PUT operation using ObjectStore trait
 pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<()> {
-    debug!("PUT operation starting for URI: {}, {} bytes", uri, data.len());
+    trace!("PUT operation starting for URI: {}, {} bytes", uri, data.len());
     let store = create_store_with_logger(uri)?;
-    debug!("ObjectStore created successfully for URI: {}", uri);
+    trace!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore put method with full URI (s3dlio handles URI parsing)
     store.put(uri, data).await
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
     
-    debug!("PUT operation completed successfully for URI: {}", uri);
+    trace!("PUT operation completed successfully for URI: {}", uri);
     Ok(())
 }
 
 /// Multi-backend LIST operation using ObjectStore trait
 pub async fn list_objects_multi_backend(uri: &str) -> anyhow::Result<Vec<String>> {
-    debug!("LIST operation starting for URI: {}", uri);
+    trace!("LIST operation starting for URI: {}", uri);
     let store = create_store_with_logger(uri)?;
-    debug!("ObjectStore created successfully for URI: {}", uri);
+    trace!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore list method with full URI and recursive=true (s3dlio handles URI parsing)
     let keys = store.list(uri, true).await
         .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
     
-    debug!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
+    trace!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
     Ok(keys)
 }
 
 /// Multi-backend STAT operation using ObjectStore trait
 /// Uses s3dlio's native stat() method (v0.8.8+)
 pub async fn stat_object_multi_backend(uri: &str) -> anyhow::Result<u64> {
-    debug!("STAT operation starting for URI: {}", uri);
+    trace!("STAT operation starting for URI: {}", uri);
     let store = create_store_with_logger(uri)?;
-    debug!("ObjectStore created successfully for URI: {}", uri);
+    trace!("ObjectStore created successfully for URI: {}", uri);
     
     // Use s3dlio's native stat() method for proper HEAD/metadata operations
     let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
     
     let size = metadata.size;
-    debug!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
+    trace!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
     Ok(size)
 }
 
 /// Multi-backend DELETE operation using ObjectStore trait
 pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
-    debug!("DELETE operation starting for URI: {}", uri);
+    trace!("DELETE operation starting for URI: {}", uri);
     let store = create_store_with_logger(uri)?;
-    debug!("ObjectStore created successfully for URI: {}", uri);
+    trace!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore delete method with full URI (s3dlio handles URI parsing)
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
     
-    debug!("DELETE operation completed successfully for URI: {}", uri);
+    trace!("DELETE operation completed successfully for URI: {}", uri);
     Ok(())
 }
 
@@ -566,13 +566,13 @@ async fn get_object_cached(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Vec<u8>> {
-    debug!("GET operation (cached store) starting for URI: {}", uri);
+    trace!("GET operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
     
-    debug!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
+    trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes.to_vec())
 }
 
@@ -584,13 +584,13 @@ async fn put_object_cached(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
+    trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     store.put(uri, data).await
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
     
-    debug!("PUT operation completed successfully for URI: {}", uri);
+    trace!("PUT operation completed successfully for URI: {}", uri);
     Ok(())
 }
 
@@ -601,13 +601,13 @@ async fn delete_object_cached(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("DELETE operation (cached store) starting for URI: {}", uri);
+    trace!("DELETE operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
     
-    debug!("DELETE operation completed successfully for URI: {}", uri);
+    trace!("DELETE operation completed successfully for URI: {}", uri);
     Ok(())
 }
 
@@ -618,13 +618,13 @@ async fn list_objects_cached(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Vec<String>> {
-    debug!("LIST operation (cached store) starting for URI: {}", uri);
+    trace!("LIST operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     let keys = store.list(uri, true).await
         .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
     
-    debug!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
+    trace!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
     Ok(keys)
 }
 
@@ -635,14 +635,14 @@ async fn stat_object_cached(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<u64> {
-    debug!("STAT operation (cached store) starting for URI: {}", uri);
+    trace!("STAT operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
     let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
     
     let size = metadata.size;
-    debug!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
+    trace!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
     Ok(size)
 }
 
@@ -656,13 +656,13 @@ async fn mkdir_with_config(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("MKDIR operation (with config) starting for URI: {}", uri);
+    trace!("MKDIR operation (with config) starting for URI: {}", uri);
     let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
     
     store.mkdir(uri).await
         .with_context(|| format!("Failed to create directory at URI: {}", uri))?;
     
-    debug!("MKDIR operation completed successfully for URI: {}", uri);
+    trace!("MKDIR operation completed successfully for URI: {}", uri);
     Ok(())
 }
 
@@ -673,13 +673,13 @@ async fn rmdir_with_config(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<()> {
-    debug!("RMDIR operation (with config, recursive={}) starting for URI: {}", recursive, uri);
+    trace!("RMDIR operation (with config, recursive={}) starting for URI: {}", recursive, uri);
     let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
     
     store.rmdir(uri, recursive).await
         .with_context(|| format!("Failed to remove directory at URI: {}", uri))?;
     
-    debug!("RMDIR operation completed successfully for URI: {}", uri);
+    trace!("RMDIR operation completed successfully for URI: {}", uri);
     Ok(())
 }
 

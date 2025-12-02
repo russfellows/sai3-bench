@@ -2012,7 +2012,6 @@ impl Agent for AgentSvc {
         tokio::spawn(async move {
             // Import timeout configuration from constants module
             use sai3_bench::constants::{
-                AGENT_IDLE_TIMEOUT_SECS,
                 AGENT_READY_TIMEOUT_SECS,
                 TIMEOUT_MONITOR_INTERVAL_SECS,
             };
@@ -2629,27 +2628,26 @@ impl Agent for AgentSvc {
                 }
             }
             
-            // Timeout monitoring - check for hung states
+            // Timeout monitoring - only check for hung READY state (awaiting coordinated start)
+            // IMPORTANT: IDLE state has NO timeout - agents wait indefinitely for controllers
+            // This allows agents to run continuously as long-lived services
             _ = timeout_monitor.tick() => {
                 let current_state = agent_state_reader.get_state().await;
                 let elapsed = last_message_time.elapsed();
                 
+                // Only READY state has a timeout - waiting too long for coordinated START
+                // IDLE state: No timeout (agent waits forever for controller)
+                // RUNNING state: No timeout (workload controls its own duration)
                 let timeout_exceeded = match current_state {
-                    WorkloadState::Idle => elapsed.as_secs() > AGENT_IDLE_TIMEOUT_SECS,
                     WorkloadState::Ready => elapsed.as_secs() > AGENT_READY_TIMEOUT_SECS,
-                    _ => false,  // Only monitor IDLE and READY states
+                    _ => false,  // IDLE, RUNNING, etc. have no timeout
                 };
                 
                 if timeout_exceeded {
                     error!(
-                        "Control reader: Timeout in {:?} state ({}s since last message, limit {}s)",
-                        current_state,
+                        "Control reader: Timeout in READY state ({}s since last message, limit {}s) - controller failed to send coordinated START",
                         elapsed.as_secs(),
-                        match current_state {
-                            WorkloadState::Idle => AGENT_IDLE_TIMEOUT_SECS,
-                            WorkloadState::Ready => AGENT_READY_TIMEOUT_SECS,
-                            _ => 0,
-                        }
+                        AGENT_READY_TIMEOUT_SECS,
                     );
                     
                     // Send ERROR status
@@ -2664,7 +2662,7 @@ impl Agent for AgentSvc {
                         completed: false,
                         final_summary: None,
                         status: 3,  // ERROR
-                        error_message: format!("Timeout in {:?} state after {}s", current_state, elapsed.as_secs()),
+                        error_message: format!("Timeout in READY state after {}s - controller did not send coordinated START", elapsed.as_secs()),
                         in_prepare_phase: false,
                         prepare_objects_created: 0,
                         prepare_objects_total: 0,
@@ -2679,8 +2677,9 @@ impl Agent for AgentSvc {
                     
                     let _ = tx_stats_for_control.send(timeout_msg).await;
                     
-                    // Transition to Failed
-                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "timeout").await;
+                    // Transition to Failed, then immediately back to Idle so agent can accept new connections
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "READY state timeout").await;
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "auto-reset after READY timeout").await;
                     
                     break;
                 }
@@ -3114,21 +3113,25 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
     
     // Initialize logging based on verbosity level
-    let level = match args.verbose {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
+    // Map verbosity to appropriate levels for both agent/sai3_bench and s3dlio:
+    // -v (1): agent=info, s3dlio=warn (default passthrough)
+    // -vv (2): agent=debug, s3dlio=info (detailed agent, operational s3dlio)
+    // -vvv (3+): agent=trace, s3dlio=debug (full debugging both crates)
+    let (agent_level, s3dlio_level) = match args.verbose {
+        0 => ("warn", "warn"),   // Default: only warnings and errors
+        1 => ("info", "warn"),   // -v: info level for agent, minimal s3dlio
+        2 => ("debug", "info"),  // -vv: debug agent, info s3dlio
+        _ => ("trace", "debug"), // -vvv+: trace agent, debug s3dlio
     };
     
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::new(format!("sai3bench_agent={},sai3_bench={}", level, level));
+    let filter = EnvFilter::new(format!("sai3bench_agent={},sai3_bench={},s3dlio={}", agent_level, agent_level, s3dlio_level));
     fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
 
-    debug!("Logging initialized at level: {}", level);
+    debug!("Logging initialized at level: {}", agent_level);
     
     let addr: SocketAddr = args.listen.parse().context("invalid listen addr")?;
 
