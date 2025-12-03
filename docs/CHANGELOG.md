@@ -6,6 +6,53 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.10] - 2025-12-02
+
+### Added
+
+- **Replay backpressure system** for graceful handling when I/O rate cannot be sustained
+  - `BackpressureController`: Monitors replay lag and triggers mode transitions
+  - `FlappingTracker`: Prevents rapid mode oscillation (max 3 transitions/minute)
+  - `ReplayMode`: Normal (strict timing) vs BestEffort (no delays, catch-up mode)
+  - Enhanced `ReplayStats`: tracks mode_transitions, flap_exit, peak_lag_ms, best_effort_time_ms
+
+- **YAML-based replay configuration** via `--config` flag
+  - New `ReplayConfig` struct with humantime Duration parsing
+  - Fields: `lag_threshold`, `recovery_threshold`, `max_flaps_per_minute`, `drain_timeout`, `max_concurrent`
+  - Sample config: `tests/configs/replay_backpressure.yaml`
+
+- **Replay constants** in `src/constants.rs`
+  - `DEFAULT_REPLAY_LAG_THRESHOLD`: 5 seconds
+  - `DEFAULT_REPLAY_RECOVERY_THRESHOLD`: 1 second  
+  - `DEFAULT_REPLAY_MAX_FLAPS_PER_MINUTE`: 3
+  - `DEFAULT_REPLAY_DRAIN_TIMEOUT`: 10 seconds
+  - `DEFAULT_REPLAY_MAX_CONCURRENT`: 16
+
+### Changed
+
+- **Replay CLI** now accepts `--config <YAML>` for backpressure configuration
+  - Config validated with dry-run before execution
+  - Backpressure metrics included in summary output
+  
+- **Renamed** `ReplayConfig` → `ReplayRunConfig` in replay_streaming.rs
+  - Distinguishes runtime config from YAML parsing struct
+  - Internal refactoring, no user-facing impact
+
+### Documentation
+
+- **Updated USAGE.md** with new Replay Backpressure section
+  - Documents all configuration options and defaults
+  - Provides usage examples and sample YAML config
+
+### Testing
+
+- ✅ 103 tests passing (68 unit + 35 config tests)
+- ✅ 11 new backpressure unit tests (mode transitions, flap detection, stats)
+- ✅ 5 new ReplayConfig YAML parsing tests
+- ✅ Dry-run validation tested with sample config
+
+---
+
 ## [0.8.9] - 2025-12-02
 
 ### Added

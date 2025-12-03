@@ -1126,6 +1126,95 @@ where
     deserializer.deserialize_any(IopsVisitor)
 }
 
+// =============================================================================
+// Replay Backpressure Configuration (v0.8.9+)
+// =============================================================================
+
+/// Replay backpressure configuration (v0.8.9+)
+/// 
+/// Controls how replay mode handles situations where the target system
+/// cannot sustain the recorded I/O rate. When lag exceeds the threshold,
+/// replay switches to best-effort mode (issuing ops as fast as possible
+/// without timing). If mode flapping is detected (oscillating between
+/// normal and best-effort), replay exits gracefully.
+/// 
+/// # Example
+/// ```yaml
+/// replay:
+///   lag_threshold: 5s      # Switch to best-effort when 5s behind
+///   recovery_threshold: 1s # Switch back to normal when caught up to 1s
+///   max_flaps_per_minute: 3 # Exit if mode changes 3+ times per minute
+///   drain_timeout: 10s     # Wait 10s for in-flight ops on exit
+///   max_concurrent: 1000   # Maximum concurrent operations
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ReplayConfig {
+    /// Lag threshold before switching to best-effort mode
+    /// When the gap between scheduled time and wall clock exceeds this,
+    /// timing constraints are abandoned and ops are issued immediately.
+    /// Default: 5 seconds
+    #[serde(default = "default_replay_lag_threshold", with = "humantime_serde")]
+    pub lag_threshold: std::time::Duration,
+    
+    /// Recovery threshold for switching back to normal mode
+    /// When lag drops below this threshold, normal timing resumes.
+    /// Must be less than lag_threshold to prevent oscillation (hysteresis).
+    /// Default: 1 second
+    #[serde(default = "default_replay_recovery_threshold", with = "humantime_serde")]
+    pub recovery_threshold: std::time::Duration,
+    
+    /// Maximum mode transitions (flaps) per minute before graceful exit
+    /// Prevents endless oscillation between normal and best-effort modes.
+    /// When exceeded, replay drains in-flight ops and exits with warning.
+    /// Default: 3
+    #[serde(default = "default_replay_max_flaps")]
+    pub max_flaps_per_minute: u32,
+    
+    /// Timeout for draining in-flight operations on flap-exit
+    /// After flap limit is hit, wait this long for pending ops to complete.
+    /// Default: 10 seconds
+    #[serde(default = "default_replay_drain_timeout", with = "humantime_serde")]
+    pub drain_timeout: std::time::Duration,
+    
+    /// Maximum concurrent operations during replay
+    /// Limits how many operations can be in-flight simultaneously.
+    /// Default: 1000
+    #[serde(default = "default_replay_max_concurrent")]
+    pub max_concurrent: usize,
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            lag_threshold: crate::constants::DEFAULT_REPLAY_LAG_THRESHOLD,
+            recovery_threshold: crate::constants::DEFAULT_REPLAY_RECOVERY_THRESHOLD,
+            max_flaps_per_minute: crate::constants::DEFAULT_REPLAY_MAX_FLAPS_PER_MINUTE,
+            drain_timeout: crate::constants::DEFAULT_REPLAY_DRAIN_TIMEOUT,
+            max_concurrent: crate::constants::DEFAULT_REPLAY_MAX_CONCURRENT,
+        }
+    }
+}
+
+fn default_replay_lag_threshold() -> std::time::Duration {
+    crate::constants::DEFAULT_REPLAY_LAG_THRESHOLD
+}
+
+fn default_replay_recovery_threshold() -> std::time::Duration {
+    crate::constants::DEFAULT_REPLAY_RECOVERY_THRESHOLD
+}
+
+fn default_replay_max_flaps() -> u32 {
+    crate::constants::DEFAULT_REPLAY_MAX_FLAPS_PER_MINUTE
+}
+
+fn default_replay_drain_timeout() -> std::time::Duration {
+    crate::constants::DEFAULT_REPLAY_DRAIN_TIMEOUT
+}
+
+fn default_replay_max_concurrent() -> usize {
+    crate::constants::DEFAULT_REPLAY_MAX_CONCURRENT
+}
+
 /// Multi-process scaling configuration (v0.7.3+)
 /// Controls how many processes to spawn per endpoint for parallel execution
 #[derive(Debug, Clone, PartialEq, Serialize)]

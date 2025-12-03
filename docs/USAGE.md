@@ -678,9 +678,92 @@ zstd -d < /data/oplogs/trace-agent1.tsv.zst | tail -n +2 | sort -t$'\t' -k13 -n 
 - **Debugging**: Trace specific operations that failed or exceeded thresholds
 - **Comparison**: Compare operation latencies across agents to identify hotspots
 
-# 9 Notes and Best Practices
+# 10 Replay Backpressure (v0.8.10+)
 
-# 9 Notes and Best Practices
+When replaying operation logs, the system may not sustain the original I/O rate. The **replay backpressure** feature gracefully handles this by detecting lag and switching to a best-effort mode that skips timing delays.
+
+## Backpressure Modes
+
+- **Normal Mode**: Strict timing - operations execute at recorded timestamps
+- **Best-Effort Mode**: No timing delays - operations execute as fast as possible to catch up
+
+## Configuration
+
+Enable backpressure configuration via `--config`:
+
+```bash
+# With YAML config for backpressure settings
+./target/release/sai3-bench replay \
+  --op-log /data/oplogs/trace.tsv.zst \
+  --config tests/configs/replay_backpressure.yaml
+```
+
+### YAML Configuration Options
+
+```yaml
+# tests/configs/replay_backpressure.yaml
+replay:
+  lag_threshold: 5s           # Switch to best-effort when lag exceeds this
+  recovery_threshold: 1s      # Switch back to normal when lag drops below this
+  max_flaps_per_minute: 3     # Max mode transitions before giving up
+  drain_timeout: 10s          # Timeout waiting for in-flight ops on mode change
+  max_concurrent: 16          # Maximum concurrent replay operations
+```
+
+### Configuration Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `lag_threshold` | 5s | Lag that triggers switch to best-effort mode |
+| `recovery_threshold` | 1s | Lag that allows return to normal mode |
+| `max_flaps_per_minute` | 3 | Maximum mode oscillations before permanent best-effort |
+| `drain_timeout` | 10s | Wait time for in-flight operations during mode switch |
+| `max_concurrent` | 16 | Parallel operation limit |
+
+## Behavior
+
+1. **Lag Detection**: System monitors difference between expected and actual operation time
+2. **Mode Switch**: When lag exceeds `lag_threshold`, switches to best-effort (skips delays)
+3. **Recovery**: When lag drops below `recovery_threshold`, returns to normal timing
+4. **Flap Prevention**: After 3 transitions per minute, permanently stays in best-effort mode
+
+## Output Statistics
+
+Replay summary includes backpressure metrics:
+
+```
+=== Replay Statistics ===
+Operations: 25000 completed (1024 errors)
+Throughput: 1234.5 ops/s
+Replay time: 30.5s vs original 28.2s (108.2%)
+
+Mode transitions: 2
+Peak lag: 3500ms
+Best-effort time: 12.3s
+Final mode: Normal
+```
+
+## Dry-Run Validation
+
+Validate your config before running:
+
+```bash
+./target/release/sai3-bench replay \
+  --op-log /data/oplogs/trace.tsv.zst \
+  --config tests/configs/replay_backpressure.yaml \
+  --dry-run
+
+# Output:
+# Dry-run mode - validating config...
+#   lag_threshold: 5s
+#   recovery_threshold: 1s
+#   max_flaps_per_minute: 3
+#   drain_timeout: 10s
+#   max_concurrent: 16
+# Replay config valid. 25000 operations would be replayed.
+```
+
+# 11 Notes and Best Practices
 Use resolvable hostnames for agents and include them in --tls-sans when
 using TLS. If connecting by IP from the controller, add that IP to
 --tls-sans or set --agent-domain to a SAN value.
@@ -693,7 +776,7 @@ high latency, stalled agents).
 All latency metrics are reported in microseconds (µs) for precision with
 fast operations.
 
-# 11 Running Tests
+# 12 Running Tests
 Unit + integration tests:
 
 cargo test
@@ -701,7 +784,7 @@ The gRPC integration test starts a local agent, then checks controller
 connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
-# 12 Versioning
+# 13 Versioning
 The agent reports its version on ping:
 
 ```
