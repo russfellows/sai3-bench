@@ -239,6 +239,34 @@ pub const DEFAULT_FILES_PER_DIR: usize = 100;
 pub const DEFAULT_IO_RATE_OPS_SEC: Option<f64> = None;
 
 // =============================================================================
+// Replay Backpressure Defaults (v0.8.9+)
+// =============================================================================
+
+/// Lag threshold before switching to best-effort mode
+/// When lag exceeds this, timing is abandoned and ops are issued as fast as possible
+/// User can override via config: replay.lag_threshold
+pub const DEFAULT_REPLAY_LAG_THRESHOLD: Duration = Duration::from_secs(5);
+
+/// Recovery threshold for switching back to normal mode
+/// Must be below lag_threshold to prevent flapping (hysteresis)
+/// User can override via config: replay.recovery_threshold
+pub const DEFAULT_REPLAY_RECOVERY_THRESHOLD: Duration = Duration::from_secs(1);
+
+/// Maximum mode transitions per minute before graceful exit
+/// Prevents oscillation between normal and best-effort modes
+/// User can override via config: replay.max_flaps_per_minute
+pub const DEFAULT_REPLAY_MAX_FLAPS_PER_MINUTE: u32 = 3;
+
+/// Timeout for draining in-flight operations on flap-exit
+/// After flap limit hit, wait this long for pending ops to complete
+/// User can override via config: replay.drain_timeout
+pub const DEFAULT_REPLAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum concurrent operations for replay
+/// User can override via config: replay.max_concurrent
+pub const DEFAULT_REPLAY_MAX_CONCURRENT: usize = 1000;
+
+// =============================================================================
 // Sleep Durations (polling, monitoring, rate limiting)
 // =============================================================================
 

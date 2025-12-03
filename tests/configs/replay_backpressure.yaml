@@ -1,0 +1,23 @@
+# Replay Backpressure Configuration (v0.8.9+)
+#
+# Controls how replay handles situations where the target storage
+# cannot sustain the recorded I/O rate.
+
+# Lag threshold to switch to best-effort mode (default: 5s)
+# When gap between scheduled time and wall clock exceeds this,
+# timing constraints are abandoned and ops are issued immediately.
+lag_threshold: 5s
+
+# Recovery threshold to switch back to normal mode (default: 1s)
+# Must be less than lag_threshold to prevent oscillation.
+recovery_threshold: 1s
+
+# Maximum mode transitions per minute before graceful exit (default: 3)
+# Prevents endless oscillation between normal and best-effort modes.
+max_flaps_per_minute: 3
+
+# Timeout for draining in-flight operations on flap-exit (default: 10s)
+drain_timeout: 10s
+
+# Maximum concurrent operations during replay (default: 1000)
+max_concurrent: 1000

@@ -930,3 +930,115 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
     
     Ok(())
 }
+
+// =============================================================================
+// ReplayConfig (Backpressure) Tests (v0.8.9+)
+// =============================================================================
+
+#[test]
+fn test_replay_config_default() {
+    use sai3_bench::config::ReplayConfig;
+    use std::time::Duration;
+    
+    let config = ReplayConfig::default();
+    
+    assert_eq!(config.lag_threshold, Duration::from_secs(5));
+    assert_eq!(config.recovery_threshold, Duration::from_secs(1));
+    assert_eq!(config.max_flaps_per_minute, 3);
+    assert_eq!(config.drain_timeout, Duration::from_secs(10));
+    assert_eq!(config.max_concurrent, 1000);
+}
+
+#[test]
+fn test_replay_config_parse_full() -> Result<()> {
+    use sai3_bench::config::ReplayConfig;
+    use std::time::Duration;
+    
+    let yaml = r#"
+lag_threshold: 10s
+recovery_threshold: 2s
+max_flaps_per_minute: 5
+drain_timeout: 30s
+max_concurrent: 500
+"#;
+
+    let config: ReplayConfig = serde_yaml::from_str(yaml)?;
+    
+    assert_eq!(config.lag_threshold, Duration::from_secs(10));
+    assert_eq!(config.recovery_threshold, Duration::from_secs(2));
+    assert_eq!(config.max_flaps_per_minute, 5);
+    assert_eq!(config.drain_timeout, Duration::from_secs(30));
+    assert_eq!(config.max_concurrent, 500);
+    
+    Ok(())
+}
+
+#[test]
+fn test_replay_config_parse_partial_with_defaults() -> Result<()> {
+    use sai3_bench::config::ReplayConfig;
+    use std::time::Duration;
+    
+    // Only specify some fields, others should use defaults
+    let yaml = r#"
+lag_threshold: 8s
+max_concurrent: 2000
+"#;
+
+    let config: ReplayConfig = serde_yaml::from_str(yaml)?;
+    
+    assert_eq!(config.lag_threshold, Duration::from_secs(8));
+    assert_eq!(config.recovery_threshold, Duration::from_secs(1)); // default
+    assert_eq!(config.max_flaps_per_minute, 3); // default
+    assert_eq!(config.drain_timeout, Duration::from_secs(10)); // default
+    assert_eq!(config.max_concurrent, 2000);
+    
+    Ok(())
+}
+
+#[test]
+fn test_replay_config_parse_humantime_durations() -> Result<()> {
+    use sai3_bench::config::ReplayConfig;
+    use std::time::Duration;
+    
+    let yaml = r#"
+lag_threshold: 5000ms
+recovery_threshold: 500ms
+drain_timeout: 1m
+"#;
+
+    let config: ReplayConfig = serde_yaml::from_str(yaml)?;
+    
+    assert_eq!(config.lag_threshold, Duration::from_millis(5000));
+    assert_eq!(config.recovery_threshold, Duration::from_millis(500));
+    assert_eq!(config.drain_timeout, Duration::from_secs(60));
+    
+    Ok(())
+}
+
+#[test]
+fn test_replay_config_serialize_deserialize() -> Result<()> {
+    use sai3_bench::config::ReplayConfig;
+    use std::time::Duration;
+    
+    let original = ReplayConfig {
+        lag_threshold: Duration::from_secs(7),
+        recovery_threshold: Duration::from_millis(1500),
+        max_flaps_per_minute: 4,
+        drain_timeout: Duration::from_secs(15),
+        max_concurrent: 750,
+    };
+    
+    // Serialize to YAML
+    let yaml = serde_yaml::to_string(&original)?;
+    
+    // Deserialize back
+    let deserialized: ReplayConfig = serde_yaml::from_str(&yaml)?;
+    
+    assert_eq!(deserialized.lag_threshold, original.lag_threshold);
+    assert_eq!(deserialized.recovery_threshold, original.recovery_threshold);
+    assert_eq!(deserialized.max_flaps_per_minute, original.max_flaps_per_minute);
+    assert_eq!(deserialized.drain_timeout, original.drain_timeout);
+    assert_eq!(deserialized.max_concurrent, original.max_concurrent);
+    
+    Ok(())
+}

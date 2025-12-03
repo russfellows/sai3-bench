@@ -107,6 +107,7 @@ enum Commands {
     ///   sai3-bench replay --op-log /tmp/ops.tsv --target "s3://newbucket/"
     ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --speed 2.0 --target "file:///tmp/replay/"
     ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --remap remap-config.yaml
+    ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --config backpressure.yaml
     ///   sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
     Replay {
         /// Path to op-log file (TSV, optionally zstd-compressed with .zst extension)
@@ -120,6 +121,11 @@ enum Commands {
         /// Advanced remap configuration file (YAML) - takes priority over --target
         #[arg(long)]
         remap: Option<std::path::PathBuf>,
+        
+        /// Backpressure configuration file (YAML) for controlling lag thresholds and flap detection
+        /// See docs/REPLAY_BACKPRESSURE.md for configuration options
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
         
         /// Speed multiplier (e.g., 2.0 = 2x faster, 0.5 = half speed)
         #[arg(long, default_value_t = 1.0)]
@@ -295,8 +301,8 @@ fn main() -> Result<()> {
         Commands::Run { config, dry_run, prepare_only, cleanup_only, verify, skip_prepare, no_cleanup, tsv_name } => {
             run_workload(&config, dry_run, prepare_only, cleanup_only, verify, skip_prepare, no_cleanup, tsv_name.as_deref(), cli.op_log.as_deref())?
         }
-        Commands::Replay { op_log, target, remap, speed, continue_on_error, dry_run } => {
-            replay_cmd(op_log, target, remap, speed, continue_on_error, dry_run)?
+        Commands::Replay { op_log, target, remap, config, speed, continue_on_error, dry_run } => {
+            replay_cmd(op_log, target, remap, config, speed, continue_on_error, dry_run)?
         }
         Commands::InternalWorker { worker_id, op_log } => {
             // This is a child worker process - read config from stdin, run workload, output to stdout
@@ -1479,12 +1485,14 @@ fn replay_cmd(
     op_log: std::path::PathBuf,
     target: Option<String>,
     remap: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
     speed: f64,
     continue_on_error: bool,
     dry_run: bool,
 ) -> Result<()> {
-    use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
+    use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
     use sai3_bench::remap::RemapConfig;
+    use sai3_bench::config::ReplayConfig;
     use sai3_bench::oplog_merge;
     
     // Dry-run mode: validate op-log file and check sort order
@@ -1546,6 +1554,23 @@ fn replay_cmd(
             println!("  ✓ Remap config is valid ({} rules)", config.rules.len());
         }
         
+        if let Some(ref bp_config_path) = config_path {
+            println!("  Backpressure config: {}", bp_config_path.display());
+            if !bp_config_path.exists() {
+                bail!("Backpressure config file does not exist: {}", bp_config_path.display());
+            }
+            let file = std::fs::File::open(bp_config_path)
+                .with_context(|| format!("Failed to open backpressure config: {}", bp_config_path.display()))?;
+            let bp_config: ReplayConfig = serde_yaml::from_reader(file)
+                .with_context(|| format!("Failed to parse backpressure config: {}", bp_config_path.display()))?;
+            println!("  ✓ Backpressure config is valid");
+            println!("      lag_threshold: {:?}", bp_config.lag_threshold);
+            println!("      recovery_threshold: {:?}", bp_config.recovery_threshold);
+            println!("      max_flaps_per_minute: {}", bp_config.max_flaps_per_minute);
+            println!("      drain_timeout: {:?}", bp_config.drain_timeout);
+            println!("      max_concurrent: {}", bp_config.max_concurrent);
+        }
+        
         println!("\n✓ Dry-run validation complete");
         return Ok(());
     }
@@ -1555,6 +1580,22 @@ fn replay_cmd(
     if let Some(ref uri) = target {
         validate_uri(uri)?;
     }
+    
+    // Load backpressure configuration if provided
+    let backpressure_config = if let Some(ref bp_config_path) = config_path {
+        println!("Loading backpressure configuration from: {}", bp_config_path.display());
+        let file = std::fs::File::open(bp_config_path)
+            .with_context(|| format!("Failed to open backpressure config: {}", bp_config_path.display()))?;
+        let bp_config: ReplayConfig = serde_yaml::from_reader(file)
+            .with_context(|| format!("Failed to parse backpressure config: {}", bp_config_path.display()))?;
+        info!("Loaded backpressure config: lag_threshold={:?}, recovery_threshold={:?}, max_flaps={}",
+              bp_config.lag_threshold, bp_config.recovery_threshold, bp_config.max_flaps_per_minute);
+        println!("  lag_threshold: {:?}, recovery_threshold: {:?}, max_flaps: {}/min",
+                 bp_config.lag_threshold, bp_config.recovery_threshold, bp_config.max_flaps_per_minute);
+        Some(bp_config)
+    } else {
+        None
+    };
     
     // Load remap configuration if provided
     let remap_config = if let Some(remap_path) = remap {
@@ -1575,13 +1616,20 @@ fn replay_cmd(
         println!("WARNING: Both --target and --remap provided. Using --remap (--target ignored).");
     }
     
-    let config = ReplayConfig {
+    // Use max_concurrent from backpressure config if provided, otherwise default
+    let max_concurrent = backpressure_config
+        .as_ref()
+        .map(|c| c.max_concurrent)
+        .unwrap_or(1000);
+    
+    let config = ReplayRunConfig {
         op_log_path: op_log,
         target_uri: target,
         speed,
         continue_on_error,
-        max_concurrent: Some(1000), // Default max concurrent operations
+        max_concurrent: Some(max_concurrent),
         remap_config,
+        backpressure: backpressure_config,
     };
     
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
@@ -1593,6 +1641,17 @@ fn replay_cmd(
     println!("  Completed: {}", stats.completed_operations);
     println!("  Failed: {}", stats.failed_operations);
     println!("  Skipped: {}", stats.skipped_operations);
+    
+    // Print backpressure statistics if any mode transitions occurred
+    if stats.mode_transitions > 0 || stats.peak_lag.as_millis() > 0 {
+        println!("\nBackpressure Statistics:");
+        println!("  Mode transitions: {}", stats.mode_transitions);
+        println!("  Peak lag: {:?}", stats.peak_lag);
+        println!("  Time in best-effort mode: {:?}", stats.best_effort_time);
+        if stats.flap_exit {
+            println!("  ⚠️  Exited due to flap limit (mode oscillation detected)");
+        }
+    }
     
     Ok(())
 }

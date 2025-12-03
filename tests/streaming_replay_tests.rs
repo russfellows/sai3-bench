@@ -16,7 +16,7 @@
 /// Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
 
 use anyhow::Result;
-use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayConfig};
+use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
 use sai3_bench::workload::{init_operation_logger, finalize_operation_logger, create_store_with_logger};
 use s3dlio_oplog::OpLogStreamReader;
 use std::fs;
@@ -131,13 +131,14 @@ async fn test_02_replay_basic() -> Result<()> {
     
     // Replay at high speed
     println!("Replaying at 100x speed...");
-    let replay_config = ReplayConfig {
+    let replay_config = ReplayRunConfig {
         op_log_path: oplog_path,
         target_uri: None, // Use original URIs from op-log
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(200),
         remap_config: None,
+        backpressure: None,
     };
     
     replay_workload_streaming(replay_config).await?;
@@ -196,13 +197,14 @@ async fn test_04_uri_remapping() -> Result<()> {
     // Replay to different target with continue_on_error
     // PUT operations will create files at new location
     // GET/DELETE operations will fail (files don't exist) - this is expected
-    let replay_config = ReplayConfig {
+    let replay_config = ReplayRunConfig {
         op_log_path: oplog_path,
         target_uri: Some(target_uri.clone()),
         speed: 100.0,
         continue_on_error: true, // Expect failures for GET/DELETE of non-existent files
         max_concurrent: Some(100),
         remap_config: None,
+        backpressure: None,
     };
     
     replay_workload_streaming(replay_config).await?;
@@ -228,13 +230,14 @@ async fn test_05_continue_on_error() -> Result<()> {
     fs::create_dir_all(&temp_dir)?;
     
     println!("Replaying with continue_on_error=true (expect some failures)...");
-    let replay_config = ReplayConfig {
+    let replay_config = ReplayRunConfig {
         op_log_path: oplog_path,
         target_uri: Some(format!("file://{}", temp_dir.display())),
         speed: 100.0,
         continue_on_error: true, // Should not panic on errors
         max_concurrent: Some(50),
         remap_config: None,
+        backpressure: None,
     };
     
     // Should complete despite errors
@@ -257,25 +260,27 @@ async fn test_06_concurrent_limits() -> Result<()> {
     
     // Test with low concurrency
     println!("Testing with max_concurrent=5...");
-    let replay_config = ReplayConfig {
+    let replay_config = ReplayRunConfig {
         op_log_path: oplog_path.clone(),
         target_uri: None,
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(5),
         remap_config: None,
+        backpressure: None,
     };
     replay_workload_streaming(replay_config).await?;
     
     // Test with high concurrency
     println!("Testing with max_concurrent=100...");
-    let replay_config = ReplayConfig {
+    let replay_config = ReplayRunConfig {
         op_log_path: oplog_path,
         target_uri: None,
         speed: 100.0,
         continue_on_error: false,
         max_concurrent: Some(100),
         remap_config: None,
+        backpressure: None,
     };
     replay_workload_streaming(replay_config).await?;
     
