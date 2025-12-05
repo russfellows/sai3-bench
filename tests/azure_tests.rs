@@ -1,17 +1,18 @@
-// Google Cloud Storage Integration Tests
-// Tests GCS backend support with gs:// and gcs:// URI schemes
+// Azure Blob Storage Integration Tests
+// Tests Azure backend support with az:// and azure:// URI schemes
 //
 // Tests will run if EITHER:
-// 1. GCS credentials are configured:
-//    - GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
-//    - GOOGLE_CLOUD_PROJECT set
-// 2. OR a custom endpoint is configured (for local emulators like fake-gcs-server):
-//    - GCS_ENDPOINT_URL or STORAGE_EMULATOR_HOST
+// 1. Azure credentials are configured:
+//    - AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY
+//    - AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_SAS_TOKEN
+//    - AZURE_STORAGE_CONNECTION_STRING
+// 2. OR a custom endpoint is configured (for local emulators like Azurite):
+//    - AZURE_STORAGE_ENDPOINT or AZURE_BLOB_ENDPOINT_URL
 //    (No credentials required for local emulators)
 //
-// Optionally set GCS_BUCKET="your-test-bucket" (defaults to "test")
+// Optionally set AZURE_CONTAINER="your-test-container" (defaults to "test")
 //
-// Run with: cargo test --test gcs_tests -- --test-threads=1 --nocapture
+// Run with: cargo test --test azure_tests -- --test-threads=1 --nocapture
 
 use anyhow::{Context, Result};
 use std::env;
@@ -21,109 +22,115 @@ use sai3_bench::workload::{
     list_objects_no_log, stat_object_no_log, delete_object_no_log,
 };
 
-/// Helper to get GCS test bucket from environment
-fn get_gcs_bucket() -> Option<String> {
-    env::var("GCS_BUCKET").ok()
-        .or_else(|| env::var("GOOGLE_CLOUD_BUCKET").ok())
+/// Helper to get Azure test container from environment
+fn get_azure_container() -> Option<String> {
+    env::var("AZURE_CONTAINER").ok()
+        .or_else(|| env::var("AZURE_STORAGE_CONTAINER").ok())
 }
 
-/// Helper to check if GCS credentials are available
-fn has_gcs_credentials() -> bool {
-    env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() 
-        || env::var("GOOGLE_CLOUD_PROJECT").is_ok()
+/// Helper to check if Azure credentials are available
+fn has_azure_credentials() -> bool {
+    let has_account = env::var("AZURE_STORAGE_ACCOUNT").is_ok();
+    let has_key = env::var("AZURE_STORAGE_KEY").is_ok();
+    let has_sas = env::var("AZURE_STORAGE_SAS_TOKEN").is_ok();
+    let has_connection_string = env::var("AZURE_STORAGE_CONNECTION_STRING").is_ok();
+    
+    // Need account + (key or sas or connection string)
+    has_account && (has_key || has_sas || has_connection_string)
+        || has_connection_string
 }
 
 /// Helper to check if custom endpoint is configured
 fn has_custom_endpoint() -> bool {
-    env::var("GCS_ENDPOINT_URL").is_ok()
-        || env::var("STORAGE_EMULATOR_HOST").is_ok()
+    env::var("AZURE_STORAGE_ENDPOINT").is_ok()
+        || env::var("AZURE_BLOB_ENDPOINT_URL").is_ok()
 }
 
-/// Check if we can run GCS tests - either with credentials OR with a custom endpoint
-/// Custom endpoints (fake-gcs-server, local emulators) typically don't require real credentials
-fn can_run_gcs_tests() -> bool {
-    has_gcs_credentials() || has_custom_endpoint()
+/// Check if we can run Azure tests - either with credentials OR with a custom endpoint
+/// Custom endpoints (Azurite, local emulators) typically don't require real credentials
+fn can_run_azure_tests() -> bool {
+    has_azure_credentials() || has_custom_endpoint()
 }
 
-/// Helper to create GCS test URI
-fn gcs_test_uri() -> Option<String> {
-    let bucket = get_gcs_bucket().or_else(|| Some("test".to_string()))?;
-    Some(format!("gs://{}/sai3-bench-gcs-tests/", bucket))
+/// Helper to create Azure test URI
+fn azure_test_uri() -> Option<String> {
+    let container = get_azure_container().or_else(|| Some("test".to_string()))?;
+    Some(format!("az://{}/sai3-bench-azure-tests/", container))
 }
 
 /// Print test configuration info
 fn print_test_config() {
     if has_custom_endpoint() {
-        let endpoint = env::var("GCS_ENDPOINT_URL")
-            .or_else(|_| env::var("STORAGE_EMULATOR_HOST"))
+        let endpoint = env::var("AZURE_STORAGE_ENDPOINT")
+            .or_else(|_| env::var("AZURE_BLOB_ENDPOINT_URL"))
             .unwrap_or_else(|_| "unknown".to_string());
         println!("🔧 Using custom endpoint: {}", endpoint);
     }
-    if has_gcs_credentials() {
-        println!("🔐 Using GCS credentials");
+    if has_azure_credentials() {
+        println!("🔐 Using Azure credentials");
     } else {
         println!("🔓 No credentials (using anonymous/emulator access)");
     }
 }
 
 #[test]
-fn test_gcs_backend_detection() {
-    // Test gs:// scheme
-    let backend = BackendType::from_uri("gs://my-bucket/prefix/");
-    assert!(matches!(backend, BackendType::Gcs));
-    assert_eq!(backend.name(), "Google Cloud Storage");
+fn test_azure_backend_detection() {
+    // Test az:// scheme
+    let backend = BackendType::from_uri("az://my-container/prefix/");
+    assert!(matches!(backend, BackendType::Azure));
+    assert_eq!(backend.name(), "Azure Blob");
     
-    // Test gcs:// scheme (alternate)
-    let backend = BackendType::from_uri("gcs://my-bucket/prefix/");
-    assert!(matches!(backend, BackendType::Gcs));
+    // Test azure:// scheme (alternate)
+    let backend = BackendType::from_uri("azure://my-container/prefix/");
+    assert!(matches!(backend, BackendType::Azure));
     
     // Test other schemes don't match
     let backend = BackendType::from_uri("s3://bucket/");
-    assert!(!matches!(backend, BackendType::Gcs));
+    assert!(!matches!(backend, BackendType::Azure));
 }
 
-#[tokio::test]
-async fn test_gcs_store_creation() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS store creation test - no credentials or custom endpoint");
-        println!("   Set GCS_ENDPOINT_URL for local emulator, or");
-        println!("   Set GOOGLE_APPLICATION_CREDENTIALS for real GCS");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_store_creation() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure store creation test - no credentials or custom endpoint");
+        println!("   Set AZURE_STORAGE_ENDPOINT for local emulator, or");
+        println!("   Set AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY for real Azure");
         return Ok(());
     }
     
-    let Some(uri) = gcs_test_uri() else {
+    let Some(uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
     
-    println!("🧪 Testing GCS store creation: {}", uri);
+    println!("🧪 Testing Azure store creation: {}", uri);
     let _store = create_store_for_uri(&uri)
-        .context("Failed to create GCS store")?;
+        .context("Failed to create Azure store")?;
     
-    println!("✅ Successfully created GCS ObjectStore");
+    println!("✅ Successfully created Azure ObjectStore");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_put_get_delete() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS PUT/GET/DELETE test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_put_get_delete() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure PUT/GET/DELETE test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS PUT/GET/DELETE cycle");
+    println!("🧪 Testing Azure PUT/GET/DELETE cycle");
     
     // Test data
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from sai3-bench GCS test!";
+    let test_data = b"Hello from sai3-bench Azure test!";
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation
@@ -145,24 +152,24 @@ async fn test_gcs_put_get_delete() -> Result<()> {
     delete_object_no_log(&test_uri).await?;
     println!("     ✓ DELETE completed");
     
-    println!("✅ GCS PUT/GET/DELETE cycle successful");
+    println!("✅ Azure PUT/GET/DELETE cycle successful");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_list_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS LIST test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_list_operations() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure LIST test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS LIST operations");
+    println!("🧪 Testing Azure LIST operations");
     
     // Create test objects
     let prefix = format!("{}list-test/", base_uri);
@@ -189,24 +196,24 @@ async fn test_gcs_list_operations() -> Result<()> {
         delete_object_no_log(&uri).await?;
     }
     
-    println!("✅ GCS LIST operations successful");
+    println!("✅ Azure LIST operations successful");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_stat_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS STAT test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_stat_operations() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure STAT test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS STAT operations");
+    println!("🧪 Testing Azure STAT operations");
     
     // Create test object
     let test_uri = format!("{}stat-test.txt", base_uri);
@@ -226,24 +233,24 @@ async fn test_gcs_stat_operations() -> Result<()> {
     println!("  🗑️  Cleaning up");
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS STAT operations successful");
+    println!("✅ Azure STAT operations successful");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_concurrent_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS concurrent ops test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_concurrent_operations() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure concurrent ops test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS concurrent operations");
+    println!("🧪 Testing Azure concurrent operations");
     
     let prefix = format!("{}concurrent-test/", base_uri);
     let num_objects = 10;
@@ -296,24 +303,24 @@ async fn test_gcs_concurrent_operations() -> Result<()> {
         delete_object_no_log(&uri).await?;
     }
     
-    println!("✅ GCS concurrent operations successful");
+    println!("✅ Azure concurrent operations successful");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_large_object() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS large object test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_large_object() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure large object test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS large object operations");
+    println!("🧪 Testing Azure large object operations");
     
     let test_uri = format!("{}large-object.bin", base_uri);
     let size_mb = 5;
@@ -341,69 +348,79 @@ async fn test_gcs_large_object() -> Result<()> {
     println!("  🗑️  DELETE: {} MB object", size_mb);
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS large object test successful");
+    println!("✅ Azure large object test successful");
     Ok(())
 }
 
-#[tokio::test]
-async fn test_gcs_alternate_scheme() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS alternate scheme test - no credentials or custom endpoint");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_alternate_scheme() -> Result<()> {
+    if !can_run_azure_tests() {
+        println!("⚠️  Skipping Azure alternate scheme test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let bucket = get_gcs_bucket().unwrap_or_else(|| "test".to_string());
+    let container = get_azure_container().unwrap_or_else(|| "test".to_string());
     
     print_test_config();
-    println!("🧪 Testing GCS alternate URI schemes");
+    println!("🧪 Testing Azure az:// scheme with multiple paths");
     
-    // Test both gs:// and gcs:// schemes
-    let gs_uri = format!("gs://{}/sai3-bench-test/scheme-test.txt", bucket);
-    let gcs_uri = format!("gcs://{}/sai3-bench-test/scheme-test.txt", bucket);
+    // Test az:// scheme with different paths
+    let uri1 = format!("az://{}/sai3-bench-test/scheme-test-1.txt", container);
+    let uri2 = format!("az://{}/sai3-bench-test/scheme-test-2.txt", container);
     
-    let test_data = b"testing alternate schemes";
+    let test_data1 = b"testing scheme path 1";
+    let test_data2 = b"testing scheme path 2";
     
-    // PUT with gs://
-    println!("  📤 PUT with gs:// scheme");
-    put_object_no_log(&gs_uri, test_data).await?;
+    // PUT first object
+    println!("  📤 PUT first object");
+    put_object_no_log(&uri1, test_data1).await?;
     
-    // GET with gcs:// (should work - same object)
-    println!("  📥 GET with gcs:// scheme");
-    let result = get_object_no_log(&gcs_uri).await?;
-    assert_eq!(result, test_data);
+    // PUT second object  
+    println!("  📤 PUT second object");
+    put_object_no_log(&uri2, test_data2).await?;
+    
+    // GET both back
+    println!("  📥 GET first object");
+    let result1 = get_object_no_log(&uri1).await?;
+    assert_eq!(result1, test_data1);
+    
+    println!("  📥 GET second object");
+    let result2 = get_object_no_log(&uri2).await?;
+    assert_eq!(result2, test_data2);
     
     // Cleanup
-    delete_object_no_log(&gs_uri).await?;
+    delete_object_no_log(&uri1).await?;
+    delete_object_no_log(&uri2).await?;
     
-    println!("✅ GCS alternate scheme test successful");
+    println!("✅ Azure scheme test successful");
     Ok(())
 }
 
 /// Test that custom endpoint mode works (specifically for local emulators)
-#[tokio::test]
-async fn test_gcs_custom_endpoint() -> Result<()> {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_azure_custom_endpoint() -> Result<()> {
     // This test ONLY runs with a custom endpoint configured
     if !has_custom_endpoint() {
         println!("⚠️  Skipping custom endpoint test - no custom endpoint configured");
-        println!("   Set GCS_ENDPOINT_URL or STORAGE_EMULATOR_HOST to enable");
+        println!("   Set AZURE_STORAGE_ENDPOINT or AZURE_BLOB_ENDPOINT_URL to enable");
         return Ok(());
     }
     
-    let endpoint = env::var("GCS_ENDPOINT_URL")
-        .or_else(|_| env::var("STORAGE_EMULATOR_HOST"))
+    let endpoint = env::var("AZURE_STORAGE_ENDPOINT")
+        .or_else(|_| env::var("AZURE_BLOB_ENDPOINT_URL"))
         .unwrap();
     
-    println!("🧪 Testing GCS custom endpoint: {}", endpoint);
+    println!("🧪 Testing Azure custom endpoint: {}", endpoint);
     print_test_config();
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = azure_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     // Test basic operations with custom endpoint
     let test_uri = format!("{}custom-endpoint-test.txt", base_uri);
-    let test_data = b"Testing custom GCS endpoint!";
+    let test_data = b"Testing custom Azure endpoint!";
     
     println!("  📤 PUT to custom endpoint");
     put_object_no_log(&test_uri, test_data).await?;
@@ -415,6 +432,6 @@ async fn test_gcs_custom_endpoint() -> Result<()> {
     println!("  🗑️  DELETE from custom endpoint");
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS custom endpoint test successful");
+    println!("✅ Azure custom endpoint test successful");
     Ok(())
 }

@@ -208,8 +208,6 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48, 0, 1).await?;
-    
     let (objects, _, _) = prepare_objects(&prepare_config, None, None, 8, 0, 1).await?;
     
     // Count sizes
