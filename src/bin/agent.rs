@@ -104,8 +104,6 @@ struct Cli {
 struct AgentState {
     /// Broadcast channel for abort signals (controller calls AbortWorkload)
     abort_tx: broadcast::Sender<()>,
-    /// Broadcast channel for workload completion/cleanup signals
-    completion_tx: broadcast::Sender<()>,
     /// Current workload state
     state: Arc<Mutex<WorkloadState>>,
     /// Error message (if state is Failed)
@@ -138,10 +136,8 @@ enum WorkloadState {
 impl AgentState {
     fn new(agent_op_log_path: Option<std::path::PathBuf>) -> Self {
         let (abort_tx, _) = broadcast::channel(16);
-        let (completion_tx, _) = broadcast::channel(16);
         Self {
             abort_tx,
-            completion_tx,
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
             error_message: Arc::new(Mutex::new(None)),
             agent_op_log_path,
@@ -200,30 +196,15 @@ impl AgentState {
         *err_msg = Some(error);
     }
     
-    async fn clear_error(&self) {
-        let mut err_msg = self.error_message.lock().await;
-        *err_msg = None;
-    }
-    
     /// Send abort signal to running workload
     fn send_abort(&self) {
         let _ = self.abort_tx.send(());
         info!("Abort signal broadcast to workload");
     }
     
-    /// Send completion signal for cleanup tasks (progress bars, etc)
-    fn send_completion(&self) {
-        let _ = self.completion_tx.send(());
-    }
-    
     /// Subscribe to abort signals
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
-    }
-    
-    /// Subscribe to completion signals
-    fn subscribe_completion(&self) -> broadcast::Receiver<()> {
-        self.completion_tx.subscribe()
     }
     
     // v0.8.4: Additional state management for execute_workload RPC
@@ -790,842 +771,22 @@ impl Agent for AgentSvc {
         Ok(Response::new(proto_summary))
     }
 
-    /// v0.7.5: Server streaming RPC for live progress updates during distributed execution
+    // v0.8.4: Bidirectional streaming type (used by execute_workload)
+    // Note: RunWorkloadWithLiveStatsStream type kept for proto compatibility but implementation removed
     type RunWorkloadWithLiveStatsStream = 
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<LiveStats, Status>> + Send>>;
-    
-    // v0.8.4: Bidirectional streaming type
     type ExecuteWorkloadStream = 
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<LiveStats, Status>> + Send>>;
 
+    // DEPRECATED: Legacy unidirectional streaming RPC removed in v0.8.11
+    // Use execute_workload() bidirectional streaming instead for proper abort handling
     async fn run_workload_with_live_stats(
         &self,
-        req: Request<RunWorkloadRequest>,
+        _req: Request<RunWorkloadRequest>,
     ) -> Result<Response<Self::RunWorkloadWithLiveStatsStream>, Status> {
-        info!("Received run_workload_with_live_stats request (streaming mode)");
-        
-        let RunWorkloadRequest {
-            config_yaml,
-            agent_id,
-            path_prefix,
-            start_timestamp_ns,
-            shared_storage,
-            agent_index,
-            num_agents,
-        } = req.into_inner();
-
-        // Parse and apply config (same as run_workload)
-        let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
-            .map_err(|e| Status::invalid_argument(format!("Invalid YAML config: {}", e)))?;
-
-        config
-            .apply_agent_prefix(&agent_id, &path_prefix, shared_storage)
-            .map_err(|e| Status::internal(format!("Failed to apply path prefix: {}", e)))?;
-
-        // v0.7.6: Parse coordinated start time (will wait inside stream after READY)
-        // v0.8.4: Coordinated start with clock synchronization
-        // 
-        // Protocol:
-        // 1. Agent sends READY with agent_timestamp_ns (agent's current time)
-        // 2. Controller calculates offset = agent_time - controller_time
-        // 3. Controller sends start_timestamp_ns in controller's clock
-        // 4. Agent adjusts: start_time_agent = start_time_controller (no adjustment needed!)
-        //
-        // Key insight: Both clocks measure time since UNIX_EPOCH. Even if agent clock
-        // is skewed (e.g., +5 seconds ahead), when controller says "start at epoch time X",
-        // agent checks its own clock against the same epoch time X. The skew cancels out
-        // because both are measuring against the same absolute reference point.
-        //
-        // Example:
-        //   Controller time: 1000s since epoch, says "start at 1010s"
-        //   Agent time: 1005s since epoch (5s ahead), sees "start at 1010s"
-        //   Agent waits: 1010 - 1005 = 5 seconds ✓
-        //   Controller waits: 1010 - 1000 = 10 seconds ✓
-        //   Both start at the same absolute epoch time (1010s)
-        //
-        // Why this works: SystemTime measures elapsed time from UNIX_EPOCH, not wall-clock time.
-        // Clock skew affects the current reading but not the measurement basis.
-        //
-        // Previous bug: Used minimum wait when start_time was in the past.
-        // Now: Always use calculated duration, even if negative (means agent already past start time).
-        
-        let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
-        let wait_duration = match start_time.duration_since(std::time::SystemTime::now()) {
-            Ok(d) if d > std::time::Duration::from_secs(60) => {
-                return Err(Status::invalid_argument("Start time is too far in the future (>60s)"));
-            }
-            Ok(d) => d,
-            Err(_) => {
-                // Start time is in the past - this should not happen with proper coordination
-                // but we handle it gracefully by starting immediately
-                warn!("Start time already passed - starting immediately");
-                std::time::Duration::from_secs(0)
-            }
-        };
-
-        info!("Preparing workload execution with live stats for agent {}", agent_id);
-
-        // v0.8.2: Clone agent_op_log_path early for 'static lifetime requirement
-        let agent_op_log_path_clone = self.state.agent_op_log_path.clone();
-
-        // Create live stats tracker
-        let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
-        
-        // v0.7.5: Capture config_yaml for final summary conversion
-        let config_yaml_for_summary = config_yaml.clone();
-        
-        // Channel to signal completion with workload summary (v0.7.5)
-        let (tx_done, mut rx_done) = tokio::sync::mpsc::channel::<Result<sai3_bench::workload::Summary, String>>(1);
-        
-        // v0.7.9: Channel to send prepare metrics from workload task to stream task
-        let (tx_prepare, mut rx_prepare) = tokio::sync::mpsc::channel::<sai3_bench::workload::PrepareMetrics>(1);
-        
-        // v0.7.8: Channel to signal cancellation (Ctrl+C propagation from controller)
-        let (tx_cancel, mut rx_cancel) = tokio::sync::oneshot::channel::<()>();
-        
-        // v0.7.11: Clone state for use in async contexts
-        let agent_state = self.state.clone();
-        
-        // v0.7.6: VALIDATION PHASE - Check config before starting workload
-        // This prevents silent failures and provides immediate feedback to controller
-        if let Err(e) = validate_workload_config(&config).await {
-            // v0.7.13: Transition to Failed state
-            agent_state.transition_to(WorkloadState::Failed, "validation failed").await.ok();
-            agent_state.set_error(e.to_string()).await;
-            
-            // Send ERROR status immediately and exit stream
-            let error_stats = LiveStats {
-                agent_id: agent_id.clone(),
-                timestamp_s: 0.0,
-                get_ops: 0,
-                get_bytes: 0,
-                get_mean_us: 0.0,
-                get_p50_us: 0.0,
-                get_p95_us: 0.0,
-                put_ops: 0,
-                put_bytes: 0,
-                put_mean_us: 0.0,
-                put_p50_us: 0.0,
-                put_p95_us: 0.0,
-                meta_ops: 0,
-                meta_mean_us: 0.0,
-                elapsed_s: 0.0,
-                completed: false,
-                final_summary: None,
-                status: 3,  // ERROR
-                error_message: format!("Configuration validation failed: {}", e),
-                in_prepare_phase: false,
-                prepare_objects_created: 0,
-                prepare_objects_total: 0,
-                prepare_summary: None,
-                cpu_user_percent: 0.0,
-                cpu_system_percent: 0.0,
-                cpu_iowait_percent: 0.0,
-                cpu_total_percent: 0.0,
-                agent_timestamp_ns: 0,
-                sequence: 0,
-                // v0.8.9: Stage tracking (not in any stage yet)
-                current_stage: 0,
-                stage_name: String::new(),
-                stage_progress_current: 0,
-                stage_progress_total: 0,
-                stage_elapsed_s: 0.0,
-            };
-            
-            let stream = async_stream::stream! {
-                yield Ok(error_stats);
-                // v0.7.13: Auto-reset to Idle after sending error
-                let _ = agent_state.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
-                agent_state.clear_error().await;
-            };
-            return Ok(Response::new(Box::pin(stream) as Self::RunWorkloadWithLiveStatsStream));
-        }
-        
-        // v0.7.12: Check current state - only accept new workload if Idle
-        let current_state = agent_state.get_state().await;
-        if current_state != WorkloadState::Idle {
-            warn!("Rejecting workload request - agent in {:?} state (not Idle)", current_state);
-            return Err(Status::failed_precondition(
-                format!("Agent busy: current state is {:?}, expected Idle", current_state)
-            ));
-        }
-        
-        // v0.7.13: Transition to Ready state (validation passed)
-        agent_state.transition_to(WorkloadState::Ready, "validation passed").await
-            .map_err(|e| Status::internal(format!("State transition failed: {}", e)))?;
-        
-        // v0.7.11: Initialize CPU monitor for utilization tracking
-        let mut cpu_monitor = CpuMonitor::new();
-        
-        // Create stream that sends stats every 1 second
-        let agent_id_stream = agent_id.clone();
-        let config_yaml_stream = config_yaml_for_summary;
-        let tracker_spawn = tracker.clone();
-        let config_spawn = config.clone();
-        let agent_state_stream = agent_state.clone();
-        let stream = async_stream::stream! {
-            // v0.7.12: Subscribe to abort signals inside stream (needed for coordinated start + workload)
-            let mut abort_rx = agent_state_stream.subscribe_abort();
-            
-            // v0.7.6: Send READY status first (validation passed)
-            // v0.8.4: Include agent timestamp for clock synchronization
-            let agent_timestamp_ns = get_agent_timestamp_ns();
-            
-            let ready_msg = LiveStats {
-                agent_id: agent_id_stream.clone(),
-                timestamp_s: 0.0,
-                get_ops: 0,
-                get_bytes: 0,
-                get_mean_us: 0.0,
-                get_p50_us: 0.0,
-                get_p95_us: 0.0,
-                put_ops: 0,
-                put_bytes: 0,
-                put_mean_us: 0.0,
-                put_p50_us: 0.0,
-                put_p95_us: 0.0,
-                meta_ops: 0,
-                meta_mean_us: 0.0,
-                elapsed_s: 0.0,
-                completed: false,
-                final_summary: None,
-                status: 1,  // READY
-                error_message: String::new(),
-                in_prepare_phase: false,
-                prepare_objects_created: 0,
-                prepare_objects_total: 0,
-                prepare_summary: None,
-                cpu_user_percent: 0.0,
-                cpu_system_percent: 0.0,
-                cpu_iowait_percent: 0.0,
-                cpu_total_percent: 0.0,
-                agent_timestamp_ns: agent_timestamp_ns,
-                sequence: 0,
-                // v0.8.9: Stage tracking (not in any stage yet, waiting for start)
-                current_stage: 0,
-                stage_name: String::new(),
-                stage_progress_current: 0,
-                stage_progress_total: 0,
-                stage_elapsed_s: 0.0,
-            };
-            yield Ok(ready_msg);
-            
-            // v0.8.4: Wait for coordinated start while sending periodic keepalive stats
-            // CRITICAL: Don't block the stream during wait - send stats every 1s to keep controller informed
-            info!("Agent {} waiting {:?} for coordinated start", agent_id_stream, wait_duration);
-            
-            let target_start_time = tokio::time::Instant::now() + wait_duration;
-            let mut keepalive_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-            keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            
-            loop {
-                tokio::select! {
-                    _ = &mut rx_cancel => {
-                        warn!("Agent {} cancelled during coordinated start (controller disconnected)", agent_id_stream);
-                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "disconnect during wait").await;
-                        yield Err(Status::cancelled("Controller disconnected during coordinated start"));
-                        return;
-                    }
-                    _ = abort_rx.recv() => {
-                        warn!("Agent {} aborted during coordinated start", agent_id_stream);
-                        let _ = agent_state_stream.transition_to(WorkloadState::Idle, "abort during wait").await;
-                        yield Err(Status::aborted("Aborted during coordinated start"));
-                        return;
-                    }
-                    _ = keepalive_interval.tick() => {
-                        // Send keepalive stats to controller (agent still waiting for coordinated start)
-                        // Status=1 (READY) indicates agent is validated and waiting
-                        let keepalive_stats = LiveStats {
-                            agent_id: agent_id_stream.clone(),
-                            timestamp_s: 0.0,
-                            get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
-                            put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
-                            meta_ops: 0, meta_mean_us: 0.0,
-                            elapsed_s: 0.0,
-                            completed: false,
-                            final_summary: None,
-                            status: 1,  // READY (waiting for start)
-                            error_message: String::new(),
-                            in_prepare_phase: false,
-                            prepare_objects_created: 0,
-                            prepare_objects_total: 0,
-                            prepare_summary: None,
-                            cpu_user_percent: 0.0,
-                            cpu_system_percent: 0.0,
-                            cpu_iowait_percent: 0.0,
-                            cpu_total_percent: 0.0,
-                            agent_timestamp_ns: 0,
-                            sequence: 0,
-                            // v0.8.9: Stage tracking (not in any stage yet)
-                            current_stage: 0,
-                            stage_name: String::new(),
-                            stage_progress_current: 0,
-                            stage_progress_total: 0,
-                            stage_elapsed_s: 0.0,
-                        };
-                        debug!("Sending keepalive stats during coordinated start wait");
-                        yield Ok(keepalive_stats);
-                        
-                        // Check if we've reached the start time
-                        if tokio::time::Instant::now() >= target_start_time {
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            // v0.7.13: Transition to Running state (start time reached, spawn workload)
-            if let Err(e) = agent_state_stream.transition_to(WorkloadState::Running, "start time reached").await {
-                error!("Failed to transition to Running: {}", e);
-                yield Err(Status::internal(format!("State transition failed: {}", e)));
-                return;
-            }
-            
-            info!("Starting workload execution for agent {}", agent_id_stream);
-            
-            // v0.8.2: Capture final oplog path for summary_to_proto (before spawning task)
-            let final_op_log_path_for_summary = config_spawn.op_log_path.as_ref()
-                .or(agent_op_log_path_clone.as_ref())
-                .map(|p| p.display().to_string());
-            
-            // v0.8.2: Clone agent_op_log_path for use in spawned task
-            let agent_op_log_path_for_task = agent_op_log_path_clone.clone();
-            
-            // v0.7.6: NOW spawn the workload task (after READY sent and coordinated start)
-            let tracker_exec = tracker_spawn.clone();
-            let mut config_exec = config_spawn.clone();
-            let agent_id_exec = agent_id_stream.clone();
-            let rx_cancel_exec = rx_cancel;
-            // v0.7.12: Subscribe again for the workload task (separate receiver)
-            let mut abort_rx_exec = agent_state_stream.subscribe_abort();
-            
-            // v0.8.3: Spawn LOCAL PROGRESS BAR task to display agent console progress
-            // This runs INDEPENDENTLY of gRPC streaming - agents MUST show progress locally
-            // Each agent displays its OWN progress bar on its OWN console (separate terminal window)
-            let tracker_progress = tracker_spawn.clone();
-            let agent_id_progress = agent_id_stream.clone();
-            let mut rx_completion = agent_state_stream.subscribe_completion();
-            let mut rx_abort = agent_state_stream.subscribe_abort();
-            tokio::spawn(async move {
-                use indicatif::{ProgressBar, ProgressStyle};
-                use std::time::{Duration as StdDuration, Instant};
-                
-                let mut interval = tokio::time::interval(StdDuration::from_millis(100));
-                let mut prepare_pb: Option<ProgressBar> = None;
-                let mut workload_pb: Option<ProgressBar> = None;
-                let mut last_prepare_total = 0u64;
-                let mut last_stats_update = Instant::now();
-                let mut last_ops = 0u64;
-                let mut last_bytes = 0u64;
-                
-                loop {
-                    tokio::select! {
-                        _ = rx_completion.recv() => {
-                            // Workload completed successfully - clean up progress bars
-                            if let Some(pb) = prepare_pb.as_ref() {
-                                pb.finish_and_clear();
-                            }
-                            if let Some(pb) = workload_pb.as_ref() {
-                                pb.finish_and_clear();
-                            }
-                            break;
-                        }
-                        _ = rx_abort.recv() => {
-                            // Workload aborted - clean up progress bars immediately
-                            if let Some(pb) = prepare_pb.as_ref() {
-                                pb.abandon_with_message(format!("[{}] aborted", agent_id_progress));
-                            }
-                            if let Some(pb) = workload_pb.as_ref() {
-                                pb.abandon_with_message(format!("[{}] aborted", agent_id_progress));
-                            }
-                            break;
-                        }
-                        _ = interval.tick() => {
-                            let snapshot = tracker_progress.snapshot();
-                    
-                            // Prepare phase progress bar (stays visible after completion)
-                            if snapshot.in_prepare_phase {
-                                if prepare_pb.is_none() || last_prepare_total != snapshot.prepare_objects_total {
-                                    // Create prepare progress bar with exact same style as standalone mode
-                                    let pb = ProgressBar::new(snapshot.prepare_objects_total);
-                                    pb.set_style(
-                                        ProgressStyle::with_template(
-                                            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
-                                        ).unwrap()
-                                    );
-                                    pb.set_message(format!("[{}] preparing...", agent_id_progress));
-                                    prepare_pb = Some(pb);
-                                    last_prepare_total = snapshot.prepare_objects_total;
-                                }
-                                
-                                if let Some(ref pb) = prepare_pb {
-                                    pb.set_position(snapshot.prepare_objects_created);
-                                    
-                                    // Update stats message every 0.5s
-                                    let elapsed = last_stats_update.elapsed();
-                                    if elapsed.as_secs_f64() >= 0.5 {
-                                        let ops_delta = snapshot.put_ops.saturating_sub(last_ops);
-                                        let bytes_delta = snapshot.put_bytes.saturating_sub(last_bytes);
-                                        let time_delta = elapsed.as_secs_f64();
-                                        
-                                        if ops_delta > 0 {
-                                            let ops_per_sec = ops_delta as f64 / time_delta;
-                                            let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
-                                            // Estimate avg latency from throughput (rough approximation)
-                                            let avg_latency_ms = if snapshot.put_ops > 0 {
-                                                snapshot.put_mean_us as f64 / 1000.0
-                                            } else {
-                                                0.0
-                                            };
-                                            
-                                            pb.set_message(format!(
-                                                "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
-                                                agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
-                                            ));
-                                        }
-                                        
-                                        last_ops = snapshot.put_ops;
-                                        last_bytes = snapshot.put_bytes;
-                                        last_stats_update = Instant::now();
-                                    }
-                                }
-                            } else if snapshot.in_prepare_phase == false && prepare_pb.is_some() {
-                                // Prepare phase just finished - finalize the bar
-                                if let Some(pb) = prepare_pb.as_ref() {
-                                    pb.finish_with_message(format!("[{}] prepare complete", agent_id_progress));
-                                }
-                            }
-                            
-                            // Workload execution phase progress bar (separate from prepare)
-                            if !snapshot.in_prepare_phase && (snapshot.put_ops > 0 || snapshot.get_ops > 0) {
-                                if workload_pb.is_none() {
-                                    // Create workload progress bar (time-based, like standalone mode)
-                                    let pb = ProgressBar::new_spinner();
-                                    pb.set_style(
-                                        ProgressStyle::with_template(
-                                            "{spinner:.green} [{elapsed_precise}] {msg}"
-                                        ).unwrap()
-                                    );
-                                    pb.set_message(format!("[{}] workload running...", agent_id_progress));
-                                    workload_pb = Some(pb);
-                                    // Reset stats tracking for workload phase
-                                    last_ops = 0;
-                                    last_bytes = 0;
-                                    last_stats_update = Instant::now();
-                                }
-                                
-                                if let Some(ref pb) = workload_pb {
-                                    pb.tick();
-                                    
-                                    // Update stats message every 0.5s
-                                    let elapsed = last_stats_update.elapsed();
-                                    if elapsed.as_secs_f64() >= 0.5 {
-                                        let ops_delta = (snapshot.get_ops + snapshot.put_ops).saturating_sub(last_ops);
-                                        let bytes_delta = (snapshot.get_bytes + snapshot.put_bytes).saturating_sub(last_bytes);
-                                        let time_delta = elapsed.as_secs_f64();
-                                        
-                                        if ops_delta > 0 {
-                                            let ops_per_sec = ops_delta as f64 / time_delta;
-                                            let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
-                                            let avg_latency_ms = if snapshot.get_ops > 0 && snapshot.put_ops > 0 {
-                                                // Mixed workload - average of both
-                                                ((snapshot.get_mean_us + snapshot.put_mean_us) as f64 / 2.0) / 1000.0
-                                            } else if snapshot.get_ops > 0 {
-                                                snapshot.get_mean_us as f64 / 1000.0
-                                            } else {
-                                                snapshot.put_mean_us as f64 / 1000.0
-                                            };
-                                            
-                                            pb.set_message(format!(
-                                                "[{}] {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
-                                                agent_id_progress, ops_per_sec, mib_per_sec, avg_latency_ms
-                                            ));
-                                        }
-                                        
-                                        last_ops = snapshot.get_ops + snapshot.put_ops;
-                                        last_bytes = snapshot.get_bytes + snapshot.put_bytes;
-                                        last_stats_update = Instant::now();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            
-            tokio::spawn(async move {
-                // Wire live stats tracker for distributed operation recording (v0.7.5+)
-                let tracker_for_prepare = tracker_exec.clone();
-                config_exec.live_stats_tracker = Some(tracker_exec);
-                
-                // v0.7.11: Execute prepare/workload with cancellation support (controller disconnect OR abort RPC)
-                tokio::select! {
-                    _ = rx_cancel_exec => {
-                        warn!("Agent {} received cancellation signal (controller disconnected)", agent_id_exec);
-                        let _ = tx_done.send(Err("Cancelled by controller disconnect".to_string())).await;
-                    }
-                    _ = abort_rx_exec.recv() => {
-                        warn!("Agent {} received ABORT signal via AbortWorkload RPC", agent_id_exec);
-                        let _ = tx_done.send(Err("Aborted by controller request".to_string())).await;
-                    }
-                    result = async {
-                        // Execute prepare phase if configured
-                        let tree_manifest = if let Some(ref prepare_config) = config_exec.prepare {
-                            // v0.8.9: Set stage to PREPARE (use sum of ensure_objects counts)
-                            let expected_objects: u64 = prepare_config.ensure_objects.iter().map(|e| e.count).sum();
-                            {
-                                use sai3_bench::live_stats::WorkloadStage;
-                                tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
-                            }
-                            
-                            match sai3_bench::workload::prepare_objects(
-                                prepare_config, 
-                                Some(&config_exec.workload), 
-                                Some(tracker_for_prepare.clone()), 
-                                config_exec.concurrency,
-                                agent_index as usize,
-                                num_agents as usize,
-                            ).await {
-                                Ok((prepared, manifest, prepare_metrics)) => {
-                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
-                                    
-                                    // v0.7.9: Export prepare metrics to TSV and JSON
-                                    if prepare_metrics.put.ops > 0 {
-                                        use sai3_bench::tsv_export::TsvExporter;
-                                        let results_dir = std::path::Path::new("./sai3-agent-results");
-                                        if let Err(e) = std::fs::create_dir_all(results_dir) {
-                                            warn!("Failed to create agent results directory: {}", e);
-                                        } else {
-                                            let prepare_tsv_path = results_dir.join("prepare_results.tsv");
-                                            match TsvExporter::with_path(&prepare_tsv_path) {
-                                                Ok(exporter) => {
-                                                    if let Err(e) = exporter.export_prepare_metrics(&prepare_metrics) {
-                                                        warn!("Failed to export prepare metrics: {}", e);
-                                                    } else {
-                                                        info!("Prepare metrics exported to: {}", prepare_tsv_path.display());
-                                                    }
-                                                }
-                                                Err(e) => warn!("Failed to create prepare TSV exporter: {}", e),
-                                            }
-                                            
-                                            // v0.7.9: Send prepare metrics to stream task
-                                            let _ = tx_prepare.send(prepare_metrics).await;
-                                        }
-                                    }
-                                    
-                                    // v0.7.9: Reset stats counters before workload to clear prepare phase PUT operations
-                                    tracker_for_prepare.reset_for_workload();
-                                    
-                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
-                                    }
-                                    manifest
-                                }
-                                Err(e) => {
-                                    let _ = tx_done.send(Err(format!("Prepare phase failed: {}", e))).await;
-                                    return;
-                                }
-                            }
-                        } else {
-                            None
-                        };
-
-                        // v0.8.2: Initialize s3dlio oplog if configured (same logic as run_workload)
-                        let final_op_log_path = config_exec.op_log_path.as_ref()
-                            .or(agent_op_log_path_for_task.as_ref());
-                        
-                        if let Some(op_log_base) = final_op_log_path {
-                            // Append agent_id to filename to avoid collisions
-                            let op_log_path = if let Some(parent) = op_log_base.parent() {
-                                let filename = op_log_base.file_name()
-                                    .and_then(|f| f.to_str())
-                                    .unwrap_or("oplog.tsv.zst");
-                                
-                                let base_name = if filename.ends_with(".tsv.zst") {
-                                    filename.strip_suffix(".tsv.zst").unwrap()
-                                } else if filename.ends_with(".tsv") {
-                                    filename.strip_suffix(".tsv").unwrap()
-                                } else {
-                                    filename
-                                };
-                                
-                                let extension = if filename.ends_with(".tsv.zst") {
-                                    ".tsv.zst"
-                                } else if filename.ends_with(".tsv") {
-                                    ".tsv"
-                                } else {
-                                    ""
-                                };
-                                
-                                parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
-                            } else {
-                                let filename = op_log_base.file_name()
-                                    .and_then(|f| f.to_str())
-                                    .unwrap_or("oplog.tsv.zst");
-                                std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
-                            };
-                            
-                            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
-                            if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
-                                error!("Failed to initialize operation logger: {}", e);
-                                let _ = tx_done.send(Err(format!("Failed to initialize oplog: {}", e))).await;
-                                return;
-                            }
-                        }
-
-                        // Execute workload (tracker wired via config for live stats)
-                        match sai3_bench::workload::run(&config_exec, tree_manifest).await {
-                            Ok(summary) => {
-                                // v0.8.2: Finalize oplog if initialized
-                                if final_op_log_path.is_some() {
-                                    info!("Finalizing s3dlio operation logger");
-                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                        error!("Failed to finalize operation logger: {}", e);
-                                    }
-                                }
-                                info!("Workload completed successfully for agent {}", agent_id_exec);
-                                let _ = tx_done.send(Ok(summary)).await;
-                            }
-                            Err(e) => {
-                                // v0.8.2: Finalize oplog on error
-                                if final_op_log_path.is_some() {
-                                    if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger() {
-                                        error!("Failed to finalize operation logger: {}", finalize_err);
-                                    }
-                                }
-                                error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
-                                let _ = tx_done.send(Err(format!("Workload execution failed: {}", e))).await;
-                            }
-                        }
-                    } => result
-                }
-            });
-            
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            // v0.7.12: Subscribe to abort signals in stream loop
-            let mut abort_rx_stream = agent_state_stream.subscribe_abort();
-
-            // v0.7.9: Store prepare metrics when received from workload task
-            let mut stored_prepare_metrics: Option<sai3_bench::workload::PrepareMetrics> = None;
-
-            loop {
-                tokio::select! {
-                    // v0.7.12: Handle abort signal - break out of stream loop immediately
-                    _ = abort_rx_stream.recv() => {
-                        warn!("Agent {} stream received abort signal - ending stream", agent_id_stream);
-                        break;
-                    }
-                    
-                    // v0.7.9: Receive prepare metrics from workload task
-                    Some(prep_metrics) = rx_prepare.recv() => {
-                        info!("Received prepare metrics: {} objects created", prep_metrics.objects_created);
-                        stored_prepare_metrics = Some(prep_metrics);
-                    }
-                    
-                    _ = interval.tick() => {
-                        // v0.7.11: Sample CPU utilization
-                        let cpu_util = cpu_monitor.sample()
-                            .ok()
-                            .flatten()
-                            .unwrap_or(CpuUtilization {
-                                user_percent: 0.0,
-                                system_percent: 0.0,
-                                iowait_percent: 0.0,
-                                total_percent: 0.0,
-                            });
-                        
-                        // Send live stats snapshot
-                        let snapshot = tracker.snapshot();
-                        debug!("Sending stats: PUT {} ops, {} bytes, elapsed {:.1}s, CPU {:.1}%", 
-                               snapshot.put_ops, snapshot.put_bytes, snapshot.elapsed_secs(), cpu_util.total_percent);
-                        let stats = LiveStats {
-                            agent_id: agent_id_stream.clone(),
-                            timestamp_s: snapshot.timestamp_secs() as f64,
-                            get_ops: snapshot.get_ops,
-                            get_bytes: snapshot.get_bytes,
-                            get_mean_us: snapshot.get_mean_us as f64,
-                            get_p50_us: snapshot.get_p50_us as f64,
-                            get_p95_us: snapshot.get_p95_us as f64,
-                            put_ops: snapshot.put_ops,
-                            put_bytes: snapshot.put_bytes,
-                            put_mean_us: snapshot.put_mean_us as f64,
-                            put_p50_us: snapshot.put_p50_us as f64,
-                            put_p95_us: snapshot.put_p95_us as f64,
-                            meta_ops: snapshot.meta_ops,
-                            meta_mean_us: snapshot.meta_mean_us as f64,
-                            elapsed_s: snapshot.elapsed_secs(),
-                            completed: false,
-                            final_summary: None,  // v0.7.5: Only in final message
-                            status: 2,  // RUNNING
-                            error_message: String::new(),
-                            in_prepare_phase: snapshot.in_prepare_phase,
-                            prepare_objects_created: snapshot.prepare_objects_created,
-                            prepare_objects_total: snapshot.prepare_objects_total,
-                            prepare_summary: None,
-                            cpu_user_percent: cpu_util.user_percent,
-                            cpu_system_percent: cpu_util.system_percent,
-                            cpu_iowait_percent: cpu_util.iowait_percent,
-                            cpu_total_percent: cpu_util.total_percent,
-                            agent_timestamp_ns: 0,
-                            sequence: 0,
-                            // v0.8.9: Stage tracking from snapshot
-                            current_stage: snapshot.current_stage.to_proto_i32(),
-                            stage_name: snapshot.stage_name.clone(),
-                            stage_progress_current: snapshot.stage_progress_current,
-                            stage_progress_total: snapshot.stage_progress_total,
-                            stage_elapsed_s: snapshot.stage_elapsed_s,
-                        };
-                        // v0.8.2: Yield can block if controller is slow - log if we're about to send
-                        if snapshot.in_prepare_phase && snapshot.prepare_objects_created % 10000 == 0 {
-                            debug!("Prepare progress: {}/{} objects ({:.1}%)",
-                                snapshot.prepare_objects_created,
-                                snapshot.prepare_objects_total,
-                                (snapshot.prepare_objects_created as f64 / snapshot.prepare_objects_total as f64) * 100.0
-                            );
-                        }
-                        yield Ok(stats);
-                    }
-                    
-                    result = rx_done.recv() => {
-                        // Workload completed (or failed)
-                        match result {
-                            Some(Ok(summary)) => {
-                                // v0.7.5 / v0.8.2: Convert summary to proto for final message (with oplog path)
-                                let proto_summary = match summary_to_proto(&agent_id_stream, &config_yaml_stream, &summary, final_op_log_path_for_summary.clone()).await {
-                                    Ok(s) => Some(s),
-                                    Err(e) => {
-                                        error!("Failed to convert summary to proto: {:?}", e);
-                                        None  // Continue without summary rather than failing entire stream
-                                    }
-                                };
-                                
-                                // v0.7.9: Convert prepare metrics to proto if available
-                                let proto_prepare = if let Some(ref prep_metrics) = stored_prepare_metrics {
-                                    match prepare_metrics_to_proto(&agent_id_stream, prep_metrics).await {
-                                        Ok(s) => Some(s),
-                                        Err(e) => {
-                                            error!("Failed to convert prepare metrics to proto: {:?}", e);
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-                                
-                                // Send final stats with completed=true and full summary
-                                let snapshot = tracker.snapshot();
-                                
-                                // v0.7.11: Sample CPU one final time
-                                let cpu_util = cpu_monitor.sample()
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(CpuUtilization {
-                                        user_percent: 0.0,
-                                        system_percent: 0.0,
-                                        iowait_percent: 0.0,
-                                        total_percent: 0.0,
-                                    });
-                                
-                                let final_stats = LiveStats {
-                                    agent_id: agent_id_stream.clone(),
-                                    timestamp_s: snapshot.timestamp_secs() as f64,
-                                    get_ops: snapshot.get_ops,
-                                    get_bytes: snapshot.get_bytes,
-                                    get_mean_us: snapshot.get_mean_us as f64,
-                                    get_p50_us: snapshot.get_p50_us as f64,
-                                    get_p95_us: snapshot.get_p95_us as f64,
-                                    put_ops: snapshot.put_ops,
-                                    put_bytes: snapshot.put_bytes,
-                                    put_mean_us: snapshot.put_mean_us as f64,
-                                    put_p50_us: snapshot.put_p50_us as f64,
-                                    put_p95_us: snapshot.put_p95_us as f64,
-                                    meta_ops: snapshot.meta_ops,
-                                    meta_mean_us: snapshot.meta_mean_us as f64,
-                                    elapsed_s: snapshot.elapsed_secs(),
-                                    completed: true,
-                                    final_summary: proto_summary,  // v0.7.5: Include complete results
-                                    status: 4,  // COMPLETED
-                                    error_message: String::new(),
-                                    in_prepare_phase: false,
-                                    prepare_objects_created: 0,
-                                    prepare_objects_total: 0,
-                                    prepare_summary: proto_prepare,  // v0.7.9: Include prepare metrics
-                                    cpu_user_percent: cpu_util.user_percent,
-                                    cpu_system_percent: cpu_util.system_percent,
-                                    cpu_iowait_percent: cpu_util.iowait_percent,
-                                    cpu_total_percent: cpu_util.total_percent,
-                                    agent_timestamp_ns: 0,
-                                    sequence: 0,
-                                    // v0.8.9: Stage tracking from snapshot (COMPLETED stage)
-                                    current_stage: snapshot.current_stage.to_proto_i32(),
-                                    stage_name: snapshot.stage_name.clone(),
-                                    stage_progress_current: snapshot.stage_progress_current,
-                                    stage_progress_total: snapshot.stage_progress_total,
-                                    stage_elapsed_s: snapshot.stage_elapsed_s,
-                                };
-                                
-                                // v0.7.13: Transition to Idle (workload completed successfully)
-                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "workload completed").await;
-                                
-                                yield Ok(final_stats);
-                                break;
-                            }
-                            Some(Err(e)) => {
-                                // v0.7.13: Transition to Failed, then auto-reset to Idle
-                                let _ = agent_state_stream.transition_to(WorkloadState::Failed, &e).await;
-                                agent_state_stream.set_error(e.clone()).await;
-                                
-                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
-                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
-                                agent_state_stream.clear_error().await;
-                                
-                                yield Err(Status::internal(e));
-                                break;
-                            }
-                            None => {
-                                // v0.7.13: Transition to Failed for unexpected termination
-                                let _ = agent_state_stream.transition_to(WorkloadState::Failed, "task terminated unexpectedly").await;
-                                
-                                // Auto-reset to Idle BEFORE yielding error (yield breaks the stream)
-                                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "error sent, auto-reset").await;
-                                
-                                yield Err(Status::internal("Workload task terminated unexpectedly"));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // v0.7.8: Stream is ending (controller disconnected or normal completion)
-            // Send cancellation signal to workload task
-            info!("Agent {} stream ending - cleaning up", agent_id_stream);
-            let _ = tx_cancel.send(());
-            
-            // v0.8.3: Signal completion to cleanup tasks (progress bars)
-            agent_state_stream.send_completion();
-            
-            // v0.8.2: Reset agent state to Idle after stream completes
-            // BUG FIX: Previously tried unconditional transition to Idle
-            // 
-            // Issue: Normal flow transitions Running→Idle when workload completes (line 992)
-            //        Then stream cleanup tries Idle→Idle which fails validation
-            //        Error: "Invalid state transition: Idle → Idle (reason: stream ended)"
-            // 
-            // Solution: Check current state before attempting transition
-            //           Only transition if not already Idle (idempotent cleanup)
-            let current_state = agent_state_stream.get_state().await;
-            if current_state != WorkloadState::Idle {
-                let _ = agent_state_stream.transition_to(WorkloadState::Idle, "stream ended").await;
-                info!("Agent {} reset to Idle state from {:?}, ready for next workload", agent_id_stream, current_state);
-            } else {
-                debug!("Agent {} already in Idle state, no transition needed", agent_id_stream);
-            }
-        };
-
-        Ok(Response::new(Box::pin(stream)))
+        Err(Status::unimplemented(
+            "run_workload_with_live_stats is deprecated. Use execute_workload() bidirectional streaming instead."
+        ))
     }
     
     // v0.7.12: Abort ongoing workload (controller failure, user interrupt, etc.)
@@ -1810,6 +971,14 @@ impl Agent for AgentSvc {
                 // Initialize CPU monitor
                 let mut cpu_monitor = CpuMonitor::new();
                 
+                // v0.8.10: Progress bar display on agent
+                use indicatif::{ProgressBar, ProgressStyle};
+                
+                // Create progress bars (recreated when stage changes)
+                let mut prepare_pb: Option<ProgressBar> = None;
+                let mut workload_pb: Option<ProgressBar> = None;
+                let mut last_prepare_total: u64 = 0;
+                
                 // Send RUNNING stats every 1 second until completion
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1831,6 +1000,14 @@ impl Agent for AgentSvc {
                             match result {
                                 Some(Ok(summary)) => {
                                     info!("Stats writer: Workload completed successfully");
+                                    
+                                    // v0.8.10: Clean up progress bars
+                                    if let Some(pb) = prepare_pb.take() {
+                                        pb.finish_and_clear();
+                                    }
+                                    if let Some(pb) = workload_pb.take() {
+                                        pb.finish_with_message(format!("[{}] workload complete", agent_id));
+                                    }
                                     
                                     // Get config_yaml and op_log_path from state
                                     let config_yaml = agent_state.get_config_yaml().await.unwrap_or_default();
@@ -1975,6 +1152,14 @@ impl Agent for AgentSvc {
                                 Some(Err(e)) => {
                                     error!("Stats writer: Workload failed: {}", e);
                                     
+                                    // v0.8.10: Clean up progress bars with error message
+                                    if let Some(pb) = prepare_pb.take() {
+                                        pb.abandon_with_message(format!("[{}] aborted", agent_id));
+                                    }
+                                    if let Some(pb) = workload_pb.take() {
+                                        pb.abandon_with_message(format!("[{}] error: {}", agent_id, e));
+                                    }
+                                    
                                     // Send ERROR message
                                     let error_msg = LiveStats {
                                         agent_id: agent_id.clone(),
@@ -2010,6 +1195,15 @@ impl Agent for AgentSvc {
                                 }
                                 None => {
                                     error!("Stats writer: Workload task terminated unexpectedly");
+                                    
+                                    // v0.8.10: Clean up progress bars
+                                    if let Some(pb) = prepare_pb.take() {
+                                        pb.abandon_with_message(format!("[{}] terminated", agent_id));
+                                    }
+                                    if let Some(pb) = workload_pb.take() {
+                                        pb.abandon_with_message(format!("[{}] terminated", agent_id));
+                                    }
+                                    
                                     break;
                                 }
                             }
@@ -2027,6 +1221,79 @@ impl Agent for AgentSvc {
                                     iowait_percent: 0.0,
                                     total_percent: 0.0,
                                 });
+                            
+                            // v0.8.10: Update progress bars based on current stage
+                            let current_stage = snapshot.current_stage.to_proto_i32();
+                            
+                            // Handle prepare phase (stage 1 = PREPARE)
+                            if snapshot.in_prepare_phase {
+                                // Create or update prepare progress bar
+                                if prepare_pb.is_none() || last_prepare_total != snapshot.prepare_objects_total {
+                                    // Finish old bar if switching totals
+                                    if let Some(old_pb) = prepare_pb.take() {
+                                        old_pb.finish_and_clear();
+                                    }
+                                    let pb = ProgressBar::new(snapshot.prepare_objects_total);
+                                    pb.set_style(
+                                        ProgressStyle::default_bar()
+                                            .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}) {msg}")
+                                            .unwrap_or_else(|_| ProgressStyle::default_bar())
+                                    );
+                                    pb.set_message(format!("[{}] preparing...", agent_id));
+                                    last_prepare_total = snapshot.prepare_objects_total;
+                                    prepare_pb = Some(pb);
+                                }
+                                
+                                if let Some(pb) = prepare_pb.as_ref() {
+                                    pb.set_position(snapshot.prepare_objects_created);
+                                    // Show throughput in message
+                                    let elapsed = snapshot.elapsed_secs();
+                                    if elapsed > 0.0 {
+                                        let rate = snapshot.prepare_objects_created as f64 / elapsed;
+                                        pb.set_message(format!(
+                                            "[{}] preparing ({:.1} obj/s)", 
+                                            agent_id, rate
+                                        ));
+                                    }
+                                }
+                            } else if prepare_pb.is_some() {
+                                // Prepare phase finished - close the bar
+                                if let Some(pb) = prepare_pb.take() {
+                                    pb.finish_with_message(format!("[{}] prepare complete", agent_id));
+                                }
+                            }
+                            
+                            // Handle workload phase (stage 2 = WORKLOAD)
+                            if !snapshot.in_prepare_phase && (snapshot.get_ops > 0 || snapshot.put_ops > 0 || current_stage == 2) {
+                                if workload_pb.is_none() {
+                                    // Create workload spinner
+                                    let pb = ProgressBar::new_spinner();
+                                    pb.set_style(
+                                        ProgressStyle::default_spinner()
+                                            .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                                            .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                                    );
+                                    pb.set_message(format!("[{}] workload running...", agent_id));
+                                    workload_pb = Some(pb);
+                                }
+                                
+                                if let Some(pb) = workload_pb.as_ref() {
+                                    pb.tick();
+                                    // Show throughput stats
+                                    let elapsed = snapshot.elapsed_secs();
+                                    let total_ops = snapshot.get_ops + snapshot.put_ops;
+                                    let total_bytes = snapshot.get_bytes + snapshot.put_bytes;
+                                    if elapsed > 0.0 {
+                                        let ops_rate = total_ops as f64 / elapsed;
+                                        let mb_rate = total_bytes as f64 / (1024.0 * 1024.0) / elapsed;
+                                        pb.set_message(format!(
+                                            "[{}] GET:{} PUT:{} | {:.1} op/s | {:.1} MiB/s",
+                                            agent_id, snapshot.get_ops, snapshot.put_ops,
+                                            ops_rate, mb_rate
+                                        ));
+                                    }
+                                }
+                            }
                             
                             let running_msg = LiveStats {
                                 agent_id: agent_id.clone(),
@@ -2069,10 +1336,27 @@ impl Agent for AgentSvc {
                             
                             if tx_stats.send(running_msg).await.is_err() {
                                 error!("Stats writer: Failed to send RUNNING message (controller disconnected?)");
+                                
+                                // v0.8.10: Clean up progress bars on disconnect
+                                if let Some(pb) = prepare_pb.take() {
+                                    pb.abandon_with_message(format!("[{}] disconnected", agent_id));
+                                }
+                                if let Some(pb) = workload_pb.take() {
+                                    pb.abandon_with_message(format!("[{}] disconnected", agent_id));
+                                }
+                                
                                 break;
                             }
                         }
                     }
+                }
+                
+                // v0.8.10: Final cleanup of any remaining progress bars
+                if let Some(pb) = prepare_pb {
+                    pb.finish_and_clear();
+                }
+                if let Some(pb) = workload_pb {
+                    pb.finish_and_clear();
                 }
                 
                 info!("Stats writer task exiting");
@@ -2309,6 +1593,23 @@ impl Agent for AgentSvc {
                                             .map(|p| p.cleanup_only.unwrap_or(false))
                                             .unwrap_or(false);
                                         
+                                        // v0.8.11: CRITICAL FIX - Wrap ALL execution in tokio::select! for proper abort handling
+                                        // This ensures the workload task stops immediately when controller disconnects or sends ABORT
+                                        tokio::select! {
+                                            // Abort path: Controller disconnected or sent ABORT command
+                                            _ = abort_rx_task.recv() => {
+                                                warn!("Workload task received abort signal - stopping immediately");
+                                                // Finalize oplog if initialized
+                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
+                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                                        error!("Failed to finalize operation logger during abort: {}", e);
+                                                    }
+                                                }
+                                                let _ = tx_done_exec.send(Err("Aborted by controller".to_string())).await;
+                                            }
+                                            
+                                            // Execution path: Run prepare, workload, and cleanup
+                                            result = async {
                                         // Execute prepare phase or generate cleanup list
                                         let (prepared_objects, tree_manifest) = if is_cleanup_only {
                                             // Cleanup-only mode: Generate list of objects to clean up
@@ -2322,8 +1623,7 @@ impl Agent for AgentSvc {
                                                             (objects, None)
                                                         }
                                                         Err(e) => {
-                                                            let _ = tx_done_exec.send(Err(format!("Failed to generate cleanup objects: {}", e))).await;
-                                                            return;
+                                                            return Err(anyhow::anyhow!("Failed to generate cleanup objects: {}", e));
                                                         }
                                                     }
                                                 } else {
@@ -2340,8 +1640,7 @@ impl Agent for AgentSvc {
                                                             (prepared, manifest)
                                                         }
                                                         Err(e) => {
-                                                            let _ = tx_done_exec.send(Err(format!("Failed to list objects: {}", e))).await;
-                                                            return;
+                                                            return Err(anyhow::anyhow!("Failed to list objects: {}", e));
                                                         }
                                                     }
                                                 }
@@ -2372,8 +1671,7 @@ impl Agent for AgentSvc {
                                                     (prepared, manifest)  // Store prepared objects for cleanup
                                                 }
                                                 Err(e) => {
-                                                    let _ = tx_done_exec.send(Err(format!("Prepare phase failed: {}", e))).await;
-                                                    return;
+                                                    return Err(anyhow::anyhow!("Prepare phase failed: {}", e));
                                                 }
                                             }
                                         } else {
@@ -2411,8 +1709,7 @@ impl Agent for AgentSvc {
                                             info!("Initializing s3dlio operation logger: {}", op_log_path.display());
                                             if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
                                                 error!("Failed to initialize operation logger: {}", e);
-                                                let _ = tx_done_exec.send(Err(format!("Failed to initialize oplog: {}", e))).await;
-                                                return;
+                                                return Err(anyhow::anyhow!("Failed to initialize oplog: {}", e));
                                             }
                                             
                                             // v0.8.6: Set client_id for this agent
@@ -2546,7 +1843,46 @@ impl Agent for AgentSvc {
                                             sai3_bench::workload::run(&config_exec, tree_manifest.clone()).await
                                         };
                                         
-                                        // Finalize oplog
+                                        // v0.8.7: Execute cleanup phase if configured (skip in cleanup-only mode)
+                                        // Note: This is INSIDE the tokio::select! so it will be aborted properly
+                                        if let Ok(ref _summary) = result {
+                                            if !is_cleanup_only {
+                                                if let Some(ref prepare_config) = config_exec.prepare {
+                                                    if prepare_config.cleanup {
+                                                        let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
+                                                        let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
+                                                        let cleanup_mode = prepare_config.cleanup_mode;
+                                                        
+                                                        info!("Starting cleanup phase (agent {}/{}, mode: {:?})", 
+                                                              agent_index, num_agents, cleanup_mode);
+                                                        
+                                                        // Get tracker for live stats reporting during cleanup
+                                                        let tracker = agent_state_for_task.get_tracker().await;
+                                                        
+                                                        // v0.8.9: Set stage to CLEANUP for proper progress display
+                                                        if let Some(ref t) = tracker {
+                                                            use sai3_bench::live_stats::WorkloadStage;
+                                                            t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+                                                        }
+                                                        
+                                                        if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
+                                                            &prepared_objects,
+                                                            tree_manifest.as_ref(),
+                                                            agent_index as usize,
+                                                            num_agents as usize,
+                                                            cleanup_mode,
+                                                            tracker,
+                                                        ).await {
+                                                            error!("Cleanup phase failed for agent {}: {}", agent_id_exec, e);
+                                                        } else {
+                                                            info!("Cleanup phase completed for agent {}", agent_id_exec);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Finalize oplog before returning result
                                         if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
                                             info!("Finalizing s3dlio operation logger");
                                             if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
@@ -2554,58 +1890,12 @@ impl Agent for AgentSvc {
                                             }
                                         }
                                         
-                                        tokio::select! {
-                                            _ = abort_rx_task.recv() => {
-                                                warn!("Workload task aborted");
-                                                // Finalize oplog
-                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                        error!("Failed to finalize operation logger: {}", e);
-                                                    }
-                                                }
-                                                let _ = tx_done_exec.send(Err("Aborted".to_string())).await;
-                                            }
-                                            _ = async {
+                                        result
+                                            } => {
+                                                // Execution completed (success or failure) - send result
                                                 match result {
                                                     Ok(summary) => {
                                                         info!("Workload completed successfully for agent {}", agent_id_exec);
-                                                        
-                                                        // v0.8.7: Execute cleanup phase if configured (skip in cleanup-only mode)
-                                                        if !is_cleanup_only {
-                                                            if let Some(ref prepare_config) = config_exec.prepare {
-                                                                if prepare_config.cleanup {
-                                                                    let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
-                                                                    let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
-                                                                    let cleanup_mode = prepare_config.cleanup_mode;
-                                                                    
-                                                                    info!("Starting cleanup phase (agent {}/{}, mode: {:?})", 
-                                                                          agent_index, num_agents, cleanup_mode);
-                                                                    
-                                                                    // Get tracker for live stats reporting during cleanup
-                                                                    let tracker = agent_state_for_task.get_tracker().await;
-                                                                    
-                                                                    // v0.8.9: Set stage to CLEANUP for proper progress display
-                                                                    if let Some(ref t) = tracker {
-                                                                        use sai3_bench::live_stats::WorkloadStage;
-                                                                        t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
-                                                                    }
-                                                                    
-                                                                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
-                                                                        &prepared_objects,
-                                                                        tree_manifest.as_ref(),
-                                                                        agent_index as usize,
-                                                                        num_agents as usize,
-                                                                        cleanup_mode,
-                                                                        tracker,
-                                                                    ).await {
-                                                                        error!("Cleanup phase failed for agent {}: {}", agent_id_exec, e);
-                                                                    } else {
-                                                                        info!("Cleanup phase completed for agent {}", agent_id_exec);
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        
                                                         let _ = tx_done_exec.send(Ok(summary)).await;
                                                     }
                                                     Err(e) => {
@@ -2613,7 +1903,7 @@ impl Agent for AgentSvc {
                                                         let _ = tx_done_exec.send(Err(e.to_string())).await;
                                                     }
                                                 }
-                                            } => {}
+                                            }
                                         }
                                     });
                                     

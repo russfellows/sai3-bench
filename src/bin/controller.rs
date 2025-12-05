@@ -1531,8 +1531,7 @@ async fn run_distributed_workload(
                 
                 anyhow::bail!("Agent startup validation timeout");
             }
-            _ = &mut shutdown_signal => {
-                let sig = shutdown_signal.await;
+            sig = &mut shutdown_signal => {
                 eprintln!("\n⚠️  Received {} during startup", sig);
                 
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
@@ -1946,8 +1945,7 @@ async fn run_distributed_workload(
                 // Check logic is at top of loop
             }
             
-            _ = &mut shutdown_signal => {
-                let sig = shutdown_signal.await;
+            sig = &mut shutdown_signal => {
                 warn!("Received {} - aborting all agents", sig);
                 progress_bar.finish_with_message(format!("Interrupted by {} - aborting agents...", sig));
                 

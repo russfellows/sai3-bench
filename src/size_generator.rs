@@ -209,18 +209,19 @@ impl SizeGenerator {
                 // Sample from lognormal and clamp to [min, max]
                 // Rejection sampling: keep trying until we get a value in range
                 // (usually converges quickly for reasonable parameters)
-                loop {
+                const MAX_ATTEMPTS: u32 = 100;
+                for _ in 0..MAX_ATTEMPTS {
                     let sample = dist.sample(&mut self.rng);
                     let size = sample.round() as u64;
                     
                     if size >= *min && size <= *max {
                         return size;
                     }
-                    
-                    // Fallback: clamp if we've tried too many times
-                    // This prevents infinite loops with unrealistic parameters
-                    return size.clamp(*min, *max);
                 }
+                // Fallback: clamp if we've tried too many times
+                // This prevents infinite loops with unrealistic parameters
+                let sample = dist.sample(&mut self.rng);
+                sample.round().clamp(*min as f64, *max as f64) as u64
             }
         }
     }
