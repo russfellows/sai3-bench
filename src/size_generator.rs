@@ -322,7 +322,7 @@ mod tests {
         
         // Check mean is approximately correct
         let mean = generator.expected_mean();
-        assert!(mean >= 5000 && mean <= 6500, "Mean {} outside expected range", mean);
+        assert!((5000..=6500).contains(&mean), "Mean {} outside expected range", mean);
     }
     
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         let mean: f64 = samples.iter().sum::<u64>() as f64 / samples.len() as f64;
         
         // Mean should be reasonably close to 1 MB (allow some variance)
-        assert!(mean >= 800_000.0 && mean <= 1_300_000.0, 
+        assert!((800_000.0..=1_300_000.0).contains(&mean), 
             "Mean {} outside expected range for lognormal", mean);
         
         // Most samples should be below the mean (characteristic of lognormal)

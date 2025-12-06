@@ -64,18 +64,18 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
     
     // Sequential strategy: first 10 should be 1KB, next 10 should be 2KB, last 10 should be 4KB
     // Check first 10 are 1KB
-    for i in 0..10 {
-        assert_eq!(objects[i].size, 1024, "Object {} should be 1KB", i);
+    for (i, obj) in objects.iter().enumerate().take(10) {
+        assert_eq!(obj.size, 1024, "Object {} should be 1KB", i);
     }
     
     // Check next 10 are 2KB
-    for i in 10..20 {
-        assert_eq!(objects[i].size, 2048, "Object {} should be 2KB", i);
+    for (i, obj) in objects.iter().enumerate().take(20).skip(10) {
+        assert_eq!(obj.size, 2048, "Object {} should be 2KB", i);
     }
     
     // Check last 10 are 4KB
-    for i in 20..30 {
-        assert_eq!(objects[i].size, 4096, "Object {} should be 4KB", i);
+    for (i, obj) in objects.iter().enumerate().take(30).skip(20) {
+        assert_eq!(obj.size, 4096, "Object {} should be 4KB", i);
     }
     
     Ok(())
@@ -138,8 +138,8 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
     // Parallel strategy: sizes should be mixed, not all 1KB first, then all 2KB, then all 4KB
     // Check that first 20 objects are NOT all the same size (proves shuffling)
     let mut size_counts_in_first_20 = HashMap::new();
-    for i in 0..20 {
-        *size_counts_in_first_20.entry(objects[i].size).or_insert(0) += 1;
+    for obj in objects.iter().take(20) {
+        *size_counts_in_first_20.entry(obj.size).or_insert(0) += 1;
     }
     
     // Should have more than one size in the first 20 objects

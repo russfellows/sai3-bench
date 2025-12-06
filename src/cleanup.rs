@@ -161,7 +161,7 @@ pub async fn cleanup_prepared_objects(
             .map(|(_, obj)| obj.clone())
             .collect()
     } else {
-        objects.iter().cloned().collect()
+        objects.to_vec()
     };
     
     let my_objects_count = my_objects.len();

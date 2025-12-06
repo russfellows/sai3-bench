@@ -15,7 +15,6 @@ use regex::{Regex, escape};
 use sai3_bench::config::Config;
 use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::workload;
-use serde_yaml;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -502,12 +501,12 @@ fn list_cmd(uri: &str) -> Result<()> {
         
         // Apply glob pattern filtering if needed
         if validated_uri.contains('*') {
-            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            let pattern_part = validated_uri.split('/').next_back().unwrap_or("*");
             if pattern_part.contains('*') {
                 let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
                 let re = Regex::new(&pattern).context("Invalid glob pattern")?;
                 objects.retain(|obj| {
-                    let basename = obj.split('/').last().unwrap_or(obj);
+                    let basename = obj.split('/').next_back().unwrap_or(obj);
                     re.is_match(basename)
                 });
             }
@@ -564,7 +563,7 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
                 return Err(anyhow!("Invalid URI pattern: {}", validated_uri));
             };
             
-            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            let pattern_part = validated_uri.split('/').next_back().unwrap_or("*");
             
             let mut found_objects = list_objects_multi_backend(dir_uri).await
                 .context("Failed to list objects for pattern matching")?;
@@ -573,7 +572,7 @@ fn get_cmd(uri: &str, jobs: usize) -> Result<()> {
                 let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
                 let re = Regex::new(&pattern).context("Invalid glob pattern")?;
                 found_objects.retain(|obj| {
-                    let basename = obj.split('/').last().unwrap_or(obj);
+                    let basename = obj.split('/').next_back().unwrap_or(obj);
                     re.is_match(basename)
                 });
             }
@@ -668,7 +667,7 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
                 return Err(anyhow!("Invalid URI pattern: {}", validated_uri));
             };
             
-            let pattern_part = validated_uri.split('/').last().unwrap_or("*");
+            let pattern_part = validated_uri.split('/').next_back().unwrap_or("*");
             
             let mut found_objects = list_objects_multi_backend(dir_uri).await
                 .context("Failed to list objects for pattern matching")?;
@@ -677,7 +676,7 @@ fn delete_cmd(uri: &str, jobs: usize) -> Result<()> {
                 let pattern = format!("^{}$", escape(pattern_part).replace(r"\*", ".*"));
                 let re = Regex::new(&pattern).context("Invalid glob pattern")?;
                 found_objects.retain(|obj| {
-                    let basename = obj.split('/').last().unwrap_or(obj);
+                    let basename = obj.split('/').next_back().unwrap_or(obj);
                     re.is_match(basename)
                 });
             }
@@ -860,6 +859,7 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     sai3_bench::validation::display_config_summary(config, config_path)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_workload(
     config_path: &str, 
     dry_run: bool, 
@@ -917,7 +917,7 @@ fn run_workload(
     info!("Configuration loaded successfully");
     
     // Initialize operation logger if --op-log flag provided (v0.8.6+)
-    if let Some(ref op_log_path) = op_log_path {
+    if let Some(op_log_path) = op_log_path {
         workload::init_operation_logger(op_log_path)
             .with_context(|| format!("Failed to initialize operation logger at {}", op_log_path.display()))?;
         info!("Initialized operation logger: {}", op_log_path.display());

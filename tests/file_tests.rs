@@ -281,7 +281,7 @@ async fn test_file_nested_directories() -> Result<()> {
     let level1_uri = format!("{}level1/", base_uri);
     let objects = list_objects_no_log(&level1_uri).await?;
     println!("     ✓ Found {} objects under level1/", objects.len());
-    assert!(objects.len() >= 1);
+    assert!(!objects.is_empty());
     
     // Cleanup
     println!("  🗑️  DELETE nested file");

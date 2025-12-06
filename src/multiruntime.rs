@@ -247,19 +247,19 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
     // Collect all non-empty histograms
     for hist_mutex in summary.get_hists.buckets.iter() {
         let hist = hist_mutex.lock().unwrap();
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             all_hists.push(hist.clone());
         }
     }
     for hist_mutex in summary.put_hists.buckets.iter() {
         let hist = hist_mutex.lock().unwrap();
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             all_hists.push(hist.clone());
         }
     }
     for hist_mutex in summary.meta_hists.buckets.iter() {
         let hist = hist_mutex.lock().unwrap();
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             all_hists.push(hist.clone());
         }
     }
@@ -284,7 +284,7 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
             .context("Failed to create GET combined histogram")?;
         for hist_mutex in summary.get_hists.buckets.iter() {
             let hist = hist_mutex.lock().unwrap();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 get_combined.add(&*hist)
                     .context("Failed to merge GET histograms")?;
             }
@@ -301,7 +301,7 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
             .context("Failed to create PUT combined histogram")?;
         for hist_mutex in summary.put_hists.buckets.iter() {
             let hist = hist_mutex.lock().unwrap();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 put_combined.add(&*hist)
                     .context("Failed to merge PUT histograms")?;
             }
@@ -318,7 +318,7 @@ fn recalculate_percentiles(summary: &mut Summary) -> Result<()> {
             .context("Failed to create META combined histogram")?;
         for hist_mutex in summary.meta_hists.buckets.iter() {
             let hist = hist_mutex.lock().unwrap();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 meta_combined.add(&*hist)
                     .context("Failed to merge META histograms")?;
             }

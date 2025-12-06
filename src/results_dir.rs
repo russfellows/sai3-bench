@@ -105,7 +105,7 @@ impl ResultsDir {
         // Copy config file
         let config_dest = dir_path.join("config.yaml");
         fs::copy(config_path, &config_dest)
-            .with_context(|| format!("Failed to copy config to results directory"))?;
+            .with_context(|| "Failed to copy config to results directory".to_string())?;
 
         // Create metadata
         let metadata = RunMetadata::new(
@@ -116,7 +116,7 @@ impl ResultsDir {
         // Create console log file
         let console_log_path = dir_path.join("console.log");
         let console_log = fs::File::create(&console_log_path)
-            .with_context(|| format!("Failed to create console.log"))?;
+            .with_context(|| "Failed to create console.log".to_string())?;
 
         tracing::info!("Created results directory: {}", dir_path.display());
 
@@ -162,7 +162,7 @@ impl ResultsDir {
         let json = serde_json::to_string_pretty(&self.metadata)
             .with_context(|| "Failed to serialize metadata")?;
         fs::write(&metadata_path, json)
-            .with_context(|| format!("Failed to write metadata.json"))?;
+            .with_context(|| "Failed to write metadata.json".to_string())?;
         Ok(())
     }
 

@@ -149,7 +149,7 @@ fn test_histogram_merging_preserves_percentiles() {
     
     // p50 should be between the two distributions (~300-400µs)
     let p50 = hist1.value_at_quantile(0.5);
-    assert!(p50 >= 200 && p50 <= 500, "p50={} should be between distributions", p50);
+    assert!((200..=500).contains(&p50), "p50={} should be between distributions", p50);
     
     // p95 should be in the upper distribution (>700µs)
     let p95 = hist1.value_at_quantile(0.95);

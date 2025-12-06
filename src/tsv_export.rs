@@ -32,6 +32,7 @@ impl TsvExporter {
     }
 
     /// Export complete results to TSV file
+    #[allow(clippy::too_many_arguments)]
     pub fn export_results(
         &self,
         get_hists: &OpHists,

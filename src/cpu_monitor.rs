@@ -188,13 +188,11 @@ mod tests {
         }
         
         // Force sample now - should return Some
-        if let Ok(result) = monitor.sample_now() {
-            if let Some(util) = result {
-                println!("CPU utilization: user={:.1}%, system={:.1}%, iowait={:.1}%, total={:.1}%",
-                         util.user_percent, util.system_percent, util.iowait_percent, util.total_percent);
-                // Sanity check: percentages should be 0-100
-                assert!(util.total_percent >= 0.0 && util.total_percent <= 100.0);
-            }
+        if let Ok(Some(util)) = monitor.sample_now() {
+            println!("CPU utilization: user={:.1}%, system={:.1}%, iowait={:.1}%, total={:.1}%",
+                     util.user_percent, util.system_percent, util.iowait_percent, util.total_percent);
+            // Sanity check: percentages should be 0-100
+            assert!(util.total_percent >= 0.0 && util.total_percent <= 100.0);
         }
     }
 }

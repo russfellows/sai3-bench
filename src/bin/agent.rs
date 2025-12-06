@@ -171,7 +171,7 @@ impl AgentState {
     /// Transition to new state with validation and logging
     async fn transition_to(&self, new_state: WorkloadState, reason: &str) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        if !Self::can_transition(&*state, &new_state) {
+        if !Self::can_transition(&state, &new_state) {
             let msg = format!("Invalid state transition: {:?} → {:?} (reason: {})", *state, new_state, reason);
             error!("{}", msg);
             return Err(msg);
@@ -2112,7 +2112,7 @@ impl Agent for AgentSvc {
         
         // Convert stats channel to stream, wrapping each LiveStats in Ok()
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx_stats)
-            .map(|stats| Ok(stats));
+            .map(Ok);
         
         Ok(Response::new(Box::pin(output_stream)))
     }
@@ -2362,11 +2362,11 @@ async fn list_keys_for_uri(uri: &str) -> Result<Vec<String>> {
                 uri
             };
             Ok(keys.into_iter()
-                .filter_map(|k| {
+                .map(|k| {
                     if let Some(stripped) = k.strip_prefix(base_uri) {
-                        Some(stripped.to_string())
+                        stripped.to_string()
                     } else {
-                        Some(k)
+                        k
                     }
                 })
                 .collect())
