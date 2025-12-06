@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.8.10"
+version = "0.8.11"
 dependencies = [
  "anyhow",
  "assert_cmd",

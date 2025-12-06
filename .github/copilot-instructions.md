@@ -38,26 +38,24 @@ The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.8.7 (November 2025) - Bidirectional Streaming with Dedicated Cleanup Module
+**Current Version**: v0.8.11 (December 2025) - Agent Progress Bars and Azure/GCS Custom Endpoints
 
-**v0.8.7 Key Features**:
-- Dedicated cleanup module (`src/cleanup.rs`) with `list_existing_objects()`
-- Cleanup-only mode with storage listing (no file creation)
-- Cleanup as counted workload with live stats tracking (DELETE → META)
-- Minimum 3-second stats reporting for fast-completing workloads
+**v0.8.11 Key Features**:
+- Agent progress bars for distributed mode (prepare phase + workload spinner)
+- Azure/GCS custom endpoint support with test infrastructure
+- Proper distributed abort handling (SIGINT fix, agent abort response)
+- Removed legacy gRPC RPCs (~824 lines) - single `ExecuteWorkload` stream
+- Zero clippy warnings across entire codebase
 
-**v0.8.5 Key Features** (Bidirectional Streaming Architecture):
-- Single gRPC bidirectional stream (`ExecuteWorkload`) for reliable distributed execution
-- Agent state machine: Idle → Ready → Running → Idle
-- Controller state machine: Connecting → ConfigSent → Ready → StartSent → CollectingStats → Completed
-- Live stats streaming every 1 second during workload execution
+**v0.8.10 Features**:
+- Replay backpressure system with graceful mode transitions
+- YAML-based replay configuration via `--config` flag
 
-**v0.8.6 Features**:
-- Prand data generation (`fill: prand`) - 31% faster, but 87-90% compressible (use sparingly)
-- Operation logging with client_id and clock offset synchronization
-- first_byte tracking for GET operations (approximate TTFB)
+**v0.8.9 Features**:
+- Flexible multi-stage system for workload lifecycle tracking
+- Stage-aware controller display (Preparing, Running, Cleanup)
 
-## Module Architecture (v0.8.7)
+## Module Architecture (v0.8.11)
 
 ### Core Source Modules (`src/`)
 - **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`
