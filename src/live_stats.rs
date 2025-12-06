@@ -297,7 +297,7 @@ impl LiveStatsTracker {
         // Calculate latency percentiles (requires histogram lock)
         let (get_mean_us, get_p50_us, get_p95_us) = {
             let hist = self.get_hist.lock();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 (hist.mean() as u64, hist.value_at_quantile(0.50), hist.value_at_quantile(0.95))
             } else {
                 (0, 0, 0)
@@ -306,7 +306,7 @@ impl LiveStatsTracker {
 
         let (put_mean_us, put_p50_us, put_p95_us) = {
             let hist = self.put_hist.lock();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 (hist.mean() as u64, hist.value_at_quantile(0.50), hist.value_at_quantile(0.95))
             } else {
                 (0, 0, 0)
@@ -315,7 +315,7 @@ impl LiveStatsTracker {
 
         let meta_mean_us = {
             let hist = self.meta_hist.lock();
-            if hist.len() > 0 {
+            if !hist.is_empty() {
                 hist.mean() as u64
             } else {
                 0

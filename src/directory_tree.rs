@@ -32,6 +32,7 @@ pub struct DirectoryStructureConfig {
     /// Example: "sai3bench.d%d_w%d.dir" produces:
     ///   - "sai3bench.d1_w1.dir", "sai3bench.d1_w2.dir" (level 1)
     ///   - "sai3bench.d2_w1.dir", "sai3bench.d2_w2.dir" (level 2, under each parent)
+    ///
     /// The first %d is replaced with depth (level), second %d with width (child index within parent)
     #[serde(default = "default_dir_mask")]
     pub dir_mask: String,
@@ -671,7 +672,7 @@ impl TreeManifest {
             let agent_id = idx % num_agents;
             self.agent_assignments
                 .entry(agent_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(path.clone());
         }
     }

@@ -209,18 +209,19 @@ impl SizeGenerator {
                 // Sample from lognormal and clamp to [min, max]
                 // Rejection sampling: keep trying until we get a value in range
                 // (usually converges quickly for reasonable parameters)
-                loop {
+                const MAX_ATTEMPTS: u32 = 100;
+                for _ in 0..MAX_ATTEMPTS {
                     let sample = dist.sample(&mut self.rng);
                     let size = sample.round() as u64;
                     
                     if size >= *min && size <= *max {
                         return size;
                     }
-                    
-                    // Fallback: clamp if we've tried too many times
-                    // This prevents infinite loops with unrealistic parameters
-                    return size.clamp(*min, *max);
                 }
+                // Fallback: clamp if we've tried too many times
+                // This prevents infinite loops with unrealistic parameters
+                let sample = dist.sample(&mut self.rng);
+                sample.round().clamp(*min as f64, *max as f64) as u64
             }
         }
     }
@@ -321,7 +322,7 @@ mod tests {
         
         // Check mean is approximately correct
         let mean = generator.expected_mean();
-        assert!(mean >= 5000 && mean <= 6500, "Mean {} outside expected range", mean);
+        assert!((5000..=6500).contains(&mean), "Mean {} outside expected range", mean);
     }
     
     #[test]
@@ -351,7 +352,7 @@ mod tests {
         let mean: f64 = samples.iter().sum::<u64>() as f64 / samples.len() as f64;
         
         // Mean should be reasonably close to 1 MB (allow some variance)
-        assert!(mean >= 800_000.0 && mean <= 1_300_000.0, 
+        assert!((800_000.0..=1_300_000.0).contains(&mean), 
             "Mean {} outside expected range for lognormal", mean);
         
         // Most samples should be below the mean (characteristic of lognormal)

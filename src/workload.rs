@@ -296,10 +296,10 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
             }
         }
         BackendType::File | BackendType::DirectIO => {
-            let path = if base_uri.starts_with("file://") {
-                &base_uri[7..]
-            } else if base_uri.starts_with("direct://") {
-                &base_uri[9..]
+            let path = if let Some(stripped) = base_uri.strip_prefix("file://") {
+                stripped
+            } else if let Some(stripped) = base_uri.strip_prefix("direct://") {
+                stripped
             } else {
                 base_uri
             };
@@ -438,7 +438,7 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
     }
     
     trace!("Chunked read completed: {} bytes in {} chunks", result.len(), 
-           (file_size + chunk_size - 1) / chunk_size);
+           file_size.div_ceil(chunk_size));
     Ok(result)
 
 }
@@ -953,6 +953,7 @@ pub struct Summary {
 // -----------------------------------------------------------------------------
 // Worker stats merged at the end
 // -----------------------------------------------------------------------------
+#[derive(Default)]
 struct WorkerStats {
     hist_get: crate::metrics::OpHists,
     hist_put: crate::metrics::OpHists,
@@ -968,24 +969,6 @@ struct WorkerStats {
     meta_bins: SizeBins,
 }
 
-impl Default for WorkerStats {
-    fn default() -> Self {
-        Self {
-            hist_get: crate::metrics::OpHists::new(),
-            hist_put: crate::metrics::OpHists::new(),
-            hist_meta: crate::metrics::OpHists::new(),
-            get_bytes: 0,
-            get_ops: 0,
-            put_bytes: 0,
-            put_ops: 0,
-            meta_bytes: 0,
-            meta_ops: 0,
-            get_bins: SizeBins::default(),
-            put_bins: SizeBins::default(),
-            meta_bins: SizeBins::default(),
-        }
-    }
-}
 
 /// Error tracking for workload resilience (v0.7.13+)
 /// 
@@ -1414,8 +1397,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     // Create ObjectStore pool for connection reuse (v0.7.3+)
     // Instead of creating a new store for every operation (wasteful!),
     // we create stores once and reuse them across all operations
-    let store_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>> = 
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let store_cache: StoreCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
     
     // v0.7.13: Create error tracker for resilient error handling
     let error_tracker = ErrorTracker::new(cfg.error_handling.clone());
@@ -1955,7 +1937,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     }
     
     // v0.7.13: If error occurred, cancel progress bar before returning
-    if workload_error.is_some() {
+    if let Some(err) = workload_error {
         let _ = tx_cancel_progress.send(());
         let _ = progress_handle.await;  // Wait for progress to exit
         
@@ -1963,7 +1945,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         error!("❌ Workload aborted: {} total errors, {:.2} errors/sec",
             total_errors, error_rate);
         
-        return Err(workload_error.unwrap());
+        return Err(err);
     }
 
     // Complete progress bar and wait for progress task

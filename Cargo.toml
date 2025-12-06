@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.10"
+version = "0.8.11"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,10 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio v0.9.22 (includes client_id, first_byte, clock offset, and prand support)
+# s3dlio v0.9.24 (includes force_path_style fix for S3-compatible endpoints, tracing workaround)
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.22" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.22" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.24" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.24" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

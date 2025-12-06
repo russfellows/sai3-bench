@@ -224,6 +224,7 @@ pub async fn prepare_objects(
 
 /// Sequential prepare strategy: Process each ensure_objects entry one at a time
 /// This is the original behavior - predictable, separate progress bars per size
+#[allow(clippy::too_many_arguments)]
 async fn prepare_sequential(
     config: &PrepareConfig,
     needs_separate_pools: bool,
@@ -364,47 +365,48 @@ async fn prepare_sequential(
             
             
             // 2.5. Record existing objects if all requirements met
-            if to_create == 0 && tree_manifest.is_some() {
-                // All objects exist - reconstruct PreparedObject entries from manifest
-                let manifest = tree_manifest.unwrap();
-                let size_spec = spec.get_size_spec();
-                let mut size_generator = SizeGenerator::new(&size_spec)
-                    .context("Failed to create size generator")?;
-                
-                for i in 0..spec.count {
-                    if let Some(rel_path) = manifest.get_file_path(i as usize) {
+            if to_create == 0 {
+                if let Some(manifest) = tree_manifest {
+                    // All objects exist - reconstruct PreparedObject entries from manifest
+                    let size_spec = spec.get_size_spec();
+                    let mut size_generator = SizeGenerator::new(&size_spec)
+                        .context("Failed to create size generator")?;
+                    
+                    for i in 0..spec.count {
+                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
+                            let uri = if spec.base_uri.ends_with('/') {
+                                format!("{}{}", spec.base_uri, rel_path)
+                            } else {
+                                format!("{}/{}", spec.base_uri, rel_path)
+                            };
+                            let size = size_generator.generate();
+                            all_prepared.push(PreparedObject {
+                                uri,
+                                size,
+                                created: false,  // Existed already
+                            });
+                        }
+                    }
+                } else {
+                    // Flat mode: all exist
+                    let size_spec = spec.get_size_spec();
+                    let mut size_generator = SizeGenerator::new(&size_spec)
+                        .context("Failed to create size generator")?;
+                    
+                    for i in 0..spec.count {
+                        let key = format!("{}-{:08}.dat", prefix, i);
                         let uri = if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, rel_path)
+                            format!("{}{}", spec.base_uri, key)
                         } else {
-                            format!("{}/{}", spec.base_uri, rel_path)
+                            format!("{}/{}", spec.base_uri, key)
                         };
                         let size = size_generator.generate();
                         all_prepared.push(PreparedObject {
                             uri,
                             size,
-                            created: false,  // Existed already
+                            created: false,
                         });
                     }
-                }
-            } else if to_create == 0 {
-                // Flat mode: all exist
-                let size_spec = spec.get_size_spec();
-                let mut size_generator = SizeGenerator::new(&size_spec)
-                    .context("Failed to create size generator")?;
-                
-                for i in 0..spec.count {
-                    let key = format!("{}-{:08}.dat", prefix, i);
-                    let uri = if spec.base_uri.ends_with('/') {
-                        format!("{}{}", spec.base_uri, key)
-                    } else {
-                        format!("{}/{}", spec.base_uri, key)
-                    };
-                    let size = size_generator.generate();
-                    all_prepared.push(PreparedObject {
-                        uri,
-                        size,
-                        created: false,
-                    });
                 }
             }
             
@@ -660,6 +662,7 @@ async fn prepare_sequential(
 /// 
 /// v0.7.2: Shuffles tasks to ensure each directory receives a mix of all file sizes
 /// rather than clustering sizes together (all 32KB, then all 64KB, etc.)
+#[allow(clippy::too_many_arguments)]
 async fn prepare_parallel(
     config: &PrepareConfig,
     needs_separate_pools: bool,
@@ -1471,7 +1474,7 @@ pub async fn create_directory_tree(
                     debug!("AFTER list() call - returned {} files for {}", files.len(), dir_prefix);
                     
                     // DEBUG: For problematic directories (< 130 files), show ALL files returned
-                    if files.len() < 130 && files.len() > 0 {
+                    if files.len() < 130 && !files.is_empty() {
                         warn!("⚠️  Directory {} returned only {} files (expected 130):", dir_prefix, files.len());
                         for (i, f) in files.iter().enumerate().take(10) {
                             warn!("    File {}: {}", i, f);
@@ -1479,7 +1482,7 @@ pub async fn create_directory_tree(
                         if files.len() > 10 {
                             warn!("    ... and {} more", files.len() - 10);
                         }
-                    } else if files.len() == 0 {
+                    } else if files.is_empty() {
                         warn!("❌ Directory {} returned ZERO files (expected 130)", dir_prefix);
                     }
                     

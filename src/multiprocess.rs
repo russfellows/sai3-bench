@@ -35,7 +35,7 @@ pub async fn run_multiprocess(
     info!("Starting multi-process execution: {} processes", process_count);
     
     // Adjust concurrency per process
-    let threads_per_process = (cfg.concurrency + process_count - 1) / process_count;
+    let threads_per_process = cfg.concurrency.div_ceil(process_count);
     info!("Threads per process: {} (total: {})", 
         threads_per_process, threads_per_process * process_count);
     
@@ -284,7 +284,7 @@ fn calculate_percentile(ophists: &crate::metrics::OpHists, percentile: f64) -> u
     // Find first non-empty histogram
     for bucket in ophists.buckets.iter() {
         let hist = bucket.lock().unwrap();
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             return hist.value_at_quantile(percentile / 100.0);
         }
     }
@@ -298,7 +298,7 @@ fn calculate_mean(ophists: &crate::metrics::OpHists) -> u64 {
     
     for bucket in ophists.buckets.iter() {
         let hist = bucket.lock().unwrap();
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             total_count += hist.len();
             weighted_sum += (hist.mean() * hist.len() as f64) as u64;
         }

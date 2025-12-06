@@ -48,7 +48,7 @@ impl MetadataPrefetcher {
     }
 
     /// Create with default configuration
-    pub fn default() -> Self {
+    pub fn with_default_config() -> Self {
         Self::new(MetadataPrefetchConfig::default())
     }
 
@@ -193,7 +193,7 @@ mod tests {
         }
 
         // Create prefetcher and fetch metadata
-        let prefetcher = MetadataPrefetcher::default();
+        let prefetcher = MetadataPrefetcher::with_default_config();
         let mut rx = prefetcher.prefetch_metadata(uris.clone()).await;
 
         // Collect results
@@ -221,7 +221,7 @@ mod tests {
             "az://container/key3".to_string(),
         ];
 
-        let prefetcher = MetadataPrefetcher::default();
+        let prefetcher = MetadataPrefetcher::with_default_config();
         let mut rx = prefetcher.prefetch_metadata(uris).await;
 
         let mut results = Vec::new();

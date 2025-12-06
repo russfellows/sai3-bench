@@ -1,19 +1,19 @@
-/// Integration tests for streaming replay functionality
-///
-/// **IMPORTANT**: These tests use s3dlio's global singleton op-logger and MUST run sequentially.
-/// 
-/// **AUTOMATIC SERIAL EXECUTION**: All tests in this module use `#[serial]` attribute to ensure
-/// proper ordering even when cargo test runs with multiple threads.
-///
-/// **TEST STRUCTURE**: To work around s3dlio's global singleton op-logger limitation:
-/// 1. `test_01_generate_oplog` - Creates op-log files (calls finalize once)
-/// 2. Other tests - Read and replay existing op-logs (no logging)
-///
-/// This ensures the global logger is only initialized/finalized once per test run.
-/// Tests are numbered to enforce execution order.
-///
-/// **NOTE**: If tests fail with "incomplete frame" errors, it means they ran in parallel.
-/// Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
+//! Integration tests for streaming replay functionality
+//!
+//! **IMPORTANT**: These tests use s3dlio's global singleton op-logger and MUST run sequentially.
+//! 
+//! **AUTOMATIC SERIAL EXECUTION**: All tests in this module use `#[serial]` attribute to ensure
+//! proper ordering even when cargo test runs with multiple threads.
+//!
+//! **TEST STRUCTURE**: To work around s3dlio's global singleton op-logger limitation:
+//! 1. `test_01_generate_oplog` - Creates op-log files (calls finalize once)
+//! 2. Other tests - Read and replay existing op-logs (no logging)
+//!
+//! This ensures the global logger is only initialized/finalized once per test run.
+//! Tests are numbered to enforce execution order.
+//!
+//! **NOTE**: If tests fail with "incomplete frame" errors, it means they ran in parallel.
+//! Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
 
 use anyhow::Result;
 use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};

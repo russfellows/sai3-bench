@@ -1,8 +1,8 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.10-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.11-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-103%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-217%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
@@ -37,21 +37,30 @@ See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides
 Test realistic shared filesystem scenarios with configurable directory hierarchies:
 
 ```yaml
-directory_tree:
-  width: 3              # Subdirectories per level
-  depth: 2              # Tree depth (2 = 3 + 9 directories)
-  files_per_dir: 10     # Files per directory
-  distribution: bottom  # "bottom" (leaf only) or "all" (every level)
+prepare:
+  directory_structure:
+    width: 3              # Subdirectories per level
+    depth: 2              # Tree depth (2 = 3 + 9 directories)
+    files_per_dir: 10     # Files per directory
+    distribution: bottom  # "bottom" (leaf only) or "all" (every level)
+    dir_mask: "d%d_w%d.dir"  # Directory naming pattern
   
-  size:
-    type: uniform       # or "lognormal", "fixed"
-    min_size_kb: 4
-    max_size_kb: 16
-  
-  fill: random          # "random" (default), "zero", or "sequential"
-  dedup_factor: 1       # Compression/dedup testing
-  compress_factor: 1
+  ensure_objects:
+    - base_uri: "file:///tmp/tree-test/"
+      count: 0            # Files created by directory_structure
+      size_spec: 
+        type: uniform
+        min: 4096         # 4 KiB
+        max: 16384        # 16 KiB
+      fill: random        # "random" (recommended) or "prand" (faster)
+      dedup_factor: 1     # 1 = unique, 2+ = duplicate blocks
+      compress_factor: 1  # 1 = incompressible, 2+ = compressible
 ```
+
+**Fill Pattern Options:**
+- **`random`** (default, recommended): Cryptographic random data - realistic, incompressible
+- **`prand`**: Pseudo-random using XorShift - faster generation, still unique per file
+- **`zero`**: All zeros - AVOID for benchmarks (triggers dedup/compression, unrealistic)
 
 **Key Features:**
 - **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
@@ -117,25 +126,62 @@ See [Usage Guide](docs/USAGE.md) for detailed examples.
 
 ## 🔬 Workload Replay
 
-Record production workloads and replay with microsecond fidelity:
+Record production workloads and replay with microsecond-accurate timing:
 
 ```bash
-# Capture production workload
+# Step 1: Capture workload to op-log (compressed TSV)
 sai3-bench --op-log /tmp/production.tsv.zst run --config production.yaml
 
-# Replay against test environment
+# Step 2: Replay against test environment with original timing
 sai3-bench replay --op-log /tmp/production.tsv.zst --target "az://test-storage/"
 
-# Replay at higher speed for load testing
+# Replay at 5x speed for accelerated load testing
 sai3-bench replay --op-log /tmp/prod.tsv.zst --speed 5.0
-
-# 1→N fanout remapping
-sai3-bench replay --op-log /tmp/workload.tsv.zst --remap fanout.yaml
 ```
 
-**Use Cases**: Pre-migration validation, performance regression testing, capacity planning, cross-cloud comparison.
+### Backpressure Handling (v0.8.9+)
+When target storage can't sustain the recorded I/O rate:
 
-See [Usage Guide](docs/USAGE.md) for remapping strategies and examples.
+```yaml
+# replay_config.yaml - controls replay behavior
+lag_threshold: 5s        # Switch to best-effort when lag exceeds this
+recovery_threshold: 1s   # Switch back when lag drops below this
+max_flaps_per_minute: 3  # Exit gracefully if oscillating too much
+max_concurrent: 1000     # Maximum in-flight operations
+drain_timeout: 10s       # Timeout for draining on exit
+```
+
+```bash
+sai3-bench replay --op-log trace.tsv.zst --config replay_config.yaml --target "s3://bucket/"
+```
+
+### URI Remapping
+Transform source URIs during replay for migration testing:
+
+```yaml
+# remap.yaml - 1:1 bucket rename (simple migration)
+rules:
+  - match:
+      bucket: "prod-bucket"
+    map_to:
+      bucket: "staging-bucket"
+      prefix: "migrated/"
+```
+
+```bash
+# Apply remapping during replay
+sai3-bench replay --op-log trace.tsv.zst --remap remap.yaml --target "s3://staging-bucket/"
+```
+
+**Advanced Remapping Strategies:**
+- **1→1**: Simple bucket/prefix rename (migration validation)
+- **1→N**: Fanout to replicas (`round_robin` or `sticky_key` distribution)
+- **N→1**: Consolidate multiple sources to single target
+- **N→M**: Regex-based transformations (e.g., `s3://` → `gs://` for cross-cloud)
+
+See [remap_examples.yaml](tests/configs/remap_examples.yaml) for complete examples.
+
+**Use Cases**: Pre-migration validation, performance regression testing, capacity planning, cross-cloud comparison.
 
 ## 💾 Storage Efficiency Testing
 
@@ -146,18 +192,28 @@ prepare:
   ensure_objects:
     - base_uri: "s3://bucket/templates/"
       count: 100
-      size_distribution: {type: fixed, size: 10485760}  # 10 MB
-      fill: random      # RECOMMENDED for realistic testing
-      dedup_factor: 20  # 95% duplicate blocks
-      compress_factor: 2
+      size_spec: 10485760  # 10 MB fixed size
+      fill: random         # Recommended: realistic, incompressible
+      dedup_factor: 20     # 95% duplicate blocks (1/20 unique)
+      compress_factor: 2   # 2:1 compressible
     
     - base_uri: "s3://bucket/media/"
       count: 500
-      size_distribution: {type: uniform, min: 5242880, max: 52428800}
-      fill: random
-      dedup_factor: 1   # No deduplication
-      compress_factor: 1  # Uncompressible
+      size_spec:
+        type: uniform
+        min: 5242880       # 5 MB
+        max: 52428800      # 50 MB
+      fill: prand          # Faster pseudo-random, still unique per file
+      dedup_factor: 1      # All unique blocks
+      compress_factor: 1   # Incompressible
 ```
+
+**Fill Pattern Guidelines:**
+| Pattern | Speed | Use Case |
+|---------|-------|----------|
+| `random` | Slower | Production benchmarks, realistic workloads |
+| `prand` | Faster | Large-scale testing, still unique data per file |
+| `zero` | Fastest | ⚠️ AVOID - triggers dedup/compression, unrealistic results |
 
 **Use Cases**: Validate vendor dedup/compression claims, predict migration space requirements, model hot vs. cold data.
 
@@ -172,18 +228,21 @@ workload:
   - op: put
     path: "data/"
     weight: 100
-    size_distribution:
-      type: lognormal  # Many small files, few large files
-      mean: 1048576    # Mean: 1 MB
-      std_dev: 524288  # Std dev: 512 KB
-      min: 1024        # Floor: 1 KB
-      max: 10485760    # Ceiling: 10 MB
-    fill: random
+    size_spec:
+      type: lognormal    # Many small files, few large files
+      mean: 1048576      # Mean: 1 MB
+      std_dev: 524288    # Std dev: 512 KB
+      min: 1024          # Floor: 1 KB
+      max: 10485760      # Ceiling: 10 MB
+    fill: random         # "random" or "prand"
 ```
 
 **Why lognormal?** Research shows object storage naturally follows lognormal distributions (many small configs/thumbnails, few large videos/backups).
 
-Other distributions: `fixed` (exact size), `uniform` (evenly distributed).
+**Distribution Types:**
+- `lognormal`: Realistic - many small, few large (requires `mean`, `std_dev`)
+- `uniform`: Even spread between `min` and `max`
+- Fixed size: Just use `size_spec: 1048576` (integer value)
 
 See [Config Syntax](docs/CONFIG_SYNTAX.md) for complete options.
 

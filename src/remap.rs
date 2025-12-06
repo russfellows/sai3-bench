@@ -364,7 +364,7 @@ impl RemapEngine {
                 use std::hash::{Hash, Hasher};
                 
                 let mut state = self.sticky_state.lock().unwrap();
-                let rule_state = state.entry(rule_idx.to_string()).or_insert_with(HashMap::new);
+                let rule_state = state.entry(rule_idx.to_string()).or_default();
                 
                 let idx = *rule_state.entry(key.to_string()).or_insert_with(|| {
                     // Hash key to get stable target index

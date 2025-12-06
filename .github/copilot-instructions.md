@@ -38,26 +38,24 @@ The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.8.7 (November 2025) - Bidirectional Streaming with Dedicated Cleanup Module
+**Current Version**: v0.8.11 (December 2025) - Agent Progress Bars and Azure/GCS Custom Endpoints
 
-**v0.8.7 Key Features**:
-- Dedicated cleanup module (`src/cleanup.rs`) with `list_existing_objects()`
-- Cleanup-only mode with storage listing (no file creation)
-- Cleanup as counted workload with live stats tracking (DELETE → META)
-- Minimum 3-second stats reporting for fast-completing workloads
+**v0.8.11 Key Features**:
+- Agent progress bars for distributed mode (prepare phase + workload spinner)
+- Azure/GCS custom endpoint support with test infrastructure
+- Proper distributed abort handling (SIGINT fix, agent abort response)
+- Removed legacy gRPC RPCs (~824 lines) - single `ExecuteWorkload` stream
+- Zero clippy warnings across entire codebase
 
-**v0.8.5 Key Features** (Bidirectional Streaming Architecture):
-- Single gRPC bidirectional stream (`ExecuteWorkload`) for reliable distributed execution
-- Agent state machine: Idle → Ready → Running → Idle
-- Controller state machine: Connecting → ConfigSent → Ready → StartSent → CollectingStats → Completed
-- Live stats streaming every 1 second during workload execution
+**v0.8.10 Features**:
+- Replay backpressure system with graceful mode transitions
+- YAML-based replay configuration via `--config` flag
 
-**v0.8.6 Features**:
-- Prand data generation (`fill: prand`) - 31% faster, but 87-90% compressible (use sparingly)
-- Operation logging with client_id and clock offset synchronization
-- first_byte tracking for GET operations (approximate TTFB)
+**v0.8.9 Features**:
+- Flexible multi-stage system for workload lifecycle tracking
+- Stage-aware controller display (Preparing, Running, Cleanup)
 
-## Module Architecture (v0.8.7)
+## Module Architecture (v0.8.11)
 
 ### Core Source Modules (`src/`)
 - **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`
@@ -106,8 +104,7 @@ STATS_INTERVAL: Duration = 1s
 
 ```bash
 # Start 2 agents with verbose logging (RECOMMENDED for debugging):
-cd /home/eval/Documents/Code/sai3-bench/scripts
-./start_local_agents.sh 2 7761 "-vv"
+./scripts/start_local_agents.sh 2 7761 "-vv"
 
 # Parameters:
 # 1. NUM_AGENTS (default: 2)
@@ -118,7 +115,28 @@ cd /home/eval/Documents/Code/sai3-bench/scripts
 
 **Agent logs**: Written to `/tmp/agent1.log`, `/tmp/agent2.log`, etc.
 
-**DO NOT** start agents manually with individual commands - use the script!
+**DO NOT** start agents manually with individual commands - ALWAYS use the script!
+
+### YAML Test Configurations - NEVER Create From Scratch
+
+**CRITICAL**: NEVER create YAML test configs from scratch. You WILL guess parameters incorrectly.
+
+**Correct approach**:
+1. Find an existing test config that is close to what you need
+2. Make a COPY of that config (never modify the original)
+3. Modify ONLY what is strictly necessary
+4. ALWAYS validate with `--dry-run` before running
+
+```bash
+# Example: Copy existing config, modify, validate
+cp tests/configs/directory-tree/tree_test_basic.yaml /tmp/my_test.yaml
+# Edit /tmp/my_test.yaml as needed
+./target/release/sai3-bench run --config /tmp/my_test.yaml --dry-run
+
+# Find available test configs:
+ls tests/configs/
+ls tests/configs/directory-tree/
+```
 
 ### Test Directories and Storage Configuration
 

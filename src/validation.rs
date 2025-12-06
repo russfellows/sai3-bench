@@ -132,7 +132,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             // Calculate total data size
             let total_bytes = if manifest.total_files > 0 {
                 // Use file size spec from ensure_objects if available
-                let avg_bytes = if let Some(ref obj_spec) = prepare.ensure_objects.first() {
+                let avg_bytes = if let Some(obj_spec) = prepare.ensure_objects.first() {
                     if let Some(ref size_spec) = obj_spec.size_spec {
                         let mut generator = SizeGenerator::new(size_spec)?;
                         generator.expected_mean()

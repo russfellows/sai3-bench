@@ -6,7 +6,6 @@
 use sai3_bench::config::{IoRateConfig, IopsTarget, ArrivalDistribution};
 use sai3_bench::rate_controller::{RateController, OptionalRateController};
 use std::time::Instant;
-use tokio;
 
 /// Test that rate controller with max IOPS has zero overhead
 #[tokio::test]
@@ -110,7 +109,7 @@ async fn test_uniform_distribution_consistency() {
     // Expected: 10 operations * 10ms = 100ms
     // Allow ±20ms tolerance for scheduling overhead
     let elapsed_ms = elapsed.as_millis();
-    assert!(elapsed_ms >= 80 && elapsed_ms <= 120, 
+    assert!((80..=120).contains(&elapsed_ms), 
         "Expected ~100ms for 10 ops at 100 IOPS, got {}ms", 
         elapsed_ms);
 }

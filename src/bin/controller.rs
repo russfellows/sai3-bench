@@ -670,8 +670,7 @@ async fn abort_all_agents(
     
     for addr in agent_addrs {
         let addr = addr.clone();
-        let insecure = insecure;
-        let ca = agent_ca.map(|p| p.clone());  // Clone PathBuf if present
+        let ca = agent_ca.cloned();  // Clone PathBuf if present
         let domain = agent_domain.to_string();
         
         let task = tokio::spawn(async move {
@@ -990,6 +989,7 @@ async fn wait_for_shutdown_signal() -> &'static str {
 }
 
 /// Execute a distributed workload across multiple agents
+#[allow(clippy::too_many_arguments)]
 async fn run_distributed_workload(
     agent_addrs: &[String],
     config_path: &PathBuf,
@@ -1198,7 +1198,6 @@ async fn run_distributed_workload(
         
         let config = config_yaml.clone();
         let addr = agent_addr.clone();
-        let insecure = insecure;
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
         let shared = is_shared_storage;
@@ -1527,16 +1526,15 @@ async fn run_distributed_workload(
                 }
                 
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+                abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
                 
                 anyhow::bail!("Agent startup validation timeout");
             }
-            _ = &mut shutdown_signal => {
-                let sig = shutdown_signal.await;
+            sig = &mut shutdown_signal => {
                 eprintln!("\n⚠️  Received {} during startup", sig);
                 
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
-                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+                abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
                 
                 anyhow::bail!("Interrupted by {}", sig);
             }
@@ -1563,7 +1561,7 @@ async fn run_distributed_workload(
         }
         
         // v0.7.13: Abort all agents to prevent orphaned workload execution
-        abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
         
         anyhow::bail!("{} agent(s) failed startup validation", failed_agents.len());
     }
@@ -1825,7 +1823,7 @@ async fn run_distributed_workload(
                                 eprintln!("{}", partial_msg);
                                 
                                 // Abort all agents and exit
-                                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+                                abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
                                 anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, stats.error_message);
                             }
                             
@@ -1946,13 +1944,12 @@ async fn run_distributed_workload(
                 // Check logic is at top of loop
             }
             
-            _ = &mut shutdown_signal => {
-                let sig = shutdown_signal.await;
+            sig = &mut shutdown_signal => {
                 warn!("Received {} - aborting all agents", sig);
                 progress_bar.finish_with_message(format!("Interrupted by {} - aborting agents...", sig));
                 
                 // v0.7.13: Abort all agents to stop running workload and reset state
-                abort_all_agents(&agent_addrs, &mut agent_trackers, insecure, agent_ca, &agent_domain).await;
+                abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
                 
                 // Cleanup deployments if any
                 if !deployments.is_empty() {
@@ -2163,7 +2160,7 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
         content.push_str("TEST STATUS: FAILURE\n");
     }
     content.push_str(&format!("Timestamp: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
-    content.push_str("\n");
+    content.push('\n');
     
     // Summary
     content.push_str("=== Summary ===\n");
@@ -2174,7 +2171,7 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
     content.push_str(&format!("Disconnect/Reconnect Count: {}\n", status.reconnect_count));
     content.push_str(&format!("Aborting: {}\n", status.aborting));
     content.push_str(&format!("Total operations: {}\n", status.total_ops));
-    content.push_str("\n");
+    content.push('\n');
     
     // Per-agent details
     content.push_str("=== Agent Details ===\n");
@@ -2184,7 +2181,7 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
     
     // Failure details (if any)
     if !status.success {
-        content.push_str("\n");
+        content.push('\n');
         content.push_str("=== Failure Analysis ===\n");
         
         if status.failed > 0 {
@@ -2539,10 +2536,10 @@ fn create_consolidated_prepare_tsv(
         
         // Deserialize PUT histograms (one per bucket)
         let mut cursor = &summary.histogram_put[..];
-        for bucket_idx in 0..NUM_BUCKETS {
+        for (bucket_idx, accumulator) in put_accumulators.iter_mut().enumerate() {
             match deserializer.deserialize::<u64, _>(&mut cursor) {
                 Ok(hist) => {
-                    put_accumulators[bucket_idx].add(&hist)
+                    accumulator.add(&hist)
                         .context("Failed to merge PUT histograms")?;
                 }
                 Err(e) => {
@@ -2579,7 +2576,7 @@ fn create_consolidated_prepare_tsv(
     
     // Write PUT bucket rows (from merged histograms)
     for (idx, hist) in put_accumulators.iter().enumerate() {
-        if hist.len() == 0 {
+        if hist.is_empty() {
             continue;
         }
         
@@ -2611,12 +2608,12 @@ fn create_consolidated_prepare_tsv(
         // Merge all bucket histograms into one for overall stats
         let mut all_hist = hdrhistogram::Histogram::<u64>::new(3)?;
         for bucket_hist in put_accumulators.iter() {
-            if bucket_hist.len() > 0 {
+            if !bucket_hist.is_empty() {
                 all_hist.add(bucket_hist)?;
             }
         }
         
-        if all_hist.len() > 0 {
+        if !all_hist.is_empty() {
             let mean_us = all_hist.mean();
             let p50_us = all_hist.value_at_quantile(0.50);
             let p90_us = all_hist.value_at_quantile(0.90);
@@ -2686,33 +2683,33 @@ fn create_consolidated_tsv(
         
         // Deserialize GET histograms (one per bucket)
         let mut cursor = &summary.histogram_get[..];
-        for bucket_idx in 0..NUM_BUCKETS {
+        for (bucket_idx, accumulator) in get_accumulators.iter_mut().enumerate() {
             let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
                 .with_context(|| format!("Failed to deserialize GET histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
-            get_accumulators[bucket_idx].add(hist)
+            accumulator.add(hist)
                 .with_context(|| format!("Failed to merge GET histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
         }
         
         // Deserialize PUT histograms
         let mut cursor = &summary.histogram_put[..];
-        for bucket_idx in 0..NUM_BUCKETS {
+        for (bucket_idx, accumulator) in put_accumulators.iter_mut().enumerate() {
             let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
                 .with_context(|| format!("Failed to deserialize PUT histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
-            put_accumulators[bucket_idx].add(hist)
+            accumulator.add(hist)
                 .with_context(|| format!("Failed to merge PUT histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
         }
         
         // Deserialize META histograms
         let mut cursor = &summary.histogram_meta[..];
-        for bucket_idx in 0..NUM_BUCKETS {
+        for (bucket_idx, accumulator) in meta_accumulators.iter_mut().enumerate() {
             let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
                 .with_context(|| format!("Failed to deserialize META histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
-            meta_accumulators[bucket_idx].add(hist)
+            accumulator.add(hist)
                 .with_context(|| format!("Failed to merge META histogram bucket {} from agent {}", 
                                         bucket_idx, summary.agent_id))?;
         }
@@ -2856,7 +2853,7 @@ fn collect_aggregate_row(
     let mut combined = hdrhistogram::Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
     
     for hist in accumulators {
-        if hist.len() > 0 {
+        if !hist.is_empty() {
             combined.add(hist)?;
         }
     }
@@ -2899,10 +2896,7 @@ fn collect_aggregate_row(
     Ok(())
 }
 
-/// Detect if storage is shared based on URI scheme
-/// Shared storage: s3://, az://, gs://, and potentially file:// (if NFS-mounted)
-/// Local storage: file://, direct://
-// Removed detect_shared_storage() and is_shared_uri() functions.
+// Note: detect_shared_storage() and is_shared_uri() functions removed.
 // Shared storage configuration is now EXPLICIT via CLI flag or config file.
 // Any storage type (file://, s3://, az://, gs://, direct://) can be shared or per-agent.
 // Users must specify their setup correctly in the config.

@@ -263,9 +263,11 @@ pub enum OpSpec {
 /// Strategy for executing prepare phase with multiple ensure_objects entries
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PrepareStrategy {
     /// Process each ensure_objects entry sequentially (one size at a time)
     /// Default behavior: predictable, separate progress bars per size
+    #[default]
     Sequential,
     
     /// Process all ensure_objects entries in parallel (all sizes interleaved)
@@ -273,11 +275,6 @@ pub enum PrepareStrategy {
     Parallel,
 }
 
-impl Default for PrepareStrategy {
-    fn default() -> Self {
-        PrepareStrategy::Sequential
-    }
-}
 
 /// Cleanup error handling mode (v0.8.7+)
 /// 
@@ -285,6 +282,7 @@ impl Default for PrepareStrategy {
 /// This is important for resuming interrupted cleanup operations.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum CleanupMode {
     /// Strict mode: Report errors for any failed deletion
     /// Best for: First-time cleanup where all objects should exist
@@ -293,6 +291,7 @@ pub enum CleanupMode {
     /// Tolerant mode: Ignore "not found" errors, report other errors
     /// Best for: Resuming interrupted cleanup operations
     /// Objects that were already deleted will be silently skipped
+    #[default]
     Tolerant,
     
     /// Best-effort mode: Ignore all deletion errors
@@ -301,11 +300,6 @@ pub enum CleanupMode {
     BestEffort,
 }
 
-impl Default for CleanupMode {
-    fn default() -> Self {
-        CleanupMode::Tolerant  // Default to tolerant for resumability
-    }
-}
 
 /// Prepare configuration for pre-populating objects before testing
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -687,6 +681,7 @@ pub struct RangeEngineConfig {
     /// Default: 67108864 (64 MiB)
     /// - Larger chunks: Fewer requests, less overhead, but less parallelism
     /// - Smaller chunks: More parallelism, but more overhead
+    ///
     /// Recommended: 32-128 MiB depending on network speed
     #[serde(default = "default_chunk_size")]
     pub chunk_size: u64,
@@ -695,6 +690,7 @@ pub struct RangeEngineConfig {
     /// Default: 16
     /// - Higher values: More parallelism for high-bandwidth networks (>1 Gbps)
     /// - Lower values: Reduce load on slow networks (<100 Mbps)
+    ///
     /// Recommended: 8-32 depending on network capacity
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_ranges: usize,
@@ -808,6 +804,7 @@ pub struct DistributedConfig {
     /// Must be explicitly set to true or false based on your actual deployment
     /// - true: Shared storage - agents access same data (e.g., NFS, Lustre, shared S3 bucket)
     /// - false: Per-agent storage - each agent has isolated namespace (e.g., local disks, agent-specific S3 prefixes)
+    ///
     /// Note: This is independent of storage TYPE - file://, s3://, az://, gs:// can all be shared OR per-agent
     pub shared_filesystem: bool,
     
@@ -1218,8 +1215,10 @@ fn default_replay_max_concurrent() -> usize {
 /// Multi-process scaling configuration (v0.7.3+)
 /// Controls how many processes to spawn per endpoint for parallel execution
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Default)]
 pub enum ProcessScaling {
     /// Single process mode (default, current behavior)
+    #[default]
     Single,
     
     /// Auto-scale to physical CPU cores (not hyperthreads)
@@ -1231,11 +1230,6 @@ pub enum ProcessScaling {
     Manual(usize),
 }
 
-impl Default for ProcessScaling {
-    fn default() -> Self {
-        ProcessScaling::Single
-    }
-}
 
 /// Serde deserialization for ProcessScaling
 /// Accepts: "auto", "single", 1, or explicit integer
@@ -1288,7 +1282,7 @@ impl<'de> Deserialize<'de> for ProcessScaling {
                     "single" | "Single" | "SINGLE" | "1" => Ok(ProcessScaling::Single),
                     _ => {
                         match value.parse::<usize>() {
-                            Ok(n) if n == 1 => Ok(ProcessScaling::Single),
+                            Ok(1) => Ok(ProcessScaling::Single),
                             Ok(n) if n > 1 => Ok(ProcessScaling::Manual(n)),
                             Ok(_) => Err(E::custom("processes must be >= 1")),
                             Err(_) => Err(E::custom(format!("invalid process scaling value: {}", value))),

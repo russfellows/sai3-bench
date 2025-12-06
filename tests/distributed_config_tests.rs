@@ -248,7 +248,7 @@ fn test_parse_real_config_file() -> Result<()> {
     assert_eq!(dist.agents[0].id, Some("test-agent-1".to_string()));
     
     // Verify shared filesystem settings
-    assert_eq!(dist.shared_filesystem, true);
+    assert!(dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, TreeCreationMode::Coordinator);
     
     Ok(())
@@ -405,7 +405,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.shared_filesystem, false);
+    assert!(!dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Isolated);
     assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Random);
     
@@ -437,7 +437,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.shared_filesystem, true);
+    assert!(dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Coordinator);
     assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Partitioned);
     
@@ -469,7 +469,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.shared_filesystem, true);
+    assert!(dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Concurrent);
     assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Exclusive);
     
@@ -703,7 +703,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.shared_filesystem, true);
+    assert!(dist.shared_filesystem);
     
     Ok(())
 }
@@ -731,7 +731,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.shared_filesystem, false);
+    assert!(!dist.shared_filesystem);
     
     Ok(())
 }
@@ -878,7 +878,7 @@ workload:
     // Validate all new fields
     let dist = config.distributed.as_ref().unwrap();
     assert_eq!(dist.agents.len(), 2);
-    assert_eq!(dist.shared_filesystem, true);
+    assert!(dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Concurrent);
     assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Partitioned);
     assert_eq!(dist.partition_overlap, 0.25);
@@ -923,7 +923,7 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
     
     // Verify all fields match
     assert_eq!(deserialized.agents.len(), 1);
-    assert_eq!(deserialized.shared_filesystem, true);
+    assert!(deserialized.shared_filesystem);
     assert_eq!(deserialized.tree_creation_mode, TreeCreationMode::Concurrent);
     assert_eq!(deserialized.path_selection, PathSelectionStrategy::Partitioned);
     assert_eq!(deserialized.partition_overlap, 0.3);

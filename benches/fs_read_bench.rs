@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
 
             if use_blocks {
                 // Fixed-size reads in a loop (vdbench-like)
-                let meta = fs::metadata(&p)?;
+                let meta = fs::metadata(p)?;
                 let mut off: u64 = 0;
                 while off < meta.len() {
                     let len = std::cmp::min(args.block_size as u64, meta.len() - off);

@@ -1,17 +1,18 @@
-// Google Cloud Storage Integration Tests
-// Tests GCS backend support with gs:// and gcs:// URI schemes
+// S3 Integration Tests
+// Tests S3 backend support with s3:// URI scheme
 //
 // Tests will run if EITHER:
-// 1. GCS credentials are configured:
-//    - GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
-//    - GOOGLE_CLOUD_PROJECT set
-// 2. OR a custom endpoint is configured (for local emulators like fake-gcs-server):
-//    - GCS_ENDPOINT_URL or STORAGE_EMULATOR_HOST
-//    (No credentials required for local emulators)
+// 1. AWS credentials are configured:
+//    - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+//    - AWS_PROFILE
+//    - IAM role (EC2/ECS/Lambda)
+// 2. OR a custom endpoint is configured (for MinIO, LocalStack, WarpIO, etc.):
+//    - AWS_ENDPOINT_URL or S3_ENDPOINT_URL
+//    (No credentials required for local emulators with anonymous access)
 //
-// Optionally set GCS_BUCKET="your-test-bucket" (defaults to "test")
+// Optionally set S3_BUCKET="your-test-bucket" (defaults to "test")
 //
-// Run with: cargo test --test gcs_tests -- --test-threads=1 --nocapture
+// Run with: cargo test --test s3_tests -- --test-threads=1 --nocapture
 
 use anyhow::{Context, Result};
 use std::env;
@@ -21,109 +22,111 @@ use sai3_bench::workload::{
     list_objects_no_log, stat_object_no_log, delete_object_no_log,
 };
 
-/// Helper to get GCS test bucket from environment
-fn get_gcs_bucket() -> Option<String> {
-    env::var("GCS_BUCKET").ok()
-        .or_else(|| env::var("GOOGLE_CLOUD_BUCKET").ok())
+/// Helper to get S3 test bucket from environment
+fn get_s3_bucket() -> Option<String> {
+    env::var("S3_BUCKET").ok()
+        .or_else(|| env::var("AWS_BUCKET").ok())
 }
 
-/// Helper to check if GCS credentials are available
-fn has_gcs_credentials() -> bool {
-    env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() 
-        || env::var("GOOGLE_CLOUD_PROJECT").is_ok()
+/// Helper to check if AWS credentials are available
+fn has_aws_credentials() -> bool {
+    let has_access_key = env::var("AWS_ACCESS_KEY_ID").is_ok();
+    let has_secret_key = env::var("AWS_SECRET_ACCESS_KEY").is_ok();
+    let has_profile = env::var("AWS_PROFILE").is_ok();
+    
+    (has_access_key && has_secret_key) || has_profile
 }
 
 /// Helper to check if custom endpoint is configured
 fn has_custom_endpoint() -> bool {
-    env::var("GCS_ENDPOINT_URL").is_ok()
-        || env::var("STORAGE_EMULATOR_HOST").is_ok()
+    env::var("AWS_ENDPOINT_URL").is_ok()
+        || env::var("S3_ENDPOINT_URL").is_ok()
 }
 
-/// Check if we can run GCS tests - either with credentials OR with a custom endpoint
-/// Custom endpoints (fake-gcs-server, local emulators) typically don't require real credentials
-fn can_run_gcs_tests() -> bool {
-    has_gcs_credentials() || has_custom_endpoint()
+/// Check if we can run S3 tests - either with credentials OR with a custom endpoint
+/// Custom endpoints (MinIO, LocalStack, WarpIO) may not require real credentials
+fn can_run_s3_tests() -> bool {
+    has_aws_credentials() || has_custom_endpoint()
 }
 
-/// Helper to create GCS test URI
-fn gcs_test_uri() -> Option<String> {
-    let bucket = get_gcs_bucket().or_else(|| Some("test".to_string()))?;
-    Some(format!("gs://{}/sai3-bench-gcs-tests/", bucket))
+/// Helper to create S3 test URI
+fn s3_test_uri() -> Option<String> {
+    let bucket = get_s3_bucket().or_else(|| Some("test".to_string()))?;
+    Some(format!("s3://{}/sai3-bench-s3-tests/", bucket))
 }
 
 /// Print test configuration info
 fn print_test_config() {
     if has_custom_endpoint() {
-        let endpoint = env::var("GCS_ENDPOINT_URL")
-            .or_else(|_| env::var("STORAGE_EMULATOR_HOST"))
+        let endpoint = env::var("AWS_ENDPOINT_URL")
+            .or_else(|_| env::var("S3_ENDPOINT_URL"))
             .unwrap_or_else(|_| "unknown".to_string());
         println!("🔧 Using custom endpoint: {}", endpoint);
     }
-    if has_gcs_credentials() {
-        println!("🔐 Using GCS credentials");
+    if has_aws_credentials() {
+        println!("🔐 Using AWS credentials");
     } else {
         println!("🔓 No credentials (using anonymous/emulator access)");
     }
 }
 
 #[test]
-fn test_gcs_backend_detection() {
-    // Test gs:// scheme
-    let backend = BackendType::from_uri("gs://my-bucket/prefix/");
-    assert!(matches!(backend, BackendType::Gcs));
-    assert_eq!(backend.name(), "Google Cloud Storage");
-    
-    // Test gcs:// scheme (alternate)
-    let backend = BackendType::from_uri("gcs://my-bucket/prefix/");
-    assert!(matches!(backend, BackendType::Gcs));
+fn test_s3_backend_detection() {
+    // Test s3:// scheme
+    let backend = BackendType::from_uri("s3://my-bucket/prefix/");
+    assert!(matches!(backend, BackendType::S3));
+    assert_eq!(backend.name(), "S3");
     
     // Test other schemes don't match
-    let backend = BackendType::from_uri("s3://bucket/");
-    assert!(!matches!(backend, BackendType::Gcs));
+    let backend = BackendType::from_uri("az://container/");
+    assert!(!matches!(backend, BackendType::S3));
+    
+    let backend = BackendType::from_uri("gs://bucket/");
+    assert!(!matches!(backend, BackendType::S3));
 }
 
 #[tokio::test]
-async fn test_gcs_store_creation() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS store creation test - no credentials or custom endpoint");
-        println!("   Set GCS_ENDPOINT_URL for local emulator, or");
-        println!("   Set GOOGLE_APPLICATION_CREDENTIALS for real GCS");
+async fn test_s3_store_creation() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 store creation test - no credentials or custom endpoint");
+        println!("   Set AWS_ENDPOINT_URL for local emulator, or");
+        println!("   Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY for real AWS");
         return Ok(());
     }
     
-    let Some(uri) = gcs_test_uri() else {
+    let Some(uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
     
-    println!("🧪 Testing GCS store creation: {}", uri);
+    println!("🧪 Testing S3 store creation: {}", uri);
     let _store = create_store_for_uri(&uri)
-        .context("Failed to create GCS store")?;
+        .context("Failed to create S3 store")?;
     
-    println!("✅ Successfully created GCS ObjectStore");
+    println!("✅ Successfully created S3 ObjectStore");
     Ok(())
 }
 
 #[tokio::test]
-async fn test_gcs_put_get_delete() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS PUT/GET/DELETE test - no credentials or custom endpoint");
+async fn test_s3_put_get_delete() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 PUT/GET/DELETE test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS PUT/GET/DELETE cycle");
+    println!("🧪 Testing S3 PUT/GET/DELETE cycle");
     
     // Test data
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from sai3-bench GCS test!";
+    let test_data = b"Hello from sai3-bench S3 test!";
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation
@@ -145,24 +148,24 @@ async fn test_gcs_put_get_delete() -> Result<()> {
     delete_object_no_log(&test_uri).await?;
     println!("     ✓ DELETE completed");
     
-    println!("✅ GCS PUT/GET/DELETE cycle successful");
+    println!("✅ S3 PUT/GET/DELETE cycle successful");
     Ok(())
 }
 
 #[tokio::test]
-async fn test_gcs_list_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS LIST test - no credentials or custom endpoint");
+async fn test_s3_list_operations() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 LIST test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS LIST operations");
+    println!("🧪 Testing S3 LIST operations");
     
     // Create test objects
     let prefix = format!("{}list-test/", base_uri);
@@ -189,24 +192,24 @@ async fn test_gcs_list_operations() -> Result<()> {
         delete_object_no_log(&uri).await?;
     }
     
-    println!("✅ GCS LIST operations successful");
+    println!("✅ S3 LIST operations successful");
     Ok(())
 }
 
 #[tokio::test]
-async fn test_gcs_stat_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS STAT test - no credentials or custom endpoint");
+async fn test_s3_stat_operations() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 STAT test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS STAT operations");
+    println!("🧪 Testing S3 STAT operations");
     
     // Create test object
     let test_uri = format!("{}stat-test.txt", base_uri);
@@ -226,24 +229,24 @@ async fn test_gcs_stat_operations() -> Result<()> {
     println!("  🗑️  Cleaning up");
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS STAT operations successful");
+    println!("✅ S3 STAT operations successful");
     Ok(())
 }
 
 #[tokio::test]
-async fn test_gcs_concurrent_operations() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS concurrent ops test - no credentials or custom endpoint");
+async fn test_s3_concurrent_operations() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 concurrent ops test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS concurrent operations");
+    println!("🧪 Testing S3 concurrent operations");
     
     let prefix = format!("{}concurrent-test/", base_uri);
     let num_objects = 10;
@@ -296,24 +299,24 @@ async fn test_gcs_concurrent_operations() -> Result<()> {
         delete_object_no_log(&uri).await?;
     }
     
-    println!("✅ GCS concurrent operations successful");
+    println!("✅ S3 concurrent operations successful");
     Ok(())
 }
 
 #[tokio::test]
-async fn test_gcs_large_object() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS large object test - no credentials or custom endpoint");
+async fn test_s3_large_object() -> Result<()> {
+    if !can_run_s3_tests() {
+        println!("⚠️  Skipping S3 large object test - no credentials or custom endpoint");
         return Ok(());
     }
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     print_test_config();
-    println!("🧪 Testing GCS large object operations");
+    println!("🧪 Testing S3 large object operations");
     
     let test_uri = format!("{}large-object.bin", base_uri);
     let size_mb = 5;
@@ -341,69 +344,35 @@ async fn test_gcs_large_object() -> Result<()> {
     println!("  🗑️  DELETE: {} MB object", size_mb);
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS large object test successful");
+    println!("✅ S3 large object test successful");
     Ok(())
 }
 
+/// Test custom endpoint configuration for local emulators
 #[tokio::test]
-async fn test_gcs_alternate_scheme() -> Result<()> {
-    if !can_run_gcs_tests() {
-        println!("⚠️  Skipping GCS alternate scheme test - no credentials or custom endpoint");
-        return Ok(());
-    }
-    
-    let bucket = get_gcs_bucket().unwrap_or_else(|| "test".to_string());
-    
-    print_test_config();
-    println!("🧪 Testing GCS alternate URI schemes");
-    
-    // Test both gs:// and gcs:// schemes
-    let gs_uri = format!("gs://{}/sai3-bench-test/scheme-test.txt", bucket);
-    let gcs_uri = format!("gcs://{}/sai3-bench-test/scheme-test.txt", bucket);
-    
-    let test_data = b"testing alternate schemes";
-    
-    // PUT with gs://
-    println!("  📤 PUT with gs:// scheme");
-    put_object_no_log(&gs_uri, test_data).await?;
-    
-    // GET with gcs:// (should work - same object)
-    println!("  📥 GET with gcs:// scheme");
-    let result = get_object_no_log(&gcs_uri).await?;
-    assert_eq!(result, test_data);
-    
-    // Cleanup
-    delete_object_no_log(&gs_uri).await?;
-    
-    println!("✅ GCS alternate scheme test successful");
-    Ok(())
-}
-
-/// Test that custom endpoint mode works (specifically for local emulators)
-#[tokio::test]
-async fn test_gcs_custom_endpoint() -> Result<()> {
+async fn test_s3_custom_endpoint() -> Result<()> {
     // This test ONLY runs with a custom endpoint configured
     if !has_custom_endpoint() {
         println!("⚠️  Skipping custom endpoint test - no custom endpoint configured");
-        println!("   Set GCS_ENDPOINT_URL or STORAGE_EMULATOR_HOST to enable");
+        println!("   Set AWS_ENDPOINT_URL or S3_ENDPOINT_URL to enable");
         return Ok(());
     }
     
-    let endpoint = env::var("GCS_ENDPOINT_URL")
-        .or_else(|_| env::var("STORAGE_EMULATOR_HOST"))
+    let endpoint = env::var("AWS_ENDPOINT_URL")
+        .or_else(|_| env::var("S3_ENDPOINT_URL"))
         .unwrap();
     
-    println!("🧪 Testing GCS custom endpoint: {}", endpoint);
+    println!("🧪 Testing S3 custom endpoint: {}", endpoint);
     print_test_config();
     
-    let Some(base_uri) = gcs_test_uri() else {
+    let Some(base_uri) = s3_test_uri() else {
         println!("⚠️  Skipping test - could not construct test URI");
         return Ok(());
     };
     
     // Test basic operations with custom endpoint
     let test_uri = format!("{}custom-endpoint-test.txt", base_uri);
-    let test_data = b"Testing custom GCS endpoint!";
+    let test_data = b"Testing custom S3 endpoint!";
     
     println!("  📤 PUT to custom endpoint");
     put_object_no_log(&test_uri, test_data).await?;
@@ -415,6 +384,6 @@ async fn test_gcs_custom_endpoint() -> Result<()> {
     println!("  🗑️  DELETE from custom endpoint");
     delete_object_no_log(&test_uri).await?;
     
-    println!("✅ GCS custom endpoint test successful");
+    println!("✅ S3 custom endpoint test successful");
     Ok(())
 }

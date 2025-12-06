@@ -150,7 +150,7 @@ async fn test_agent_assignment_balanced() -> Result<()> {
     // Create manifests for each agent to verify actual distribution
     let mut agent_file_counts = vec![0; num_agents];
     
-    for agent_id in 0..num_agents {
+    for (agent_id, file_count) in agent_file_counts.iter_mut().enumerate() {
         let temp_dir = TempDir::new()?;
         let base_uri = format!("file://{}", temp_dir.path().display());
         let mut metrics = PrepareMetrics::default();
@@ -158,7 +158,7 @@ async fn test_agent_assignment_balanced() -> Result<()> {
         
         // Count files created by this agent
         let files = list_files_recursive(temp_dir.path())?;
-        agent_file_counts[agent_id] = files.len();
+        *file_count = files.len();
         
         // Verify manifest reports correct total
         assert_eq!(manifest.total_files, 45, "Total files should be 45 (9 leaf dirs * 5 files)");

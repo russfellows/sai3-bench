@@ -25,7 +25,7 @@ pub use s3dlio_oplog::{OpLogEntry, OpLogStreamReader, OpType};
 /// Given a base path like "/tmp/test.tsv", generates:
 /// - Worker 0: "/tmp/test-worker-0.tsv"
 /// - Worker 1: "/tmp/test-worker-1.tsv"
-/// etc.
+/// - etc.
 pub fn worker_oplog_path(base_path: &Path, worker_id: usize) -> PathBuf {
     let base_stem = base_path.file_stem()
         .and_then(|s| s.to_str())
@@ -180,19 +180,16 @@ fn write_entry<W: Write>(
     // We'll use simplified format since some fields may not be in OpLogEntry
     writeln!(
         encoder,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t\t{}\t{}\t{}\t{}\t{}\t{}\t\t\t{}",
         idx,
         0, // thread (not tracked in OpLogEntry)
-        entry.op,
-        "", // client_id (not tracked)
+        entry.op, // client_id (not tracked)
         1, // n_objects (assume 1)
         entry.bytes,
         entry.endpoint,
         entry.file,
         entry.error.as_deref().unwrap_or(""),
-        entry.start.to_rfc3339(),
-        "", // first_byte (not tracked)
-        "", // end (not tracked)
+        entry.start.to_rfc3339(), // end (not tracked)
         entry.duration_ns.unwrap_or(0)
     )?;
     Ok(())
@@ -210,14 +207,14 @@ fn write_entry<W: Write>(
 /// * `path` - Path to op-log file (supports .zst compression)
 /// * `max_lines` - Maximum number of lines to check (None = check all)
 pub fn check_oplog_sorted(path: &Path, max_lines: Option<usize>) -> Result<(bool, usize, Option<usize>)> {
-    let mut stream = OpLogStreamReader::from_file(path)
+    let stream = OpLogStreamReader::from_file(path)
         .with_context(|| format!("Failed to open op-log file: {}", path.display()))?;
     
     let mut prev_time: Option<DateTime<Utc>> = None;
     let mut line_num = 0;
     let max = max_lines.unwrap_or(usize::MAX);
     
-    while let Some(entry_result) = stream.next() {
+    for entry_result in stream {
         let entry = entry_result?;
         line_num += 1;
         
@@ -256,7 +253,7 @@ pub fn sort_oplog_file(input_path: &Path, output_path: &Path, window_size: usize
     info!("Sorting op-log file: {} -> {} (window_size={})", 
           input_path.display(), output_path.display(), window_size);
     
-    let mut stream = OpLogStreamReader::from_file(input_path)
+    let stream = OpLogStreamReader::from_file(input_path)
         .with_context(|| format!("Failed to open input file: {}", input_path.display()))?;
     
     // Create output file with zstd compression
@@ -273,7 +270,7 @@ pub fn sort_oplog_file(input_path: &Path, output_path: &Path, window_size: usize
     let mut window: Vec<OpLogEntry> = Vec::with_capacity(window_size);
     let mut output_count: u64 = 0;
     
-    while let Some(entry_result) = stream.next() {
+    for entry_result in stream {
         let entry = entry_result?;
         
         // Insert into sorted position

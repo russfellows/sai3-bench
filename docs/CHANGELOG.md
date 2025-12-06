@@ -6,6 +6,57 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.11] - 2025-12-05
+
+### Added
+
+- **Agent progress bars** for distributed mode visibility
+  - Prepare phase: Progress bar showing object count and rate
+  - Workload phase: Spinner with GET/PUT operation stats
+  - Proper cleanup on completion, error, disconnect, or abort
+
+- **Azure/GCS custom endpoint support** with new test infrastructure
+  - New test modules: `azure_tests.rs`, `gcs_tests.rs`, `file_tests.rs`, `s3_tests.rs`
+  - Environment-driven endpoint configuration for private clouds
+  - RangeEngine enable/disable testing for both backends
+
+### Fixed
+
+- **Distributed abort handling** - Agent now properly responds to controller abort signals
+  - Wrapped all execution phases in `tokio::select!` with abort check
+  - Stats writer task checks abort channel and exits cleanly
+  - Agents send proper error status when aborted
+
+- **SIGINT handler panic** - Fixed double-await bug in controller shutdown
+  - Changed `shutdown_signal.await` to `sig = &mut shutdown_signal` pattern
+  - Prevents panic when user presses Ctrl+C during distributed execution
+
+### Changed
+
+- **Removed legacy gRPC RPCs** (~824 lines removed)
+  - Removed: `RunPrepare`, `RunWorkload`, `GetPrepareStats`, `GetWorkloadStats`, `Cleanup`, `Abort`
+  - Single bidirectional stream `ExecuteWorkload` now handles all functionality
+  - Cleaner codebase with reduced maintenance burden
+
+### Code Quality
+
+- **Zero clippy warnings** across entire codebase
+  - Fixed needless_range_loop warnings with enumerate()/iter()
+  - Fixed empty_line_after_doc_comments in tests
+  - Fixed collapsible_match patterns
+  - Fixed bool_assert_comparison in tests
+  - Added `#[allow(clippy::too_many_arguments)]` where appropriate
+  - Renamed `default()` to `with_default_config()` for clarity
+
+### Documentation
+
+- **Updated copilot-instructions.md** with critical guidelines:
+  - NEVER create YAML test configs from scratch
+  - ALWAYS use `./scripts/start_local_agents.sh` for agent testing
+  - ALWAYS validate configs with `--dry-run` before running
+
+---
+
 ## [0.8.10] - 2025-12-02
 
 ### Added
