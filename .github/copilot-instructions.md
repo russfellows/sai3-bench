@@ -106,8 +106,7 @@ STATS_INTERVAL: Duration = 1s
 
 ```bash
 # Start 2 agents with verbose logging (RECOMMENDED for debugging):
-cd /home/eval/Documents/Code/sai3-bench/scripts
-./start_local_agents.sh 2 7761 "-vv"
+./scripts/start_local_agents.sh 2 7761 "-vv"
 
 # Parameters:
 # 1. NUM_AGENTS (default: 2)
@@ -118,7 +117,28 @@ cd /home/eval/Documents/Code/sai3-bench/scripts
 
 **Agent logs**: Written to `/tmp/agent1.log`, `/tmp/agent2.log`, etc.
 
-**DO NOT** start agents manually with individual commands - use the script!
+**DO NOT** start agents manually with individual commands - ALWAYS use the script!
+
+### YAML Test Configurations - NEVER Create From Scratch
+
+**CRITICAL**: NEVER create YAML test configs from scratch. You WILL guess parameters incorrectly.
+
+**Correct approach**:
+1. Find an existing test config that is close to what you need
+2. Make a COPY of that config (never modify the original)
+3. Modify ONLY what is strictly necessary
+4. ALWAYS validate with `--dry-run` before running
+
+```bash
+# Example: Copy existing config, modify, validate
+cp tests/configs/directory-tree/tree_test_basic.yaml /tmp/my_test.yaml
+# Edit /tmp/my_test.yaml as needed
+./target/release/sai3-bench run --config /tmp/my_test.yaml --dry-run
+
+# Find available test configs:
+ls tests/configs/
+ls tests/configs/directory-tree/
+```
 
 ### Test Directories and Storage Configuration
 
