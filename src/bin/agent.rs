@@ -1144,6 +1144,13 @@ impl Agent for AgentSvc {
                                         error!("Stats writer: Failed to send COMPLETED message");
                                     }
                                     
+                                    // v0.8.12: Give gRPC stream time to flush completed message to controller
+                                    // This prevents race condition where stream closes before controller receives final status
+                                    debug!("Stats writer: Waiting {}s for COMPLETED message to flush", sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS);
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                                        sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS
+                                    )).await;
+                                    
                                     // Transition to Idle
                                     let _ = agent_state.transition_to(WorkloadState::Idle, "workload completed").await;
                                     
@@ -1186,6 +1193,13 @@ impl Agent for AgentSvc {
                                     if tx_stats.send(error_msg).await.is_err() {
                                         error!("Stats writer: Failed to send ERROR message");
                                     }
+                                    
+                                    // v0.8.12: Give gRPC stream time to flush error message to controller
+                                    // This prevents race condition where stream closes before controller receives error
+                                    info!("Stats writer: Waiting {}s for error message to flush", sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS);
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                                        sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS
+                                    )).await;
                                     
                                     // Transition to Idle
                                     let _ = agent_state.transition_to(WorkloadState::Failed, &e).await;
@@ -1961,8 +1975,12 @@ impl Agent for AgentSvc {
                                     error!("Control reader: Failed to send ABORTED status: {}", e);
                                 }
                                 
-                                // Wait briefly for workload cleanup
-                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                // v0.8.12: Give gRPC stream time to flush abort message to controller
+                                // before transitioning to Idle and closing the stream
+                                info!("Control reader: Waiting {}s for ABORTED message to flush", sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(
+                                    sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS
+                                )).await;
                                 
                                 // Reset to Idle
                                 if let Err(e) = agent_state_reader.transition_to(WorkloadState::Idle, "abort complete").await {

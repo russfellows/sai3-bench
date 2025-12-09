@@ -6,6 +6,31 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.12] - 2025-12-09
+
+### Added
+
+- **Custom endpoint documentation** in `docs/USAGE.md`
+  - Environment variables for S3, Azure, and GCS custom endpoints
+  - Usage examples for MinIO, Azurite, fake-gcs-server
+  - Multi-protocol proxy configuration (WarpIO)
+
+### Fixed
+
+- **Distributed error transmission race condition** - Agent now waits before closing stream
+  - Added `AGENT_ERROR_FLUSH_DELAY_SECS` constant (5 seconds default)
+  - Delay applied after sending ERROR, COMPLETED, or ABORTED status
+  - Prevents controller from missing critical status messages
+
+### Changed
+
+- **Updated s3dlio to v0.9.25** with Azure/GCS custom endpoint support
+  - `AZURE_STORAGE_ENDPOINT` / `AZURE_BLOB_ENDPOINT_URL` for Azure
+  - `GCS_ENDPOINT_URL` / `STORAGE_EMULATOR_HOST` for GCS
+  - S3 `force_path_style` for S3-compatible endpoints
+
+---
+
 ## [0.8.11] - 2025-12-05
 
 ### Added

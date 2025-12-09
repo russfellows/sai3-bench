@@ -52,6 +52,60 @@ This doc focuses on the distributed controller/agent mode, including plaintext a
   - **File/Direct I/O**: No credentials required, uses local filesystem
 - **Open firewall** for the agent port (default: `7761`)
 
+## Custom Endpoints (Local Emulators & Proxies)
+
+All three cloud backends support custom endpoints for local emulators, on-prem storage, or multi-protocol proxies like WarpIO. Set the appropriate environment variable before running sai3-bench:
+
+| Backend | Environment Variable(s) | Example |
+|---------|------------------------|---------|
+| **S3** | `AWS_ENDPOINT_URL` | `http://localhost:9000` (MinIO) |
+| **Azure Blob** | `AZURE_STORAGE_ENDPOINT` or `AZURE_BLOB_ENDPOINT_URL` | `http://localhost:10000` (Azurite) |
+| **GCS** | `GCS_ENDPOINT_URL` or `STORAGE_EMULATOR_HOST` | `http://localhost:4443` (fake-gcs-server) |
+
+### Usage Examples
+
+```bash
+# S3 with MinIO or other S3-compatible storage
+export AWS_ENDPOINT_URL=http://localhost:9000
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+sai3-bench util ls s3://mybucket/
+
+# Azure Blob with Azurite emulator
+export AZURE_STORAGE_ENDPOINT=http://127.0.0.1:10000
+export AZURE_STORAGE_ACCOUNT=devstoreaccount1
+export AZURE_STORAGE_ACCOUNT_KEY="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+sai3-bench util ls az://testcontainer/
+
+# GCS with fake-gcs-server
+export GCS_ENDPOINT_URL=http://localhost:4443
+sai3-bench util ls gs://testbucket/
+
+# Alternative GCS emulator syntax (Google's convention)
+export STORAGE_EMULATOR_HOST=localhost:4443  # http:// added automatically
+sai3-bench util ls gs://testbucket/
+```
+
+### Multi-Protocol Proxy (WarpIO)
+
+When using a multi-protocol proxy that exposes S3, Azure, and GCS on different ports:
+
+```bash
+# Configure all backends to use the proxy
+export AWS_ENDPOINT_URL=http://proxy.local:9000
+export AZURE_STORAGE_ENDPOINT=http://proxy.local:9001  
+export GCS_ENDPOINT_URL=http://proxy.local:9002
+
+# Now all URI schemes work through the proxy
+sai3-bench util ls s3://bucket/
+sai3-bench util ls az://container/
+sai3-bench util ls gs://bucket/
+```
+
+### Path-Style Addressing
+
+When `AWS_ENDPOINT_URL` is set, S3 requests automatically use path-style addressing (`endpoint/bucket/key`) instead of virtual-hosted style (`bucket.endpoint/key`). This is required for most S3-compatible storage systems.
+
 Build all binaries:
 
 ```bash

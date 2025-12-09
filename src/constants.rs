@@ -196,6 +196,13 @@ pub const CONTROLLER_AGENT_HANG_TIMEOUT_SECS: u64 = 60;
 /// How often to check for timeouts in agent control reader
 pub const TIMEOUT_MONITOR_INTERVAL_SECS: u64 = 5;
 
+/// Error message flush delay (seconds)
+/// After sending critical messages (ERROR, COMPLETED, ABORTED), agent waits
+/// this long before transitioning to Idle to ensure gRPC stream has time to
+/// transmit the message to the controller. Prevents race condition where
+/// stream closes before controller receives the error.
+pub const AGENT_ERROR_FLUSH_DELAY_SECS: u64 = 5;
+
 // =============================================================================
 // Prepare Phase Defaults
 // =============================================================================
