@@ -6,7 +6,7 @@
 //    - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
 //    - AWS_PROFILE
 //    - IAM role (EC2/ECS/Lambda)
-// 2. OR a custom endpoint is configured (for MinIO, LocalStack, WarpIO, etc.):
+// 2. OR a custom endpoint is configured (for MinIO, LocalStack, etc.):
 //    - AWS_ENDPOINT_URL or S3_ENDPOINT_URL
 //    (No credentials required for local emulators with anonymous access)
 //
@@ -44,7 +44,7 @@ fn has_custom_endpoint() -> bool {
 }
 
 /// Check if we can run S3 tests - either with credentials OR with a custom endpoint
-/// Custom endpoints (MinIO, LocalStack, WarpIO) may not require real credentials
+/// Custom endpoints (MinIO, LocalStack, etc.) may not require real credentials
 fn can_run_s3_tests() -> bool {
     has_aws_credentials() || has_custom_endpoint()
 }

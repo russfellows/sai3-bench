@@ -195,7 +195,7 @@ All notable changes to sai3-bench are documented in this file.
 - **Custom endpoint documentation** in `docs/USAGE.md`
   - Environment variables for S3, Azure, and GCS custom endpoints
   - Usage examples for MinIO, Azurite, fake-gcs-server
-  - Multi-protocol proxy configuration (WarpIO)
+  - Multi-protocol proxy configuration
 
 ### Fixed
 

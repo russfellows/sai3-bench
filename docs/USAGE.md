@@ -54,7 +54,7 @@ This doc focuses on the distributed controller/agent mode, including plaintext a
 
 ## Custom Endpoints (Local Emulators & Proxies)
 
-All three cloud backends support custom endpoints for local emulators, on-prem storage, or multi-protocol proxies like WarpIO. Set the appropriate environment variable before running sai3-bench:
+All three cloud backends support custom endpoints for local emulators, on-prem storage, or multi-protocol proxies. Set the appropriate environment variable before running sai3-bench:
 
 | Backend | Environment Variable(s) | Example |
 |---------|------------------------|---------|
@@ -86,7 +86,7 @@ export STORAGE_EMULATOR_HOST=localhost:4443  # http:// added automatically
 sai3-bench util ls gs://testbucket/
 ```
 
-### Multi-Protocol Proxy (WarpIO)
+### Multi-Protocol Proxy
 
 When using a multi-protocol proxy that exposes S3, Azure, and GCS on different ports:
 
