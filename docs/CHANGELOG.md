@@ -33,10 +33,22 @@ All notable changes to sai3-bench are documented in this file.
   - `DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS` = 10 consecutive errors before abort
   - Failed objects logged at debug level, summary at warn level
   - Applied to both `prepare_sequential` and `prepare_parallel` functions
+
+- **Exponential backoff retry for all operations**
+  - New `retry_with_backoff()` function in `src/workload.rs`
+  - Configurable: initial delay (100ms), max delay (10s), multiplier (2.0)
+  - 10% jitter to prevent thundering herd on recovery
+  - Backoff resets on success - doesn't stay in backed-off state
+  - Applied to PUT operations in prepare phase
+  - New `ErrorHandlingConfig` fields: `initial_retry_delay`, `max_retry_delay`, `retry_backoff_multiplier`
   
 - **Workload consecutive error threshold**
   - New `DEFAULT_MAX_CONSECUTIVE_ERRORS` = 10 in `constants.rs`
   - Prevents runaway failures when backend is completely unreachable
+
+- **Comprehensive error handling tests** (23 new tests)
+  - 12 tests for `PrepareErrorTracker` (consecutive reset, thresholds, thread safety)
+  - 11 tests for retry logic (exponential backoff, jitter, success after failures)
 
 ### Changed
 
