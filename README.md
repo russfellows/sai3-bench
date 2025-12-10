@@ -393,6 +393,11 @@ cargo test --test streaming_replay_tests -- --test-threads=1
 
 See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication details.
 
+## 🔗 Related Projects
+
+- **[s3dlio](https://github.com/russfellows/s3dlio)** - The underlying multi-protocol storage library powering sai3-bench
+- **[polarWarp](https://github.com/russfellows/polarWarp)** - Op-log analysis tool for parsing and visualizing s3dlio operation logs
+
 ## 📄 License
 
 GPL-3.0 License - See [LICENSE](LICENSE) for details.
