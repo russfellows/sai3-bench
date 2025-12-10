@@ -1029,7 +1029,116 @@ impl ErrorTracker {
     }
 }
 
+/// Configuration for retry with exponential backoff (v0.8.13)
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub backoff_multiplier: f64,
+    pub jitter_factor: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: crate::constants::DEFAULT_MAX_RETRIES,
+            initial_delay_ms: crate::constants::DEFAULT_INITIAL_RETRY_DELAY_MS,
+            max_delay_ms: crate::constants::DEFAULT_MAX_RETRY_DELAY_MS,
+            backoff_multiplier: crate::constants::DEFAULT_RETRY_BACKOFF_MULTIPLIER,
+            jitter_factor: crate::constants::DEFAULT_RETRY_JITTER_FACTOR,
+        }
+    }
+}
+
+impl From<&crate::config::ErrorHandlingConfig> for RetryConfig {
+    fn from(cfg: &crate::config::ErrorHandlingConfig) -> Self {
+        Self {
+            max_retries: cfg.max_retries,
+            initial_delay_ms: cfg.initial_retry_delay_ms,
+            max_delay_ms: cfg.max_retry_delay_ms,
+            backoff_multiplier: cfg.retry_backoff_multiplier,
+            jitter_factor: cfg.retry_jitter_factor,
+        }
+    }
+}
+
+/// Result of a retry operation
+pub enum RetryResult<T> {
+    /// Operation succeeded
+    Success(T),
+    /// All retries failed - contains the last error
+    Failed(anyhow::Error),
+}
+
+/// Execute an async operation with retry and exponential backoff (v0.8.13)
+/// 
+/// This is a reusable utility for both workload and prepare phases.
+/// 
+/// # Arguments
+/// * `operation_name` - Name for logging purposes
+/// * `config` - Retry configuration (delays, multiplier, jitter)
+/// * `op_fn` - The async operation to execute
+/// 
+/// # Returns
+/// * `RetryResult::Success(T)` - Operation succeeded (possibly after retries)
+/// * `RetryResult::Failed(Error)` - All retries exhausted
+pub async fn retry_with_backoff<F, Fut, T>(
+    operation_name: &str,
+    config: &RetryConfig,
+    op_fn: F,
+) -> RetryResult<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let max_attempts = config.max_retries + 1;  // Initial attempt + retries
+    let mut current_delay_ms = config.initial_delay_ms as f64;
+    let mut last_error: Option<anyhow::Error> = None;
+    
+    for attempt in 1..=max_attempts {
+        match op_fn().await {
+            Ok(result) => return RetryResult::Success(result),
+            Err(e) => {
+                last_error = Some(e);
+                
+                let is_last_attempt = attempt == max_attempts;
+                
+                if is_last_attempt {
+                    debug!("❌ {} failed after {} attempts", operation_name, max_attempts);
+                } else {
+                    // Calculate delay with jitter
+                    let jitter = if config.jitter_factor > 0.0 {
+                        let mut rng = rand::rng();
+                        let jitter_range = 1.0 - config.jitter_factor 
+                            ..= 1.0 + config.jitter_factor;
+                        rng.random_range(jitter_range)
+                    } else {
+                        1.0
+                    };
+                    
+                    let delay_with_jitter_ms = (current_delay_ms * jitter).min(config.max_delay_ms as f64);
+                    let delay = Duration::from_millis(delay_with_jitter_ms as u64);
+                    
+                    trace!("🔄 Retrying {} (attempt {}/{}) in {:?}", 
+                        operation_name, attempt + 1, max_attempts, delay);
+                    
+                    tokio::time::sleep(delay).await;
+                    
+                    // Exponential backoff for next iteration
+                    current_delay_ms = (current_delay_ms * config.backoff_multiplier)
+                        .min(config.max_delay_ms as f64);
+                }
+            }
+        }
+    }
+    
+    RetryResult::Failed(last_error.unwrap_or_else(|| anyhow!("Unknown error in retry")))
+}
+
 /// Helper to execute an operation with error handling and retry logic (v0.7.13+)
+/// 
+/// v0.8.13: Added exponential backoff with jitter between retries
 /// 
 /// Returns: Ok(Some(result)) on success, Ok(None) on error (skip), Err on abort
 async fn execute_with_error_handling<F, Fut, T>(
@@ -1047,6 +1156,9 @@ where
     } else {
         1  // Single attempt, skip on error
     };
+    
+    // Track current backoff delay for exponential growth
+    let mut current_delay_ms = config.initial_retry_delay_ms as f64;
     
     for attempt in 1..=max_attempts {
         match op_fn().await {
@@ -1069,6 +1181,7 @@ where
                     ));
                 }
                 
+                // Check if we should apply high-error-rate backoff (separate from retry backoff)
                 if should_backoff {
                     warn!("⚠️  HIGH ERROR RATE: {:.2} errors/sec (threshold: {:.2})", 
                         error_rate, config.error_rate_threshold);
@@ -1087,9 +1200,29 @@ where
                     warn!("   Last error: {}", e);
                     return Ok(None);  // Skip operation, don't abort workload
                 } else {
-                    // Retry - log at info level (visible with -v) so users see retry attempts
-                    info!("🔄 Retrying {} (attempt {}/{}) after error: {}", 
-                        operation_name, attempt + 1, max_attempts, e);
+                    // v0.8.13: Apply exponential backoff with jitter before retry
+                    let jitter = if config.retry_jitter_factor > 0.0 {
+                        use rand::Rng;
+                        let mut rng = rand::rng();
+                        // Jitter range: [1 - jitter_factor, 1 + jitter_factor]
+                        let jitter_range = 1.0 - config.retry_jitter_factor 
+                            ..= 1.0 + config.retry_jitter_factor;
+                        rng.random_range(jitter_range)
+                    } else {
+                        1.0
+                    };
+                    
+                    let delay_with_jitter_ms = (current_delay_ms * jitter).min(config.max_retry_delay_ms as f64);
+                    let delay = Duration::from_millis(delay_with_jitter_ms as u64);
+                    
+                    info!("🔄 Retrying {} (attempt {}/{}) in {:?} after error: {}", 
+                        operation_name, attempt + 1, max_attempts, delay, e);
+                    
+                    tokio::time::sleep(delay).await;
+                    
+                    // Exponential backoff: multiply delay for next iteration
+                    current_delay_ms = (current_delay_ms * config.retry_backoff_multiplier)
+                        .min(config.max_retry_delay_ms as f64);
                 }
             }
         }
@@ -2124,6 +2257,372 @@ fn normalize_scheme_for_matching(uri: &str) -> String {
     } else {
         // No scheme, treat as file path
         format!("file://{}", uri)
+    }
+}
+
+#[cfg(test)]
+mod error_handling_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+    
+    // =========================================================================
+    // RetryConfig Tests
+    // =========================================================================
+    
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        
+        assert_eq!(config.max_retries, crate::constants::DEFAULT_MAX_RETRIES);
+        assert_eq!(config.initial_delay_ms, crate::constants::DEFAULT_INITIAL_RETRY_DELAY_MS);
+        assert_eq!(config.max_delay_ms, crate::constants::DEFAULT_MAX_RETRY_DELAY_MS);
+        assert!((config.backoff_multiplier - crate::constants::DEFAULT_RETRY_BACKOFF_MULTIPLIER).abs() < 0.001);
+        assert!((config.jitter_factor - crate::constants::DEFAULT_RETRY_JITTER_FACTOR).abs() < 0.001);
+    }
+    
+    #[test]
+    fn test_retry_config_from_error_handling_config() {
+        let mut error_cfg = crate::config::ErrorHandlingConfig::default();
+        error_cfg.max_retries = 5;
+        error_cfg.initial_retry_delay_ms = 200;
+        error_cfg.max_retry_delay_ms = 10000;
+        error_cfg.retry_backoff_multiplier = 3.0;
+        error_cfg.retry_jitter_factor = 0.5;
+        
+        let retry_config = RetryConfig::from(&error_cfg);
+        
+        assert_eq!(retry_config.max_retries, 5);
+        assert_eq!(retry_config.initial_delay_ms, 200);
+        assert_eq!(retry_config.max_delay_ms, 10000);
+        assert!((retry_config.backoff_multiplier - 3.0).abs() < 0.001);
+        assert!((retry_config.jitter_factor - 0.5).abs() < 0.001);
+    }
+    
+    // =========================================================================
+    // retry_with_backoff Tests
+    // =========================================================================
+    
+    #[tokio::test]
+    async fn test_retry_success_on_first_attempt() {
+        let config = RetryConfig::default();
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        
+        let result = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let count = attempt_count_clone.clone();
+                async move {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok::<i32, anyhow::Error>(42)
+                }
+            }
+        ).await;
+        
+        match result {
+            RetryResult::Success(val) => assert_eq!(val, 42),
+            RetryResult::Failed(_) => panic!("Expected success"),
+        }
+        
+        // Should only attempt once on success
+        assert_eq!(attempt_count.load(Ordering::Relaxed), 1);
+    }
+    
+    #[tokio::test]
+    async fn test_retry_success_after_failures() {
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,  // Very short for testing
+            max_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,  // No jitter for predictable testing
+        };
+        
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        
+        // Fail first 2 times, succeed on 3rd
+        let result = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let count = attempt_count_clone.clone();
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if attempt < 3 {
+                        Err(anyhow::anyhow!("Simulated failure {}", attempt))
+                    } else {
+                        Ok::<i32, anyhow::Error>(42)
+                    }
+                }
+            }
+        ).await;
+        
+        match result {
+            RetryResult::Success(val) => assert_eq!(val, 42),
+            RetryResult::Failed(_) => panic!("Expected success after retries"),
+        }
+        
+        // Should have attempted 3 times
+        assert_eq!(attempt_count.load(Ordering::Relaxed), 3);
+    }
+    
+    #[tokio::test]
+    async fn test_retry_all_attempts_fail() {
+        let config = RetryConfig {
+            max_retries: 2,  // Initial + 2 retries = 3 attempts
+            initial_delay_ms: 1,
+            max_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        
+        let result = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let count = attempt_count_clone.clone();
+                async move {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Err::<i32, anyhow::Error>(anyhow::anyhow!("Always fails"))
+                }
+            }
+        ).await;
+        
+        match result {
+            RetryResult::Success(_) => panic!("Expected failure"),
+            RetryResult::Failed(e) => {
+                assert!(e.to_string().contains("Always fails"));
+            }
+        }
+        
+        // max_retries=2 means 3 total attempts (initial + 2 retries)
+        assert_eq!(attempt_count.load(Ordering::Relaxed), 3);
+    }
+    
+    #[tokio::test]
+    async fn test_retry_delay_increases_exponentially() {
+        let config = RetryConfig {
+            max_retries: 4,
+            initial_delay_ms: 10,
+            max_delay_ms: 1000,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,  // No jitter for predictable timing
+        };
+        
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = timestamps.clone();
+        
+        let result = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let ts = timestamps_clone.clone();
+                async move {
+                    ts.lock().unwrap().push(Instant::now());
+                    Err::<i32, anyhow::Error>(anyhow::anyhow!("Always fails"))
+                }
+            }
+        ).await;
+        
+        assert!(matches!(result, RetryResult::Failed(_)));
+        
+        let times = timestamps.lock().unwrap();
+        assert_eq!(times.len(), 5);  // Initial + 4 retries
+        
+        // Verify delays are approximately doubling (with some tolerance for execution time)
+        // Delay 1: ~10ms, Delay 2: ~20ms, Delay 3: ~40ms, Delay 4: ~80ms
+        let delays: Vec<u128> = times.windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_millis())
+            .collect();
+        
+        // Each delay should be roughly double the previous (within 50% tolerance for test stability)
+        for i in 1..delays.len() {
+            let ratio = delays[i] as f64 / delays[i-1] as f64;
+            assert!(ratio > 1.5 && ratio < 2.5, 
+                "Delay ratio {} at index {} not within expected range (delays: {:?})", 
+                ratio, i, delays);
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_retry_delay_capped_at_max() {
+        let config = RetryConfig {
+            max_retries: 5,
+            initial_delay_ms: 100,
+            max_delay_ms: 150,  // Cap at 150ms - should be hit after first retry
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.0,
+        };
+        
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = timestamps.clone();
+        
+        let _ = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let ts = timestamps_clone.clone();
+                async move {
+                    ts.lock().unwrap().push(Instant::now());
+                    Err::<i32, anyhow::Error>(anyhow::anyhow!("Always fails"))
+                }
+            }
+        ).await;
+        
+        let times = timestamps.lock().unwrap();
+        let delays: Vec<u128> = times.windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_millis())
+            .collect();
+        
+        // After first delay (100ms), subsequent should be capped at 150ms
+        for delay in delays.iter().skip(1) {
+            assert!(*delay <= 200, "Delay {} exceeded max", delay);  // Some tolerance for timing
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_retry_with_jitter() {
+        let config = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 50,
+            max_delay_ms: 1000,
+            backoff_multiplier: 1.0,  // No growth, just jitter
+            jitter_factor: 0.5,  // 50% jitter
+        };
+        
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = timestamps.clone();
+        
+        let _ = retry_with_backoff(
+            "test_op",
+            &config,
+            || {
+                let ts = timestamps_clone.clone();
+                async move {
+                    ts.lock().unwrap().push(Instant::now());
+                    Err::<i32, anyhow::Error>(anyhow::anyhow!("Always fails"))
+                }
+            }
+        ).await;
+        
+        let times = timestamps.lock().unwrap();
+        let delays: Vec<u128> = times.windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_millis())
+            .collect();
+        
+        // With 50% jitter on 50ms base, delays should be in range [25ms, 75ms]
+        // Allow some tolerance for test stability
+        for delay in &delays {
+            assert!(*delay >= 15 && *delay <= 100, 
+                "Delay {} outside jitter range", delay);
+        }
+        
+        // With jitter, delays should vary (not all identical)
+        let unique_delays: std::collections::HashSet<u128> = delays.iter().cloned().collect();
+        assert!(unique_delays.len() > 1, "Jitter should produce varying delays");
+    }
+    
+    // =========================================================================
+    // ErrorTracker Tests
+    // =========================================================================
+    
+    #[test]
+    fn test_error_tracker_record_error() {
+        let config = crate::config::ErrorHandlingConfig::default();
+        let tracker = ErrorTracker::new(config);
+        
+        let (should_backoff, should_abort, total, rate) = tracker.record_error();
+        
+        assert!(!should_backoff);  // Single error shouldn't trigger backoff
+        assert!(!should_abort);    // Far below threshold
+        assert_eq!(total, 1);
+        assert!(rate > 0.0);
+    }
+    
+    #[test]
+    fn test_error_tracker_abort_threshold() {
+        let mut config = crate::config::ErrorHandlingConfig::default();
+        config.max_total_errors = 5;  // Low threshold for testing
+        let tracker = ErrorTracker::new(config);
+        
+        // Record 4 errors - should not abort
+        for _ in 0..4 {
+            let (_, should_abort, _, _) = tracker.record_error();
+            assert!(!should_abort);
+        }
+        
+        // 5th error should trigger abort
+        let (_, should_abort, total, _) = tracker.record_error();
+        assert!(should_abort);
+        assert_eq!(total, 5);
+    }
+    
+    #[test]
+    fn test_error_tracker_get_stats() {
+        let config = crate::config::ErrorHandlingConfig::default();
+        let tracker = ErrorTracker::new(config);
+        
+        // Record some errors
+        for _ in 0..3 {
+            tracker.record_error();
+        }
+        
+        let (total, rate) = tracker.get_stats();
+        assert_eq!(total, 3);
+        assert!(rate > 0.0);
+    }
+    
+    #[test]
+    fn test_error_tracker_time_window_clears() {
+        let mut config = crate::config::ErrorHandlingConfig::default();
+        config.error_rate_window = 0.01;  // 10ms window for fast test
+        let tracker = ErrorTracker::new(config);
+        
+        // Record error
+        tracker.record_error();
+        let (_, rate1) = tracker.get_stats();
+        assert!(rate1 > 0.0);
+        
+        // Wait for window to expire
+        std::thread::sleep(Duration::from_millis(20));
+        
+        // Rate should have dropped (errors aged out)
+        let (total, rate2) = tracker.get_stats();
+        assert_eq!(total, 1);  // Total is cumulative
+        assert!(rate2 < rate1, "Rate should decrease as errors age out of window");
+    }
+    
+    // =========================================================================
+    // Backoff State Recovery Tests
+    // =========================================================================
+    
+    #[test]
+    fn test_error_rate_recovers_after_time() {
+        let mut config = crate::config::ErrorHandlingConfig::default();
+        config.error_rate_window = 0.05;  // 50ms window
+        config.error_rate_threshold = 10.0;  // 10 errors/sec to trigger backoff
+        let tracker = ErrorTracker::new(config);
+        
+        // Rapid errors to trigger backoff state
+        for _ in 0..5 {
+            tracker.record_error();
+        }
+        
+        // Should be in high error rate state
+        let (_, rate_before) = tracker.get_stats();
+        assert!(rate_before > 10.0, "Should have high error rate");
+        
+        // Wait for window to expire
+        std::thread::sleep(Duration::from_millis(100));
+        
+        // Error rate should have recovered
+        let (_, rate_after) = tracker.get_stats();
+        assert!(rate_after < rate_before, "Error rate should decrease over time");
     }
 }
 

@@ -6,6 +6,46 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.13] - 2025-12-09
+
+### Fixed
+
+- **Critical: Controller error detection for distributed mode**
+  - Controller now checks `status == 3` (ERROR) BEFORE `completed` flag
+  - Previously, agent errors during prepare phase were never detected because agents send `completed: false` with ERROR status
+  - Added handling for `status == 5` (ABORTED) in workload loop
+  - Added `status == 5` handling in startup phase (edge case)
+  - Added defensive check for `status == 4` (COMPLETED) with mismatched `completed` flag
+  
+- **Missing state transition: Preparing → Failed**
+  - Controller can now properly transition agents from Preparing to Failed on errors
+  - Previously this transition was undefined, causing state machine errors
+  
+- **Added Disconnected → Failed state transition**
+  - Allows proper error handling when agents reconnect with error status
+
+### Added
+
+- **Resilient prepare phase with error thresholds**
+  - New `PrepareErrorTracker` in `src/prepare.rs`
+  - Agents continue on I/O errors until threshold exceeded
+  - `DEFAULT_PREPARE_MAX_ERRORS` = 100 total errors before abort
+  - `DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS` = 10 consecutive errors before abort
+  - Failed objects logged at debug level, summary at warn level
+  - Applied to both `prepare_sequential` and `prepare_parallel` functions
+  
+- **Workload consecutive error threshold**
+  - New `DEFAULT_MAX_CONSECUTIVE_ERRORS` = 10 in `constants.rs`
+  - Prevents runaway failures when backend is completely unreachable
+
+### Changed
+
+- **Downgraded h2 protocol error logging**
+  - Stream errors after workload completion logged at `debug` instead of `info`
+  - These are normal gRPC stream closures, not actual errors
+
+---
+
 ## [0.8.12] - 2025-12-09
 
 ### Added

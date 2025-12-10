@@ -124,6 +124,31 @@ pub struct ErrorHandlingConfig {
     /// Default: 3
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    
+    // v0.8.13: Exponential backoff configuration for retries
+    
+    /// Initial delay before first retry (milliseconds)
+    /// Default: 100ms
+    #[serde(default = "default_initial_retry_delay_ms")]
+    pub initial_retry_delay_ms: u64,
+    
+    /// Maximum delay between retries (milliseconds)
+    /// Caps exponential growth to prevent excessive waits
+    /// Default: 5000ms (5 seconds)
+    #[serde(default = "default_max_retry_delay_ms")]
+    pub max_retry_delay_ms: u64,
+    
+    /// Multiplier for exponential backoff (delay * multiplier each retry)
+    /// 2.0 means delay doubles: 100ms -> 200ms -> 400ms -> 800ms
+    /// Default: 2.0
+    #[serde(default = "default_retry_backoff_multiplier")]
+    pub retry_backoff_multiplier: f64,
+    
+    /// Jitter factor for retry delays (0.0 = no jitter, 1.0 = full jitter)
+    /// Adds randomness to prevent thundering herd on retries
+    /// Default: 0.25 (25% jitter)
+    #[serde(default = "default_retry_jitter_factor")]
+    pub retry_jitter_factor: f64,
 }
 
 impl Default for ErrorHandlingConfig {
@@ -135,6 +160,10 @@ impl Default for ErrorHandlingConfig {
             error_rate_window: crate::constants::DEFAULT_ERROR_RATE_WINDOW,
             retry_on_error: crate::constants::DEFAULT_RETRY_ON_ERROR,
             max_retries: crate::constants::DEFAULT_MAX_RETRIES,
+            initial_retry_delay_ms: crate::constants::DEFAULT_INITIAL_RETRY_DELAY_MS,
+            max_retry_delay_ms: crate::constants::DEFAULT_MAX_RETRY_DELAY_MS,
+            retry_backoff_multiplier: crate::constants::DEFAULT_RETRY_BACKOFF_MULTIPLIER,
+            retry_jitter_factor: crate::constants::DEFAULT_RETRY_JITTER_FACTOR,
         }
     }
 }
@@ -157,6 +186,22 @@ fn default_error_rate_window() -> f64 {
 
 fn default_max_retries() -> u32 {
     crate::constants::DEFAULT_MAX_RETRIES
+}
+
+fn default_initial_retry_delay_ms() -> u64 {
+    crate::constants::DEFAULT_INITIAL_RETRY_DELAY_MS
+}
+
+fn default_max_retry_delay_ms() -> u64 {
+    crate::constants::DEFAULT_MAX_RETRY_DELAY_MS
+}
+
+fn default_retry_backoff_multiplier() -> f64 {
+    crate::constants::DEFAULT_RETRY_BACKOFF_MULTIPLIER
+}
+
+fn default_retry_jitter_factor() -> f64 {
+    crate::constants::DEFAULT_RETRY_JITTER_FACTOR
 }
 
 /// Processing mode for parallel execution (v0.7.3+)

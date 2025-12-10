@@ -72,6 +72,7 @@ impl ControllerAgentState {
             | (Ready, Preparing)       // Prepare phase starts
             | (Ready, Running)         // No prepare, direct to running
             | (Preparing, Running)     // Prepare → workload
+            | (Preparing, Failed)      // v0.8.13: Error during prepare phase
             | (Running, Cleaning)      // v0.8.9: Workload → cleanup
             | (Running, Completed)     // Success (no cleanup)
             | (Cleaning, Completed)    // v0.8.9: Cleanup → success
@@ -102,6 +103,7 @@ impl ControllerAgentState {
             | (Disconnected, Running)    // Reconnect during workload phase
             | (Disconnected, Cleaning)   // v0.8.9: Reconnect during cleanup phase
             | (Disconnected, Completed)  // Reconnect with completion message
+            | (Disconnected, Failed)     // v0.8.13: Reconnect with error message
             // Stay in terminal states
             | (Completed, Completed)
             | (Failed, Failed)
@@ -1457,6 +1459,14 @@ async fn run_distributed_workload(
                         }
                         eprintln!("  ❌ {} error: {}", stats.agent_id, stats.error_message);
                     }
+                    5 => {  // ABORTED - v0.8.13: Handle during startup (shouldn't happen but be safe)
+                        warn!("Agent {} sent ABORTED status during startup (unexpected)", stats.agent_id);
+                        tracker.error_message = Some("Agent aborted during startup".to_string());
+                        if let Err(e) = tracker.transition_to(ControllerAgentState::Failed, "ABORTED status during startup") {
+                            warn!("Failed to transition agent {} to Failed: {}", stats.agent_id, e);
+                        }
+                        eprintln!("  ❌ {} aborted during startup", stats.agent_id);
+                    }
                     _ => {
                         // Unexpected status during startup (RUNNING/COMPLETED)
                         // This shouldn't happen, but treat as ready if not already in terminal state
@@ -1790,44 +1800,69 @@ async fn run_distributed_workload(
                             max_prepare_total = 0;
                         }
                         
-                        // v0.7.5: Extract final summary if completed
-                        if stats.completed {
-                            // v0.7.13: Check if agent completed with error (status 3)
-                            if stats.status == 3 && !stats.error_message.is_empty() {
-                                error!("❌ Agent {} FAILED: {}", stats.agent_id, stats.error_message);
-                                tracker.error_message = Some(stats.error_message.clone());
-                                let _ = tracker.transition_to(ControllerAgentState::Failed, "error status received");
-                                aggregator.mark_completed(&stats.agent_id);
-                                progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, stats.error_message));
-                                
-                                // v0.8.1: Save partial results before aborting
-                                // Aggregate whatever stats we have so far for diagnostic purposes
-                                let partial_stats = aggregator.aggregate();
-                                
-                                // Finalize results directory with partial data
-                                if let Err(e) = results_dir.finalize(partial_stats.elapsed_s) {
-                                    error!("Failed to finalize results directory: {}", e);
-                                }
-                                
-                                // Write test status showing the failure
-                                let status_summary = check_test_status(&agent_trackers, &agent_summaries);
-                                if let Err(e) = write_test_status(&results_dir, &status_summary) {
-                                    error!("Failed to write STATUS.txt: {}", e);
-                                }
-                                if let Err(e) = print_test_status(&status_summary, &mut results_dir) {
-                                    error!("Failed to print test status: {}", e);
-                                }
-                                
-                                // Inform user that partial results were saved
-                                let partial_msg = format!("Partial results saved to: {}", results_dir.path().display());
-                                eprintln!("{}", partial_msg);
-                                
-                                // Abort all agents and exit
-                                abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                                anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, stats.error_message);
+                        // v0.8.13: Check for ERROR status FIRST, regardless of completed flag
+                        // Agent sends completed=false with status=3 on error, so we must check status first
+                        // Check status code first, error_message may be empty in some edge cases
+                        if stats.status == 3 {
+                            let error_msg = if stats.error_message.is_empty() {
+                                "Unknown error (no message provided)".to_string()
+                            } else {
+                                stats.error_message.clone()
+                            };
+                            error!("❌ Agent {} FAILED: {}", stats.agent_id, error_msg);
+                            tracker.error_message = Some(error_msg.clone());
+                            let _ = tracker.transition_to(ControllerAgentState::Failed, "error status received");
+                            aggregator.mark_completed(&stats.agent_id);
+                            progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, error_msg));
+                            
+                            // v0.8.1: Save partial results before aborting
+                            // Aggregate whatever stats we have so far for diagnostic purposes
+                            let partial_stats = aggregator.aggregate();
+                            
+                            // Finalize results directory with partial data
+                            if let Err(e) = results_dir.finalize(partial_stats.elapsed_s) {
+                                error!("Failed to finalize results directory: {}", e);
                             }
                             
-                            // Success case
+                            // Write test status showing the failure
+                            let status_summary = check_test_status(&agent_trackers, &agent_summaries);
+                            if let Err(e) = write_test_status(&results_dir, &status_summary) {
+                                error!("Failed to write STATUS.txt: {}", e);
+                            }
+                            if let Err(e) = print_test_status(&status_summary, &mut results_dir) {
+                                error!("Failed to print test status: {}", e);
+                            }
+                            
+                            // Inform user that partial results were saved
+                            let partial_msg = format!("Partial results saved to: {}", results_dir.path().display());
+                            eprintln!("{}", partial_msg);
+                            
+                            // Abort all agents and exit
+                            abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                            anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, error_msg);
+                        }
+                        
+                        // v0.8.13: Handle ABORTED status (status=5)
+                        // Agent sends this when it receives and processes an abort command
+                        if stats.status == 5 {
+                            info!("Agent {} acknowledged abort", stats.agent_id);
+                            let _ = tracker.transition_to(ControllerAgentState::Completed, "abort acknowledged");
+                            aggregator.mark_completed(&stats.agent_id);
+                            // Abort acknowledgment handled - skip regular completion check
+                            continue;
+                        }
+                        
+                        // v0.8.13: Defensive check for COMPLETED status (backup for completed flag)
+                        // Agent should always send completed=true with status=4, but be defensive
+                        if stats.status == 4 && !stats.completed {
+                            warn!("Agent {} sent status=4 (COMPLETED) but completed flag is false - treating as completed", stats.agent_id);
+                            let _ = tracker.transition_to(ControllerAgentState::Completed, "status 4 received (completed flag mismatch)");
+                            aggregator.mark_completed(&stats.agent_id);
+                            continue;
+                        }
+                        
+                        // v0.7.5: Extract final summary if completed successfully
+                        if stats.completed {
                             let _ = tracker.transition_to(ControllerAgentState::Completed, "workload completed");
                             aggregator.mark_completed(&stats.agent_id);
                             
