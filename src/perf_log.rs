@@ -245,6 +245,21 @@ impl PerfLogDeltaTracker {
         self.warmup_end = warmup_duration.map(|d| now + d);
     }
     
+    /// Reset the warmup timer for the main workload phase
+    /// 
+    /// Call this when transitioning from prepare to workload phase.
+    /// The warmup period should be measured from when the actual workload starts,
+    /// not from when prepare began.
+    pub fn reset_warmup_for_workload(&mut self, warmup_duration: Option<Duration>) {
+        let now = Instant::now();
+        // Reset the workload start time to now (for elapsed_s calculation)
+        self.workload_start = Some(now);
+        self.prev_timestamp = Some(now);
+        // Reset warmup end based on new start time
+        self.warmup_end = warmup_duration.map(|d| now + d);
+        // Note: We don't reset prev_* counters - those track cumulative deltas
+    }
+    
     /// Compute delta entry from current cumulative stats
     /// 
     /// Returns a PerfLogEntry with delta values (ops/bytes in this interval)

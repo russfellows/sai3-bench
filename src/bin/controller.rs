@@ -1895,6 +1895,14 @@ async fn run_distributed_workload(
                             // Reset workload timer to measure actual workload duration (not including prepare)
                             workload_start = std::time::Instant::now();
                             
+                            // v0.8.16: Reset perf_log warmup timers for workload phase
+                            // Warmup should be measured from workload start, not prepare start
+                            perf_log_tracker.reset_warmup_for_workload(warmup_opt);
+                            for tracker in agent_perf_trackers.values_mut() {
+                                tracker.reset_warmup_for_workload(warmup_opt);
+                            }
+                            debug!("Reset perf_log warmup timers for workload phase");
+                            
                             // v0.8.4: Reset prepare counters when transitioning to workload phase
                             max_prepare_created = 0;
                             max_prepare_total = 0;
