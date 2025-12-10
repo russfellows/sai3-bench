@@ -21,9 +21,92 @@ use tracing::{info, warn, debug};
 use crate::config::{FillPattern, PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
 use crate::size_generator::SizeGenerator;
+use crate::constants::{DEFAULT_PREPARE_MAX_ERRORS, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS};
+use crate::workload::{RetryConfig, RetryResult, retry_with_backoff};
 
 // Re-export for backward compatibility (so workload.rs can use via workload::PreparedObject)
 pub use crate::workload::{create_store_for_uri, detect_pool_requirements};
+
+/// Error tracking for prepare phase resilience (v0.8.13)
+/// 
+/// Tracks errors during object creation to implement configurable thresholds:
+/// - Total error count (abort if exceeded)
+/// - Consecutive error count (abort if backend seems completely down)
+/// - Failed objects list for potential retry or reporting
+#[derive(Clone)]
+pub struct PrepareErrorTracker {
+    total_errors: Arc<AtomicU64>,
+    consecutive_errors: Arc<AtomicU64>,
+    max_total_errors: u64,
+    max_consecutive_errors: u64,
+    failed_objects: Arc<std::sync::Mutex<Vec<PrepareFailure>>>,
+}
+
+/// Record of a failed prepare operation
+#[derive(Debug, Clone)]
+pub struct PrepareFailure {
+    pub uri: String,
+    pub size: u64,
+    pub error: String,
+    pub timestamp: Instant,
+}
+
+impl PrepareErrorTracker {
+    pub fn new() -> Self {
+        Self::with_thresholds(DEFAULT_PREPARE_MAX_ERRORS, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS)
+    }
+    
+    pub fn with_thresholds(max_total: u64, max_consecutive: u64) -> Self {
+        Self {
+            total_errors: Arc::new(AtomicU64::new(0)),
+            consecutive_errors: Arc::new(AtomicU64::new(0)),
+            max_total_errors: max_total,
+            max_consecutive_errors: max_consecutive,
+            failed_objects: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+    
+    /// Record a successful operation (resets consecutive error counter)
+    pub fn record_success(&self) {
+        self.consecutive_errors.store(0, Ordering::Relaxed);
+    }
+    
+    /// Record an error and check if thresholds are exceeded
+    /// Returns: (should_abort, total_errors, consecutive_errors)
+    pub fn record_error(&self, uri: &str, size: u64, error: &str) -> (bool, u64, u64) {
+        let total = self.total_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        let consecutive = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        
+        // Record failure for potential retry/reporting
+        {
+            let mut failures = self.failed_objects.lock().unwrap();
+            failures.push(PrepareFailure {
+                uri: uri.to_string(),
+                size,
+                error: error.to_string(),
+                timestamp: Instant::now(),
+            });
+        }
+        
+        let should_abort = total >= self.max_total_errors || consecutive >= self.max_consecutive_errors;
+        
+        (should_abort, total, consecutive)
+    }
+    
+    pub fn get_stats(&self) -> (u64, u64) {
+        let total = self.total_errors.load(Ordering::Relaxed);
+        let consecutive = self.consecutive_errors.load(Ordering::Relaxed);
+        (total, consecutive)
+    }
+    
+    pub fn get_failures(&self) -> Vec<PrepareFailure> {
+        self.failed_objects.lock().unwrap().clone()
+    }
+    
+    pub fn total_errors(&self) -> u64 {
+        self.total_errors.load(Ordering::Relaxed)
+    }
+}
 
 /// Information about a prepared object
 #[derive(Debug, Clone)]
@@ -560,6 +643,9 @@ async fn prepare_sequential(
                 let pb_clone = pb.clone();
                 let tracker_clone = live_stats_tracker.clone();
                 
+                // v0.8.13: Error tracking for resilient prepare phase
+                let error_tracker = Arc::new(PrepareErrorTracker::new());
+                
                 // v0.8.9: Create store ONCE before loop (was creating per-object, causing massive overhead)
                 let shared_store = Arc::new(create_store_for_uri(&spec.base_uri)
                     .context("Failed to create object store for prepare")?);
@@ -574,6 +660,8 @@ async fn prepare_sequential(
                     let ops_counter = live_ops.clone();
                     let bytes_counter = live_bytes.clone();
                     let tracker = tracker_clone.clone();
+                    let err_tracker = error_tracker.clone();
+                    let uri_clone = uri.clone();
                     
                     futs.push(tokio::spawn(async move {
                         let _permit = sem2.acquire_owned().await.unwrap();
@@ -589,57 +677,130 @@ async fn prepare_sequential(
                             }
                         };
                         
-                        // PUT object with timing (using shared store)
+                        // v0.8.13: PUT object with retry and exponential backoff
+                        let retry_config = RetryConfig::default();
+                        let uri_for_retry = uri_clone.clone();
                         let put_start = Instant::now();
-                        store.put(&uri, &data).await
-                            .with_context(|| format!("Failed to PUT {}", uri))?;
-                        let latency = put_start.elapsed();
-                        let latency_us = latency.as_micros() as u64;
                         
-                        // Record stats for live streaming (if tracker provided)
-                        if let Some(ref t) = tracker {
-                            t.record_put(size as usize, latency);
+                        let put_result = retry_with_backoff(
+                            &format!("PUT {}", &uri_clone),
+                            &retry_config,
+                            || {
+                                let store_ref = store.clone();
+                                let uri_ref = uri_for_retry.clone();
+                                let data_ref = data.clone();
+                                async move {
+                                    store_ref.put(&uri_ref, &data_ref).await
+                                        .map_err(|e| anyhow::anyhow!("{}", e))
+                                }
+                            }
+                        ).await;
+                        
+                        match put_result {
+                            RetryResult::Success(_) => {
+                                let latency = put_start.elapsed();
+                                let latency_us = latency.as_micros() as u64;
+                                
+                                // Record success - resets consecutive error counter
+                                err_tracker.record_success();
+                                
+                                // Record stats for live streaming (if tracker provided)
+                                if let Some(ref t) = tracker {
+                                    t.record_put(size as usize, latency);
+                                }
+                                
+                                // Update live counters
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                bytes_counter.fetch_add(size, Ordering::Relaxed);
+                                
+                                pb2.inc(1);
+                                
+                                // v0.7.9: Update prepare progress in live stats tracker
+                                if let Some(ref t) = tracker {
+                                    let created = pb2.position();
+                                    let total = pb2.length().unwrap_or(actual_to_create);
+                                    t.set_prepare_progress(created, total);
+                                }
+                                
+                                Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((uri_clone, size, latency_us)))
+                            }
+                            RetryResult::Failed(e) => {
+                                // v0.8.13: All retries failed - record error and check thresholds
+                                let error_msg = format!("{}", e);
+                                let (should_abort, total_errors, consecutive_errors) = 
+                                    err_tracker.record_error(&uri_clone, size, &error_msg);
+                                
+                                tracing::debug!("❌ PUT failed for {} after retries: {} [total: {}, consecutive: {}]",
+                                    uri_clone, error_msg, total_errors, consecutive_errors);
+                                
+                                pb2.inc(1);
+                                if let Some(ref t) = tracker {
+                                    let created = pb2.position();
+                                    let total = pb2.length().unwrap_or(actual_to_create);
+                                    t.set_prepare_progress(created, total);
+                                }
+                                
+                                if should_abort {
+                                    Err(anyhow::anyhow!(
+                                        "Prepare aborted: {} total errors or {} consecutive errors",
+                                        total_errors, consecutive_errors
+                                    ))
+                                } else {
+                                    Ok(None)
+                                }
+                            }
                         }
-                        
-                        // Update live counters
-                        ops_counter.fetch_add(1, Ordering::Relaxed);
-                        bytes_counter.fetch_add(size, Ordering::Relaxed);
-                        
-                        pb2.inc(1);
-                        
-                        // v0.7.9: Update prepare progress in live stats tracker
-                        if let Some(ref t) = tracker {
-                            let created = pb2.position();
-                            let total = pb2.length().unwrap_or(actual_to_create);
-                            t.set_prepare_progress(created, total);
-                        }
-                        
-                        Ok::<(String, u64, u64), anyhow::Error>((uri, size, latency_us))
                     }));
                 }
                 
-                // Collect results as they complete
+                // Collect results as they complete - v0.8.13: Handle errors gracefully
                 let mut created_objects = Vec::with_capacity(actual_to_create as usize);
+                let mut error_result: Option<anyhow::Error> = None;
+                
                 while let Some(result) = futs.next().await {
-                    let (uri, size, latency_us) = result
-                        .context("Task join error")??;
-                    
-                    // Update metrics
-                    metrics.put.bytes += size;
-                    metrics.put.ops += 1;
-                    metrics.put_bins.add(size);
-                    let bucket = crate::metrics::bucket_index(size as usize);
-                    metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
-                    
-                    created_objects.push(PreparedObject {
-                        uri,
-                        size,
-                        created: true,
-                    });
+                    match result {
+                        Ok(Ok(Some((uri, size, latency_us)))) => {
+                            metrics.put.bytes += size;
+                            metrics.put.ops += 1;
+                            metrics.put_bins.add(size);
+                            let bucket = crate::metrics::bucket_index(size as usize);
+                            metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+                            
+                            created_objects.push(PreparedObject {
+                                uri,
+                                size,
+                                created: true,
+                            });
+                        }
+                        Ok(Ok(None)) => {
+                            // PUT failed but below threshold - continue
+                        }
+                        Ok(Err(e)) => {
+                            if error_result.is_none() {
+                                error_result = Some(e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Prepare task failed: {}", e);
+                        }
+                    }
                 }
                 
                 // Wait for monitoring task to complete cleanly
                 monitor_handle.await.ok();
+                
+                // Check if we hit the error threshold
+                if let Some(e) = error_result {
+                    let (total_errors, _) = error_tracker.get_stats();
+                    warn!("Prepare phase failed with {} errors", total_errors);
+                    return Err(e);
+                }
+                
+                // Log any partial failures
+                let (total_errors, _) = error_tracker.get_stats();
+                if total_errors > 0 {
+                    warn!("⚠️ Pool {} completed with {} failed objects", prefix, total_errors);
+                }
                 
                 pb.finish_with_message(format!("created {} {} objects", actual_to_create, prefix));
                 
@@ -1135,6 +1296,9 @@ async fn prepare_parallel(
     let pb_clone = pb.clone();
     let tracker_clone = live_stats_tracker.clone();
     
+    // v0.8.13: Error tracking for resilient prepare phase
+    let error_tracker = Arc::new(PrepareErrorTracker::new());
+    
     // v0.8.9: Create store cache to avoid creating per-object (was causing massive overhead)
     // Build cache of unique store_uris before entering the loop
     let mut store_cache: std::collections::HashMap<String, Arc<Box<dyn s3dlio::ObjectStore>>> = std::collections::HashMap::new();
@@ -1155,6 +1319,7 @@ async fn prepare_parallel(
         let bytes_counter = live_bytes.clone();
         let tracker = tracker_clone.clone();
         let stores = store_cache.clone();
+        let err_tracker = error_tracker.clone();
         
         futs.push(tokio::spawn(async move {
             let _permit = sem2.acquire_owned().await.unwrap();
@@ -1174,53 +1339,146 @@ async fn prepare_parallel(
             let store = stores.get(&task.store_uri)
                 .ok_or_else(|| anyhow::anyhow!("Store not found in cache for {}", task.store_uri))?;
             
-            // PUT object with timing
+            // v0.8.13: PUT object with retry and exponential backoff
+            let retry_config = RetryConfig::default();
+            let uri_for_retry = task.uri.clone();
             let put_start = Instant::now();
-            store.put(&task.uri, &data).await
-                .with_context(|| format!("Failed to PUT {}", task.uri))?;
-            let latency = put_start.elapsed();
-            let latency_us = latency.as_micros() as u64;
             
-            // Record stats for live streaming (if tracker provided)
-            if let Some(ref t) = tracker {
-                t.record_put(task.size as usize, latency);
+            let put_result = retry_with_backoff(
+                &format!("PUT {}", &task.uri),
+                &retry_config,
+                || {
+                    let store_ref = store.clone();
+                    let uri_ref = uri_for_retry.clone();
+                    let data_ref = data.clone();
+                    async move {
+                        store_ref.put(&uri_ref, &data_ref).await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                    }
+                }
+            ).await;
+            
+            match put_result {
+                RetryResult::Success(_) => {
+                    let latency = put_start.elapsed();
+                    let latency_us = latency.as_micros() as u64;
+                    
+                    // Record success - resets consecutive error counter
+                    err_tracker.record_success();
+                    
+                    // Record stats for live streaming (if tracker provided)
+                    if let Some(ref t) = tracker {
+                        t.record_put(task.size as usize, latency);
+                    }
+                    
+                    // Update live counters
+                    ops_counter.fetch_add(1, Ordering::Relaxed);
+                    bytes_counter.fetch_add(task.size, Ordering::Relaxed);
+                    
+                    pb2.inc(1);
+                    
+                    // v0.7.9: Update prepare progress in live stats tracker
+                    if let Some(ref t) = tracker {
+                        let created = pb2.position();
+                        let total = pb2.length().unwrap_or(total_to_create);
+                        t.set_prepare_progress(created, total);
+                    }
+                    
+                    // Return success with latency
+                    Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
+                }
+                RetryResult::Failed(e) => {
+                    // v0.8.13: All retries failed - record error and check thresholds
+                    let error_msg = format!("{}", e);
+                    let (should_abort, total_errors, consecutive_errors) = 
+                        err_tracker.record_error(&task.uri, task.size, &error_msg);
+                    
+                    // Log at debug level (visible with -vv) - individual errors are expected
+                    tracing::debug!("❌ PUT failed for {} after retries: {} [total: {}, consecutive: {}]",
+                        task.uri, error_msg, total_errors, consecutive_errors);
+                    
+                    // Still increment progress bar (object skipped)
+                    pb2.inc(1);
+                    if let Some(ref t) = tracker {
+                        let created = pb2.position();
+                        let total = pb2.length().unwrap_or(total_to_create);
+                        t.set_prepare_progress(created, total);
+                    }
+                    
+                    if should_abort {
+                        // Threshold exceeded - abort entire prepare
+                        Err(anyhow::anyhow!(
+                            "Prepare aborted: {} total errors (max: {}) or {} consecutive errors (max: {})",
+                            total_errors, DEFAULT_PREPARE_MAX_ERRORS,
+                            consecutive_errors, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS
+                        ))
+                    } else {
+                        // Error logged but continue with other objects
+                        Ok(None)
+                    }
+                }
             }
-            
-            // Update live counters
-            ops_counter.fetch_add(1, Ordering::Relaxed);
-            bytes_counter.fetch_add(task.size, Ordering::Relaxed);
-            
-            pb2.inc(1);
-            
-            // v0.7.9: Update prepare progress in live stats tracker
-            if let Some(ref t) = tracker {
-                let created = pb2.position();
-                let total = pb2.length().unwrap_or(total_to_create);
-                t.set_prepare_progress(created, total);
-            }
-            
-            Ok::<(String, u64, u64), anyhow::Error>((task.uri, task.size, latency_us))
         }));
     }
     
-    // Collect results as they complete
+    // Collect results as they complete - v0.8.13: Handle errors gracefully
     let mut all_prepared = Vec::with_capacity(total_to_create as usize);
+    let mut error_result: Option<anyhow::Error> = None;
+    
     while let Some(result) = futs.next().await {
-        let (uri, size, latency_us) = result
-            .context("Task join error")??;
+        match result {
+            Ok(Ok(Some((uri, size, latency_us)))) => {
+                // Successful PUT
+                metrics.put.bytes += size;
+                metrics.put.ops += 1;
+                metrics.put_bins.add(size);
+                let bucket = crate::metrics::bucket_index(size as usize);
+                metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+                
+                all_prepared.push(PreparedObject {
+                    uri,
+                    size,
+                    created: true,
+                });
+            }
+            Ok(Ok(None)) => {
+                // PUT failed but below threshold - object skipped, continue
+            }
+            Ok(Err(e)) => {
+                // Threshold exceeded - record error but continue draining futures
+                if error_result.is_none() {
+                    error_result = Some(e);
+                }
+            }
+            Err(e) => {
+                // Task panic or join error
+                warn!("Prepare task failed: {}", e);
+            }
+        }
+    }
+    
+    // Check if we hit the error threshold
+    if let Some(e) = error_result {
+        // Wait for monitoring task before returning error
+        monitor_handle.await.ok();
         
-        // Update metrics
-        metrics.put.bytes += size;
-        metrics.put.ops += 1;
-        metrics.put_bins.add(size);
-        let bucket = crate::metrics::bucket_index(size as usize);
-        metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+        // Log summary of failures
+        let (total_errors, _) = error_tracker.get_stats();
+        let failures = error_tracker.get_failures();
+        if !failures.is_empty() {
+            warn!("Prepare phase failed with {} errors. First 5 failures:", total_errors);
+            for failure in failures.iter().take(5) {
+                warn!("  - {}: {}", failure.uri, failure.error);
+            }
+        }
         
-        all_prepared.push(PreparedObject {
-            uri,
-            size,
-            created: true,
-        });
+        return Err(e);
+    }
+    
+    // Log any partial failures that didn't exceed threshold
+    let (total_errors, _) = error_tracker.get_stats();
+    if total_errors > 0 {
+        warn!("⚠️ Prepare completed with {} failed objects (below threshold, continuing)", total_errors);
     }
     
     // Wait for monitoring task to complete cleanly
@@ -2352,5 +2610,201 @@ mod tests {
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);
         }
+    }
+    
+    // =========================================================================
+    // PrepareErrorTracker Tests (v0.8.13)
+    // =========================================================================
+    
+    #[test]
+    fn test_prepare_error_tracker_new() {
+        let tracker = PrepareErrorTracker::new();
+        let (total, consecutive) = tracker.get_stats();
+        
+        assert_eq!(total, 0);
+        assert_eq!(consecutive, 0);
+        assert_eq!(tracker.total_errors(), 0);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_with_thresholds() {
+        let tracker = PrepareErrorTracker::with_thresholds(50, 5);
+        let (total, consecutive) = tracker.get_stats();
+        
+        assert_eq!(total, 0);
+        assert_eq!(consecutive, 0);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_record_error() {
+        let tracker = PrepareErrorTracker::new();
+        
+        let (should_abort, total, consecutive) = 
+            tracker.record_error("file:///test/obj1", 1024, "Connection refused");
+        
+        assert!(!should_abort);  // Single error shouldn't trigger abort
+        assert_eq!(total, 1);
+        assert_eq!(consecutive, 1);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_record_success_resets_consecutive() {
+        let tracker = PrepareErrorTracker::new();
+        
+        // Record some errors
+        for i in 0..5 {
+            let (_, _, consecutive) = tracker.record_error(
+                &format!("file:///test/obj{}", i), 
+                1024, 
+                "Error"
+            );
+            assert_eq!(consecutive, i as u64 + 1);
+        }
+        
+        let (_, consecutive_before) = tracker.get_stats();
+        assert_eq!(consecutive_before, 5);
+        
+        // Success should reset consecutive counter
+        tracker.record_success();
+        
+        let (total, consecutive_after) = tracker.get_stats();
+        assert_eq!(total, 5);  // Total is cumulative
+        assert_eq!(consecutive_after, 0);  // Consecutive reset
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_total_threshold() {
+        let tracker = PrepareErrorTracker::with_thresholds(5, 100);  // 5 max total
+        
+        // Record 4 errors - should not abort
+        for i in 0..4 {
+            let (should_abort, total, _) = tracker.record_error(
+                &format!("file:///test/obj{}", i),
+                1024,
+                "Error"
+            );
+            assert!(!should_abort, "Should not abort at {} errors", total);
+        }
+        
+        // 5th error should trigger abort
+        let (should_abort, total, _) = tracker.record_error(
+            "file:///test/obj5",
+            1024,
+            "Error"
+        );
+        assert!(should_abort, "Should abort at {} errors", total);
+        assert_eq!(total, 5);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_consecutive_threshold() {
+        let tracker = PrepareErrorTracker::with_thresholds(100, 3);  // 3 max consecutive
+        
+        // Record 2 errors - should not abort
+        for i in 0..2 {
+            let (should_abort, _, consecutive) = tracker.record_error(
+                &format!("file:///test/obj{}", i),
+                1024,
+                "Error"
+            );
+            assert!(!should_abort, "Should not abort at {} consecutive", consecutive);
+        }
+        
+        // 3rd consecutive error should trigger abort
+        let (should_abort, _, consecutive) = tracker.record_error(
+            "file:///test/obj3",
+            1024,
+            "Error"
+        );
+        assert!(should_abort, "Should abort at {} consecutive errors", consecutive);
+        assert_eq!(consecutive, 3);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_consecutive_reset_prevents_abort() {
+        let tracker = PrepareErrorTracker::with_thresholds(100, 3);  // 3 max consecutive
+        
+        // Error, error, success, error, error - should not abort
+        tracker.record_error("file:///test/obj1", 1024, "Error");
+        tracker.record_error("file:///test/obj2", 1024, "Error");
+        tracker.record_success();  // Reset consecutive
+        tracker.record_error("file:///test/obj3", 1024, "Error");
+        let (should_abort, total, consecutive) = tracker.record_error(
+            "file:///test/obj4",
+            1024,
+            "Error"
+        );
+        
+        assert!(!should_abort, "Should not abort - consecutive was reset");
+        assert_eq!(total, 4);
+        assert_eq!(consecutive, 2);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_get_failures() {
+        let tracker = PrepareErrorTracker::new();
+        
+        tracker.record_error("file:///test/obj1", 1024, "Connection refused");
+        tracker.record_error("file:///test/obj2", 2048, "Timeout");
+        tracker.record_success();  // Doesn't affect failures list
+        tracker.record_error("file:///test/obj3", 512, "Access denied");
+        
+        let failures = tracker.get_failures();
+        
+        assert_eq!(failures.len(), 3);
+        assert_eq!(failures[0].uri, "file:///test/obj1");
+        assert_eq!(failures[0].size, 1024);
+        assert_eq!(failures[0].error, "Connection refused");
+        
+        assert_eq!(failures[1].uri, "file:///test/obj2");
+        assert_eq!(failures[1].size, 2048);
+        assert_eq!(failures[1].error, "Timeout");
+        
+        assert_eq!(failures[2].uri, "file:///test/obj3");
+        assert_eq!(failures[2].size, 512);
+        assert_eq!(failures[2].error, "Access denied");
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_clone() {
+        let tracker = PrepareErrorTracker::new();
+        tracker.record_error("file:///test/obj1", 1024, "Error");
+        
+        // Clone should share state (Arc)
+        let tracker2 = tracker.clone();
+        tracker2.record_error("file:///test/obj2", 1024, "Error");
+        
+        // Both should see the same total
+        assert_eq!(tracker.total_errors(), 2);
+        assert_eq!(tracker2.total_errors(), 2);
+    }
+    
+    #[test]
+    fn test_prepare_error_tracker_thread_safety() {
+        use std::thread;
+        
+        let tracker = PrepareErrorTracker::new();
+        let mut handles = vec![];
+        
+        // Spawn 10 threads, each recording 10 errors
+        for t in 0..10 {
+            let tracker_clone = tracker.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..10 {
+                    tracker_clone.record_error(
+                        &format!("file:///test/thread{}/obj{}", t, i),
+                        1024,
+                        "Error"
+                    );
+                }
+            }));
+        }
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        assert_eq!(tracker.total_errors(), 100);
+        assert_eq!(tracker.get_failures().len(), 100);
     }
 }

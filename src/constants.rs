@@ -33,6 +33,46 @@ pub const DEFAULT_MAX_RETRIES: u32 = 3;
 /// User can override via config: error_handling.retry_on_error
 pub const DEFAULT_RETRY_ON_ERROR: bool = false;
 
+/// Maximum consecutive errors before aborting (v0.8.13)
+/// Prevents runaway failures when backend is completely down
+/// User can override via config: error_handling.max_consecutive_errors
+pub const DEFAULT_MAX_CONSECUTIVE_ERRORS: u64 = 10;
+
+// =============================================================================
+// Retry with Exponential Backoff (v0.8.13)
+// =============================================================================
+
+/// Initial delay before first retry (milliseconds)
+/// User can override via config: error_handling.initial_retry_delay_ms
+pub const DEFAULT_INITIAL_RETRY_DELAY_MS: u64 = 100;
+
+/// Maximum delay between retries (milliseconds)
+/// Caps exponential growth to prevent excessive waits
+/// User can override via config: error_handling.max_retry_delay_ms
+pub const DEFAULT_MAX_RETRY_DELAY_MS: u64 = 5000;
+
+/// Multiplier for exponential backoff (delay * multiplier each retry)
+/// 2.0 means delay doubles: 100ms -> 200ms -> 400ms -> 800ms -> ...
+/// User can override via config: error_handling.retry_backoff_multiplier
+pub const DEFAULT_RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;
+
+/// Jitter factor for retry delays (0.0 = no jitter, 1.0 = full jitter)
+/// Adds randomness to prevent thundering herd on retries
+/// User can override via config: error_handling.retry_jitter_factor
+pub const DEFAULT_RETRY_JITTER_FACTOR: f64 = 0.25;
+
+// =============================================================================
+// Prepare Phase Error Handling (v0.8.13)
+// =============================================================================
+
+/// Maximum total errors during prepare phase before aborting
+/// Similar to workload error handling, but for object creation
+pub const DEFAULT_PREPARE_MAX_ERRORS: u64 = 100;
+
+/// Maximum consecutive errors during prepare before aborting
+/// Indicates backend is completely unreachable
+pub const DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS: u64 = 10;
+
 // =============================================================================
 // Workload Execution Defaults
 // =============================================================================

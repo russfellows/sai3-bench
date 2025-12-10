@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.12"
+version = "0.8.13"
 edition = "2021"
 build   = "build.rs"
 

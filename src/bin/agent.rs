@@ -2002,7 +2002,9 @@ impl Agent for AgentSvc {
                         // Check if workload is already complete - if so, this is normal disconnect
                         let current_state = agent_state_reader.get_state().await;
                         if current_state == WorkloadState::Idle {
-                            info!("Control reader: Stream error after workload completion (normal): {}", e);
+                            // v0.8.13: Downgrade to debug - h2 errors after completion are normal
+                            // Controller disconnects while agent still has buffered data
+                            debug!("Control reader: Stream closed after workload completion (normal h2 shutdown)");
                         } else {
                             error!("Control reader: Error receiving control message: {}", e);
                             
