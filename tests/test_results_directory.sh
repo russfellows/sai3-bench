@@ -67,7 +67,7 @@ run_test() {
         echo "Results directory: $results_dir"
         
         # Verify required files exist
-        local required_files=("config.yaml" "console.log" "metadata.json")
+        local required_files=("config.yaml" "console_log.txt" "metadata.json")
         if [ "$require_tsv" == "yes" ]; then
             required_files+=("results.tsv")
         fi

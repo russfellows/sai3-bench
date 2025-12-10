@@ -118,7 +118,7 @@ Results are saved to a timestamped directory:
 ```
 sai3-20251104-1430-distributed-test/
 ├── config.yaml              # Your workload config
-├── console.log              # Complete execution log
+├── console_log.txt          # Complete execution log
 ├── metadata.json            # Test metadata
 ├── workload_results.tsv     # Consolidated metrics
 ├── prepare_results.tsv      # Prepare phase metrics

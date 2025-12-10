@@ -114,9 +114,9 @@ impl ResultsDir {
         );
 
         // Create console log file
-        let console_log_path = dir_path.join("console.log");
+        let console_log_path = dir_path.join("console_log.txt");
         let console_log = fs::File::create(&console_log_path)
-            .with_context(|| "Failed to create console.log".to_string())?;
+            .with_context(|| "Failed to create console_log.txt".to_string())?;
 
         tracing::info!("Created results directory: {}", dir_path.display());
 
@@ -144,14 +144,14 @@ impl ResultsDir {
 
     /// Get the path for console log
     pub fn console_log_path(&self) -> PathBuf {
-        self.path.join("console.log")
+        self.path.join("console_log.txt")
     }
 
     /// Write a line to the console log
     pub fn write_console(&mut self, line: &str) -> Result<()> {
         if let Some(ref mut log) = self.console_log {
             writeln!(log, "{}", line)
-                .with_context(|| "Failed to write to console.log")?;
+                .with_context(|| "Failed to write to console_log.txt")?;
         }
         Ok(())
     }
@@ -215,7 +215,7 @@ mod tests {
 
         assert!(results_dir.path().exists());
         assert!(results_dir.path().join("config.yaml").exists());
-        assert!(results_dir.path().join("console.log").exists());
+        assert!(results_dir.path().join("console_log.txt").exists());
     }
 
     #[test]

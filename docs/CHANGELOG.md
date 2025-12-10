@@ -6,6 +6,47 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.16] - 2025-12-10
+
+### Added
+
+- **Per-agent perf_log.tsv files** - Individual performance logs for each agent
+  - Written to `agents/{agent-id}/perf_log.tsv` subdirectories
+  - Each agent's metrics tracked independently with correct agent_id
+  - Aggregate perf_log.tsv (agent_id="controller") contains merged totals
+  - Sum of per-agent values exactly equals aggregate values (verified)
+
+- **Synchronized perf_log timing** - All logs write at consistent intervals
+  - Uses `tokio::time::interval` for exact timing regardless of stats arrival
+  - Per-agent and aggregate logs write in same timer tick
+  - Enables direct comparison across all perf_log files
+
+- **Warmup timer reset for workload phase**
+  - Warmup period (is_warmup flag) now measured from workload start, not prepare start
+  - `elapsed_s` resets to 0 when workload phase begins
+  - New `reset_warmup_for_workload()` method in `PerfLogDeltaTracker`
+  - Prepare stage has its own elapsed_s timeline
+
+- **New `test_parse_perf_log_no_path` test** for optional path field validation
+
+### Changed
+
+- **`PerfLogConfig.path` field now optional** - No longer required in YAML configs
+  - Distributed mode ignores path (writes to results directory)
+  - Added `#[serde(default)]` for backward compatibility
+
+- **Renamed `console.log` to `console_log.txt`**
+  - Avoids confusion with JavaScript console.log
+  - Updated in controller.rs, results_dir.rs, and documentation
+
+### Fixed
+
+- **Aggregate perf_log interval accuracy** - Now writes at exact configured interval
+  - Previously tied to stats message arrival timing (could drift)
+  - Moved to dedicated interval timer in tokio::select!
+
+---
+
 ## [0.8.15] - 2025-12-10
 
 ### Added
