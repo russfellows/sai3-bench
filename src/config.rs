@@ -78,6 +78,22 @@ pub struct Config {
     /// Default: None (no operation logging)
     #[serde(default)]
     pub op_log_path: Option<std::path::PathBuf>,
+    
+    /// Optional warmup period to exclude from statistics analysis (v0.8.15+)
+    /// Time at the beginning of workload execution to ignore for metrics.
+    /// Data is still captured but flagged as warmup (is_warmup=1 in perf-log).
+    /// Useful for excluding cache warming, JIT compilation, connection establishment, etc.
+    /// Format: humantime duration (e.g., "30s", "2m", "90s")
+    /// Default: None (no warmup period)
+    #[serde(default, with = "humantime_serde_opt")]
+    pub warmup_period: Option<std::time::Duration>,
+    
+    /// Optional performance log configuration for time-series metrics (v0.8.15+)
+    /// Captures aggregate metrics at regular intervals for performance analysis over time.
+    /// Unlike op-log (per-operation), perf-log captures rates/latencies per interval.
+    /// Default: None (no performance logging)
+    #[serde(default)]
+    pub perf_log: Option<PerfLogConfig>,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -202,6 +218,62 @@ fn default_retry_backoff_multiplier() -> f64 {
 
 fn default_retry_jitter_factor() -> f64 {
     crate::constants::DEFAULT_RETRY_JITTER_FACTOR
+}
+
+/// Performance log configuration for time-series metrics capture (v0.8.15+)
+/// 
+/// Captures aggregate performance metrics at regular intervals for analysis
+/// of how performance changes over the duration of a workload.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PerfLogConfig {
+    /// Path to performance log file (e.g., "/tmp/perf.tsv" or "/tmp/perf.tsv.zst")
+    /// If path ends with .zst, output will be zstd-compressed
+    pub path: std::path::PathBuf,
+    
+    /// Sampling interval for metrics capture (e.g., "1s", "5s", "10s")
+    /// Default: 1 second
+    #[serde(default = "default_perf_log_interval", with = "humantime_serde")]
+    pub interval: std::time::Duration,
+}
+
+fn default_perf_log_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(crate::constants::DEFAULT_PERF_LOG_INTERVAL_SECS)
+}
+
+/// Custom serde module for Option<Duration> with humantime parsing
+/// 
+/// This allows YAML like:
+///   warmup_period: 30s
+///   warmup_period: 2m
+/// while still supporting None for unset values.
+mod humantime_serde_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+    
+    pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(d) => serializer.serialize_str(&humantime::format_duration(*d).to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+    
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => {
+                humantime::parse_duration(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 /// Processing mode for parallel execution (v0.7.3+)
