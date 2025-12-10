@@ -1,8 +1,8 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.13-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.14-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-240%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-269%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 

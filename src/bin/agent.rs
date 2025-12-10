@@ -122,6 +122,8 @@ struct AgentState {
     agent_index: Arc<Mutex<Option<u32>>>,
     /// v0.8.7: Total number of agents for distributed cleanup
     num_agents: Arc<Mutex<Option<u32>>>,
+    /// v0.8.14: Flag to track when COMPLETED message has been sent (fixes race with control reader)
+    completion_sent: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +149,7 @@ impl AgentState {
             op_log_path: Arc::new(Mutex::new(None)),
             agent_index: Arc::new(Mutex::new(None)),
             num_agents: Arc::new(Mutex::new(None)),
+            completion_sent: Arc::new(Mutex::new(false)),
         }
     }
     
@@ -158,6 +161,7 @@ impl AgentState {
             // Normal flow
             (Idle, Ready)           // RPC arrives, validation passes
             | (Idle, Failed)        // RPC arrives, validation fails
+            | (Idle, Idle)          // v0.8.14: No-op for race condition safety (completion already processed)
             | (Ready, Running)      // Start time reached, spawn workload
             | (Ready, Idle)         // Abort during coordinated start (no cleanup needed)
             | (Running, Idle)       // Workload completed successfully
@@ -165,12 +169,20 @@ impl AgentState {
             | (Running, Aborting)   // Abort signal during execution
             | (Aborting, Idle)      // Cleanup complete
             | (Failed, Idle)        // Auto-reset after sending error
+            | (Failed, Failed)      // v0.8.14: No-op for race condition safety (error already processed)
         )
     }
     
     /// Transition to new state with validation and logging
     async fn transition_to(&self, new_state: WorkloadState, reason: &str) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        
+        // v0.8.14: Handle same-state transitions as no-op (race condition between stats writer and control reader)
+        if *state == new_state {
+            debug!("Agent state already {:?}, ignoring redundant transition ({})", *state, reason);
+            return Ok(());
+        }
+        
         if !Self::can_transition(&state, &new_state) {
             let msg = format!("Invalid state transition: {:?} → {:?} (reason: {})", *state, new_state, reason);
             error!("{}", msg);
@@ -205,6 +217,25 @@ impl AgentState {
     /// Subscribe to abort signals
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
+    }
+    
+    /// v0.8.14: Mark completion message as sent (before flush delay)
+    /// This allows control reader to distinguish normal disconnect from abnormal
+    async fn mark_completion_sent(&self) {
+        let mut sent = self.completion_sent.lock().await;
+        *sent = true;
+        debug!("Marked completion as sent");
+    }
+    
+    /// v0.8.14: Check if completion message was sent
+    async fn is_completion_sent(&self) -> bool {
+        *self.completion_sent.lock().await
+    }
+    
+    /// v0.8.14: Reset completion flag for new workload
+    async fn reset_completion_sent(&self) {
+        let mut sent = self.completion_sent.lock().await;
+        *sent = false;
     }
     
     // v0.8.4: Additional state management for execute_workload RPC
@@ -934,6 +965,8 @@ impl Agent for AgentSvc {
                     sequence,
                     // v0.8.9: Stage tracking (not in any stage yet)
                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                    // v0.8.14: Concurrency (not known yet - will be sent with RUNNING messages)
+                    concurrency: 0,
                 };
                 sequence += 1;
                 
@@ -1086,6 +1119,8 @@ impl Agent for AgentSvc {
                                                 stage_progress_current: snapshot.stage_progress_current,
                                                 stage_progress_total: snapshot.stage_progress_total,
                                                 stage_elapsed_s: snapshot.stage_elapsed_s,
+                                                // v0.8.14: Concurrency from snapshot
+                                                concurrency: snapshot.concurrency,
                                             };
                                             
                                             if tx_stats.send(running_msg).await.is_err() {
@@ -1102,6 +1137,11 @@ impl Agent for AgentSvc {
                                     
                                     // Now send COMPLETED message
                                     sequence += 1;
+                                    
+                                    // v0.8.14: Mark completion sent BEFORE sending message
+                                    // This allows control reader to recognize normal disconnect
+                                    agent_state.mark_completion_sent().await;
+                                    
                                     let completed_msg = LiveStats {
                                         agent_id: agent_id.clone(),
                                         timestamp_s: snapshot.timestamp_secs() as f64,
@@ -1138,6 +1178,8 @@ impl Agent for AgentSvc {
                                         stage_progress_current: snapshot.stage_progress_current,
                                         stage_progress_total: snapshot.stage_progress_total,
                                         stage_elapsed_s: snapshot.stage_elapsed_s,
+                                        // v0.8.14: Concurrency from snapshot
+                                        concurrency: snapshot.concurrency,
                                     };
                                     
                                     if tx_stats.send(completed_msg).await.is_err() {
@@ -1188,6 +1230,8 @@ impl Agent for AgentSvc {
                                         sequence,
                                         // v0.8.9: Stage tracking (error state)
                                         current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                        // v0.8.14: Concurrency (0 for error messages)
+                                        concurrency: 0,
                                     };
                                     
                                     if tx_stats.send(error_msg).await.is_err() {
@@ -1345,6 +1389,8 @@ impl Agent for AgentSvc {
                                 stage_progress_current: snapshot.stage_progress_current,
                                 stage_progress_total: snapshot.stage_progress_total,
                                 stage_elapsed_s: snapshot.stage_elapsed_s,
+                                // v0.8.14: Concurrency from snapshot
+                                concurrency: snapshot.concurrency,
                             };
                             sequence += 1;
                             
@@ -1434,6 +1480,8 @@ impl Agent for AgentSvc {
                                             sequence: 0,
                                             // v0.8.9: Stage tracking (ack has no stage)
                                             current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                            // v0.8.14: Concurrency (0 for ack messages)
+                                            concurrency: 0,
                                         };
                                         
                                         if let Err(e) = tx_stats_for_control.send(ack_msg).await {
@@ -1463,6 +1511,9 @@ impl Agent for AgentSvc {
                                     
                                     // Store agent_id in state for stats writer
                                     agent_state_reader.set_agent_id(agent_id.clone()).await;
+                                    
+                                    // v0.8.14: Reset completion_sent flag for new workload
+                                    agent_state_reader.reset_completion_sent().await;
                                     
                                     // Store agent_index and num_agents for distributed cleanup
                                     agent_state_reader.set_agent_index(agent_index).await;
@@ -1568,8 +1619,10 @@ impl Agent for AgentSvc {
                                     // Get agent_id from state
                                     let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
                                     
-                                    // Create live stats tracker
-                                    let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new());
+                                    // Create live stats tracker with concurrency for total thread count display (v0.8.14)
+                                    let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new_with_concurrency(
+                                        config.concurrency as u32
+                                    ));
                                     
                                     // Store tracker in state for stats writer
                                     agent_state_reader.set_tracker(tracker.clone()).await;
@@ -1969,6 +2022,8 @@ impl Agent for AgentSvc {
                                     sequence: 0,
                                     // v0.8.9: Stage tracking (aborted)
                                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                    // v0.8.14: Concurrency (0 for aborted messages)
+                                    concurrency: 0,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
@@ -2033,6 +2088,8 @@ impl Agent for AgentSvc {
                                 sequence: 0,
                                 // v0.8.9: Stage tracking (connection error)
                                 current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                // v0.8.14: Concurrency (0 for error messages)
+                                concurrency: 0,
                             };
                             
                             let _ = tx_stats_for_control.send(error_msg).await;
@@ -2093,6 +2150,8 @@ impl Agent for AgentSvc {
                         sequence: 0,
                         // v0.8.9: Stage tracking (timeout)
                         current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                        // v0.8.14: Concurrency (0 for timeout messages)
+                        concurrency: 0,
                     };
                     
                     let _ = tx_stats_for_control.send(timeout_msg).await;
@@ -2111,10 +2170,18 @@ impl Agent for AgentSvc {
             
             // Check if workload completed successfully vs abnormal disconnect
             let current_state = agent_state_reader.get_state().await;
+            let completion_sent = agent_state_reader.is_completion_sent().await;
+            
             match current_state {
                 WorkloadState::Idle => {
                     // Workload already completed - this is normal controller disconnect after receiving results
                     info!("Control reader: Normal disconnect (workload completed, agent idle)");
+                }
+                WorkloadState::Running if completion_sent => {
+                    // v0.8.14: COMPLETED message was sent but state hasn't transitioned yet
+                    // This is a race condition between stats writer and control reader - NOT abnormal
+                    info!("Control reader: Normal disconnect (completion sent, state transition pending)");
+                    // Don't send abort - let stats writer complete its transition
                 }
                 WorkloadState::Ready | WorkloadState::Running | WorkloadState::Aborting => {
                     // Abnormal disconnect during workload - send abort and transition to Failed
@@ -2631,3 +2698,255 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    // ============================================================================
+    // State Transition Validation Tests (v0.8.14)
+    // ============================================================================
+    
+    #[test]
+    fn test_can_transition_valid_normal_flow() {
+        use WorkloadState::*;
+        
+        // Normal successful workload flow: Idle → Ready → Running → Idle
+        assert!(AgentState::can_transition(&Idle, &Ready));
+        assert!(AgentState::can_transition(&Ready, &Running));
+        assert!(AgentState::can_transition(&Running, &Idle));
+    }
+    
+    #[test]
+    fn test_can_transition_valid_error_flow() {
+        use WorkloadState::*;
+        
+        // Error flow: Idle → Ready → Running → Failed → Idle
+        assert!(AgentState::can_transition(&Idle, &Failed));
+        assert!(AgentState::can_transition(&Running, &Failed));
+        assert!(AgentState::can_transition(&Failed, &Idle));
+    }
+    
+    #[test]
+    fn test_can_transition_valid_abort_flow() {
+        use WorkloadState::*;
+        
+        // Abort flow: Running → Aborting → Idle
+        assert!(AgentState::can_transition(&Running, &Aborting));
+        assert!(AgentState::can_transition(&Aborting, &Idle));
+        
+        // Abort during coordinated start: Ready → Idle
+        assert!(AgentState::can_transition(&Ready, &Idle));
+    }
+    
+    #[test]
+    fn test_can_transition_same_state_noop() {
+        use WorkloadState::*;
+        
+        // v0.8.14: Same-state transitions are valid no-ops for race condition safety
+        assert!(AgentState::can_transition(&Idle, &Idle));
+        assert!(AgentState::can_transition(&Failed, &Failed));
+    }
+    
+    #[test]
+    fn test_can_transition_invalid_transitions() {
+        use WorkloadState::*;
+        
+        // Invalid transitions that should return false
+        assert!(!AgentState::can_transition(&Idle, &Running));      // Must go through Ready
+        assert!(!AgentState::can_transition(&Idle, &Aborting));     // Can't abort from Idle
+        assert!(!AgentState::can_transition(&Ready, &Failed));      // Ready should go to Running or Idle
+        assert!(!AgentState::can_transition(&Ready, &Aborting));    // Can't abort from Ready
+        assert!(!AgentState::can_transition(&Failed, &Running));    // Can't run from Failed
+        assert!(!AgentState::can_transition(&Failed, &Ready));      // Can't ready from Failed
+        assert!(!AgentState::can_transition(&Aborting, &Running));  // Can't resume from Aborting
+        assert!(!AgentState::can_transition(&Aborting, &Failed));   // Aborting goes to Idle only
+    }
+    
+    #[test]
+    fn test_can_transition_all_same_state_except_running_ready_aborting() {
+        use WorkloadState::*;
+        
+        // These same-state transitions are explicitly allowed as no-ops
+        assert!(AgentState::can_transition(&Idle, &Idle));
+        assert!(AgentState::can_transition(&Failed, &Failed));
+        
+        // These same-state transitions are NOT in the allowed list
+        // (but transition_to() handles them as no-ops anyway)
+        assert!(!AgentState::can_transition(&Running, &Running));
+        assert!(!AgentState::can_transition(&Ready, &Ready));
+        assert!(!AgentState::can_transition(&Aborting, &Aborting));
+    }
+    
+    // ============================================================================
+    // AgentState transition_to() Tests (async)
+    // ============================================================================
+    
+    #[tokio::test]
+    async fn test_transition_to_valid_transition() {
+        let state = AgentState::new(None);
+        
+        // Valid transition: Idle → Ready
+        let result = state.transition_to(WorkloadState::Ready, "test").await;
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Ready);
+    }
+    
+    #[tokio::test]
+    async fn test_transition_to_invalid_transition() {
+        let state = AgentState::new(None);
+        
+        // Invalid transition: Idle → Running (must go through Ready)
+        let result = state.transition_to(WorkloadState::Running, "test").await;
+        assert!(result.is_err());
+        assert_eq!(state.get_state().await, WorkloadState::Idle); // State unchanged
+    }
+    
+    #[tokio::test]
+    async fn test_transition_to_same_state_noop() {
+        let state = AgentState::new(None);
+        
+        // Same-state transition should succeed as no-op
+        let result = state.transition_to(WorkloadState::Idle, "test").await;
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Idle);
+    }
+    
+    #[tokio::test]
+    async fn test_transition_to_failed_same_state_noop() {
+        let state = AgentState::new(None);
+        
+        // Get to Failed state first
+        let _ = state.transition_to(WorkloadState::Ready, "setup").await;
+        let _ = state.transition_to(WorkloadState::Running, "setup").await;
+        let _ = state.transition_to(WorkloadState::Failed, "setup").await;
+        assert_eq!(state.get_state().await, WorkloadState::Failed);
+        
+        // Failed → Failed should succeed as no-op
+        let result = state.transition_to(WorkloadState::Failed, "duplicate error").await;
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Failed);
+    }
+    
+    // ============================================================================
+    // Completion Sent Flag Tests (v0.8.14)
+    // ============================================================================
+    
+    #[tokio::test]
+    async fn test_completion_sent_initial_state() {
+        let state = AgentState::new(None);
+        assert!(!state.is_completion_sent().await);
+    }
+    
+    #[tokio::test]
+    async fn test_completion_sent_mark_and_check() {
+        let state = AgentState::new(None);
+        
+        state.mark_completion_sent().await;
+        assert!(state.is_completion_sent().await);
+    }
+    
+    #[tokio::test]
+    async fn test_completion_sent_reset() {
+        let state = AgentState::new(None);
+        
+        state.mark_completion_sent().await;
+        assert!(state.is_completion_sent().await);
+        
+        state.reset_completion_sent().await;
+        assert!(!state.is_completion_sent().await);
+    }
+    
+    #[tokio::test]
+    async fn test_completion_sent_shared_across_clones() {
+        let state1 = AgentState::new(None);
+        let state2 = state1.clone();
+        
+        // Set flag on state1
+        state1.mark_completion_sent().await;
+        
+        // Should be visible on state2 (they share the same Arc)
+        assert!(state2.is_completion_sent().await);
+        
+        // Reset on state2
+        state2.reset_completion_sent().await;
+        
+        // Should be reflected in state1
+        assert!(!state1.is_completion_sent().await);
+    }
+    
+    // ============================================================================
+    // Race Condition Scenario Tests (v0.8.14)
+    // ============================================================================
+    
+    #[tokio::test]
+    async fn test_race_condition_scenario_success_completion() {
+        // Simulates: stats writer completes, control reader sees Running state
+        let state = AgentState::new(None);
+        
+        // Setup: Get to Running state
+        let _ = state.transition_to(WorkloadState::Ready, "setup").await;
+        let _ = state.transition_to(WorkloadState::Running, "setup").await;
+        assert_eq!(state.get_state().await, WorkloadState::Running);
+        
+        // Stats writer marks completion sent BEFORE sending COMPLETED message
+        state.mark_completion_sent().await;
+        
+        // Control reader checks state and flag
+        let current_state = state.get_state().await;
+        let completion_sent = state.is_completion_sent().await;
+        
+        assert_eq!(current_state, WorkloadState::Running);
+        assert!(completion_sent);
+        
+        // Control reader should NOT treat this as abnormal disconnect
+        // (it would check: if Running && completion_sent => normal)
+        
+        // Stats writer completes transition
+        let result = state.transition_to(WorkloadState::Idle, "workload completed").await;
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Idle);
+    }
+    
+    #[tokio::test]
+    async fn test_race_condition_scenario_control_reader_wins() {
+        // Simulates: control reader transitions first, stats writer tries later
+        let state = AgentState::new(None);
+        
+        // Setup: Get to Running state
+        let _ = state.transition_to(WorkloadState::Ready, "setup").await;
+        let _ = state.transition_to(WorkloadState::Running, "setup").await;
+        
+        // Control reader "wins" the race - transitions to Idle
+        let _ = state.transition_to(WorkloadState::Failed, "disconnect").await;
+        let _ = state.transition_to(WorkloadState::Idle, "cleanup").await;
+        assert_eq!(state.get_state().await, WorkloadState::Idle);
+        
+        // Stats writer tries to transition (state already Idle)
+        let result = state.transition_to(WorkloadState::Idle, "workload completed").await;
+        
+        // Should succeed as no-op (not error)
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Idle);
+    }
+    
+    #[tokio::test]
+    async fn test_race_condition_scenario_error_path() {
+        // Simulates: error path where both tasks race to transition
+        let state = AgentState::new(None);
+        
+        // Setup: Get to Running state
+        let _ = state.transition_to(WorkloadState::Ready, "setup").await;
+        let _ = state.transition_to(WorkloadState::Running, "setup").await;
+        
+        // Stats writer sends ERROR, transitions to Failed
+        let _ = state.transition_to(WorkloadState::Failed, "workload error").await;
+        assert_eq!(state.get_state().await, WorkloadState::Failed);
+        
+        // Control reader also tries to transition to Failed (race)
+        let result = state.transition_to(WorkloadState::Failed, "disconnect").await;
+        
+        // Should succeed as no-op (not error)
+        assert!(result.is_ok());
+        assert_eq!(state.get_state().await, WorkloadState::Failed);
+    }
+}

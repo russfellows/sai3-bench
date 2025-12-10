@@ -6,6 +6,136 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.14] - 2025-12-10
+
+### Added
+
+- **Distributed listing stage with progress updates**
+  - New `STAGE_LISTING = 4` in proto and `WorkloadStage::Listing` enum variant
+  - Listing phase now reports progress via LiveStatsTracker every 1000 files
+  - Each agent lists only its assigned directories (distributed by tree manifest)
+  - Uses streaming `list_stream()` API for real-time progress instead of blocking `list()`
+  - Progress shows files found and rate (files/second)
+  
+- **New `list_existing_objects_distributed()` function**
+  - Streaming list with progress callbacks
+  - Distributes listing work across agents using tree manifest directory assignments
+  - Each agent lists their assigned top-level directories depth-first
+  - For 8 agents with 64 top-level directories, each agent lists 8 directories
+  - Parses file indices during streaming for gap-aware creation
+  
+- **Robust error handling for LIST operations**
+  - New `ListingErrorTracker` with same pattern as `PrepareErrorTracker`
+  - Tracks total errors and consecutive errors with configurable thresholds
+  - `DEFAULT_LISTING_MAX_ERRORS` = 50 total errors before abort
+  - `DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS` = 5 consecutive errors before abort
+  - Consecutive error counter resets on success (handles transient network issues)
+  - Error messages collected for debugging (first 20 errors)
+  - Listing aborts with detailed error report if thresholds exceeded
+  - 12 new unit tests for ListingErrorTracker
+  
+- **New constants in `src/constants.rs`**
+  - `DEFAULT_LISTING_MAX_ERRORS` = 50
+  - `DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS` = 5
+  - `LISTING_PROGRESS_INTERVAL` = 1000 (files between progress updates)
+
+- **Total threads display in controller live stats**
+  - Shows total concurrent workers across all agents during all stages
+  - Added `concurrency` field to proto `LiveStats` message (field 35)
+  - Added `concurrency: u32` to `LiveStatsTracker` and `LiveStatsSnapshot`
+  - New `LiveStatsTracker::new_with_concurrency(u32)` constructor
+  - Controller aggregates concurrency from all agents into `total_concurrency`
+  - Display format: "8 of 8 Agents (512 threads)" when total_concurrency > 0
+  - Visible during prepare, workload, cleanup, and listing stages
+
+### Changed
+
+- **Replaced blocking list calls in prepare phase**
+  - `prepare_sequential` and `prepare_parallel` now use distributed listing
+  - Progress visible in controller during long listing operations (can take 1+ hour)
+  - Listing rate displayed in logs: "Listing progress: N files found (X/s)"
+
+### Fixed
+
+- **Agent state machine race condition on workload completion**
+  - Fixed race condition between stats writer and control reader tasks
+  - When workload completes, stats writer sends COMPLETED message and waits 3s for flush
+  - Controller receives COMPLETED, closes stream (normal disconnect)
+  - Control reader previously detected disconnect while state still "Running" → treated as abnormal
+  - **Root cause**: Two concurrent tasks both try to transition state after disconnect
+  - **Fix 1**: Added `completion_sent` flag to track when COMPLETED message was sent
+  - Control reader now checks flag: if completion_sent && state==Running → normal disconnect
+  - **Fix 2**: Same-state transitions are now valid no-ops (defensive programming)
+  - `transition_to()` returns Ok() early if `*state == new_state`
+  - Added `Idle → Idle` and `Failed → Failed` as valid transitions in `can_transition()`
+  - New methods: `mark_completion_sent()`, `is_completion_sent()`, `reset_completion_sent()`
+  - Eliminates spurious ERROR logs: "Invalid state transition: Idle → Idle"
+  - Eliminates spurious WARN logs: "Abnormal disconnect during Running state"
+
+- **Critical: Distributed cleanup double-filtering bug**
+  - **Symptom**: Cleanup running at ~900 ops/s instead of expected ~20,000 ops/s (8 agents × 2,500 each)
+  - **Root cause**: Double-filtering in cleanup phase
+    - `prepare_objects()` returns only THIS agent's prepared objects (correctly filtered)
+    - `cleanup_prepared_objects()` then re-filtered by list index % num_agents
+    - Result: Each agent only deleted 1/N² of their objects instead of 1/N
+  - **Fix**: Removed modulo filtering from `cleanup_prepared_objects()` in `cleanup.rs`
+    - Caller is now responsible for passing the correct subset of objects
+    - In distributed mode: `prepare_objects()` already filters
+    - In cleanup-only mode: `list_existing_objects()` now filters by file index
+  - **Updated `list_existing_objects()`** to filter by file index modulo
+    - Tree mode: Parses `file_NNNNNNNN.dat` and filters by `file_idx % num_agents == agent_id`
+    - Flat mode: Parses `prepared-NNNNNNNN.dat` and filters similarly
+  - Cleanup performance should now scale linearly with number of agents
+
+- **Directory structure cleanup for tree mode**
+  - After file cleanup, agent 0 now cleans up any remaining directory markers
+  - Handles GCS folder objects, `.keep` files, and other placeholder objects
+  - Uses tree manifest to determine the tree root URI
+  - Lists remaining objects under the tree prefix and deletes them
+  - Only agent 0 performs this to avoid race conditions between agents
+  - Ensures complete cleanup leaving no empty directories or markers
+
+### Testing
+
+- **New unit tests for ListingErrorTracker (12 tests)**
+  - `test_listing_error_tracker_new` - Initial state
+  - `test_listing_error_tracker_with_thresholds` - Custom thresholds
+  - `test_listing_error_tracker_record_error` - Error recording
+  - `test_listing_error_tracker_record_success_resets_consecutive` - Reset behavior
+  - `test_listing_error_tracker_total_threshold` - Total error abort
+  - `test_listing_error_tracker_consecutive_threshold` - Consecutive error abort
+  - `test_listing_error_tracker_consecutive_reset_prevents_abort` - Recovery from errors
+  - `test_listing_error_tracker_get_error_messages` - Error message collection
+  - `test_listing_error_tracker_clone` - Arc-based cloning
+  - `test_listing_error_tracker_thread_safety` - Multi-threaded safety
+  - `test_listing_error_tracker_default` - Default trait implementation
+  - `test_listing_result_default` - ListingResult default
+
+- **New unit tests for Agent state machine (17 tests)**
+  - State transition validation (6 tests):
+    - `test_can_transition_valid_normal_flow` - Idle→Ready→Running→Idle
+    - `test_can_transition_valid_error_flow` - Error transitions
+    - `test_can_transition_valid_abort_flow` - Abort transitions
+    - `test_can_transition_same_state_noop` - Idle→Idle, Failed→Failed
+    - `test_can_transition_invalid_transitions` - Invalid transitions return false
+    - `test_can_transition_all_same_state_except_running_ready_aborting` - Explicit no-ops
+  - Async transition_to() tests (4 tests):
+    - `test_transition_to_valid_transition` - Valid transition succeeds
+    - `test_transition_to_invalid_transition` - Invalid transition fails
+    - `test_transition_to_same_state_noop` - Same-state is no-op
+    - `test_transition_to_failed_same_state_noop` - Failed→Failed is no-op
+  - Completion sent flag tests (4 tests):
+    - `test_completion_sent_initial_state` - Starts false
+    - `test_completion_sent_mark_and_check` - Mark and check
+    - `test_completion_sent_reset` - Reset clears flag
+    - `test_completion_sent_shared_across_clones` - Arc sharing
+  - Race condition scenario tests (3 tests):
+    - `test_race_condition_scenario_success_completion` - completion_sent prevents false abort
+    - `test_race_condition_scenario_control_reader_wins` - Idle→Idle no-op
+    - `test_race_condition_scenario_error_path` - Failed→Failed no-op
+
+---
+
 ## [0.8.13] - 2025-12-09
 
 ### Fixed

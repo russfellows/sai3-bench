@@ -22,6 +22,7 @@ pub enum WorkloadStage {
     Prepare = 1,     // Creating objects before workload
     Workload = 2,    // Main benchmark execution
     Cleanup = 3,     // Deleting objects after workload
+    Listing = 4,     // v0.8.14: Scanning existing objects before prepare
     Custom = 10,     // User-defined custom stage
 }
 
@@ -37,6 +38,7 @@ impl WorkloadStage {
             1 => WorkloadStage::Prepare,
             2 => WorkloadStage::Workload,
             3 => WorkloadStage::Cleanup,
+            4 => WorkloadStage::Listing,
             10 => WorkloadStage::Custom,
             _ => WorkloadStage::Unknown,
         }
@@ -49,6 +51,7 @@ impl WorkloadStage {
             WorkloadStage::Prepare => "Prepare",
             WorkloadStage::Workload => "Workload",
             WorkloadStage::Cleanup => "Cleanup",
+            WorkloadStage::Listing => "Listing",
             WorkloadStage::Custom => "Custom",
         }
     }
@@ -79,6 +82,9 @@ pub struct LiveStatsTracker {
     stage_progress_current: Arc<AtomicU64>,
     stage_progress_total: Arc<AtomicU64>,
     stage_start_time: Arc<Mutex<Instant>>,
+    
+    // v0.8.14: Concurrency tracking for total thread count display
+    concurrency: u32,
 
     // Latency histograms (microseconds) - Mutex for snapshot operations
     get_hist: Arc<Mutex<Histogram<u64>>>,
@@ -106,6 +112,13 @@ impl LiveStatsTracker {
     ///
     /// Histograms track latencies from 1 microsecond to 1 hour with 3 significant digits.
     pub fn new() -> Self {
+        Self::new_with_concurrency(0)  // Default to 0 (unknown)
+    }
+    
+    /// Create new tracker with explicit concurrency value (v0.8.14)
+    ///
+    /// Use this when you know the concurrency at creation time (e.g., from config).
+    pub fn new_with_concurrency(concurrency: u32) -> Self {
         let now = Instant::now();
         Self {
             get_ops: Arc::new(AtomicU64::new(0)),
@@ -121,6 +134,7 @@ impl LiveStatsTracker {
             stage_progress_current: Arc::new(AtomicU64::new(0)),
             stage_progress_total: Arc::new(AtomicU64::new(0)),
             stage_start_time: Arc::new(Mutex::new(now)),
+            concurrency,
             get_hist: Arc::new(Mutex::new(
                 Histogram::new_with_bounds(1, 3_600_000_000, 3).unwrap(),
             )),
@@ -345,6 +359,8 @@ impl LiveStatsTracker {
             stage_progress_current: self.stage_progress_current.load(Ordering::Relaxed),
             stage_progress_total: self.stage_progress_total.load(Ordering::Relaxed),
             stage_elapsed_s: self.stage_start_time.lock().elapsed().as_secs_f64(),
+            // v0.8.14: Concurrency
+            concurrency: self.concurrency,
         }
     }
 }
@@ -380,6 +396,8 @@ pub struct LiveStatsSnapshot {
     pub stage_progress_current: u64,
     pub stage_progress_total: u64,
     pub stage_elapsed_s: f64,
+    // v0.8.14: Concurrency for total thread count display
+    pub concurrency: u32,
 }
 
 impl LiveStatsSnapshot {

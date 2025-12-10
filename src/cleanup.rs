@@ -70,11 +70,16 @@ pub async fn list_existing_objects(
     
     if is_tree_mode {
         // Directory tree mode: parse file_NNNNNNNN.dat filenames
-        // NOTE: Include ALL files - cleanup_prepared_objects will distribute work via modulo
+        // v0.8.14: Filter by agent here - each agent handles files where file_index % num_agents == agent_id
         for path in &all_files {
             if let Some(filename) = path.rsplit('/').next() {
                 if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
-                    if let Ok(_idx) = idx_str.parse::<u64>() {
+                    if let Ok(file_idx) = idx_str.parse::<usize>() {
+                        // v0.8.14: Distributed cleanup - filter by file index modulo
+                        if num_agents > 1 && (file_idx % num_agents) != agent_id {
+                            continue;  // This file belongs to another agent
+                        }
+                        
                         // List returns full URIs (file://..., s3://..., etc)
                         // Use path directly if it's already a full URI, otherwise prepend list_base
                         let full_uri = if path.contains("://") {
@@ -93,26 +98,51 @@ pub async fn list_existing_objects(
             }
         }
     } else {
-        // Flat mode: include all files
-        // NOTE: No filtering here - cleanup_prepared_objects will distribute work via modulo
-        // Sort for deterministic ordering
+        // Flat mode: parse prepared-NNNNNNNN.dat or deletable-NNNNNNNN.dat filenames
+        // v0.8.14: Filter by file index modulo for distributed cleanup
+        // Sort for deterministic ordering first
         let mut sorted_files = all_files.clone();
         sorted_files.sort();
         
         for path in sorted_files.iter() {
-            // List returns full URIs (file://..., s3://..., etc)
-            // Use path directly if it's already a full URI, otherwise prepend list_base
-            let full_uri = if path.contains("://") {
-                path.clone()
+            // Try to parse file index from filename
+            let should_include = if num_agents <= 1 {
+                true  // Single agent mode - include all
+            } else if let Some(filename) = path.rsplit('/').next() {
+                // Parse "prepared-00000042.dat" or "deletable-00000042.dat"
+                if let Some(dash_pos) = filename.find('-') {
+                    if let Some(dot_pos) = filename.find('.') {
+                        let idx_str = &filename[dash_pos + 1..dot_pos];
+                        if let Ok(file_idx) = idx_str.parse::<usize>() {
+                            (file_idx % num_agents) == agent_id
+                        } else {
+                            true  // Can't parse - include for safety
+                        }
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
             } else {
-                format!("{}{}", list_base, path)
+                true
             };
             
-            prepared_objects.push(PreparedObject {
-                uri: full_uri,
-                size: 0,
-                created: false,
-            });
+            if should_include {
+                // List returns full URIs (file://..., s3://..., etc)
+                // Use path directly if it's already a full URI, otherwise prepend list_base
+                let full_uri = if path.contains("://") {
+                    path.clone()
+                } else {
+                    format!("{}{}", list_base, path)
+                };
+                
+                prepared_objects.push(PreparedObject {
+                    uri: full_uri,
+                    size: 0,
+                    created: false,
+                });
+            }
         }
     }
     
@@ -138,7 +168,7 @@ pub async fn list_existing_objects(
 /// * `live_stats_tracker` - Optional tracker for recording DELETE latencies as META operations
 pub async fn cleanup_prepared_objects(
     objects: &[PreparedObject],
-    _tree_manifest: Option<&TreeManifest>,
+    tree_manifest: Option<&TreeManifest>,
     agent_id: usize,
     num_agents: usize,
     cleanup_mode: CleanupMode,
@@ -149,24 +179,22 @@ pub async fn cleanup_prepared_objects(
         return Ok(());
     }
     
-    info!("Agent {}/{}: Cleaning up {} objects with {} workers", 
-          agent_id, num_agents, objects.len(), 32);
-    
-    // Determine which objects this agent should clean (distributed cleanup)
-    let my_objects: Vec<_> = if num_agents > 1 {
-        // Each agent handles objects whose index % num_agents == agent_id
-        objects.iter()
-            .enumerate()
-            .filter(|(idx, _)| idx % num_agents == agent_id)
-            .map(|(_, obj)| obj.clone())
-            .collect()
-    } else {
-        objects.to_vec()
-    };
-    
+    // v0.8.14: Removed modulo filtering - the caller is responsible for passing the correct
+    // subset of objects for this agent. This fixes a major bug where cleanup was double-filtering:
+    // - prepare_objects() already filters to this agent's share when creating objects
+    // - cleanup was then filtering AGAIN by list index, resulting in only 1/N² objects deleted
+    //
+    // Now: Simply delete ALL objects in the list. The caller handles distribution:
+    // - Distributed mode with prepare: prepare_objects() returns this agent's share
+    // - Cleanup-only mode: list_existing_objects() should filter if needed
+    let my_objects = objects.to_vec();
     let my_objects_count = my_objects.len();
-    info!("Agent {}/{}: Responsible for {} of {} objects", 
-          agent_id, num_agents, my_objects_count, objects.len());
+    
+    // v0.8.14: Save first object URI for directory cleanup later
+    let first_object_uri = my_objects.first().map(|o| o.uri.clone());
+    
+    info!("Agent {}/{}: Cleaning up {} objects with {} workers", 
+          agent_id, num_agents, my_objects_count, 32);
     
     if my_objects.is_empty() {
         info!("Agent {}/{}: No objects to delete (all assigned to other agents)", agent_id, num_agents);
@@ -261,8 +289,48 @@ pub async fn cleanup_prepared_objects(
     info!("Agent {}/{}: deleted {} objects ({} succeeded, {} already deleted, {} errors)", 
           agent_id, num_agents, my_objects_count, succeeded, already_deleted, errors);
     
-    // Note: Directory cleanup for tree structures is handled separately
-    // via rmdir operations after all files are deleted
+    // v0.8.14: Directory cleanup for tree structures
+    // Only agent 0 does this to avoid race conditions between agents
+    // This cleans up any remaining directory markers (GCS folder objects, .keep files, etc.)
+    if agent_id == 0 {
+        if let Some(manifest) = tree_manifest {
+            // Get base URI from first object (strip the file path to get tree root)
+            if let Some(first_obj_uri) = first_object_uri {
+                // Find the tree root by looking for the manifest's root directory pattern
+                if let Some(root_dir) = manifest.all_directories.first() {
+                    // Extract base URI up to the tree root
+                    if let Some(pos) = first_obj_uri.find(root_dir.as_str()) {
+                        let base_uri = &first_obj_uri[..pos];
+                        info!("Agent 0: Cleaning up directory structure at {}", base_uri);
+                        
+                        // List any remaining objects under the prefix and delete them
+                        // This catches directory markers, .keep files, folder placeholders, etc.
+                        match store.list(base_uri, true).await {
+                            Ok(remaining) => {
+                                if !remaining.is_empty() {
+                                    info!("Agent 0: Found {} remaining objects (directory markers), deleting...", remaining.len());
+                                    for obj_path in remaining {
+                                        let full_uri = if obj_path.contains("://") {
+                                            obj_path
+                                        } else {
+                                            format!("{}{}", base_uri, obj_path)
+                                        };
+                                        if let Err(e) = store.delete(&full_uri).await {
+                                            debug!("Agent 0: Failed to delete {}: {}", full_uri, e);
+                                        }
+                                    }
+                                    info!("Agent 0: Directory cleanup complete");
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Agent 0: Could not list remaining objects: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     Ok(())
 }

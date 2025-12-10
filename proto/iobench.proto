@@ -174,6 +174,7 @@ message LiveStats {
     STAGE_PREPARE = 1;    // Creating objects before workload
     STAGE_WORKLOAD = 2;   // Main benchmark execution (GET/PUT/etc.)
     STAGE_CLEANUP = 3;    // Deleting objects after workload
+    STAGE_LISTING = 4;    // v0.8.14: Scanning existing objects before prepare
     STAGE_CUSTOM = 10;    // User-defined custom stage (use stage_name)
   }
   WorkloadStage current_stage = 30;      // Current execution stage
@@ -181,6 +182,9 @@ message LiveStats {
   uint64 stage_progress_current = 32;    // Progress within stage (objects created/deleted, etc.)
   uint64 stage_progress_total = 33;      // Total items for this stage (0 = time-based like workload)
   double stage_elapsed_s = 34;           // Seconds since this stage started
+  
+  // v0.8.14: Agent concurrency for total thread count display
+  uint32 concurrency = 35;               // Number of concurrent workers on this agent
 }
 
 service Agent {
