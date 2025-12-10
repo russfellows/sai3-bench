@@ -1042,3 +1042,187 @@ fn test_replay_config_serialize_deserialize() -> Result<()> {
     
     Ok(())
 }
+
+// =============================================================================
+// Performance Log Configuration Tests (v0.8.15+)
+// =============================================================================
+
+#[test]
+fn test_parse_warmup_period() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+concurrency: 16
+warmup_period: 30s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.warmup_period.is_some());
+    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(30));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_warmup_period_minutes() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 5m
+warmup_period: 2m
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.warmup_period.is_some());
+    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(120));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_warmup_period_none() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.warmup_period.is_none());
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_perf_log_config() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+
+perf_log:
+  path: /tmp/perf-metrics.tsv
+  interval: 5s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.perf_log.is_some());
+    let perf_log = config.perf_log.as_ref().unwrap();
+    assert_eq!(perf_log.path, std::path::PathBuf::from("/tmp/perf-metrics.tsv"));
+    assert_eq!(perf_log.interval, std::time::Duration::from_secs(5));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_perf_log_config_compressed() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+
+perf_log:
+  path: /data/metrics/benchmark.tsv.zst
+  interval: 1s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.perf_log.is_some());
+    let perf_log = config.perf_log.as_ref().unwrap();
+    assert_eq!(perf_log.path, std::path::PathBuf::from("/data/metrics/benchmark.tsv.zst"));
+    assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_perf_log_default_interval() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+
+perf_log:
+  path: /tmp/perf.tsv
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.perf_log.is_some());
+    let perf_log = config.perf_log.as_ref().unwrap();
+    // Default interval should be 1 second
+    assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_full_perf_config() -> Result<()> {
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 5m
+concurrency: 32
+warmup_period: 30s
+
+perf_log:
+  path: /data/benchmark/perf.tsv.zst
+  interval: 1s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 80
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 20
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    // Verify warmup
+    assert!(config.warmup_period.is_some());
+    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(30));
+    
+    // Verify perf_log
+    assert!(config.perf_log.is_some());
+    let perf_log = config.perf_log.as_ref().unwrap();
+    assert_eq!(perf_log.path, std::path::PathBuf::from("/data/benchmark/perf.tsv.zst"));
+    assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
+    
+    // Verify other fields
+    assert_eq!(config.duration, std::time::Duration::from_secs(300));
+    assert_eq!(config.concurrency, 32);
+    
+    Ok(())
+}

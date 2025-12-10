@@ -175,6 +175,27 @@ pub const PROGRESS_UPDATE_INTERVAL_MS: u64 = 100;
 pub const PROGRESS_STATS_UPDATE_INTERVAL_SECS: f64 = 0.5;
 
 // =============================================================================
+// Performance Log Defaults (v0.8.15+)
+// =============================================================================
+
+/// Default perf-log sampling interval (1 second)
+/// User can override via config: perf_log.interval
+pub const DEFAULT_PERF_LOG_INTERVAL_SECS: u64 = 1;
+
+/// TSV header for perf-log files (28 columns)
+/// See docs/PERF_LOG_FORMAT.md for complete column specification
+/// 
+/// Columns by group:
+/// - Identity (1): agent_id
+/// - Timing (3): timestamp_epoch_ms, elapsed_s, stage
+/// - GET metrics (7): ops, bytes, iops, mbps, p50_us, p90_us, p99_us
+/// - PUT metrics (7): ops, bytes, iops, mbps, p50_us, p90_us, p99_us  
+/// - META metrics (5): ops, iops, p50_us, p90_us, p99_us
+/// - CPU metrics (3): cpu_user_pct, cpu_system_pct, cpu_iowait_pct
+/// - Status (2): errors, is_warmup
+pub const PERF_LOG_HEADER: &str = "agent_id\ttimestamp_epoch_ms\telapsed_s\tstage\tget_ops\tget_bytes\tget_iops\tget_mbps\tget_p50_us\tget_p90_us\tget_p99_us\tput_ops\tput_bytes\tput_iops\tput_mbps\tput_p50_us\tput_p90_us\tput_p99_us\tmeta_ops\tmeta_iops\tmeta_p50_us\tmeta_p90_us\tmeta_p99_us\tcpu_user_pct\tcpu_system_pct\tcpu_iowait_pct\terrors\tis_warmup";
+
+// =============================================================================
 // Distributed Testing Defaults
 // =============================================================================
 

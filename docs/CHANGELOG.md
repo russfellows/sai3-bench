@@ -6,6 +6,43 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.15] - 2025-12-10
+
+### Added
+
+- **Performance Logging (perf-log) module** - New time-series metrics capture system
+  - Captures interval-based aggregate metrics (default 1-second intervals)
+  - 28-column TSV format with optional zstd compression
+  - Delta-based metrics: ops, bytes, IOPS, throughput per interval
+  - Latency percentiles: p50, p90, p99 for GET, PUT, and META operations
+  - CPU utilization: user, system, and I/O wait percentages
+  - Agent identification for distributed workload analysis
+  - Warmup period flagging (is_warmup column) for filtering pre-measurement data
+  - Stage tracking (prepare, workload, cleanup, listing)
+  - New `PerfLogWriter`, `PerfLogEntry`, `PerfLogDeltaTracker` types
+  - See [docs/PERF_LOG_FORMAT.md](./PERF_LOG_FORMAT.md) for complete specification
+
+- **Extended LiveStatsSnapshot percentiles**
+  - Added p90 and p99 percentiles to GET and PUT operations (kept p95 for compatibility)
+  - Added p50, p90, p95, p99 percentiles to META operations
+  - Enables finer-grained latency analysis in gRPC streaming stats
+
+- **New configuration options**
+  - `warmup_period: Duration` - Mark initial data as warmup (e.g., "10s")
+  - `perf_log.path: String` - Output path for perf-log file
+  - `perf_log.interval: Duration` - Sampling interval (default "1s")
+
+- **New constants in `src/constants.rs`**
+  - `DEFAULT_PERF_LOG_INTERVAL_SECS` = 1
+  - `PERF_LOG_HEADER` - 28-column TSV header with full documentation
+
+### Changed
+
+- Moved `PERF_LOG_HEADER` constant to `constants.rs` for centralized configuration
+- Updated module header comments to reference new documentation
+
+---
+
 ## [0.8.14] - 2025-12-10
 
 ### Added

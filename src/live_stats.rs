@@ -309,30 +309,49 @@ impl LiveStatsTracker {
         let prepare_objects_total = self.prepare_objects_total.load(Ordering::Relaxed);
 
         // Calculate latency percentiles (requires histogram lock)
-        let (get_mean_us, get_p50_us, get_p95_us) = {
+        // v0.8.15: Added p90 and p99 percentiles (keeping p95 for backwards compatibility)
+        let (get_mean_us, get_p50_us, get_p90_us, get_p95_us, get_p99_us) = {
             let hist = self.get_hist.lock();
             if !hist.is_empty() {
-                (hist.mean() as u64, hist.value_at_quantile(0.50), hist.value_at_quantile(0.95))
+                (
+                    hist.mean() as u64,
+                    hist.value_at_quantile(0.50),
+                    hist.value_at_quantile(0.90),
+                    hist.value_at_quantile(0.95),
+                    hist.value_at_quantile(0.99),
+                )
             } else {
-                (0, 0, 0)
+                (0, 0, 0, 0, 0)
             }
         };
 
-        let (put_mean_us, put_p50_us, put_p95_us) = {
+        let (put_mean_us, put_p50_us, put_p90_us, put_p95_us, put_p99_us) = {
             let hist = self.put_hist.lock();
             if !hist.is_empty() {
-                (hist.mean() as u64, hist.value_at_quantile(0.50), hist.value_at_quantile(0.95))
+                (
+                    hist.mean() as u64,
+                    hist.value_at_quantile(0.50),
+                    hist.value_at_quantile(0.90),
+                    hist.value_at_quantile(0.95),
+                    hist.value_at_quantile(0.99),
+                )
             } else {
-                (0, 0, 0)
+                (0, 0, 0, 0, 0)
             }
         };
 
-        let meta_mean_us = {
+        let (meta_mean_us, meta_p50_us, meta_p90_us, meta_p95_us, meta_p99_us) = {
             let hist = self.meta_hist.lock();
             if !hist.is_empty() {
-                hist.mean() as u64
+                (
+                    hist.mean() as u64,
+                    hist.value_at_quantile(0.50),
+                    hist.value_at_quantile(0.90),
+                    hist.value_at_quantile(0.95),
+                    hist.value_at_quantile(0.99),
+                )
             } else {
-                0
+                (0, 0, 0, 0, 0)
             }
         };
 
@@ -342,14 +361,22 @@ impl LiveStatsTracker {
             get_bytes,
             get_mean_us,
             get_p50_us,
+            get_p90_us,
             get_p95_us,
+            get_p99_us,
             put_ops,
             put_bytes,
             put_mean_us,
             put_p50_us,
+            put_p90_us,
             put_p95_us,
+            put_p99_us,
             meta_ops,
             meta_mean_us,
+            meta_p50_us,
+            meta_p90_us,
+            meta_p95_us,
+            meta_p99_us,
             in_prepare_phase,
             prepare_objects_created,
             prepare_objects_total,
@@ -379,14 +406,22 @@ pub struct LiveStatsSnapshot {
     pub get_bytes: u64,
     pub get_mean_us: u64,
     pub get_p50_us: u64,
+    pub get_p90_us: u64,
     pub get_p95_us: u64,
+    pub get_p99_us: u64,
     pub put_ops: u64,
     pub put_bytes: u64,
     pub put_mean_us: u64,
     pub put_p50_us: u64,
+    pub put_p90_us: u64,
     pub put_p95_us: u64,
+    pub put_p99_us: u64,
     pub meta_ops: u64,
     pub meta_mean_us: u64,
+    pub meta_p50_us: u64,
+    pub meta_p90_us: u64,
+    pub meta_p95_us: u64,
+    pub meta_p99_us: u64,
     pub in_prepare_phase: bool,
     pub prepare_objects_created: u64,
     pub prepare_objects_total: u64,
