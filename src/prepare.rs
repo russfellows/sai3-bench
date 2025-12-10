@@ -11,7 +11,9 @@
 //! grew beyond 2500 lines.
 
 use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,8 +22,15 @@ use tracing::{info, warn, debug};
 
 use crate::config::{FillPattern, PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
+use crate::live_stats::{LiveStatsTracker, WorkloadStage};
 use crate::size_generator::SizeGenerator;
-use crate::constants::{DEFAULT_PREPARE_MAX_ERRORS, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS};
+use crate::constants::{
+    DEFAULT_PREPARE_MAX_ERRORS, 
+    DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS,
+    DEFAULT_LISTING_MAX_ERRORS,
+    DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS,
+    LISTING_PROGRESS_INTERVAL,
+};
 use crate::workload::{RetryConfig, RetryResult, retry_with_backoff};
 
 // Re-export for backward compatibility (so workload.rs can use via workload::PreparedObject)
@@ -49,6 +58,12 @@ pub struct PrepareFailure {
     pub size: u64,
     pub error: String,
     pub timestamp: Instant,
+}
+
+impl Default for PrepareErrorTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PrepareErrorTracker {
@@ -183,6 +198,453 @@ fn compute_op_agg(hists: &crate::metrics::OpHists, total_bytes: u64, total_ops: 
         p95_us: combined.value_at_quantile(0.95),
         p99_us: combined.value_at_quantile(0.99),
     }
+}
+
+// ============================================================================
+// Distributed Listing with Progress (v0.8.14)
+// ============================================================================
+
+/// Error tracking for listing phase resilience (v0.8.14)
+/// 
+/// Similar to PrepareErrorTracker, but for LIST operations.
+/// LIST can fail on transient network issues; we don't want to abort immediately.
+#[derive(Clone)]
+pub struct ListingErrorTracker {
+    total_errors: Arc<AtomicU64>,
+    consecutive_errors: Arc<AtomicU64>,
+    max_total_errors: u64,
+    max_consecutive_errors: u64,
+    error_messages: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ListingErrorTracker {
+    pub fn new() -> Self {
+        Self::with_thresholds(DEFAULT_LISTING_MAX_ERRORS, DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS)
+    }
+    
+    pub fn with_thresholds(max_total: u64, max_consecutive: u64) -> Self {
+        Self {
+            total_errors: Arc::new(AtomicU64::new(0)),
+            consecutive_errors: Arc::new(AtomicU64::new(0)),
+            max_total_errors: max_total,
+            max_consecutive_errors: max_consecutive,
+            error_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+    
+    /// Record a successful item retrieval (resets consecutive error counter)
+    pub fn record_success(&self) {
+        self.consecutive_errors.store(0, Ordering::Relaxed);
+    }
+    
+    /// Record an error and check if thresholds are exceeded
+    /// Returns: (should_abort, total_errors, consecutive_errors)
+    pub fn record_error(&self, error_msg: &str) -> (bool, u64, u64) {
+        let total = self.total_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        let consecutive = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+        
+        // Store first 20 error messages for debugging
+        {
+            let mut errors = self.error_messages.lock().unwrap();
+            if errors.len() < 20 {
+                errors.push(error_msg.to_string());
+            }
+        }
+        
+        let should_abort = total >= self.max_total_errors || consecutive >= self.max_consecutive_errors;
+        
+        (should_abort, total, consecutive)
+    }
+    
+    pub fn get_stats(&self) -> (u64, u64) {
+        (self.total_errors.load(Ordering::Relaxed), 
+         self.consecutive_errors.load(Ordering::Relaxed))
+    }
+    
+    pub fn total_errors(&self) -> u64 {
+        self.total_errors.load(Ordering::Relaxed)
+    }
+    
+    pub fn get_error_messages(&self) -> Vec<String> {
+        self.error_messages.lock().unwrap().clone()
+    }
+}
+
+impl Default for ListingErrorTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Result of listing operation with parsed file indices and error tracking
+#[derive(Debug, Default)]
+pub struct ListingResult {
+    /// Total files found
+    pub file_count: u64,
+    /// Parsed file indices (for gap-aware creation)
+    pub indices: HashSet<u64>,
+    /// Directories listed (for distributed mode)
+    pub dirs_listed: u64,
+    /// Total listing errors encountered (non-fatal)
+    pub errors_encountered: u64,
+    /// Whether listing was aborted due to error threshold
+    pub aborted: bool,
+    /// Duration of listing phase
+    pub elapsed_secs: f64,
+}
+
+/// List existing objects with streaming progress updates (v0.8.14)
+/// 
+/// This function replaces the blocking `store.list()` call with a streaming
+/// implementation that provides progress updates during long-running list operations.
+/// 
+/// For directory tree mode with multiple agents:
+/// - Each agent lists only its assigned top-level directories
+/// - Progress is reported via LiveStatsTracker in the "Listing" stage
+/// - Uses depth-first listing per directory for better distribution
+/// 
+/// # Error Handling (v0.8.14)
+/// - Individual LIST errors are tracked and logged
+/// - Consecutive errors reset on success (transient network issues)
+/// - Aborts if total errors exceed DEFAULT_LISTING_MAX_ERRORS (50)
+/// - Aborts if consecutive errors exceed DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS (5)
+/// 
+/// # Arguments
+/// * `store` - Object store to list from
+/// * `base_uri` - Base URI to list (e.g., "gs://bucket/prefix/")
+/// * `tree_manifest` - Optional tree manifest for distributed directory assignment
+/// * `agent_id` - 0-based agent index
+/// * `num_agents` - Total number of agents
+/// * `live_stats_tracker` - Optional tracker for progress updates
+/// * `expected_total` - Expected total files (for progress percentage)
+/// 
+/// # Returns
+/// ListingResult with file count, parsed indices, and error statistics
+pub async fn list_existing_objects_distributed(
+    store: &dyn s3dlio::object_store::ObjectStore,
+    base_uri: &str,
+    tree_manifest: Option<&TreeManifest>,
+    agent_id: usize,
+    num_agents: usize,
+    live_stats_tracker: Option<&Arc<LiveStatsTracker>>,
+    expected_total: u64,
+) -> Result<ListingResult> {
+    let start_time = Instant::now();
+    
+    // Error tracker for this listing operation
+    let error_tracker = ListingErrorTracker::new();
+    
+    // Set the Listing stage if we have a stats tracker
+    if let Some(tracker) = live_stats_tracker {
+        tracker.set_stage(WorkloadStage::Listing, expected_total);
+        tracker.set_stage_with_name(WorkloadStage::Listing, "Scanning existing files", expected_total);
+    }
+    
+    let list_base = if base_uri.ends_with('/') {
+        base_uri.to_string()
+    } else {
+        format!("{}/", base_uri)
+    };
+    
+    let mut result = ListingResult::default();
+    let files_found = Arc::new(AtomicU64::new(0));
+    let last_report = Arc::new(AtomicU64::new(0));
+    
+    // Helper closure to process a single list item with error tracking
+    let process_list_item = |path: &str, result: &mut ListingResult| {
+        result.file_count += 1;
+        
+        // Parse file index from filename
+        if let Some(filename) = path.rsplit('/').next() {
+            // Try file_NNNN.dat format (tree mode)
+            if let Some(idx_str) = filename.strip_prefix("file_")
+                .and_then(|s| s.strip_suffix(".dat")) 
+            {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    result.indices.insert(idx);
+                }
+            }
+            // Try prepared-NNNN.dat format (flat mode)
+            else if let Some(idx_str) = filename.strip_prefix("prepared-")
+                .and_then(|s| s.strip_suffix(".dat")) 
+            {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    result.indices.insert(idx);
+                }
+            }
+            // Try deletable-NNNN.dat format (flat mode with separate pools)
+            else if let Some(idx_str) = filename.strip_prefix("deletable-")
+                .and_then(|s| s.strip_suffix(".dat")) 
+            {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    result.indices.insert(idx);
+                }
+            }
+        }
+    };
+    
+    // For distributed tree mode, each agent lists their assigned directories
+    if let Some(manifest) = tree_manifest {
+        if num_agents > 1 {
+            // Get directories assigned to this agent
+            let agent_dirs = manifest.get_agent_dirs(agent_id);
+            let total_dirs = agent_dirs.len();
+            
+            if total_dirs == 0 {
+                info!("  [Agent {}/{}] No directories assigned for listing", agent_id, num_agents);
+                result.elapsed_secs = start_time.elapsed().as_secs_f64();
+                return Ok(result);
+            }
+            
+            info!("  [Agent {}/{}] Listing {} directories (of {} total)", 
+                agent_id, num_agents, total_dirs, manifest.all_directories.len());
+            
+            // List each assigned directory
+            'dir_loop: for (dir_idx, dir_path) in agent_dirs.iter().enumerate() {
+                let dir_uri = format!("{}{}/", list_base, dir_path);
+                
+                debug!("  [{}/{}] Listing directory: {}", dir_idx + 1, total_dirs, dir_path);
+                
+                // Use streaming list for this directory
+                let mut stream = store.list_stream(&dir_uri, true);
+                
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(path) => {
+                            // Reset consecutive errors on success
+                            error_tracker.record_success();
+                            
+                            process_list_item(&path, &mut result);
+                            files_found.fetch_add(1, Ordering::Relaxed);
+                            
+                            // Update progress at intervals
+                            let current = files_found.load(Ordering::Relaxed);
+                            let last = last_report.load(Ordering::Relaxed);
+                            if current - last >= LISTING_PROGRESS_INTERVAL {
+                                last_report.store(current, Ordering::Relaxed);
+                                
+                                if let Some(tracker) = live_stats_tracker {
+                                    tracker.set_prepare_progress(current, expected_total);
+                                }
+                                
+                                let elapsed = start_time.elapsed().as_secs_f64();
+                                let rate = current as f64 / elapsed;
+                                let (total_errs, _) = error_tracker.get_stats();
+                                if total_errs > 0 {
+                                    debug!("  Progress: {} files ({:.0}/s), {} errors - dir {}/{}", 
+                                        current, rate, total_errs, dir_idx + 1, total_dirs);
+                                } else {
+                                    debug!("  Progress: {} files ({:.0}/s) - dir {}/{}", 
+                                        current, rate, dir_idx + 1, total_dirs);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("{}: {}", dir_uri, e);
+                            let (should_abort, total_errs, consecutive_errs) = 
+                                error_tracker.record_error(&error_msg);
+                            
+                            result.errors_encountered = total_errs;
+                            
+                            if should_abort {
+                                warn!("❌ Listing aborted: {} total errors, {} consecutive (thresholds: {}/{})",
+                                    total_errs, consecutive_errs,
+                                    DEFAULT_LISTING_MAX_ERRORS, DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS);
+                                result.aborted = true;
+                                break 'dir_loop;
+                            } else {
+                                debug!("  LIST error (non-fatal {}/{}): {}", 
+                                    total_errs, DEFAULT_LISTING_MAX_ERRORS, e);
+                            }
+                        }
+                    }
+                }
+                
+                if !result.aborted {
+                    result.dirs_listed += 1;
+                }
+            }
+            
+            let elapsed = start_time.elapsed().as_secs_f64();
+            result.elapsed_secs = elapsed;
+            let rate = if elapsed > 0.0 { result.file_count as f64 / elapsed } else { 0.0 };
+            
+            if result.errors_encountered > 0 {
+                if result.aborted {
+                    warn!("  [Agent {}/{}] Listing ABORTED: {} files in {} dirs, {} errors ({:.1}s)",
+                        agent_id, num_agents, result.file_count, result.dirs_listed, 
+                        result.errors_encountered, elapsed);
+                } else {
+                    info!("  [Agent {}/{}] Listed {} files in {} dirs, {} errors ({:.1}s, {:.0}/s)", 
+                        agent_id, num_agents, result.file_count, result.dirs_listed, 
+                        result.errors_encountered, elapsed, rate);
+                }
+            } else {
+                info!("  [Agent {}/{}] Listed {} files in {} dirs ({:.1}s, {:.0} files/s)", 
+                    agent_id, num_agents, result.file_count, result.dirs_listed, elapsed, rate);
+            }
+            
+        } else {
+            // Single agent: list everything with streaming progress
+            info!("  [Directory tree mode] Listing recursively from: {}", list_base);
+            
+            let mut stream = store.list_stream(&list_base, true);
+            
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(path) => {
+                        error_tracker.record_success();
+                        process_list_item(&path, &mut result);
+                        files_found.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Update progress at intervals
+                        let current = files_found.load(Ordering::Relaxed);
+                        let last = last_report.load(Ordering::Relaxed);
+                        if current - last >= LISTING_PROGRESS_INTERVAL {
+                            last_report.store(current, Ordering::Relaxed);
+                            
+                            if let Some(tracker) = live_stats_tracker {
+                                tracker.set_prepare_progress(current, expected_total);
+                            }
+                            
+                            let elapsed = start_time.elapsed().as_secs_f64();
+                            let rate = current as f64 / elapsed;
+                            let (total_errs, _) = error_tracker.get_stats();
+                            if total_errs > 0 {
+                                info!("  Listing progress: {} files ({:.0}/s), {} errors", 
+                                    current, rate, total_errs);
+                            } else {
+                                info!("  Listing progress: {} files ({:.0}/s)", current, rate);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg = format!("{}: {}", list_base, e);
+                        let (should_abort, total_errs, consecutive_errs) = 
+                            error_tracker.record_error(&error_msg);
+                        
+                        result.errors_encountered = total_errs;
+                        
+                        if should_abort {
+                            warn!("❌ Listing aborted: {} total errors, {} consecutive (thresholds: {}/{})",
+                                total_errs, consecutive_errs,
+                                DEFAULT_LISTING_MAX_ERRORS, DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS);
+                            result.aborted = true;
+                            break;
+                        } else {
+                            debug!("  LIST error (non-fatal {}/{}): {}", 
+                                total_errs, DEFAULT_LISTING_MAX_ERRORS, e);
+                        }
+                    }
+                }
+            }
+            
+            let elapsed = start_time.elapsed().as_secs_f64();
+            result.elapsed_secs = elapsed;
+            let rate = if elapsed > 0.0 { result.file_count as f64 / elapsed } else { 0.0 };
+            
+            if result.errors_encountered > 0 {
+                if result.aborted {
+                    warn!("  Listing ABORTED: {} files, {} errors ({:.1}s)",
+                        result.file_count, result.errors_encountered, elapsed);
+                } else {
+                    info!("  Listed {} files, {} non-fatal errors ({:.1}s, {:.0}/s)", 
+                        result.file_count, result.errors_encountered, elapsed, rate);
+                }
+            } else {
+                info!("  Listed {} files ({:.1}s, {:.0}/s)", result.file_count, elapsed, rate);
+            }
+        }
+    } else {
+        // Non-tree mode: simple streaming list
+        info!("  [Flat file mode] Listing from: {}", list_base);
+        
+        let mut stream = store.list_stream(&list_base, true);
+        
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(path) => {
+                    error_tracker.record_success();
+                    process_list_item(&path, &mut result);
+                    files_found.fetch_add(1, Ordering::Relaxed);
+                    
+                    // Update progress at intervals
+                    let current = files_found.load(Ordering::Relaxed);
+                    let last = last_report.load(Ordering::Relaxed);
+                    if current - last >= LISTING_PROGRESS_INTERVAL {
+                        last_report.store(current, Ordering::Relaxed);
+                        
+                        if let Some(tracker) = live_stats_tracker {
+                            tracker.set_prepare_progress(current, expected_total);
+                        }
+                        
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let rate = current as f64 / elapsed;
+                        let (total_errs, _) = error_tracker.get_stats();
+                        if total_errs > 0 {
+                            info!("  Listing progress: {} files ({:.0}/s), {} errors", 
+                                current, rate, total_errs);
+                        } else {
+                            info!("  Listing progress: {} files ({:.0}/s)", current, rate);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("{}: {}", list_base, e);
+                    let (should_abort, total_errs, consecutive_errs) = 
+                        error_tracker.record_error(&error_msg);
+                    
+                    result.errors_encountered = total_errs;
+                    
+                    if should_abort {
+                        warn!("❌ Listing aborted: {} total errors, {} consecutive (thresholds: {}/{})",
+                            total_errs, consecutive_errs,
+                            DEFAULT_LISTING_MAX_ERRORS, DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS);
+                        result.aborted = true;
+                        break;
+                    } else {
+                        debug!("  LIST error (non-fatal {}/{}): {}", 
+                            total_errs, DEFAULT_LISTING_MAX_ERRORS, e);
+                    }
+                }
+            }
+        }
+        
+        let elapsed = start_time.elapsed().as_secs_f64();
+        result.elapsed_secs = elapsed;
+        let rate = if elapsed > 0.0 { result.file_count as f64 / elapsed } else { 0.0 };
+        
+        if result.errors_encountered > 0 {
+            if result.aborted {
+                warn!("  Listing ABORTED: {} files, {} errors ({:.1}s)",
+                    result.file_count, result.errors_encountered, elapsed);
+            } else {
+                info!("  Listed {} files, {} non-fatal errors ({:.1}s, {:.0}/s)", 
+                    result.file_count, result.errors_encountered, elapsed, rate);
+            }
+        } else {
+            info!("  Listed {} files ({:.1}s, {:.0}/s)", result.file_count, elapsed, rate);
+        }
+    }
+    
+    // Final progress update
+    if let Some(tracker) = live_stats_tracker {
+        tracker.set_prepare_progress(result.file_count, expected_total);
+    }
+    
+    debug!("  Parsed {} valid file indices from filenames", result.indices.len());
+    
+    // If aborted, return error so caller knows listing was incomplete
+    if result.aborted {
+        let error_msgs = error_tracker.get_error_messages();
+        let sample_errors = error_msgs.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+        return Err(anyhow!(
+            "Listing aborted after {} errors (found {} files so far). Sample errors: {}",
+            result.errors_encountered, result.file_count, sample_errors
+        ));
+    }
+    
+    Ok(result)
 }
 
 /// Execute prepare step: ensure objects exist for testing
@@ -345,61 +807,22 @@ async fn prepare_sequential(
             // v0.7.9: Parse filenames to extract indices for gap-filling
             let (existing_count, existing_indices) = if config.skip_verification {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
-                (spec.count, std::collections::HashSet::new())  // Assume all files exist, no gaps
+                (spec.count, HashSet::new())  // Assume all files exist, no gaps
             } else if tree_manifest.is_some() {
-                // Directory tree mode: list all files recursively (no prefix filtering needed)
-                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
-                let list_base = if spec.base_uri.ends_with('/') {
-                    spec.base_uri.clone()
-                } else {
-                    format!("{}/", spec.base_uri)
-                };
+                // v0.8.14: Use distributed listing with progress updates
+                let listing_result = list_existing_objects_distributed(
+                    store.as_ref(),
+                    &spec.base_uri,
+                    tree_manifest,
+                    agent_id,
+                    num_agents,
+                    live_stats_tracker.as_ref(),
+                    spec.count,
+                ).await.context("Failed to list existing objects")?;
                 
-                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
-                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
-                let all_files = store.list(&list_base, true).await
-                    .context("Failed to list existing objects")?;
-                
-                let match_count = all_files.len() as u64;
-                debug!("  LIST operation returned {} total files in tree", match_count);
-                
-                // v0.7.9: Parse filenames to extract indices for gap-aware creation
-                let mut indices = std::collections::HashSet::new();
-                for path in &all_files {
-                    // Extract filename from path (e.g., "test.d1_w2.dir/file_00000042.dat" -> "file_00000042.dat")
-                    if let Some(filename) = path.rsplit('/').next() {
-                        // Parse index from filename (e.g., "file_00000042.dat" -> 42)
-                        if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
-                            if let Ok(idx) = idx_str.parse::<u64>() {
-                                indices.insert(idx);
-                            }
-                        }
-                    }
-                }
-                debug!("  Parsed {} valid file indices from filenames", indices.len());
-                
-                // Verbose: show first 5 files found
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    debug!("  Sample files found in directory tree:");
-                    for (i, path) in all_files.iter().take(5).enumerate() {
-                        debug!("    [{}] {}", i+1, path);
-                    }
-                    if all_files.len() > 5 {
-                        debug!("    ... and {} more files", all_files.len() - 5);
-                    }
-                }
-                
-                // Extra verbose: show ALL files
-                if tracing::enabled!(tracing::Level::TRACE) {
-                    tracing::trace!("  Complete file list ({} files):", all_files.len());
-                    for (i, path) in all_files.iter().enumerate() {
-                        tracing::trace!("    [{}] {}", i+1, path);
-                    }
-                }
-                
-                (match_count, indices)
+                (listing_result.file_count, listing_result.indices)
             } else {
-                // Flat file mode: original behavior
+                // Flat file mode: use streaming list with progress
                 let list_pattern = if spec.base_uri.ends_with('/') {
                     format!("{}{}-", spec.base_uri, prefix)
                 } else {
@@ -407,33 +830,19 @@ async fn prepare_sequential(
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", list_pattern);
-                let existing = store.list(&list_pattern, true).await
-                    .context("Failed to list existing objects")?;
                 
-                debug!("  Found {} files matching pattern", existing.len());
-                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
-                    debug!("  Sample files found:");
-                    for (i, path) in existing.iter().take(5).enumerate() {
-                        debug!("    [{}] {}", i+1, path);
-                    }
-                    if existing.len() > 5 {
-                        debug!("    ... and {} more files", existing.len() - 5);
-                    }
-                }
+                // Use streaming list for flat mode too
+                let listing_result = list_existing_objects_distributed(
+                    store.as_ref(),
+                    &list_pattern,
+                    None,  // No tree manifest for flat mode
+                    agent_id,
+                    num_agents,
+                    live_stats_tracker.as_ref(),
+                    spec.count,
+                ).await.context("Failed to list existing objects")?;
                 
-                // v0.7.9: Parse indices from prepared-NNNN.dat filenames for gap-filling
-                let mut indices = std::collections::HashSet::new();
-                for path in &existing {
-                    if let Some(filename) = path.rsplit('/').next() {
-                        // Parse: "prepared-00000042.dat" -> 42
-                        if let Some(idx_str) = filename.strip_prefix(&format!("{}-", prefix)).and_then(|s| s.strip_suffix(".dat")) {
-                            if let Ok(idx) = idx_str.parse::<u64>() {
-                                indices.insert(idx);
-                            }
-                        }
-                    }
-                }
-                (existing.len() as u64, indices)
+                (listing_result.file_count, listing_result.indices)
             };
             
             info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
@@ -892,60 +1301,22 @@ async fn prepare_parallel(
             // v0.7.9: Parse filenames to extract indices for gap-filling
             let (existing_count, existing_indices) = if config.skip_verification {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
-                (spec.count, std::collections::HashSet::new())  // Assume all files exist, no gaps
+                (spec.count, HashSet::new())  // Assume all files exist, no gaps
             } else if tree_manifest.is_some() {
-                // Directory tree mode: list all files recursively (no prefix filtering needed)
-                // Tree mode uses manifest-based naming (e.g., file_00000000.dat), not prefix-based (prepared-*.dat)
-                let list_base = if spec.base_uri.ends_with('/') {
-                    spec.base_uri.clone()
-                } else {
-                    format!("{}/", spec.base_uri)
-                };
+                // v0.8.14: Use distributed listing with progress updates
+                let listing_result = list_existing_objects_distributed(
+                    store.as_ref(),
+                    &spec.base_uri,
+                    tree_manifest,
+                    agent_id,
+                    num_agents,
+                    live_stats_tracker.as_ref(),
+                    spec.count,
+                ).await.context("Failed to list existing objects")?;
                 
-                info!("  [Directory tree mode] Listing recursively from: {}", list_base);
-                debug!("  Note: Tree mode uses manifest naming (file_*.dat), not prefix-based naming");
-                let all_files = store.list(&list_base, true).await
-                    .context("Failed to list existing objects")?;
-                
-                let match_count = all_files.len() as u64;
-                debug!("  LIST operation returned {} total files in tree", match_count);
-                
-                // v0.7.9: Parse filenames to extract indices for gap-aware creation
-                let mut indices = std::collections::HashSet::new();
-                for path in &all_files {
-                    if let Some(filename) = path.rsplit('/').next() {
-                        // Parse index from filename (e.g., "file_00000042.dat" -> 42)
-                        if let Some(idx_str) = filename.strip_prefix("file_").and_then(|s| s.strip_suffix(".dat")) {
-                            if let Ok(idx) = idx_str.parse::<u64>() {
-                                indices.insert(idx);
-                            }
-                        }
-                    }
-                }
-                debug!("  Parsed {} valid file indices from filenames", indices.len());
-                
-                // Verbose: show first 5 files found
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    debug!("  Sample files found in directory tree:");
-                    for (i, path) in all_files.iter().take(5).enumerate() {
-                        debug!("    [{}] {}", i+1, path);
-                    }
-                    if all_files.len() > 5 {
-                        debug!("    ... and {} more files", all_files.len() - 5);
-                    }
-                }
-                
-                // Extra verbose: show ALL files
-                if tracing::enabled!(tracing::Level::TRACE) {
-                    tracing::trace!("  Complete file list ({} files):", all_files.len());
-                    for (i, path) in all_files.iter().enumerate() {
-                        tracing::trace!("    [{}] {}", i+1, path);
-                    }
-                }
-                
-                (match_count, indices)
+                (listing_result.file_count, listing_result.indices)
             } else {
-                // Flat file mode: original behavior
+                // Flat file mode: use streaming list with progress
                 let pattern = if spec.base_uri.ends_with('/') {
                     format!("{}{}-", spec.base_uri, prefix)
                 } else {
@@ -953,33 +1324,19 @@ async fn prepare_parallel(
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", pattern);
-                let existing = store.list(&pattern, true).await
-                    .context("Failed to list existing objects")?;
                 
-                debug!("  Found {} files matching pattern", existing.len());
-                if tracing::enabled!(tracing::Level::DEBUG) && !existing.is_empty() {
-                    debug!("  Sample files found:");
-                    for (i, path) in existing.iter().take(5).enumerate() {
-                        debug!("    [{}] {}", i+1, path);
-                    }
-                    if existing.len() > 5 {
-                        debug!("    ... and {} more files", existing.len() - 5);
-                    }
-                }
+                // Use streaming list for flat mode too
+                let listing_result = list_existing_objects_distributed(
+                    store.as_ref(),
+                    &pattern,
+                    None,  // No tree manifest for flat mode
+                    agent_id,
+                    num_agents,
+                    live_stats_tracker.as_ref(),
+                    spec.count,
+                ).await.context("Failed to list existing objects")?;
                 
-                // v0.7.9: Parse indices from prepared-NNNN.dat filenames for gap-filling
-                let mut indices = std::collections::HashSet::new();
-                for path in &existing {
-                    if let Some(filename) = path.rsplit('/').next() {
-                        // Parse: "prepared-00000042.dat" -> 42
-                        if let Some(idx_str) = filename.strip_prefix(&format!("{}-", prefix)).and_then(|s| s.strip_suffix(".dat")) {
-                            if let Ok(idx) = idx_str.parse::<u64>() {
-                                indices.insert(idx);
-                            }
-                        }
-                    }
-                }
-                (existing.len() as u64, indices)
+                (listing_result.file_count, listing_result.indices)
             };
             
             info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
@@ -2806,5 +3163,194 @@ mod tests {
         
         assert_eq!(tracker.total_errors(), 100);
         assert_eq!(tracker.get_failures().len(), 100);
+    }
+    
+    // =========================================================================
+    // ListingErrorTracker Tests (v0.8.14)
+    // =========================================================================
+    
+    #[test]
+    fn test_listing_error_tracker_new() {
+        let tracker = ListingErrorTracker::new();
+        let (total, consecutive) = tracker.get_stats();
+        
+        assert_eq!(total, 0);
+        assert_eq!(consecutive, 0);
+        assert_eq!(tracker.total_errors(), 0);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_with_thresholds() {
+        let tracker = ListingErrorTracker::with_thresholds(25, 3);
+        let (total, consecutive) = tracker.get_stats();
+        
+        assert_eq!(total, 0);
+        assert_eq!(consecutive, 0);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_record_error() {
+        let tracker = ListingErrorTracker::new();
+        
+        let (should_abort, total, consecutive) = 
+            tracker.record_error("gs://bucket/path/: Connection reset");
+        
+        assert!(!should_abort);  // Single error shouldn't trigger abort
+        assert_eq!(total, 1);
+        assert_eq!(consecutive, 1);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_record_success_resets_consecutive() {
+        let tracker = ListingErrorTracker::new();
+        
+        // Record some errors
+        for i in 0..3 {
+            let (_, _, consecutive) = tracker.record_error(&format!("Error {}", i));
+            assert_eq!(consecutive, i + 1);
+        }
+        
+        // Record success - should reset consecutive counter
+        tracker.record_success();
+        
+        // Next error should have consecutive = 1
+        let (_, total, consecutive) = tracker.record_error("New error after success");
+        assert_eq!(total, 4);        // Total still accumulates
+        assert_eq!(consecutive, 1);  // Consecutive reset by success
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_total_threshold() {
+        // Use lower thresholds for testing
+        let tracker = ListingErrorTracker::with_thresholds(5, 100);  // 5 total before abort
+        
+        // Record 4 errors - should not abort
+        for i in 0..4 {
+            tracker.record_success();  // Reset consecutive between errors
+            let (should_abort, total, _) = tracker.record_error(&format!("Error {}", i));
+            assert!(!should_abort, "Should not abort at {} errors", total);
+        }
+        
+        // 5th error should trigger abort
+        tracker.record_success();
+        let (should_abort, total, _) = tracker.record_error("Final error");
+        assert!(should_abort, "Should abort at {} total errors", total);
+        assert_eq!(total, 5);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_consecutive_threshold() {
+        // Use lower thresholds for testing
+        let tracker = ListingErrorTracker::with_thresholds(100, 3);  // 3 consecutive before abort
+        
+        // Record 2 consecutive errors - should not abort
+        for i in 0..2 {
+            let (should_abort, _, consecutive) = tracker.record_error(&format!("Error {}", i));
+            assert!(!should_abort, "Should not abort at {} consecutive", consecutive);
+        }
+        
+        // 3rd consecutive error should trigger abort
+        let (should_abort, _, consecutive) = tracker.record_error("Third consecutive error");
+        assert!(should_abort, "Should abort at {} consecutive errors", consecutive);
+        assert_eq!(consecutive, 3);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_consecutive_reset_prevents_abort() {
+        let tracker = ListingErrorTracker::with_thresholds(100, 3);  // 3 consecutive before abort
+        
+        // Record 2 errors
+        tracker.record_error("Error 1");
+        tracker.record_error("Error 2");
+        
+        // Success resets consecutive
+        tracker.record_success();
+        
+        // Record 2 more - still shouldn't abort (consecutive is reset)
+        let (should_abort, total, consecutive) = tracker.record_error("Error 3");
+        assert!(!should_abort, "Should not abort after reset, consecutive={}", consecutive);
+        assert_eq!(consecutive, 1);
+        assert_eq!(total, 3);  // Total still 3
+        
+        let (should_abort, _, _) = tracker.record_error("Error 4");
+        assert!(!should_abort, "Still should not abort (consecutive=2)");
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_get_error_messages() {
+        let tracker = ListingErrorTracker::new();
+        
+        tracker.record_error("Error in gs://bucket/dir1/");
+        tracker.record_success();
+        tracker.record_error("Timeout reading gs://bucket/dir2/");
+        tracker.record_error("Connection reset gs://bucket/dir3/");
+        
+        let messages = tracker.get_error_messages();
+        
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], "Error in gs://bucket/dir1/");
+        assert_eq!(messages[1], "Timeout reading gs://bucket/dir2/");
+        assert_eq!(messages[2], "Connection reset gs://bucket/dir3/");
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_clone() {
+        let tracker = ListingErrorTracker::new();
+        tracker.record_error("Error 1");
+        
+        // Clone should share state (Arc)
+        let tracker2 = tracker.clone();
+        tracker2.record_error("Error 2");
+        
+        // Both should see the same total
+        assert_eq!(tracker.total_errors(), 2);
+        assert_eq!(tracker2.total_errors(), 2);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_thread_safety() {
+        use std::thread;
+        
+        let tracker = ListingErrorTracker::new();
+        let mut handles = vec![];
+        
+        // Spawn 10 threads, each recording 2 errors (less than threshold)
+        for t in 0..10 {
+            let tracker_clone = tracker.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..2 {
+                    tracker_clone.record_error(&format!("Thread {} error {}", t, i));
+                    tracker_clone.record_success();  // Reset consecutive to avoid abort
+                }
+            }));
+        }
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        assert_eq!(tracker.total_errors(), 20);
+        assert_eq!(tracker.get_error_messages().len(), 20);
+    }
+    
+    #[test]
+    fn test_listing_error_tracker_default() {
+        let tracker = ListingErrorTracker::default();
+        let (total, consecutive) = tracker.get_stats();
+        
+        assert_eq!(total, 0);
+        assert_eq!(consecutive, 0);
+    }
+    
+    #[test]
+    fn test_listing_result_default() {
+        let result = ListingResult::default();
+        
+        assert_eq!(result.file_count, 0);
+        assert!(result.indices.is_empty());
+        assert_eq!(result.dirs_listed, 0);
+        assert_eq!(result.errors_encountered, 0);
+        assert!(!result.aborted);
+        assert_eq!(result.elapsed_secs, 0.0);
     }
 }

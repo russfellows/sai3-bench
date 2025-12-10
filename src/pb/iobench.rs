@@ -273,6 +273,11 @@ pub struct LiveStats {
     /// Seconds since this stage started
     #[prost(double, tag = "34")]
     pub stage_elapsed_s: f64,
+    /// v0.8.14: Agent concurrency for total thread count display
+    ///
+    /// Number of concurrent workers on this agent
+    #[prost(uint32, tag = "35")]
+    pub concurrency: u32,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {
@@ -358,6 +363,8 @@ pub mod live_stats {
         StageWorkload = 2,
         /// Deleting objects after workload
         StageCleanup = 3,
+        /// v0.8.14: Scanning existing objects before prepare
+        StageListing = 4,
         /// User-defined custom stage (use stage_name)
         StageCustom = 10,
     }
@@ -372,6 +379,7 @@ pub mod live_stats {
                 Self::StagePrepare => "STAGE_PREPARE",
                 Self::StageWorkload => "STAGE_WORKLOAD",
                 Self::StageCleanup => "STAGE_CLEANUP",
+                Self::StageListing => "STAGE_LISTING",
                 Self::StageCustom => "STAGE_CUSTOM",
             }
         }
@@ -382,6 +390,7 @@ pub mod live_stats {
                 "STAGE_PREPARE" => Some(Self::StagePrepare),
                 "STAGE_WORKLOAD" => Some(Self::StageWorkload),
                 "STAGE_CLEANUP" => Some(Self::StageCleanup),
+                "STAGE_LISTING" => Some(Self::StageListing),
                 "STAGE_CUSTOM" => Some(Self::StageCustom),
                 _ => None,
             }

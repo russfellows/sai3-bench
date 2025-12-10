@@ -74,6 +74,22 @@ pub const DEFAULT_PREPARE_MAX_ERRORS: u64 = 100;
 pub const DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS: u64 = 10;
 
 // =============================================================================
+// Listing Phase Error Handling (v0.8.14)
+// =============================================================================
+
+/// Maximum total errors during listing phase before aborting
+/// LIST operations can fail on transient network issues
+pub const DEFAULT_LISTING_MAX_ERRORS: u64 = 50;
+
+/// Maximum consecutive errors during listing before aborting
+/// Indicates backend is completely unreachable
+pub const DEFAULT_LISTING_MAX_CONSECUTIVE_ERRORS: u64 = 5;
+
+/// Progress update interval for listing (number of files between updates)
+/// Balances visibility with performance overhead
+pub const LISTING_PROGRESS_INTERVAL: u64 = 1000;
+
+// =============================================================================
 // Workload Execution Defaults
 // =============================================================================
 

@@ -264,6 +264,9 @@ impl LiveStatsAggregator {
         let mut cpu_system_sum = 0.0f64;
         let mut cpu_iowait_sum = 0.0f64;
         let mut cpu_total_sum = 0.0f64;
+        
+        // v0.8.14: Total concurrency across all agents
+        let mut total_concurrency = 0u32;
 
         for stats in self.agent_stats.values() {
             // Sum operations and bytes
@@ -297,6 +300,9 @@ impl LiveStatsAggregator {
             cpu_system_sum += stats.cpu_system_percent;
             cpu_iowait_sum += stats.cpu_iowait_percent;
             cpu_total_sum += stats.cpu_total_percent;
+            
+            // v0.8.14: Accumulate concurrency
+            total_concurrency += stats.concurrency;
         }
 
         // Calculate weighted averages
@@ -395,6 +401,8 @@ impl LiveStatsAggregator {
             } else {
                 0.0
             },
+            // v0.8.14: Total concurrency
+            total_concurrency,
         };
 
         // v0.7.12: Store current aggregate for next windowed calculation
@@ -433,6 +441,8 @@ struct AggregateStats {
     windowed_put_ops_s: f64,
     windowed_put_bytes: u64,
     windowed_delta_time: f64,
+    // v0.8.14: Total concurrency across all agents
+    total_concurrency: u32,
 }
 
 impl AggregateStats {
@@ -479,10 +489,18 @@ impl AggregateStats {
         let meta_mean_str = format_latency(self.meta_mean_us);
 
         // Always show META line (for cleanup/list operations visibility)
+        // v0.8.14: Show total threads across all agents
+        let threads_str = if self.total_concurrency > 0 {
+            format!(" ({} threads)", self.total_concurrency)
+        } else {
+            String::new()
+        };
+        
         format!(
-            "{} of {} Agents\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
+            "{} of {} Agents{}\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
                 self.num_agents,
                 self.expected_agents,
+                threads_str,
                 get_ops_s,
                 get_bandwidth,
                 get_mean_str,
@@ -1357,6 +1375,8 @@ async fn run_distributed_workload(
                     sequence: 0,
                     // v0.8.9: Stage tracking (error state)
                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                    // v0.8.14: Concurrency (0 for error messages)
+                    concurrency: 0,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
