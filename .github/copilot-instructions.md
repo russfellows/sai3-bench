@@ -38,24 +38,25 @@ The `-v`, `-vv`, and `-vvv` flags provide essential diagnostic output showing:
 ## Project Overview
 sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified multi-backend support (`file://`, `direct://`, `s3://`, `az://`, `gs://`) using the `s3dlio` library. It provides both single-node CLI and distributed gRPC execution with HDR histogram metrics and professional progress bars.
 
-**Current Version**: v0.8.11 (December 2025) - Agent Progress Bars and Azure/GCS Custom Endpoints
+**Current Version**: v0.8.16 (December 2025) - Per-Agent Perf Logs and Warmup Reset
 
-**v0.8.11 Key Features**:
-- Agent progress bars for distributed mode (prepare phase + workload spinner)
-- Azure/GCS custom endpoint support with test infrastructure
-- Proper distributed abort handling (SIGINT fix, agent abort response)
-- Removed legacy gRPC RPCs (~824 lines) - single `ExecuteWorkload` stream
-- Zero clippy warnings across entire codebase
+**v0.8.16 Key Features**:
+- Per-agent perf_log.tsv files in agents/{agent-id}/ subdirectories
+- Synchronized perf_log timing (all logs write at same interval tick)
+- Warmup timer reset when workload phase starts (not from prepare)
+- PerfLogConfig.path field now optional
+- Renamed console.log to console_log.txt
 
-**v0.8.10 Features**:
-- Replay backpressure system with graceful mode transitions
-- YAML-based replay configuration via `--config` flag
+**v0.8.15 Key Features**:
+- Performance logging (perf-log) module with 28-column TSV format
+- Extended LiveStatsSnapshot percentiles (p50, p90, p95, p99)
+- Warmup period configuration and is_warmup flagging
 
-**v0.8.9 Features**:
-- Flexible multi-stage system for workload lifecycle tracking
-- Stage-aware controller display (Preparing, Running, Cleanup)
+**v0.8.14 Features**:
+- Distributed listing stage with progress updates
+- Robust error handling for LIST operations with ListingErrorTracker
 
-## Module Architecture (v0.8.11)
+## Module Architecture (v0.8.16)
 
 ### Core Source Modules (`src/`)
 - **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`
@@ -217,7 +218,7 @@ Added 21 new tests in `tests/distributed_config_tests.rs`:
 - 1 serialize/deserialize round-trip test
 - Updated 9 existing tests to include new required fields
 
-**Current test count**: 55+ Rust tests across multiple test files
+**Current test count**: 283 Rust tests across multiple test files
 
 ## Architecture: Three Binary Strategy
 - **`sai3-bench`** (`src/main.rs`) - Single-node CLI with subcommands: `run`, `replay`, `util`
