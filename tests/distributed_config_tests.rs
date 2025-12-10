@@ -1129,7 +1129,7 @@ workload:
     
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, std::path::PathBuf::from("/tmp/perf-metrics.tsv"));
+    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/tmp/perf-metrics.tsv")));
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(5));
     
     Ok(())
@@ -1155,8 +1155,34 @@ workload:
     
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, std::path::PathBuf::from("/data/metrics/benchmark.tsv.zst"));
+    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/data/metrics/benchmark.tsv.zst")));
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
+    
+    Ok(())
+}
+
+#[test]
+fn test_parse_perf_log_no_path() -> Result<()> {
+    // v0.8.16: path is optional - in distributed mode, perf_log goes to results dir
+    let yaml = r#"
+target: "file:///tmp/test/"
+duration: 60s
+
+perf_log:
+  interval: 2s
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml)?;
+    
+    assert!(config.perf_log.is_some());
+    let perf_log = config.perf_log.as_ref().unwrap();
+    assert_eq!(perf_log.path, None);  // No path specified
+    assert_eq!(perf_log.interval, std::time::Duration::from_secs(2));
     
     Ok(())
 }
@@ -1217,7 +1243,7 @@ workload:
     // Verify perf_log
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, std::path::PathBuf::from("/data/benchmark/perf.tsv.zst"));
+    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/data/benchmark/perf.tsv.zst")));
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
     
     // Verify other fields

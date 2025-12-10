@@ -570,13 +570,13 @@ Every workload execution creates timestamped results directory: `sai3-YYYYMMDD-H
 ```
 sai3-YYYYMMDD-HHMM-{test_name}/
 ├── config.yaml          # Complete workload configuration
-├── console.log          # Full execution log
+├── console_log.txt      # Full execution log
 ├── metadata.json        # Test metadata (distributed: true/false)
 ├── results.tsv          # Single-node OR consolidated aggregate (merged histograms)
 └── agents/              # Only in distributed mode
     ├── agent-1/
     │   ├── config.yaml  # Agent's modified config (with path prefix)
-    │   ├── console.log  # Agent's execution log
+    │   ├── console_log.txt  # Agent's execution log
     │   └── results.tsv  # Per-agent results
     └── agent-2/...
 ```

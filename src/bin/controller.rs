@@ -22,6 +22,9 @@ use tracing::{debug, error, info, warn};
 use sai3_bench::results_dir::ResultsDir;
 // Import BUCKET_LABELS from constants module
 use sai3_bench::constants::BUCKET_LABELS;
+// v0.8.15: Performance logging
+use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
+use sai3_bench::live_stats::WorkloadStage as LiveWorkloadStage;
 
 pub mod pb {
     pub mod iobench {
@@ -1651,8 +1654,55 @@ async fn run_distributed_workload(
     // v0.7.9: Collect prepare summaries for persistence  
     let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
     
-    // v0.7.5: Track last console.log write time (write every 1 second)
-    let mut last_console_log = std::time::Instant::now();
+    // v0.8.16: Performance logging setup
+    // - Aggregate perf_log.tsv in results directory root
+    // - Per-agent perf_log.tsv in agents/{agent-id}/ subdirectories
+    let perf_log_enabled = config.perf_log.is_some();
+    let perf_log_path = results_dir.path().join("perf_log.tsv");
+    let mut perf_log_writer: Option<PerfLogWriter> = if perf_log_enabled {
+        match PerfLogWriter::new(&perf_log_path) {
+            Ok(writer) => {
+                info!("Created aggregate perf-log at: {}", perf_log_path.display());
+                Some(writer)
+            }
+            Err(e) => {
+                warn!("Failed to create aggregate perf-log: {} - continuing without perf-log", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut perf_log_tracker = PerfLogDeltaTracker::new();
+    
+    // v0.8.16: Per-agent perf log writers and trackers
+    // Lazily initialized when first stats arrive from each agent
+    let agents_dir = results_dir.path().join("agents");
+    let mut agent_perf_writers: std::collections::HashMap<String, PerfLogWriter> = std::collections::HashMap::new();
+    let mut agent_perf_trackers: std::collections::HashMap<String, PerfLogDeltaTracker> = std::collections::HashMap::new();
+    
+    // Initialize tracker with warmup duration
+    let warmup_duration = config.warmup_period.unwrap_or(Duration::ZERO);
+    let warmup_opt = if warmup_duration > Duration::ZERO {
+        Some(warmup_duration)
+    } else {
+        None
+    };
+    perf_log_tracker.start(warmup_opt);
+    let mut last_perf_log = std::time::Instant::now();
+    let mut last_perf_log_flush = std::time::Instant::now();
+    let perf_log_interval = config.perf_log.as_ref()
+        .map(|p| p.interval)
+        .unwrap_or(Duration::from_secs(1));
+    // Flush every 10 seconds to minimize data loss on crash
+    let perf_log_flush_interval = Duration::from_secs(
+        sai3_bench::constants::PERF_LOG_FLUSH_INTERVAL_SECS
+    );
+    
+    // v0.8.16: Create interval timer for aggregate perf-log writes
+    // This ensures we write at the configured interval regardless of stats message timing
+    let mut perf_log_timer = tokio::time::interval(perf_log_interval);
+    perf_log_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     
     // v0.8.9: Track stage for transition detection (replaces was_in_prepare_phase)
     let mut last_stage = WorkloadStage::StageUnknown;
@@ -1807,6 +1857,36 @@ async fn run_distributed_workload(
                         // v0.8.9: Track last known stage for phase transition detection
                         let prev_stage = last_stage;
                         last_stage = current_stage;
+                        
+                        // v0.8.16: Lazily initialize per-agent perf-log writer and tracker
+                        // Actual writing happens in the interval timer for consistent timing
+                        if perf_log_enabled && !stats.completed && stats.status != 3 && stats.status != 5 {
+                            let agent_id = stats.agent_id.clone();
+                            
+                            // Create agent directory and writer if not exists
+                            if !agent_perf_writers.contains_key(&agent_id) {
+                                let agent_dir = agents_dir.join(&agent_id);
+                                if let Err(e) = std::fs::create_dir_all(&agent_dir) {
+                                    warn!("Failed to create agent directory {}: {}", agent_dir.display(), e);
+                                } else {
+                                    let agent_perf_path = agent_dir.join("perf_log.tsv");
+                                    match PerfLogWriter::new(&agent_perf_path) {
+                                        Ok(writer) => {
+                                            debug!("Created per-agent perf-log at: {}", agent_perf_path.display());
+                                            agent_perf_writers.insert(agent_id.clone(), writer);
+                                            
+                                            // Initialize tracker with warmup duration
+                                            let mut tracker = PerfLogDeltaTracker::new();
+                                            tracker.start(warmup_opt);
+                                            agent_perf_trackers.insert(agent_id.clone(), tracker);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to create per-agent perf-log for {}: {}", agent_id, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         
                         // v0.7.9: Detect transition from prepare to workload and reset aggregator
                         if prev_stage == WorkloadStage::StagePrepare && current_stage == WorkloadStage::StageWorkload {
@@ -1967,17 +2047,18 @@ async fn run_distributed_workload(
                             
                             last_update = std::time::Instant::now();
                             
-                            // v0.7.5: Write live stats to console.log every 1 second
-                            if last_console_log.elapsed() >= std::time::Duration::from_secs(1) {
+                            // v0.8.16: Write console_log.txt at the configured interval
+                            if last_perf_log.elapsed() >= perf_log_interval {
+                                // Write to console_log.txt
                                 let timestamp = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs();
                                 let log_line = format!("[{}] {}", timestamp, msg);
                                 if let Err(e) = results_dir.write_console(&log_line) {
-                                    warn!("Failed to write live stats to console.log: {}", e);
+                                    warn!("Failed to write live stats to console_log.txt: {}", e);
                                 }
-                                last_console_log = std::time::Instant::now();
+                                last_perf_log = std::time::Instant::now();
                             }
                         }
                         
@@ -1994,9 +2075,106 @@ async fn run_distributed_workload(
                 }
             }
             
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-                // v0.7.5: Periodic timeout check (every 1 second)
-                // Check logic is at top of loop
+            _ = perf_log_timer.tick() => {
+                // v0.8.16: Write aggregate perf-log at configured interval
+                // This runs independently of stats message timing
+                if let Some(ref mut writer) = perf_log_writer {
+                    let agg = aggregator.aggregate();
+                    
+                    // Determine stage for perf-log
+                    let perf_stage = match last_stage {
+                        WorkloadStage::StagePrepare => LiveWorkloadStage::Prepare,
+                        WorkloadStage::StageWorkload => LiveWorkloadStage::Workload,
+                        WorkloadStage::StageCleanup => LiveWorkloadStage::Cleanup,
+                        WorkloadStage::StageListing => LiveWorkloadStage::Listing,
+                        _ => LiveWorkloadStage::Workload,
+                    };
+                    
+                    // Compute delta entry from aggregate stats
+                    let entry = perf_log_tracker.compute_delta(
+                        "controller",  // agent_id for aggregate
+                        agg.total_get_ops,
+                        agg.total_get_bytes,
+                        agg.total_put_ops,
+                        agg.total_put_bytes,
+                        agg.total_meta_ops,
+                        0,  // errors (not tracked in aggregate)
+                        // Latency percentiles
+                        agg.get_p50_us as u64,
+                        agg.get_p95_us as u64,  // Use p95 as p90/p99 approximation
+                        agg.get_p95_us as u64,
+                        agg.put_p50_us as u64,
+                        agg.put_p95_us as u64,
+                        agg.put_p95_us as u64,
+                        agg.meta_mean_us as u64,  // Use mean as approximation
+                        agg.meta_mean_us as u64,
+                        agg.meta_mean_us as u64,
+                        // CPU utilization
+                        agg.cpu_user_percent,
+                        agg.cpu_system_percent,
+                        agg.cpu_iowait_percent,
+                        // Stage info
+                        perf_stage,
+                        String::new(),
+                    );
+                    
+                    if let Err(e) = writer.write_entry(&entry) {
+                        warn!("Failed to write aggregate perf-log entry: {}", e);
+                    }
+                    
+                    // v0.8.16: Write per-agent perf-log entries at the same interval
+                    // This ensures consistent timing - sum of per-agent = aggregate
+                    for (agent_id, agent_stats) in aggregator.agent_stats.iter() {
+                        if let (Some(agent_writer), Some(agent_tracker)) = (
+                            agent_perf_writers.get_mut(agent_id),
+                            agent_perf_trackers.get_mut(agent_id)
+                        ) {
+                            let agent_entry = agent_tracker.compute_delta(
+                                agent_id,
+                                agent_stats.get_ops,
+                                agent_stats.get_bytes,
+                                agent_stats.put_ops,
+                                agent_stats.put_bytes,
+                                agent_stats.meta_ops,
+                                0,  // errors not tracked per-message
+                                agent_stats.get_p50_us as u64,
+                                agent_stats.get_p95_us as u64,
+                                agent_stats.get_p95_us as u64,
+                                agent_stats.put_p50_us as u64,
+                                agent_stats.put_p95_us as u64,
+                                agent_stats.put_p95_us as u64,
+                                agent_stats.meta_mean_us as u64,
+                                agent_stats.meta_mean_us as u64,
+                                agent_stats.meta_mean_us as u64,
+                                agent_stats.cpu_user_percent,
+                                agent_stats.cpu_system_percent,
+                                agent_stats.cpu_iowait_percent,
+                                perf_stage,
+                                String::new(),
+                            );
+                            
+                            if let Err(e) = agent_writer.write_entry(&agent_entry) {
+                                warn!("Failed to write per-agent perf-log entry for {}: {}", agent_id, e);
+                            }
+                        }
+                    }
+                    
+                    // Periodic flush every 10 seconds to minimize data loss on crash
+                    if last_perf_log_flush.elapsed() >= perf_log_flush_interval {
+                        if let Err(e) = writer.flush() {
+                            warn!("Failed to flush aggregate perf-log: {}", e);
+                        }
+                        
+                        // Also flush per-agent perf logs
+                        for (agent_id, agent_writer) in agent_perf_writers.iter_mut() {
+                            if let Err(e) = agent_writer.flush() {
+                                warn!("Failed to flush per-agent perf-log for {}: {}", agent_id, e);
+                            }
+                        }
+                        
+                        last_perf_log_flush = std::time::Instant::now();
+                    }
+                }
             }
             
             sig = &mut shutdown_signal => {
@@ -2020,6 +2198,27 @@ async fn run_distributed_workload(
     // Final aggregation
     let final_stats = aggregator.aggregate();
     progress_bar.finish_with_message(format!("✓ All {} agents completed\n\n", final_stats.num_agents));
+    
+    // v0.8.15: Flush and close perf-log
+    if let Some(ref mut writer) = perf_log_writer {
+        if let Err(e) = writer.flush() {
+            warn!("Failed to flush aggregate perf-log: {}", e);
+        } else {
+            info!("Aggregate perf-log written to: {}", perf_log_path.display());
+        }
+    }
+    
+    // v0.8.16: Flush and close per-agent perf logs
+    for (agent_id, writer) in agent_perf_writers.iter_mut() {
+        if let Err(e) = writer.flush() {
+            warn!("Failed to flush per-agent perf-log for {}: {}", agent_id, e);
+        } else {
+            debug!("Per-agent perf-log written for: {}", agent_id);
+        }
+    }
+    if !agent_perf_writers.is_empty() {
+        info!("Per-agent perf-logs written to: {}/*/perf_log.tsv", agents_dir.display());
+    }
     
     // v0.7.5: Print live aggregate stats for immediate visibility
     println!("=== Live Aggregate Stats (from streaming) ===");
@@ -2253,8 +2452,8 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
         }
         
         content.push_str("\nRecommendations:\n");
-        content.push_str("1. Check agent logs in agents/*/console.log\n");
-        content.push_str("2. Review controller console.log for error messages\n");
+        content.push_str("1. Check agent logs in agents/*/console_log.txt\n");
+        content.push_str("2. Review controller console_log.txt for error messages\n");
         content.push_str("3. Verify agent connectivity and network stability\n");
         content.push_str("4. Check storage backend availability\n");
     }
@@ -2265,7 +2464,7 @@ fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::R
     Ok(())
 }
 
-/// v0.8.1: Print test status to console and console.log
+/// v0.8.1: Print test status to console and console_log.txt
 fn print_test_status(status: &TestStatus, results_dir: &mut ResultsDir) -> anyhow::Result<()> {
     if status.success {
         let msg = "\n✅ Test PASSED: All agents completed successfully".to_string();
@@ -2493,9 +2692,9 @@ fn write_agent_results(
             .with_context(|| format!("Failed to write agent TSV: {}", tsv_path.display()))?;
     }
     
-    // Write console.log (if provided - currently agents don't generate this)
+    // Write console_log.txt (if provided - currently agents don't generate this)
     if !summary.console_log.is_empty() {
-        let console_path = agent_dir.join("console.log");
+        let console_path = agent_dir.join("console_log.txt");
         fs::write(&console_path, &summary.console_log)
             .with_context(|| format!("Failed to write agent console log: {}", console_path.display()))?;
     }

@@ -48,7 +48,7 @@ Results are automatically saved to timestamped directory:
 ```
 sai3-20251011-1430-distributed_mixed_test/
 ├── config.yaml              # Your workload config
-├── console.log              # Complete execution log
+├── console_log.txt          # Complete execution log
 ├── metadata.json            # Test metadata (4 agents, start/end times)
 ├── results.tsv              # CONSOLIDATED metrics (merged histograms)
 └── agents/
@@ -250,7 +250,7 @@ For production environments, use TLS:
 3. **Monitor Resources**: Watch CPU/network on agent hosts during tests
 4. **Use Meaningful IDs**: Set `id` field in config YAML for easier debugging
 5. **Save Results**: Results directories are timestamped and self-contained
-6. **Review Logs**: Check `console.log` in results directory for any errors
+6. **Review Logs**: Check `console_log.txt` in results directory for any errors
 7. **Histogram Accuracy**: The consolidated `results.tsv` uses proper histogram merging, not simple averaging of percentiles
 
 ## Scale-Out vs Scale-Up Testing

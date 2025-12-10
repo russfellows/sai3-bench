@@ -224,11 +224,17 @@ fn default_retry_jitter_factor() -> f64 {
 /// 
 /// Captures aggregate performance metrics at regular intervals for analysis
 /// of how performance changes over the duration of a workload.
+/// 
+/// In distributed mode, perf_log.tsv is always written to the results directory,
+/// so the path field is optional and ignored.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PerfLogConfig {
-    /// Path to performance log file (e.g., "/tmp/perf.tsv" or "/tmp/perf.tsv.zst")
+    /// Path to performance log file (OPTIONAL - ignored in distributed mode)
+    /// In distributed mode, perf_log.tsv is always written to results directory.
+    /// For single-node mode, specify path like "/tmp/perf.tsv" or "/tmp/perf.tsv.zst"
     /// If path ends with .zst, output will be zstd-compressed
-    pub path: std::path::PathBuf,
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
     
     /// Sampling interval for metrics capture (e.g., "1s", "5s", "10s")
     /// Default: 1 second

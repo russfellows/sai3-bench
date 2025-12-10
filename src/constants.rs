@@ -182,6 +182,10 @@ pub const PROGRESS_STATS_UPDATE_INTERVAL_SECS: f64 = 0.5;
 /// User can override via config: perf_log.interval
 pub const DEFAULT_PERF_LOG_INTERVAL_SECS: u64 = 1;
 
+/// Perf-log flush interval (10 seconds)
+/// Ensures data is written to disk periodically to minimize data loss on crash
+pub const PERF_LOG_FLUSH_INTERVAL_SECS: u64 = 10;
+
 /// TSV header for perf-log files (28 columns)
 /// See docs/PERF_LOG_FORMAT.md for complete column specification
 /// 
