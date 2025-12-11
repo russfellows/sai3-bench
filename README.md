@@ -127,18 +127,56 @@ See [Usage Guide](docs/USAGE.md) for detailed examples.
 
 ## 🔬 Workload Replay
 
-Record production workloads and replay with microsecond-accurate timing:
+Capture production I/O traces with s3dlio and replay them with microsecond-accurate timing.
+
+### Capturing Workloads with s3dlio
+
+The [s3dlio library](https://github.com/russfellows/s3dlio) provides op-log capture for applications using storage APIs. This is the recommended way to capture real production workloads:
+
+**Python Application:**
+```python
+import s3dlio
+
+# Initialize op-log capture at application startup
+s3dlio.init_op_log("/tmp/production_trace.tsv.zst")
+
+# Your application's normal storage operations - all are logged
+data = s3dlio.get("s3://bucket/model.bin")
+s3dlio.put("s3://bucket/results/output.json", result_bytes)
+files = s3dlio.list("s3://bucket/data/")
+
+# Finalize when done (flushes and closes the log)
+s3dlio.finalize_op_log()
+```
+
+**Rust Application:**
+```rust
+use s3dlio::{init_op_logger, store_for_uri, LoggedObjectStore, global_logger};
+
+// Initialize op-log capture
+init_op_logger("production_trace.tsv.zst")?;
+
+// Wrap your ObjectStore with logging
+let store = store_for_uri("s3://bucket/")?;
+let logged_store = LoggedObjectStore::new(Arc::from(store), global_logger().unwrap());
+
+// All operations now captured to op-log
+let data = logged_store.get("s3://bucket/file.bin").await?;
+```
+
+### Replaying Captured Traces
+
+Once you have an op-log from production, replay it with sai3-bench:
 
 ```bash
-# Step 1: Capture workload to op-log (compressed TSV)
-sai3-bench --op-log /tmp/production.tsv.zst run --config production.yaml
-
-# Step 2: Replay against test environment with original timing
-sai3-bench replay --op-log /tmp/production.tsv.zst --target "az://test-storage/"
+# Replay against test environment with original timing
+sai3-bench replay --op-log /tmp/production_trace.tsv.zst --target "az://test-storage/"
 
 # Replay at 5x speed for accelerated load testing
-sai3-bench replay --op-log /tmp/prod.tsv.zst --speed 5.0
+sai3-bench replay --op-log /tmp/production_trace.tsv.zst --speed 5.0
 ```
+
+> **Note**: sai3-bench can also capture op-logs during benchmark runs with `--op-log`, but this is primarily for analyzing benchmark I/O patterns rather than capturing production workloads.
 
 ### Backpressure Handling (v0.8.9+)
 When target storage can't sustain the recorded I/O rate:
