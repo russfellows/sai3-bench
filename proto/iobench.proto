@@ -48,6 +48,17 @@ message OpAggregateMetrics {
   uint64 p99_us = 6;
 }
 
+// v0.8.18: Per-bucket size tracking for accurate avg_bytes in distributed mode
+message SizeBucketData {
+  uint32 bucket_idx = 1;  // Bucket index (0-8)
+  uint64 ops = 2;         // Number of operations in this bucket
+  uint64 bytes = 3;       // Total bytes for operations in this bucket
+}
+
+message SizeBins {
+  repeated SizeBucketData buckets = 1;
+}
+
 message WorkloadSummary {
   string agent_id = 1;
   double wall_seconds = 2;
@@ -75,6 +86,11 @@ message WorkloadSummary {
   bytes histogram_get = 16;      // Serialized GET histograms (all size buckets)
   bytes histogram_put = 17;      // Serialized PUT histograms (all size buckets)
   bytes histogram_meta = 18;     // Serialized META histograms (all size buckets)
+  
+  // v0.8.18: Per-bucket byte counts for accurate avg_bytes calculation
+  SizeBins get_bins = 19;        // Per-bucket ops and bytes for GET
+  SizeBins put_bins = 20;        // Per-bucket ops and bytes for PUT
+  SizeBins meta_bins = 21;       // Per-bucket ops and bytes for META
 }
 
 // v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
@@ -97,6 +113,9 @@ message PrepareSummary {
   // v0.7.9: TSV content for agent-level prepare results
   string tsv_content = 9;        // Prepare results TSV data
   string results_path = 10;      // Local path where agent saved prepare_results.tsv
+  
+  // v0.8.18: Per-bucket byte counts for accurate avg_bytes calculation
+  SizeBins put_bins = 11;        // Per-bucket ops and bytes for PUT
 }
 
 // v0.7.5: Live performance statistics for distributed execution

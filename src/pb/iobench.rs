@@ -83,6 +83,24 @@ pub struct OpAggregateMetrics {
     #[prost(uint64, tag = "6")]
     pub p99_us: u64,
 }
+/// v0.8.18: Per-bucket size tracking for accurate avg_bytes in distributed mode
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct SizeBucketData {
+    /// Bucket index (0-8)
+    #[prost(uint32, tag = "1")]
+    pub bucket_idx: u32,
+    /// Number of operations in this bucket
+    #[prost(uint64, tag = "2")]
+    pub ops: u64,
+    /// Total bytes for operations in this bucket
+    #[prost(uint64, tag = "3")]
+    pub bytes: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SizeBins {
+    #[prost(message, repeated, tag = "1")]
+    pub buckets: ::prost::alloc::vec::Vec<SizeBucketData>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorkloadSummary {
     #[prost(string, tag = "1")]
@@ -135,6 +153,17 @@ pub struct WorkloadSummary {
     /// Serialized META histograms (all size buckets)
     #[prost(bytes = "vec", tag = "18")]
     pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
+    /// v0.8.18: Per-bucket byte counts for accurate avg_bytes calculation
+    ///
+    /// Per-bucket ops and bytes for GET
+    #[prost(message, optional, tag = "19")]
+    pub get_bins: ::core::option::Option<SizeBins>,
+    /// Per-bucket ops and bytes for PUT
+    #[prost(message, optional, tag = "20")]
+    pub put_bins: ::core::option::Option<SizeBins>,
+    /// Per-bucket ops and bytes for META
+    #[prost(message, optional, tag = "21")]
+    pub meta_bins: ::core::option::Option<SizeBins>,
 }
 /// v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -168,6 +197,11 @@ pub struct PrepareSummary {
     /// Local path where agent saved prepare_results.tsv
     #[prost(string, tag = "10")]
     pub results_path: ::prost::alloc::string::String,
+    /// v0.8.18: Per-bucket byte counts for accurate avg_bytes calculation
+    ///
+    /// Per-bucket ops and bytes for PUT
+    #[prost(message, optional, tag = "11")]
+    pub put_bins: ::core::option::Option<SizeBins>,
 }
 /// v0.7.5: Live performance statistics for distributed execution
 /// Sent every 1 second during workload execution for real-time visibility

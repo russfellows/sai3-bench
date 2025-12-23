@@ -2226,6 +2226,22 @@ impl Agent for AgentSvc {
     }
 }
 
+/// Convert SizeBins to protobuf SizeBins message (v0.8.18)
+fn size_bins_to_proto(bins: &sai3_bench::workload::SizeBins) -> pb::iobench::SizeBins {
+    let buckets = bins.by_bucket
+        .iter()
+        .map(|(bucket_idx, (ops, bytes))| {
+            pb::iobench::SizeBucketData {
+                bucket_idx: *bucket_idx as u32,
+                ops: *ops,
+                bytes: *bytes,
+            }
+        })
+        .collect();
+    
+    pb::iobench::SizeBins { buckets }
+}
+
 /// Convert Summary to WorkloadSummary protobuf (v0.7.5)
 /// Helper to avoid duplication between blocking and streaming RPCs
 async fn summary_to_proto(
@@ -2284,6 +2300,9 @@ async fn summary_to_proto(
         p50_us: summary.p50_us,
         p95_us: summary.p95_us,
         p99_us: summary.p99_us,
+        get_bins: Some(size_bins_to_proto(&summary.get_bins)),
+        put_bins: Some(size_bins_to_proto(&summary.put_bins)),
+        meta_bins: Some(size_bins_to_proto(&summary.meta_bins)),
     })
 }
 
@@ -2355,6 +2374,7 @@ async fn prepare_metrics_to_proto(
         histogram_put: put_hist_bytes,
         tsv_content,
         results_path: results_path.display().to_string(),
+        put_bins: Some(size_bins_to_proto(&metrics.put_bins)),
     })
 }
 

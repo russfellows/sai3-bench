@@ -6,6 +6,33 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.18] - 2025-12-23
+
+### Fixed
+
+- **Accurate per-bucket avg_bytes in distributed mode** - Critical data accuracy fix
+  - **Problem**: In distributed mode, all per-bucket rows in results.tsv and prepare_results.tsv showed the same avg_bytes value (overall average instead of bucket-specific average)
+  - **Root cause**: SizeBins data (per-bucket operation and byte counts) was not transmitted from agents to controller
+  - **Solution**: Extended proto with SizeBins messages and fields, agents now transmit per-bucket byte counts
+  - **Impact**: Each size bucket now reports its actual average object size, not an estimate
+  - **Verification**: Tested with comp_perf.yaml - different buckets show different avg_bytes (4096, 262144, 4194304, etc.)
+
+- **Proto changes** (backward compatible - new fields are optional):
+  - Added `SizeBucketData` message (bucket_idx, ops, bytes)
+  - Added `SizeBins` message (repeated SizeBucketData)
+  - Extended `WorkloadSummary` with get_bins, put_bins, meta_bins fields (19-21)
+  - Extended `PrepareSummary` with put_bins field (11)
+
+- **Code changes**:
+  - Agent: Added `size_bins_to_proto()` helper, populates SizeBins in both WorkloadSummary and PrepareSummary
+  - Controller: Added `proto_to_size_bins()` and `merge_size_bins()` helpers
+  - Controller: Updated `create_consolidated_tsv()` and `create_consolidated_prepare_tsv()` to merge and use actual per-bucket bytes
+  - Controller: Updated `collect_op_rows()` signature to accept merged SizeBins parameter
+
+**Note**: Standalone mode was not affected - it already used accurate per-bucket bytes from local SizeBins data.
+
+---
+
 ## [0.8.17] - 2025-12-22
 
 ### Added
