@@ -4,14 +4,14 @@
 
 The perf-log feature captures time-series performance metrics at configurable intervals during workload execution. Unlike op-log (which records individual operations), perf-log provides aggregate metrics for analysis of performance over time.
 
-**Version**: v0.8.15+
+**Version**: v0.8.17+ (31 columns)
 
 ## Features
 
 - **Delta-based metrics**: Operations and bytes per interval (not cumulative)
 - **Warmup period flagging**: `is_warmup` column marks pre-measurement data
 - **Stage tracking**: Prepare, workload, cleanup phases identified
-- **Latency percentiles**: p50, p90, p99 for each operation type
+- **Complete latency metrics**: Mean, p50, p90, p99 for each operation type
 - **CPU utilization**: System, user, and I/O wait percentages
 - **Agent identification**: Worker/agent ID for distributed workloads
 - **Optional compression**: Automatic zstd compression with `.zst` extension
@@ -27,34 +27,37 @@ The perf-log feature captures time-series performance metrics at configurable in
 
 | # | Column Name | Type | Description |
 |---|-------------|------|-------------|
-| 1 | `agent_id` | string | Worker identifier (e.g., "agent-1", "local") |
+| 1 | `agent_id` | string | Worker identifier (e.g., "agent-1", "standalone") |
 | 2 | `timestamp_epoch_ms` | u64 | Unix timestamp in milliseconds |
 | 3 | `elapsed_s` | f64 | Seconds since workload start |
-| 4 | `stage` | string | Current phase: "prepare", "workload", "cleanup" |
+| 4 | `stage` | string | Current phase: "prepare", "workload", "cleanup", "listing" |
 | 5 | `get_ops` | u64 | GET operations in this interval |
 | 6 | `get_bytes` | u64 | Bytes read in this interval |
 | 7 | `get_iops` | f64 | GET operations per second |
 | 8 | `get_mbps` | f64 | GET throughput (MiB/s) |
-| 9 | `get_p50_us` | u64 | GET latency 50th percentile (microseconds) |
-| 10 | `get_p90_us` | u64 | GET latency 90th percentile (microseconds) |
-| 11 | `get_p99_us` | u64 | GET latency 99th percentile (microseconds) |
-| 12 | `put_ops` | u64 | PUT operations in this interval |
-| 13 | `put_bytes` | u64 | Bytes written in this interval |
-| 14 | `put_iops` | f64 | PUT operations per second |
-| 15 | `put_mbps` | f64 | PUT throughput (MiB/s) |
-| 16 | `put_p50_us` | u64 | PUT latency 50th percentile (microseconds) |
-| 17 | `put_p90_us` | u64 | PUT latency 90th percentile (microseconds) |
-| 18 | `put_p99_us` | u64 | PUT latency 99th percentile (microseconds) |
-| 19 | `meta_ops` | u64 | META operations in this interval (LIST, STAT, DELETE) |
-| 20 | `meta_iops` | f64 | META operations per second |
-| 21 | `meta_p50_us` | u64 | META latency 50th percentile (microseconds) |
-| 22 | `meta_p90_us` | u64 | META latency 90th percentile (microseconds) |
-| 23 | `meta_p99_us` | u64 | META latency 99th percentile (microseconds) |
-| 24 | `cpu_user_pct` | f64 | CPU user time percentage |
-| 25 | `cpu_system_pct` | f64 | CPU system/kernel time percentage |
-| 26 | `cpu_iowait_pct` | f64 | CPU I/O wait percentage |
-| 27 | `errors` | u64 | Error count in this interval |
-| 28 | `is_warmup` | 0/1 | 1 if within warmup period, 0 otherwise |
+| 9 | `get_mean_us` | u64 | GET latency mean (microseconds) |
+| 10 | `get_p50_us` | u64 | GET latency 50th percentile (microseconds) |
+| 11 | `get_p90_us` | u64 | GET latency 90th percentile (microseconds) |
+| 12 | `get_p99_us` | u64 | GET latency 99th percentile (microseconds) |
+| 13 | `put_ops` | u64 | PUT operations in this interval |
+| 14 | `put_bytes` | u64 | Bytes written in this interval |
+| 15 | `put_iops` | f64 | PUT operations per second |
+| 16 | `put_mbps` | f64 | PUT throughput (MiB/s) |
+| 17 | `put_mean_us` | u64 | PUT latency mean (microseconds) |
+| 18 | `put_p50_us` | u64 | PUT latency 50th percentile (microseconds) |
+| 19 | `put_p90_us` | u64 | PUT latency 90th percentile (microseconds) |
+| 20 | `put_p99_us` | u64 | PUT latency 99th percentile (microseconds) |
+| 21 | `meta_ops` | u64 | META operations in this interval (LIST, STAT, DELETE) |
+| 22 | `meta_iops` | f64 | META operations per second |
+| 23 | `meta_mean_us` | u64 | META latency mean (microseconds) |
+| 24 | `meta_p50_us` | u64 | META latency 50th percentile (microseconds) |
+| 25 | `meta_p90_us` | u64 | META latency 90th percentile (microseconds) |
+| 26 | `meta_p99_us` | u64 | META latency 99th percentile (microseconds) |
+| 27 | `cpu_user_pct` | f64 | CPU user time percentage |
+| 28 | `cpu_system_pct` | f64 | CPU system/kernel time percentage |
+| 29 | `cpu_iowait_pct` | f64 | CPU I/O wait percentage |
+| 30 | `errors` | u64 | Error count in this interval |
+| 31 | `is_warmup` | 0/1 | 1 if within warmup period, 0 otherwise |
 
 ## Column Groups
 
@@ -66,14 +69,14 @@ The perf-log feature captures time-series performance metrics at configurable in
 - `elapsed_s`: Relative time for plotting workload progression
 - `stage`: Current execution phase
 
-### GET Metrics (7 columns)
-- Operations, bytes, IOPS, throughput, and latency percentiles for read operations
+### GET Metrics (8 columns)
+- Operations, bytes, IOPS, throughput, mean latency, and percentiles (p50, p90, p99) for read operations
 
-### PUT Metrics (7 columns)
-- Operations, bytes, IOPS, throughput, and latency percentiles for write operations
+### PUT Metrics (8 columns)
+- Operations, bytes, IOPS, throughput, mean latency, and percentiles (p50, p90, p99) for write operations
 
-### META Metrics (5 columns)
-- Operations, IOPS, and latency percentiles for metadata operations (LIST, STAT, DELETE)
+### META Metrics (6 columns)
+- Operations, IOPS, mean latency, and percentiles (p50, p90, p99) for metadata operations (LIST, STAT, DELETE)
 - Note: META operations don't have bytes/mbps (metadata doesn't transfer data)
 
 ### CPU Metrics (3 columns)
@@ -99,17 +102,31 @@ warmup_period: "10s"
 ## Example Output
 
 ```tsv
-agent_id	timestamp_epoch_ms	elapsed_s	stage	get_ops	get_bytes	get_iops	get_mbps	get_p50_us	get_p90_us	get_p99_us	put_ops	put_bytes	put_iops	put_mbps	put_p50_us	put_p90_us	put_p99_us	meta_ops	meta_iops	meta_p50_us	meta_p90_us	meta_p99_us	cpu_user_pct	cpu_system_pct	cpu_iowait_pct	errors	is_warmup
-local	1733840400000	1.000	workload	1523	156237824	1523.0	149.02	425	890	2150	0	0	0.0	0.00	0	0	0	0	0.0	0	0	0	12.5	3.2	0.8	0	1
-local	1733840401000	2.000	workload	1612	165347328	1612.0	157.70	410	875	2080	0	0	0.0	0.00	0	0	0	0	0.0	0	0	0	13.1	3.4	0.6	0	0
+agent_id	timestamp_epoch_ms	elapsed_s	stage	get_ops	get_bytes	get_iops	get_mbps	get_mean_us	get_p50_us	get_p90_us	get_p99_us	put_ops	put_bytes	put_iops	put_mbps	put_mean_us	put_p50_us	put_p90_us	put_p99_us	meta_ops	meta_iops	meta_mean_us	meta_p50_us	meta_p90_us	meta_p99_us	cpu_user_pct	cpu_system_pct	cpu_iowait_pct	errors	is_warmup
+standalone	1766470049067	1.000	Workload	5350	9586720768	5348.0	9139.22	2459	531	5667	25631	1073	88076132	1072.6	83.96	470	323	924	2557	2949	2947.9	356	112	986	2823	0.0	0.0	0.0	0	0
+standalone	1766470050067	2.001	Workload	5930	10191196160	5926.0	9712.52	2355	520	5423	24719	1172	96202448	1171.2	91.68	478	319	939	2553	3365	3362.7	331	103	921	2409	39.8	45.9	0.0	0	0
 ```
+
+## Statistical Validity Note (v0.8.17+)
+
+**Important for Distributed Mode:**
+
+In distributed mode with multiple agents, the aggregate `perf_log.tsv` percentiles (p50, p90, p99) are computed using **weighted averaging**, which is a mathematical approximation. Percentiles cannot be accurately averaged - they should be computed from merged HDR histograms.
+
+**For statistically accurate percentile analysis:**
+- ✅ Use **per-agent perf_log files** (`results/agents/{agent-id}/perf_log.tsv`) - Accurate, computed from local HDR histograms
+- ✅ Use **final workload_results.tsv** - Accurate, uses HDR histogram merging across all agents
+
+The aggregate perf_log is suitable for **monitoring during execution** and visualization, but final detailed analysis should use the above sources.
+
+**Standalone mode**: All percentiles are accurate (single HDR histogram, no aggregation).
 
 ## Analysis Tips
 
 ### Filtering Warmup Data
 ```bash
-# Remove warmup rows for analysis
-awk -F'\t' 'NR==1 || $28==0' perf_metrics.tsv > perf_metrics_no_warmup.tsv
+# Remove warmup rows for analysis (column 31)
+awk -F'\t' 'NR==1 || $31==0' perf_metrics.tsv > perf_metrics_no_warmup.tsv
 ```
 
 ### Plotting with gnuplot
