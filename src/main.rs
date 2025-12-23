@@ -13,6 +13,7 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
 use sai3_bench::config::Config;
+use sai3_bench::cpu_monitor::CpuMonitor;
 use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
 use sai3_bench::workload;
@@ -1326,8 +1327,17 @@ fn run_workload(
             tracker_mut.start(warmup_opt);
             
             Some(std::thread::spawn(move || {
+                // Initialize CPU monitor for this thread
+                let mut cpu_monitor = CpuMonitor::new();
+                
                 loop {
                     std::thread::sleep(interval);
+                    
+                    // Sample CPU utilization
+                    let cpu_util = cpu_monitor.sample()
+                        .unwrap_or(None)
+                        .unwrap_or_default();
+                    
                     let stats = tracker_for_task.snapshot();
                     let entry = tracker_mut.compute_delta(
                         "standalone",
@@ -1346,9 +1356,9 @@ fn run_workload(
                         stats.meta_mean_us,
                         stats.meta_mean_us,
                         stats.meta_mean_us,
-                        0.0,  // cpu_user_percent not available
-                        0.0,  // cpu_system_percent not available
-                        0.0,  // cpu_iowait_percent not available
+                        cpu_util.user_percent,
+                        cpu_util.system_percent,
+                        cpu_util.iowait_percent,
                         sai3_bench::live_stats::WorkloadStage::Workload,
                         String::new(),
                     );
