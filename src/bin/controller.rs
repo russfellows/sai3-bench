@@ -2108,13 +2108,16 @@ async fn run_distributed_workload(
                         agg.total_meta_ops,
                         0,  // errors (not tracked in aggregate)
                         // Latency percentiles
+                        agg.get_mean_us as u64,
                         agg.get_p50_us as u64,
                         agg.get_p95_us as u64,  // Use p95 as p90/p99 approximation
                         agg.get_p95_us as u64,
+                        agg.put_mean_us as u64,
                         agg.put_p50_us as u64,
                         agg.put_p95_us as u64,
                         agg.put_p95_us as u64,
-                        agg.meta_mean_us as u64,  // Use mean as approximation
+                        agg.meta_mean_us as u64,
+                        agg.meta_mean_us as u64,  // Use mean as p50/p90/p99 approximation
                         agg.meta_mean_us as u64,
                         agg.meta_mean_us as u64,
                         // CPU utilization
@@ -2145,12 +2148,15 @@ async fn run_distributed_workload(
                                 agent_stats.put_bytes,
                                 agent_stats.meta_ops,
                                 0,  // errors not tracked per-message
+                                agent_stats.get_mean_us as u64,
                                 agent_stats.get_p50_us as u64,
                                 agent_stats.get_p95_us as u64,
                                 agent_stats.get_p95_us as u64,
+                                agent_stats.put_mean_us as u64,
                                 agent_stats.put_p50_us as u64,
                                 agent_stats.put_p95_us as u64,
                                 agent_stats.put_p95_us as u64,
+                                agent_stats.meta_mean_us as u64,
                                 agent_stats.meta_mean_us as u64,
                                 agent_stats.meta_mean_us as u64,
                                 agent_stats.meta_mean_us as u64,

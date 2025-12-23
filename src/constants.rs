@@ -197,7 +197,7 @@ pub const PERF_LOG_FLUSH_INTERVAL_SECS: u64 = 10;
 /// - META metrics (5): ops, iops, p50_us, p90_us, p99_us
 /// - CPU metrics (3): cpu_user_pct, cpu_system_pct, cpu_iowait_pct
 /// - Status (2): errors, is_warmup
-pub const PERF_LOG_HEADER: &str = "agent_id\ttimestamp_epoch_ms\telapsed_s\tstage\tget_ops\tget_bytes\tget_iops\tget_mbps\tget_p50_us\tget_p90_us\tget_p99_us\tput_ops\tput_bytes\tput_iops\tput_mbps\tput_p50_us\tput_p90_us\tput_p99_us\tmeta_ops\tmeta_iops\tmeta_p50_us\tmeta_p90_us\tmeta_p99_us\tcpu_user_pct\tcpu_system_pct\tcpu_iowait_pct\terrors\tis_warmup";
+pub const PERF_LOG_HEADER: &str = "agent_id\ttimestamp_epoch_ms\telapsed_s\tstage\tget_ops\tget_bytes\tget_iops\tget_mbps\tget_mean_us\tget_p50_us\tget_p90_us\tget_p99_us\tput_ops\tput_bytes\tput_iops\tput_mbps\tput_mean_us\tput_p50_us\tput_p90_us\tput_p99_us\tmeta_ops\tmeta_iops\tmeta_mean_us\tmeta_p50_us\tmeta_p90_us\tmeta_p99_us\tcpu_user_pct\tcpu_system_pct\tcpu_iowait_pct\terrors\tis_warmup";
 
 // =============================================================================
 // Distributed Testing Defaults
