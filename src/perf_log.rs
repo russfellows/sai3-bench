@@ -17,7 +17,14 @@
 // - Agent identification for distributed workloads
 // - Optional zstd compression (.zst extension)
 //
-// Format: TSV (tab-separated values) - 28 columns
+// IMPORTANT: In distributed mode, aggregate perf_log percentiles are computed
+// using weighted averaging, which is a mathematical approximation. For statistically
+// valid percentile analysis, use:
+//   1. Per-agent perf_log files (accurate - computed from local HDR histograms)
+//   2. Final workload_results.tsv (accurate - uses HDR histogram merging)
+// Aggregate perf_log percentiles are suitable for monitoring/visualization only.
+//
+// Format: TSV (tab-separated values) - 31 columns (v0.8.17+)
 // See docs/PERF_LOG_FORMAT.md for complete column specification
 // See src/constants.rs for PERF_LOG_HEADER constant
 

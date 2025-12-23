@@ -19,7 +19,8 @@ A comprehensive storage performance testing tool supporting multiple backends th
 7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
 8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
 9. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
-10. **Performance Logging**: Time-series perf-log with CPU metrics, latency percentiles, and warmup filtering (v0.8.15+)
+10. **Performance Logging**: Time-series perf-log with 31 columns including mean/p50/p90/p99 latencies, CPU metrics, and warmup filtering (v0.8.17+)
+11. **Results Analysis Tool**: Excel spreadsheet generation consolidating multiple test results (sai3-analyze, v0.8.17+)
 
 ## 🎯 Supported Storage Backends
 

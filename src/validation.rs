@@ -46,6 +46,19 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     } else {
         println!("│ Target URI:   (not set - using absolute URIs in operations)");
     }
+    
+    // Performance logging status
+    if let Some(ref perf_log) = config.perf_log {
+        println!("│ Perf Log:     ✅ ENABLED (interval: {:?})", perf_log.interval);
+        if let Some(ref path) = perf_log.path {
+            println!("│               Output: {}", path.display());
+        } else {
+            println!("│               Output: ./results/perf_log.tsv (default)");
+        }
+    } else {
+        println!("│ Perf Log:     ❌ DISABLED");
+    }
+    
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
     

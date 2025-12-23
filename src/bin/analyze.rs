@@ -251,6 +251,7 @@ fn write_tsv_to_worksheet(
     worksheet: &mut Worksheet,
     rows: &[Vec<String>],
     header_format: &Format,
+    data_format: &Format,
 ) -> Result<()> {
     for (row_idx, row) in rows.iter().enumerate() {
         for (col_idx, cell) in row.iter().enumerate() {
@@ -259,14 +260,14 @@ fn write_tsv_to_worksheet(
 
             // Try to parse as number first
             if let Ok(num) = cell.parse::<f64>() {
-                worksheet.write_number(row, col, num)?;
+                worksheet.write_number_with_format(row, col, num, data_format)?;
             } else {
                 // Write as string
                 if row_idx == 0 {
                     // Header row - use bold format
                     worksheet.write_string_with_format(row, col, cell, header_format)?;
                 } else {
-                    worksheet.write_string(row, col, cell)?;
+                    worksheet.write_string_with_format(row, col, cell, data_format)?;
                 }
             }
         }
@@ -287,8 +288,14 @@ fn write_tsv_to_worksheet(
 fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Result<()> {
     let mut workbook = Workbook::new();
 
-    // Create a bold format for headers
-    let header_format = Format::new().set_bold();
+    // Create a bold format for headers with Aptos font
+    let header_format = Format::new()
+        .set_bold()
+        .set_font_name("Aptos");
+    
+    // Create a regular format with Aptos font for data cells
+    let data_format = Format::new()
+        .set_font_name("Aptos");
 
     let mut tabs_created = 0;
 
@@ -305,7 +312,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
-            write_tsv_to_worksheet(worksheet, &rows, &header_format)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
 
             tabs_created += 1;
         }
@@ -320,7 +327,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
-            write_tsv_to_worksheet(worksheet, &rows, &header_format)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
 
             tabs_created += 1;
         }
@@ -335,7 +342,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
-            write_tsv_to_worksheet(worksheet, &rows, &header_format)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
 
             tabs_created += 1;
         }

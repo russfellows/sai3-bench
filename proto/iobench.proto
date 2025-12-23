@@ -185,6 +185,16 @@ message LiveStats {
   
   // v0.8.14: Agent concurrency for total thread count display
   uint32 concurrency = 35;               // Number of concurrent workers on this agent
+  
+  // v0.8.17: Additional latency percentiles for complete perf_log data
+  // Proto originally only transmitted p50 and p95, but perf_log needs p90/p99
+  double get_p90_us = 36;                // GET p90 latency (microseconds)
+  double get_p99_us = 37;                // GET p99 latency (microseconds)
+  double put_p90_us = 38;                // PUT p90 latency (microseconds)
+  double put_p99_us = 39;                // PUT p99 latency (microseconds)
+  double meta_p50_us = 40;               // META p50 latency (microseconds)
+  double meta_p90_us = 41;               // META p90 latency (microseconds)
+  double meta_p99_us = 42;               // META p99 latency (microseconds)
 }
 
 service Agent {

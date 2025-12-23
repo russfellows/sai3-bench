@@ -6,6 +6,67 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.17] - 2025-12-22
+
+### Added
+
+- **Complete perf_log percentile data** - Fixed missing p90/p99 percentiles
+  - Extended perf_log format from 28 to 31 columns
+  - Added get_p90_us, get_p99_us, put_p90_us, put_p99_us (fields 11, 12, 19, 20)
+  - Added meta_p50_us, meta_p90_us, meta_p99_us (fields 24, 25, 26)
+  - All percentiles now computed from HDR histograms (standalone mode)
+  - Proto extended with 7 new percentile fields (36-42) for distributed mode
+
+- **sai3-analyze results consolidation tool** - NEW binary for Excel spreadsheet generation
+  - Consolidates multiple test results into single Excel workbook
+  - Supports 30 tabbed spreadsheets from 15 result directories
+  - Includes workload_results.tsv, prepare_results.tsv, and perf_log.tsv
+  - Handles both standalone and distributed test results
+  - See [docs/ANALYZE_TOOL.md](./ANALYZE_TOOL.md) for usage guide
+
+- **Warning documentation for aggregate percentiles**
+  - Added prominent comments in controller.rs aggregate() function
+  - Added documentation in perf_log.rs module header
+  - Explains that aggregate perf_log percentiles use weighted averaging (approximation)
+  - Per-agent perf_log files contain accurate percentiles from local HDR histograms
+  - Final workload_results.tsv uses correct HDR histogram merging
+
+### Changed
+
+- **Updated all compute_delta() calls** - Fixed percentile parameters
+  - Standalone mode: Now passes correct p90/p99 values (was passing p95 instead)
+  - Distributed mode: Uses new p90/p99 fields from AggregateStats
+  - Fixed meta percentiles: Was passing meta_mean_us three times, now passes p50/p90/p99
+
+- **Enhanced --dry-run validation output**
+  - Added perf_log status display showing enabled/disabled and interval
+  - Format: "Perf Log: ✅ ENABLED (interval: 1s)" or "❌ DISABLED"
+
+### Fixed
+
+- **Missing mean latency columns** - Added get_mean_us, put_mean_us, meta_mean_us to perf_log
+  - Columns 9, 17, 23 in perf_log.tsv format
+  - Computed from HDR histogram mean in all modes
+
+- **Incorrect percentile transmission in distributed mode**
+  - Proto LiveStats now includes all percentiles needed for perf_log
+  - Agent code updated to populate all 7 new percentile fields
+  - Controller AggregateStats extended with corresponding fields
+
+### Important Notes
+
+**Statistical Limitation of Aggregate perf_log Percentiles:**
+
+In distributed mode, the aggregate perf_log.tsv uses weighted averaging to combine percentiles from multiple agents. This is a mathematical approximation, not statistically exact. Percentiles should ideally be computed from merged HDR histograms, not averaged.
+
+**For accurate percentile analysis, use:**
+1. **Per-agent perf_log files** (`agents/{agent-id}/perf_log.tsv`) - Accurate, computed from local HDR histograms
+2. **Final workload_results.tsv** - Accurate, uses HDR histogram merging across all agents
+
+The aggregate perf_log is suitable for monitoring and visualization during test execution, but final analysis should use the above sources. This limitation is documented in code comments and will be addressed in a future release by transmitting serialized histograms instead of pre-computed percentiles.
+
+---
+
 ## [0.8.16] - 2025-12-10
 
 ### Added
