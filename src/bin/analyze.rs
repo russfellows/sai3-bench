@@ -57,6 +57,7 @@ struct ResultsDir {
     hosts: String,
     results_tsv: Option<PathBuf>,
     prepare_results_tsv: Option<PathBuf>,
+    perf_log_tsv: Option<PathBuf>,
 }
 
 impl ResultsDir {
@@ -102,6 +103,7 @@ impl ResultsDir {
         // Check for TSV files
         let results_tsv = path.join("results.tsv");
         let prepare_results_tsv = path.join("prepare_results.tsv");
+        let perf_log_tsv = path.join("perf_log.tsv");
 
         Ok(Self {
             path,
@@ -114,11 +116,16 @@ impl ResultsDir {
             } else { 
                 None 
             },
+            perf_log_tsv: if perf_log_tsv.exists() {
+                Some(perf_log_tsv)
+            } else {
+                None
+            },
         })
     }
 
     /// Generate a short, unique tab name (Excel limit: 31 chars)
-    /// Format: MMDD-HHMM-workload_Xh-R/P
+    /// Format: MMDD-HHMM-workload_Xh-R/P/L
     fn generate_tab_name(&self, file_type: &str) -> String {
         // Extract MMDD-HHMM from timestamp (20251222-1744 -> 1222-1744)
         let short_time = if self.timestamp.len() >= 13 {
@@ -207,7 +214,10 @@ fn find_results_dirs(args: &Args) -> Result<Vec<ResultsDir>> {
 
         if let Ok(results_dir) = ResultsDir::from_path(path.to_path_buf()) {
             // Only include if it has at least one TSV file
-            if results_dir.results_tsv.is_some() || results_dir.prepare_results_tsv.is_some() {
+            if results_dir.results_tsv.is_some() 
+                || results_dir.prepare_results_tsv.is_some() 
+                || results_dir.perf_log_tsv.is_some() 
+            {
                 results_dirs.push(results_dir);
             }
         }
@@ -314,6 +324,21 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             tabs_created += 1;
         }
+
+        // Add perf_log.tsv tab
+        if let Some(ref tsv_path) = results_dir.perf_log_tsv {
+            let tab_name = results_dir.generate_tab_name("L");
+            println!("  Creating tab: {} (perf_log.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read perf_log.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format)?;
+
+            tabs_created += 1;
+        }
     }
 
     if tabs_created == 0 {
@@ -360,6 +385,9 @@ fn main() -> Result<()> {
         if dir.prepare_results_tsv.is_some() {
             println!("      - prepare_results.tsv found");
         }
+        if dir.perf_log_tsv.is_some() {
+            println!("      - perf_log.tsv found");
+        }
     }
     println!();
 
@@ -393,6 +421,7 @@ mod tests {
             hosts: "1hosts".to_string(),
             results_tsv: None,
             prepare_results_tsv: None,
+            perf_log_tsv: None,
         };
 
         let tab_name = results_dir.generate_tab_name("R");
@@ -409,6 +438,7 @@ mod tests {
             hosts: "8hosts".to_string(),
             results_tsv: None,
             prepare_results_tsv: None,
+            perf_log_tsv: None,
         };
 
         let tab_name = results_dir.generate_tab_name("R");
