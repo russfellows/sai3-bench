@@ -278,6 +278,30 @@ pub struct LiveStats {
     /// Number of concurrent workers on this agent
     #[prost(uint32, tag = "35")]
     pub concurrency: u32,
+    /// v0.8.17: Additional latency percentiles for complete perf_log data
+    /// Proto originally only transmitted p50 and p95, but perf_log needs p90/p99
+    ///
+    /// GET p90 latency (microseconds)
+    #[prost(double, tag = "36")]
+    pub get_p90_us: f64,
+    /// GET p99 latency (microseconds)
+    #[prost(double, tag = "37")]
+    pub get_p99_us: f64,
+    /// PUT p90 latency (microseconds)
+    #[prost(double, tag = "38")]
+    pub put_p90_us: f64,
+    /// PUT p99 latency (microseconds)
+    #[prost(double, tag = "39")]
+    pub put_p99_us: f64,
+    /// META p50 latency (microseconds)
+    #[prost(double, tag = "40")]
+    pub meta_p50_us: f64,
+    /// META p90 latency (microseconds)
+    #[prost(double, tag = "41")]
+    pub meta_p90_us: f64,
+    /// META p99 latency (microseconds)
+    #[prost(double, tag = "42")]
+    pub meta_p99_us: f64,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

@@ -13,6 +13,41 @@ sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed 
 - **`sai3bench-run`** — Removed (use `sai3-bench run` instead - same functionality, more features)
 - **`fs_read_bench`** — Removed (internal development tool, not needed for production)
 
+## Performance Logging (perf_log)
+
+The perf_log feature captures time-series performance metrics at configurable intervals (default 1 second). This provides detailed visibility into performance trends during test execution.
+
+**Format**: TSV (tab-separated values) with 31 columns (v0.8.17+)
+
+**Columns**:
+- Metadata: agent_id, timestamp_epoch_ms, elapsed_s, stage, is_warmup
+- GET metrics: ops, bytes, iops, mbps, mean_us, p50_us, p90_us, p99_us
+- PUT metrics: ops, bytes, iops, mbps, mean_us, p50_us, p90_us, p99_us  
+- META metrics: ops, iops, mean_us, p50_us, p90_us, p99_us
+- CPU metrics: user_pct, system_pct, iowait_pct
+- Error tracking: errors
+
+**Enable in config**:
+```yaml
+perf_log:
+  enabled: true
+  interval: 1  # seconds
+```
+
+**Output files**:
+- Standalone mode: `results/perf_log.tsv`
+- Distributed mode:
+  - Per-agent: `results/agents/{agent-id}/perf_log.tsv` (accurate percentiles)
+  - Aggregate: `results/perf_log.tsv` (aggregated across agents)
+
+**⚠️ Important - Aggregate Percentile Limitation:**
+
+In distributed mode, the aggregate perf_log.tsv percentiles are computed using weighted averaging, which is a mathematical approximation. For statistically accurate percentile analysis:
+- Use **per-agent perf_log files** (`agents/{agent-id}/perf_log.tsv`) - Computed from local HDR histograms
+- Use **final workload_results.tsv** - Uses correct HDR histogram merging across agents
+
+The aggregate perf_log is suitable for monitoring during execution, but final analysis should use the above sources. See [docs/CHANGELOG.md](CHANGELOG.md) v0.8.17 for technical details.
+
 ## Configuration Syntax
 
 For detailed YAML configuration syntax, see:

@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.16"
+version = "0.8.17"
 edition = "2021"
 build   = "build.rs"
 
@@ -25,8 +25,8 @@ num_cpus = "^1.16"
 # s3dlio v0.9.25: Azure/GCS custom endpoint support, S3 force_path_style, CLI streaming progress
 # Key features: AZURE_STORAGE_ENDPOINT, GCS_ENDPOINT_URL env vars for local emulators/proxies
 # For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.25" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.25" }
+s3dlio = { path = "../s3dlio" }
+s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
@@ -63,6 +63,10 @@ async-stream = "0.3"  # v0.7.5: Server streaming for live stats
 libc = "0.2"
 bytes = "1"
 
+# Results analysis (v0.8.17+)
+rust_xlsxwriter = "0.79"  # Excel file generation
+walkdir = "2"  # Directory traversal
+
 [build-dependencies]
 tonic-build = "^0.13"
 prost-build = "^0.13"
@@ -81,6 +85,11 @@ path = "src/bin/agent.rs"
 [[bin]]
 name = "sai3bench-ctl"
 path = "src/bin/controller.rs"
+
+# results analyzer (consolidates multiple results into Excel)
+[[bin]]
+name = "sai3-analyze"
+path = "src/bin/analyze.rs"
 
 # NOTE: Legacy binaries removed from production builds (v0.6.9+)
 # - sai3bench-run: Replaced by "sai3-bench run" subcommand (more features) - source deleted

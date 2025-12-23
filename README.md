@@ -1,6 +1,6 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.16-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.17-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-283%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -19,7 +19,8 @@ A comprehensive storage performance testing tool supporting multiple backends th
 7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
 8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
 9. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
-10. **Performance Logging**: Time-series perf-log with CPU metrics, latency percentiles, and warmup filtering (v0.8.15+)
+10. **Performance Logging**: Time-series perf-log with 31 columns including mean/p50/p90/p99 latencies, CPU metrics, and warmup filtering (v0.8.17+)
+11. **Results Analysis Tool**: Excel spreadsheet generation consolidating multiple test results (sai3-analyze, v0.8.17+)
 
 ## 🎯 Supported Storage Backends
 
@@ -87,6 +88,7 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 - **`sai3-bench`** - Single-node CLI with subcommands: `run`, `replay`, `util`
 - **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
 - **`sai3bench-ctl`** - Controller for coordinating distributed agents
+- **`sai3-analyze`** - Results consolidation tool (Excel spreadsheet generation) ✨ NEW in v0.8.17
 
 ## 📖 Documentation
 
@@ -96,6 +98,7 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 - **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation
 - **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication
 - **[Data Generation Guide](docs/DATA_GENERATION.md)** - Deduplication and compression testing
+- **[Results Analysis Tool](docs/ANALYZE_TOOL.md)** - Consolidating multiple results into Excel ✨ NEW
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history
 
 ## 🚀 Quick Start
@@ -116,6 +119,9 @@ cargo build --release
 # Capture and replay workload
 ./target/release/sai3-bench --op-log /tmp/workload.tsv.zst run --config my-workload.yaml
 ./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst --target "az://test/"
+
+# Consolidate multiple results into Excel (NEW in v0.8.17)
+./target/release/sai3-analyze --pattern "sai3-*" --output results.xlsx
 
 # Test cloud storage (requires authentication)
 export AZURE_STORAGE_ACCOUNT="your-storage-account"

@@ -17,7 +17,14 @@
 // - Agent identification for distributed workloads
 // - Optional zstd compression (.zst extension)
 //
-// Format: TSV (tab-separated values) - 28 columns
+// IMPORTANT: In distributed mode, aggregate perf_log percentiles are computed
+// using weighted averaging, which is a mathematical approximation. For statistically
+// valid percentile analysis, use:
+//   1. Per-agent perf_log files (accurate - computed from local HDR histograms)
+//   2. Final workload_results.tsv (accurate - uses HDR histogram merging)
+// Aggregate perf_log percentiles are suitable for monitoring/visualization only.
+//
+// Format: TSV (tab-separated values) - 31 columns (v0.8.17+)
 // See docs/PERF_LOG_FORMAT.md for complete column specification
 // See src/constants.rs for PERF_LOG_HEADER constant
 
@@ -51,6 +58,7 @@ pub struct PerfLogEntry {
     pub get_bytes: u64,
     pub get_iops: f64,
     pub get_mbps: f64,
+    pub get_mean_us: u64,
     pub get_p50_us: u64,
     pub get_p90_us: u64,
     pub get_p99_us: u64,
@@ -60,6 +68,7 @@ pub struct PerfLogEntry {
     pub put_bytes: u64,
     pub put_iops: f64,
     pub put_mbps: f64,
+    pub put_mean_us: u64,
     pub put_p50_us: u64,
     pub put_p90_us: u64,
     pub put_p99_us: u64,
@@ -67,6 +76,7 @@ pub struct PerfLogEntry {
     // META operation deltas (this interval only)
     pub meta_ops: u64,
     pub meta_iops: f64,
+    pub meta_mean_us: u64,
     pub meta_p50_us: u64,
     pub meta_p90_us: u64,
     pub meta_p99_us: u64,
@@ -92,7 +102,7 @@ impl PerfLogEntry {
         };
         
         format!(
-            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
+            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
             self.agent_id,
             self.timestamp_epoch_ms,
             self.elapsed_s,
@@ -101,6 +111,7 @@ impl PerfLogEntry {
             self.get_bytes,
             self.get_iops,
             self.get_mbps,
+            self.get_mean_us,
             self.get_p50_us,
             self.get_p90_us,
             self.get_p99_us,
@@ -108,11 +119,13 @@ impl PerfLogEntry {
             self.put_bytes,
             self.put_iops,
             self.put_mbps,
+            self.put_mean_us,
             self.put_p50_us,
             self.put_p90_us,
             self.put_p99_us,
             self.meta_ops,
             self.meta_iops,
+            self.meta_mean_us,
             self.meta_p50_us,
             self.meta_p90_us,
             self.meta_p99_us,
@@ -276,12 +289,15 @@ impl PerfLogDeltaTracker {
         meta_ops: u64,
         errors: u64,
         // Latency percentiles (from current interval's histogram)
+        get_mean_us: u64,
         get_p50_us: u64,
         get_p90_us: u64,
         get_p99_us: u64,
+        put_mean_us: u64,
         put_p50_us: u64,
         put_p90_us: u64,
         put_p99_us: u64,
+        meta_mean_us: u64,
         meta_p50_us: u64,
         meta_p90_us: u64,
         meta_p99_us: u64,
@@ -349,6 +365,7 @@ impl PerfLogDeltaTracker {
             get_bytes: delta_get_bytes,
             get_iops,
             get_mbps,
+            get_mean_us,
             get_p50_us,
             get_p90_us,
             get_p99_us,
@@ -356,11 +373,13 @@ impl PerfLogDeltaTracker {
             put_bytes: delta_put_bytes,
             put_iops,
             put_mbps,
+            put_mean_us,
             put_p50_us,
             put_p90_us,
             put_p99_us,
             meta_ops: delta_meta_ops,
             meta_iops,
+            meta_mean_us,
             meta_p50_us,
             meta_p90_us,
             meta_p99_us,

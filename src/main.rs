@@ -13,14 +13,16 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
 use sai3_bench::config::Config;
+use sai3_bench::cpu_monitor::CpuMonitor;
 use sai3_bench::metrics::{OpHists, bucket_index};
+use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
 use sai3_bench::workload;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::runtime::Builder as RtBuilder;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 
 // Multi-backend ObjectStore operations
@@ -1277,7 +1279,116 @@ fn run_workload(
     } else {
         // Single worker - use traditional execution
         info!("Single worker mode (processes={})", num_processes);
-        rt.block_on(workload::run(&config, tree_manifest.clone()))?
+        
+        // v0.8.17: Setup performance logging for standalone mode (same as distributed)
+        let perf_log_enabled = config.perf_log.is_some();
+        let perf_log_path = results_dir.path().join("perf_log.tsv");
+        let perf_log_writer_opt: Option<PerfLogWriter> = if perf_log_enabled {
+            match PerfLogWriter::new(&perf_log_path) {
+                Ok(writer) => {
+                    info!("Created perf_log at: {}", perf_log_path.display());
+                    Some(writer)
+                }
+                Err(e) => {
+                    warn!("Failed to create perf_log: {} - continuing without perf_log", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Create LiveStatsTracker for workload execution
+        let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new_with_concurrency(
+            config.concurrency as u32
+        ));
+        
+        // Initialize perf_log tracker with warmup duration
+        let warmup_duration = config.warmup_period.unwrap_or(Duration::ZERO);
+        let perf_log_interval = config.perf_log.as_ref()
+            .map(|p| p.interval)
+            .unwrap_or(Duration::from_secs(1));
+        
+        // Clone config and wire in LiveStatsTracker
+        let mut config_with_tracker = config.clone();
+        config_with_tracker.live_stats_tracker = Some(tracker.clone());
+        
+        // Spawn perf_log writer task if enabled
+        let (perf_stop_tx, perf_stop_rx) = std::sync::mpsc::channel::<()>();
+        let perf_log_task = if let Some(mut writer) = perf_log_writer_opt {
+            let tracker_for_task = tracker.clone();
+            let interval = perf_log_interval;
+            let mut tracker_mut = PerfLogDeltaTracker::new();
+            let warmup_opt = if warmup_duration > Duration::ZERO {
+                Some(warmup_duration)
+            } else {
+                None
+            };
+            tracker_mut.start(warmup_opt);
+            
+            Some(std::thread::spawn(move || {
+                // Initialize CPU monitor for this thread
+                let mut cpu_monitor = CpuMonitor::new();
+                
+                loop {
+                    std::thread::sleep(interval);
+                    
+                    // Sample CPU utilization
+                    let cpu_util = cpu_monitor.sample()
+                        .unwrap_or(None)
+                        .unwrap_or_default();
+                    
+                    let stats = tracker_for_task.snapshot();
+                    let entry = tracker_mut.compute_delta(
+                        "standalone",
+                        stats.get_ops,
+                        stats.get_bytes,
+                        stats.put_ops,
+                        stats.put_bytes,
+                        stats.meta_ops,
+                        0,  // errors not tracked
+                        stats.get_mean_us,
+                        stats.get_p50_us,
+                        stats.get_p90_us,
+                        stats.get_p99_us,
+                        stats.put_mean_us,
+                        stats.put_p50_us,
+                        stats.put_p90_us,
+                        stats.put_p99_us,
+                        stats.meta_mean_us,
+                        stats.meta_p50_us,
+                        stats.meta_p90_us,
+                        stats.meta_p99_us,
+                        cpu_util.user_percent,
+                        cpu_util.system_percent,
+                        cpu_util.iowait_percent,
+                        sai3_bench::live_stats::WorkloadStage::Workload,
+                        String::new(),
+                    );
+                    if let Err(e) = writer.write_entry(&entry) {
+                        warn!("Failed to write perf_log entry: {}", e);
+                    }
+                    
+                    // Check if we should stop
+                    if perf_stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+        
+        // Run workload with LiveStatsTracker
+        let summary = rt.block_on(workload::run(&config_with_tracker, tree_manifest.clone()))?;
+        
+        // Stop perf_log writer and wait for completion
+        if let Some(handle) = perf_log_task {
+            let _ = perf_stop_tx.send(());
+            let _ = handle.join();
+        }
+        
+        summary
     };
     
     // Merge worker op-log files if multi-worker mode was used with op_log enabled

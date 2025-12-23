@@ -254,13 +254,30 @@ impl LiveStatsAggregator {
         let mut max_elapsed = 0.0f64;
 
         // Weighted sums for latency averaging
+        //
+        // WARNING: Weighted averaging of percentiles is mathematically incorrect.
+        // Percentiles should be computed from merged HDR histograms, not averaged.
+        // This limitation exists because LiveStats proto sends pre-computed percentiles
+        // instead of serialized histograms. For statistically valid percentiles, use
+        // the final workload_results.tsv which uses HDR histogram merging.
+        //
+        // The aggregate percentiles in perf_log.tsv are approximations for monitoring
+        // purposes only. Per-agent perf_log files contain accurate percentiles computed
+        // from each agent's local HDR histogram.
         let mut get_mean_weighted = 0.0f64;
         let mut get_p50_weighted = 0.0f64;
+        let mut get_p90_weighted = 0.0f64;
         let mut get_p95_weighted = 0.0f64;
+        let mut get_p99_weighted = 0.0f64;
         let mut put_mean_weighted = 0.0f64;
         let mut put_p50_weighted = 0.0f64;
+        let mut put_p90_weighted = 0.0f64;
         let mut put_p95_weighted = 0.0f64;
+        let mut put_p99_weighted = 0.0f64;
         let mut meta_mean_weighted = 0.0f64;
+        let mut meta_p50_weighted = 0.0f64;
+        let mut meta_p90_weighted = 0.0f64;
+        let mut meta_p99_weighted = 0.0f64;
 
         // v0.7.11: CPU utilization sums (simple average across agents)
         let mut cpu_user_sum = 0.0f64;
@@ -285,17 +302,24 @@ impl LiveStatsAggregator {
                 let weight = stats.get_ops as f64;
                 get_mean_weighted += stats.get_mean_us * weight;
                 get_p50_weighted += stats.get_p50_us * weight;
+                get_p90_weighted += stats.get_p90_us * weight;
                 get_p95_weighted += stats.get_p95_us * weight;
+                get_p99_weighted += stats.get_p99_us * weight;
             }
             if stats.put_ops > 0 {
                 let weight = stats.put_ops as f64;
                 put_mean_weighted += stats.put_mean_us * weight;
                 put_p50_weighted += stats.put_p50_us * weight;
+                put_p90_weighted += stats.put_p90_us * weight;
                 put_p95_weighted += stats.put_p95_us * weight;
+                put_p99_weighted += stats.put_p99_us * weight;
             }
             if stats.meta_ops > 0 {
                 let weight = stats.meta_ops as f64;
                 meta_mean_weighted += stats.meta_mean_us * weight;
+                meta_p50_weighted += stats.meta_p50_us * weight;
+                meta_p90_weighted += stats.meta_p90_us * weight;
+                meta_p99_weighted += stats.meta_p99_us * weight;
             }
             
             // v0.7.11: Accumulate CPU metrics
@@ -326,8 +350,18 @@ impl LiveStatsAggregator {
         } else {
             0.0
         };
+        let get_p90_us = if total_get_ops > 0 {
+            get_p90_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
         let get_p95_us = if total_get_ops > 0 {
             get_p95_weighted / total_get_ops as f64
+        } else {
+            0.0
+        };
+        let get_p99_us = if total_get_ops > 0 {
+            get_p99_weighted / total_get_ops as f64
         } else {
             0.0
         };
@@ -341,13 +375,38 @@ impl LiveStatsAggregator {
         } else {
             0.0
         };
+        let put_p90_us = if total_put_ops > 0 {
+            put_p90_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
         let put_p95_us = if total_put_ops > 0 {
             put_p95_weighted / total_put_ops as f64
         } else {
             0.0
         };
+        let put_p99_us = if total_put_ops > 0 {
+            put_p99_weighted / total_put_ops as f64
+        } else {
+            0.0
+        };
         let meta_mean_us = if total_meta_ops > 0 {
             meta_mean_weighted / total_meta_ops as f64
+        } else {
+            0.0
+        };
+        let meta_p50_us = if total_meta_ops > 0 {
+            meta_p50_weighted / total_meta_ops as f64
+        } else {
+            0.0
+        };
+        let meta_p90_us = if total_meta_ops > 0 {
+            meta_p90_weighted / total_meta_ops as f64
+        } else {
+            0.0
+        };
+        let meta_p99_us = if total_meta_ops > 0 {
+            meta_p99_weighted / total_meta_ops as f64
         } else {
             0.0
         };
@@ -382,14 +441,21 @@ impl LiveStatsAggregator {
             total_get_bytes,
             get_mean_us,
             get_p50_us,
+            get_p90_us,
             get_p95_us,
+            get_p99_us,
             total_put_ops,
             total_put_bytes,
             put_mean_us,
             put_p50_us,
+            put_p90_us,
             put_p95_us,
+            put_p99_us,
             total_meta_ops,
             meta_mean_us,
+            meta_p50_us,
+            meta_p90_us,
+            meta_p99_us,
             elapsed_s: max_elapsed,
             cpu_user_percent,
             cpu_system_percent,
@@ -424,14 +490,21 @@ struct AggregateStats {
     total_get_bytes: u64,
     get_mean_us: f64,
     get_p50_us: f64,
+    get_p90_us: f64,
     get_p95_us: f64,
+    get_p99_us: f64,
     total_put_ops: u64,
     total_put_bytes: u64,
     put_mean_us: f64,
     put_p50_us: f64,
+    put_p90_us: f64,
     put_p95_us: f64,
+    put_p99_us: f64,
     total_meta_ops: u64,
     meta_mean_us: f64,
+    meta_p50_us: f64,
+    meta_p90_us: f64,
+    meta_p99_us: f64,
     elapsed_s: f64,
     // v0.7.11: CPU utilization metrics (averaged across agents)
     cpu_user_percent: f64,
@@ -1358,9 +1431,9 @@ async fn run_distributed_workload(
                 let error_stats = pb::iobench::LiveStats {
                     agent_id: agent_id.clone(),
                     timestamp_s: 0.0,
-                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p95_us: 0.0,
-                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p95_us: 0.0,
-                    meta_ops: 0, meta_mean_us: 0.0,
+                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
                     elapsed_s: 0.0,
                     completed: true,
                     final_summary: None,
@@ -2108,15 +2181,18 @@ async fn run_distributed_workload(
                         agg.total_meta_ops,
                         0,  // errors (not tracked in aggregate)
                         // Latency percentiles
+                        agg.get_mean_us as u64,
                         agg.get_p50_us as u64,
-                        agg.get_p95_us as u64,  // Use p95 as p90/p99 approximation
-                        agg.get_p95_us as u64,
+                        agg.get_p90_us as u64,
+                        agg.get_p99_us as u64,
+                        agg.put_mean_us as u64,
                         agg.put_p50_us as u64,
-                        agg.put_p95_us as u64,
-                        agg.put_p95_us as u64,
-                        agg.meta_mean_us as u64,  // Use mean as approximation
+                        agg.put_p90_us as u64,
+                        agg.put_p99_us as u64,
                         agg.meta_mean_us as u64,
-                        agg.meta_mean_us as u64,
+                        agg.meta_p50_us as u64,
+                        agg.meta_p90_us as u64,
+                        agg.meta_p99_us as u64,
                         // CPU utilization
                         agg.cpu_user_percent,
                         agg.cpu_system_percent,
@@ -2145,15 +2221,18 @@ async fn run_distributed_workload(
                                 agent_stats.put_bytes,
                                 agent_stats.meta_ops,
                                 0,  // errors not tracked per-message
+                                agent_stats.get_mean_us as u64,
                                 agent_stats.get_p50_us as u64,
-                                agent_stats.get_p95_us as u64,
-                                agent_stats.get_p95_us as u64,
+                                agent_stats.get_p90_us as u64,
+                                agent_stats.get_p99_us as u64,
+                                agent_stats.put_mean_us as u64,
                                 agent_stats.put_p50_us as u64,
-                                agent_stats.put_p95_us as u64,
-                                agent_stats.put_p95_us as u64,
+                                agent_stats.put_p90_us as u64,
+                                agent_stats.put_p99_us as u64,
                                 agent_stats.meta_mean_us as u64,
-                                agent_stats.meta_mean_us as u64,
-                                agent_stats.meta_mean_us as u64,
+                                agent_stats.meta_p50_us as u64,
+                                agent_stats.meta_p90_us as u64,
+                                agent_stats.meta_p99_us as u64,
                                 agent_stats.cpu_user_percent,
                                 agent_stats.cpu_system_percent,
                                 agent_stats.cpu_iowait_percent,
