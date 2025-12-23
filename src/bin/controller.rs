@@ -2840,6 +2840,29 @@ fn write_agent_prepare_results(
     Ok(())
 }
 
+/// Convert protobuf SizeBins to local SizeBins (v0.8.18)
+fn proto_to_size_bins(proto_bins: &pb::iobench::SizeBins) -> sai3_bench::workload::SizeBins {
+    use std::collections::HashMap;
+    
+    let mut by_bucket = HashMap::new();
+    for bucket_data in &proto_bins.buckets {
+        by_bucket.insert(bucket_data.bucket_idx as usize, (bucket_data.ops, bucket_data.bytes));
+    }
+    
+    sai3_bench::workload::SizeBins { by_bucket }
+}
+
+/// Merge SizeBins from multiple agents (v0.8.18)
+fn merge_size_bins(bins_list: &[sai3_bench::workload::SizeBins]) -> sai3_bench::workload::SizeBins {
+    let mut merged = sai3_bench::workload::SizeBins::default();
+    
+    for bins in bins_list {
+        merged.merge_from(bins);
+    }
+    
+    merged
+}
+
 /// Create consolidated prepare_results.tsv from agent histograms (v0.7.9)
 /// Mirrors create_consolidated_tsv logic but for prepare phase
 fn create_consolidated_prepare_tsv(
@@ -2899,6 +2922,9 @@ fn create_consolidated_prepare_tsv(
     let mut total_objects_existed: u64 = 0;
     let total_wall_seconds = summaries.iter().map(|s| s.wall_seconds).fold(0.0f64, f64::max);
     
+    // v0.8.18: Merge SizeBins from all agents for accurate per-bucket avg_bytes
+    let mut put_bins_list = Vec::new();
+    
     for summary in summaries {
         if let Some(ref put) = summary.put {
             total_ops += put.ops;
@@ -2906,7 +2932,15 @@ fn create_consolidated_prepare_tsv(
         }
         total_objects_created += summary.objects_created;
         total_objects_existed += summary.objects_existed;
+        
+        // Collect SizeBins for merging
+        if let Some(ref bins) = summary.put_bins {
+            put_bins_list.push(proto_to_size_bins(bins));
+        }
     }
+    
+    // Merge all SizeBins for accurate per-bucket calculations
+    let merged_put_bins = merge_size_bins(&put_bins_list);
     
     // Write consolidated TSV
     let tsv_path = results_dir.join("prepare_results.tsv");
@@ -2929,10 +2963,15 @@ fn create_consolidated_prepare_tsv(
         let max_us = hist.max();
         let count = hist.len();
         
-        // Estimate avg_bytes and throughput per bucket (approximate)
-        let avg_bytes = if total_ops > 0 { total_bytes / total_ops } else { 0 };
+        // v0.8.18: Use actual per-bucket bytes from merged SizeBins (NOT total!)
+        let (bucket_ops, bucket_bytes) = merged_put_bins.by_bucket.get(&idx).copied().unwrap_or((0, 0));
+        let avg_bytes = if bucket_ops > 0 {
+            bucket_bytes as f64 / bucket_ops as f64
+        } else {
+            0.0
+        };
         let ops_per_sec = count as f64 / total_wall_seconds;
-        let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+        let throughput_mibps = (bucket_bytes as f64 / 1_048_576.0) / total_wall_seconds;
         
         let bucket_label = BUCKET_LABELS[idx];
         
@@ -3089,6 +3128,27 @@ fn create_consolidated_tsv(
         .map(|m| m.bytes)
         .sum();
     
+    // v0.8.18: Merge SizeBins from all agents for accurate per-bucket avg_bytes
+    let mut get_bins_list = Vec::new();
+    let mut put_bins_list = Vec::new();
+    let mut meta_bins_list = Vec::new();
+    
+    for summary in summaries {
+        if let Some(ref bins) = summary.get_bins {
+            get_bins_list.push(proto_to_size_bins(bins));
+        }
+        if let Some(ref bins) = summary.put_bins {
+            put_bins_list.push(proto_to_size_bins(bins));
+        }
+        if let Some(ref bins) = summary.meta_bins {
+            meta_bins_list.push(proto_to_size_bins(bins));
+        }
+    }
+    
+    let merged_get_bins = merge_size_bins(&get_bins_list);
+    let merged_put_bins = merge_size_bins(&put_bins_list);
+    let merged_meta_bins = merge_size_bins(&meta_bins_list);
+    
     // Write consolidated TSV
     let tsv_path = results_dir.path().join("results.tsv");
     let mut f = File::create(&tsv_path)
@@ -3101,9 +3161,9 @@ fn create_consolidated_tsv(
     let mut rows = Vec::new();
     
     // Write per-bucket rows (merged across all agents)
-    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
-    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
-    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
+    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, &merged_get_bins, wall_seconds)?;
+    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, &merged_put_bins, wall_seconds)?;
+    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, &merged_meta_bins, wall_seconds)?;
     
     // Write aggregate rows (overall totals across all agents and size buckets)
     // META=97, GET=98, PUT=99 for natural sorting
@@ -3128,8 +3188,9 @@ fn collect_op_rows(
     rows: &mut Vec<(usize, String)>,
     op_name: &str,
     accumulators: &[hdrhistogram::Histogram<u64>],
-    total_ops: u64,
-    total_bytes: u64,
+    _total_ops: u64,  // v0.8.18: Unused - kept for API compatibility
+    _total_bytes: u64,  // v0.8.18: Unused - kept for API compatibility
+    merged_bins: &sai3_bench::workload::SizeBins,  // v0.8.18: Use per-bucket bytes!
     wall_seconds: f64,
 ) -> anyhow::Result<()> {
     for (bucket_idx, hist) in accumulators.iter().enumerate() {
@@ -3146,17 +3207,17 @@ fn collect_op_rows(
         let p99_us = hist.value_at_quantile(0.99) as f64;
         let max_us = hist.max() as f64;
         
-        // Calculate average bytes (approximate - we don't track per-bucket bytes in distributed mode)
-        let avg_bytes = if total_ops > 0 {
-            total_bytes as f64 / total_ops as f64
+        // v0.8.18: Use actual per-bucket bytes from merged SizeBins (NOT estimated!)
+        let (bucket_ops, bucket_bytes) = merged_bins.by_bucket.get(&bucket_idx).copied().unwrap_or((0, 0));
+        let avg_bytes = if bucket_ops > 0 {
+            bucket_bytes as f64 / bucket_ops as f64
         } else {
             0.0
         };
         
         // Calculate throughput
         let ops_per_sec = count as f64 / wall_seconds;
-        let bucket_bytes = count as f64 * avg_bytes;  // Approximation
-        let throughput_mibps = (bucket_bytes / 1_048_576.0) / wall_seconds;
+        let throughput_mibps = (bucket_bytes as f64 / 1_048_576.0) / wall_seconds;
         
         let row = format!(
             "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
