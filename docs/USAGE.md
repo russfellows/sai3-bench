@@ -15,7 +15,14 @@ sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed 
 
 ## Performance Logging (perf_log)
 
-The perf_log feature captures time-series performance metrics at configurable intervals (default 1 second). This provides detailed visibility into performance trends during test execution.
+**v0.8.19+**: Performance logging is **always enabled** with **precise 1-second intervals** (±1ms accuracy). No configuration needed!
+
+The perf_log feature captures time-series performance metrics with exact 1-second timing during test execution, providing detailed visibility into performance trends.
+
+**Timing Precision** (v0.8.19):
+- Perf_log updates: Exactly 1000ms intervals using dedicated timer with `MissedTickBehavior::Burst`
+- Display updates: 500ms intervals for responsive feedback (independent of perf_log timing)
+- All perf_log files (aggregate + per-agent) use synchronized timestamps
 
 **Format**: TSV (tab-separated values) with 31 columns (v0.8.17+)
 
@@ -27,14 +34,7 @@ The perf_log feature captures time-series performance metrics at configurable in
 - CPU metrics: user_pct, system_pct, iowait_pct
 - Error tracking: errors
 
-**Enable in config**:
-```yaml
-perf_log:
-  enabled: true
-  interval: 1  # seconds
-```
-
-**Output files**:
+**Output files** (automatically created):
 - Standalone mode: `results/perf_log.tsv`
 - Distributed mode:
   - Per-agent: `results/agents/{agent-id}/perf_log.tsv` (accurate percentiles)

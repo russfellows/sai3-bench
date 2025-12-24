@@ -182,6 +182,16 @@ pub const PROGRESS_STATS_UPDATE_INTERVAL_SECS: f64 = 0.5;
 /// User can override via config: perf_log.interval
 pub const DEFAULT_PERF_LOG_INTERVAL_SECS: u64 = 1;
 
+/// Controller perf-log update interval (milliseconds)
+/// v0.8.19: Always 1000ms for precise timing - uses dedicated timer with MissedTickBehavior::Burst
+/// This ensures perf_log.tsv entries are written at EXACTLY 1-second intervals
+pub const CONTROLLER_PERF_LOG_INTERVAL_MS: u64 = 1000;
+
+/// Controller display update interval (milliseconds)
+/// v0.8.19: Display updates (console, progress bar) use cached aggregate from perf_log timer
+/// This can be faster than perf_log updates without affecting precision
+pub const CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS: u64 = 500;
+
 /// Perf-log flush interval (10 seconds)
 /// Ensures data is written to disk periodically to minimize data loss on crash
 pub const PERF_LOG_FLUSH_INTERVAL_SECS: u64 = 10;

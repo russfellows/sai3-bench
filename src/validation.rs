@@ -221,6 +221,21 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         if prepare.post_prepare_delay > 0 {
             println!("│ Post-Prepare Delay: {}s (eventual consistency wait)", prepare.post_prepare_delay);
         }
+        
+        // v0.8.19: Warn if skip_verification=true and workload has GET operations
+        if prepare.skip_verification {
+            // Check if any workload operation is a GET
+            let has_get_ops = config.workload.iter().any(|w| matches!(w.spec, crate::config::OpSpec::Get { .. }));
+            if has_get_ops {
+                println!("│");
+                println!("│ ⚠️  WARNING: skip_verification=true but workload has GET operations");
+                println!("│     Objects will NOT be created during prepare phase!");
+                println!("│     GET operations will fail unless objects exist from a previous run.");
+                println!("│");
+                println!("│     To fix: Set skip_verification=false (default) to create objects");
+            }
+        }
+        
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
     }
