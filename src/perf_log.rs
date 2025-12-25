@@ -39,6 +39,32 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use crate::constants::PERF_LOG_HEADER;
 use crate::live_stats::WorkloadStage;
 
+/// Parameters for compute_delta to avoid too many function arguments (v0.8.19)
+#[derive(Debug, Clone)]
+pub struct PerfMetrics {
+    pub get_ops: u64,
+    pub get_bytes: u64,
+    pub put_ops: u64,
+    pub put_bytes: u64,
+    pub meta_ops: u64,
+    pub errors: u64,
+    pub get_mean_us: u64,
+    pub get_p50_us: u64,
+    pub get_p90_us: u64,
+    pub get_p99_us: u64,
+    pub put_mean_us: u64,
+    pub put_p50_us: u64,
+    pub put_p90_us: u64,
+    pub put_p99_us: u64,
+    pub meta_mean_us: u64,
+    pub meta_p50_us: u64,
+    pub meta_p90_us: u64,
+    pub meta_p99_us: u64,
+    pub cpu_user_percent: f64,
+    pub cpu_system_percent: f64,
+    pub cpu_iowait_percent: f64,
+}
+
 /// Performance log entry representing metrics for a single interval
 #[derive(Debug, Clone)]
 pub struct PerfLogEntry {
@@ -277,35 +303,12 @@ impl PerfLogDeltaTracker {
     /// 
     /// Returns a PerfLogEntry with delta values (ops/bytes in this interval)
     /// and computed rates (IOPS, MB/s).
+    /// 
+    /// v0.8.19: Refactored to use PerfMetrics struct to reduce argument count
     pub fn compute_delta(
         &mut self,
-        // Agent identifier
         agent_id: &str,
-        // Current cumulative values
-        get_ops: u64,
-        get_bytes: u64,
-        put_ops: u64,
-        put_bytes: u64,
-        meta_ops: u64,
-        errors: u64,
-        // Latency percentiles (from current interval's histogram)
-        get_mean_us: u64,
-        get_p50_us: u64,
-        get_p90_us: u64,
-        get_p99_us: u64,
-        put_mean_us: u64,
-        put_p50_us: u64,
-        put_p90_us: u64,
-        put_p99_us: u64,
-        meta_mean_us: u64,
-        meta_p50_us: u64,
-        meta_p90_us: u64,
-        meta_p99_us: u64,
-        // CPU utilization
-        cpu_user_percent: f64,
-        cpu_system_percent: f64,
-        cpu_iowait_percent: f64,
-        // Stage info
+        metrics: &PerfMetrics,
         stage: WorkloadStage,
         stage_name: String,
     ) -> PerfLogEntry {
@@ -327,12 +330,12 @@ impl PerfLogDeltaTracker {
             .max(0.001); // Prevent division by zero
         
         // Calculate deltas
-        let delta_get_ops = get_ops.saturating_sub(self.prev_get_ops);
-        let delta_get_bytes = get_bytes.saturating_sub(self.prev_get_bytes);
-        let delta_put_ops = put_ops.saturating_sub(self.prev_put_ops);
-        let delta_put_bytes = put_bytes.saturating_sub(self.prev_put_bytes);
-        let delta_meta_ops = meta_ops.saturating_sub(self.prev_meta_ops);
-        let delta_errors = errors.saturating_sub(self.prev_errors);
+        let delta_get_ops = metrics.get_ops.saturating_sub(self.prev_get_ops);
+        let delta_get_bytes = metrics.get_bytes.saturating_sub(self.prev_get_bytes);
+        let delta_put_ops = metrics.put_ops.saturating_sub(self.prev_put_ops);
+        let delta_put_bytes = metrics.put_bytes.saturating_sub(self.prev_put_bytes);
+        let delta_meta_ops = metrics.meta_ops.saturating_sub(self.prev_meta_ops);
+        let delta_errors = metrics.errors.saturating_sub(self.prev_errors);
         
         // Calculate rates
         let get_iops = delta_get_ops as f64 / interval_s;
@@ -347,12 +350,12 @@ impl PerfLogDeltaTracker {
             .unwrap_or(false);
         
         // Update previous values
-        self.prev_get_ops = get_ops;
-        self.prev_get_bytes = get_bytes;
-        self.prev_put_ops = put_ops;
-        self.prev_put_bytes = put_bytes;
-        self.prev_meta_ops = meta_ops;
-        self.prev_errors = errors;
+        self.prev_get_ops = metrics.get_ops;
+        self.prev_get_bytes = metrics.get_bytes;
+        self.prev_put_ops = metrics.put_ops;
+        self.prev_put_bytes = metrics.put_bytes;
+        self.prev_meta_ops = metrics.meta_ops;
+        self.prev_errors = metrics.errors;
         self.prev_timestamp = Some(now);
         
         PerfLogEntry {
@@ -365,27 +368,27 @@ impl PerfLogDeltaTracker {
             get_bytes: delta_get_bytes,
             get_iops,
             get_mbps,
-            get_mean_us,
-            get_p50_us,
-            get_p90_us,
-            get_p99_us,
+            get_mean_us: metrics.get_mean_us,
+            get_p50_us: metrics.get_p50_us,
+            get_p90_us: metrics.get_p90_us,
+            get_p99_us: metrics.get_p99_us,
             put_ops: delta_put_ops,
             put_bytes: delta_put_bytes,
             put_iops,
             put_mbps,
-            put_mean_us,
-            put_p50_us,
-            put_p90_us,
-            put_p99_us,
+            put_mean_us: metrics.put_mean_us,
+            put_p50_us: metrics.put_p50_us,
+            put_p90_us: metrics.put_p90_us,
+            put_p99_us: metrics.put_p99_us,
             meta_ops: delta_meta_ops,
             meta_iops,
-            meta_mean_us,
-            meta_p50_us,
-            meta_p90_us,
-            meta_p99_us,
-            cpu_user_percent,
-            cpu_system_percent,
-            cpu_iowait_percent,
+            meta_mean_us: metrics.meta_mean_us,
+            meta_p50_us: metrics.meta_p50_us,
+            meta_p90_us: metrics.meta_p90_us,
+            meta_p99_us: metrics.meta_p99_us,
+            cpu_user_percent: metrics.cpu_user_percent,
+            cpu_system_percent: metrics.cpu_system_percent,
+            cpu_iowait_percent: metrics.cpu_iowait_percent,
             errors: delta_errors,
             is_warmup,
         }
@@ -553,15 +556,18 @@ mod tests {
         tracker.start(None);
         
         // First interval: 100 ops, 100KB
+        let metrics1 = PerfMetrics {
+            get_ops: 100, get_bytes: 102400,
+            put_ops: 0, put_bytes: 0,
+            meta_ops: 0, errors: 0,
+            get_mean_us: 500, get_p50_us: 1000, get_p90_us: 3000, get_p99_us: 5000,
+            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
+            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
+            cpu_user_percent: 25.0, cpu_system_percent: 10.0, cpu_iowait_percent: 5.0,
+        };
         let entry1 = tracker.compute_delta(
             "agent-1",
-            100, 102400,  // get
-            0, 0,         // put
-            0, 0,         // meta, errors
-            1000, 3000, 5000,   // get latencies (p50, p90, p99)
-            0, 0, 0,            // put latencies
-            0, 0, 0,            // meta latencies
-            25.0, 10.0, 5.0,    // cpu (user, system, iowait)
+            &metrics1,
             WorkloadStage::Workload,
             String::new(),
         );
@@ -573,15 +579,18 @@ mod tests {
         
         // Second interval: 250 ops total (delta = 150)
         std::thread::sleep(std::time::Duration::from_millis(10));
+        let metrics2 = PerfMetrics {
+            get_ops: 250, get_bytes: 256000,
+            put_ops: 0, put_bytes: 0,
+            meta_ops: 0, errors: 0,
+            get_mean_us: 550, get_p50_us: 1100, get_p90_us: 3500, get_p99_us: 5500,
+            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
+            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
+            cpu_user_percent: 30.0, cpu_system_percent: 12.0, cpu_iowait_percent: 8.0,
+        };
         let entry2 = tracker.compute_delta(
             "agent-1",
-            250, 256000,  // get
-            0, 0,         // put
-            0, 0,         // meta, errors
-            1100, 3500, 5500,   // get latencies
-            0, 0, 0,            // put latencies
-            0, 0, 0,            // meta latencies
-            30.0, 12.0, 8.0,    // cpu
+            &metrics2,
             WorkloadStage::Workload,
             String::new(),
         );
@@ -596,23 +605,39 @@ mod tests {
         tracker.start(Some(Duration::from_millis(50)));
         
         // During warmup
+        let metrics1 = PerfMetrics {
+            get_ops: 100, get_bytes: 102400,
+            put_ops: 0, put_bytes: 0,
+            meta_ops: 0, errors: 0,
+            get_mean_us: 500, get_p50_us: 1000, get_p90_us: 3000, get_p99_us: 5000,
+            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
+            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
+            cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0,
+        };
         let entry1 = tracker.compute_delta(
             "local",
-            100, 102400, 0, 0, 0, 0,
-            1000, 3000, 5000, 0, 0, 0, 0, 0, 0,
-            0.0, 0.0, 0.0,  // cpu
-            WorkloadStage::Workload, String::new(),
+            &metrics1,
+            WorkloadStage::Workload,
+            String::new(),
         );
         assert!(entry1.is_warmup);
         
         // After warmup
         std::thread::sleep(std::time::Duration::from_millis(60));
+        let metrics2 = PerfMetrics {
+            get_ops: 200, get_bytes: 204800,
+            put_ops: 0, put_bytes: 0,
+            meta_ops: 0, errors: 0,
+            get_mean_us: 500, get_p50_us: 1000, get_p90_us: 3000, get_p99_us: 5000,
+            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
+            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
+            cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0,
+        };
         let entry2 = tracker.compute_delta(
             "local",
-            200, 204800, 0, 0, 0, 0,
-            1000, 3000, 5000, 0, 0, 0, 0, 0, 0,
-            0.0, 0.0, 0.0,  // cpu
-            WorkloadStage::Workload, String::new(),
+            &metrics2,
+            WorkloadStage::Workload,
+            String::new(),
         );
         assert!(!entry2.is_warmup);
     }

@@ -6,6 +6,57 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.19] - 2025-12-24
+
+### Fixed
+
+- **CRITICAL: Controller aggregator not including final stats from agents**
+  - **Impact**: Controller reported approximately 1/N performance with N agents (e.g., 1/4 performance with 4 agents)
+  - **Root cause**: When agents completed, final LiveStats message was stored in agent_summaries for TSV persistence but never added to live aggregator HashMap
+  - **Symptom**: Live aggregate stats (displayed during execution and in perf_log.tsv) showed second-to-last update instead of final cumulative totals from each agent
+  - **Solution**: Call `aggregator.update(stats.clone())` BEFORE `mark_completed()` to include final counts in aggregation
+  - **Affected versions**: v0.8.18 only (regression introduced with SizeBins changes)
+  - **Detection method**: User noticed storage system reported 4x higher performance than controller output with 4 agents
+  - **File**: `src/bin/controller.rs` line ~2050
+
+- **CRITICAL: Race condition causing 1/4 throughput display during execution**
+  - **Impact**: During distributed execution, controller displayed ~25% of actual throughput (e.g., 3.60 GiB/s when storage reported 15 GiB/s)
+  - **Root cause**: Two async branches calling `LiveStatsAggregator::aggregate()` at different intervals
+    - Display update: Every 100ms (line 2076)
+    - Perf_log timer: At configured interval (line 2169)
+    - Each `aggregate()` call updated `previous_aggregate`, corrupting windowed delta calculations
+  - **Symptom**: Throughput display dropped to 1/4 of actual during execution (at 700/1200 seconds), not at completion
+  - **Solution**: Separated perf_log into dedicated precise timer, display uses cached aggregate
+  - **Files modified**: `src/bin/controller.rs` (lines 1764-2300)
+
+- **Console_log.txt and perf_log.tsv value mismatch**
+  - **Problem**: Display and perf_log showed different throughput values (e.g., 8.26 GiB/s vs 4.20 GiB/s at same timestamp)
+  - **Root cause**: Two independent windowing calculations - `LiveStatsAggregator` and `PerfLogDeltaTracker` maintained separate delta state
+  - **Solution**: Create `PerfLogEntry` directly from windowed values already computed by `aggregate()` for controller aggregate
+  - **Result**: Both now use identical windowed calculation, values match within rounding errors
+  - **Files modified**: `src/bin/controller.rs` (lines 2133-2200)
+
+### Added
+
+- **Three-tier warning system for skip_verification configuration errors**
+  - Prevents frustrating workload failures when users forget objects don't exist with `skip_verification=true`
+  - **Tier 1 - Config validation warning**: Displayed during `--dry-run` and startup when `prepare.skip_verification=true` combined with GET operations
+  - **Tier 2 - Pre-flight object check**: Lists objects from GET paths before workload starts; prints prominent warning with 5-second countdown if none found
+  - **Tier 3 - Early error detection**: Spawns monitoring task that checks error rate after 5 seconds of execution; warns if >90% errors (indicates missing objects)
+  - **User feedback**: "I myself have run this multiple times, not realizing the setting meant I would not check for, or create objects"
+  - **Files modified**: `src/validation.rs` (config warning), `src/main.rs` (preflight check), `src/workload.rs` (early detection)
+
+### Changed
+
+- **Precise perf_log timing with independent display updates**
+  - **Perf_log**: Now uses dedicated timer with `MissedTickBehavior::Burst` for EXACTLY 1-second intervals (±1ms precision)
+  - **Display**: Independent 500ms updates using cached aggregate from perf_log timer (more responsive)
+  - **Configuration**: All timing constants moved to `src/constants.rs` (no more hard-coded values)
+    - `CONTROLLER_PERF_LOG_INTERVAL_MS = 1000` (perf_log precision)
+    - `CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS = 500` (display responsiveness)
+  - **Verification**: Perf_log timestamps show perfect 1000ms gaps, all three files (aggregate + per-agent) synchronized
+  - **Files modified**: `src/bin/controller.rs`, `src/constants.rs`
+
 ## [0.8.18] - 2025-12-23
 
 ### Fixed

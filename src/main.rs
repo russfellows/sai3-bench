@@ -32,6 +32,114 @@ use sai3_bench::workload::{
 };
 
 // -----------------------------------------------------------------------------
+// Pre-flight validation (v0.8.19)
+// -----------------------------------------------------------------------------
+
+/// Check if objects exist for GET operations when skip_verification=true
+/// This prevents running an entire workload only to discover all GETs fail
+async fn preflight_check_get_objects(
+    config: &Config,
+    _results_dir: &sai3_bench::results_dir::ResultsDir,
+) -> Result<()> {
+    // Only check if prepare phase exists and skip_verification=true
+    let Some(ref prepare_config) = config.prepare else {
+        return Ok(());  // No prepare phase, nothing to check
+    };
+    
+    if !prepare_config.skip_verification {
+        return Ok(());  // Objects will be created, no need to check
+    }
+    
+    // Check if workload has any GET operations
+    let get_operations: Vec<_> = config.workload.iter()
+        .filter_map(|w| {
+            if let sai3_bench::config::OpSpec::Get { path } = &w.spec {
+                Some(path.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    if get_operations.is_empty() {
+        return Ok(());  // No GET operations, nothing to check
+    }
+    
+    info!("Preflight check: Verifying objects exist for GET operations (skip_verification=true)");
+    
+    // Try to list a few objects from each GET path pattern
+    let target_uri = config.target.as_ref()
+        .ok_or_else(|| anyhow!("Target URI required for preflight check"))?;
+    
+    let mut any_objects_found = false;
+    let mut checked_patterns = Vec::new();
+    
+    for get_path in get_operations.iter().take(3) {  // Check up to 3 different patterns
+        // Construct full URI
+        let full_uri = if target_uri.ends_with('/') {
+            format!("{}{}", target_uri, get_path)
+        } else {
+            format!("{}/{}", target_uri, get_path)
+        };
+        
+        // Extract base path for listing (remove wildcard/glob patterns)
+        let list_prefix = full_uri.trim_end_matches('*')
+            .trim_end_matches('/')
+            .to_string();
+        
+        // Try to list up to 5 objects
+        match list_objects_multi_backend(&list_prefix).await {
+            Ok(objects) if !objects.is_empty() => {
+                any_objects_found = true;
+                info!("Preflight check: Found {} objects at {}", objects.len(), list_prefix);
+                break;  // Found objects, no need to check more patterns
+            }
+            Ok(_) => {
+                checked_patterns.push(list_prefix.clone());
+                info!("Preflight check: No objects found at {}", list_prefix);
+            }
+            Err(e) => {
+                warn!("Preflight check: Failed to list {}: {}", list_prefix, e);
+                checked_patterns.push(list_prefix);
+            }
+        }
+    }
+    
+    // If no objects were found, print prominent warning
+    if !any_objects_found {
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("⚠️  PREFLIGHT CHECK WARNING: No objects found for GET operations!");
+        eprintln!("{}", "=".repeat(80));
+        eprintln!();
+        eprintln!("Your config has skip_verification=true and GET operations, but no objects exist.");
+        eprintln!();
+        eprintln!("Checked locations:");
+        for pattern in &checked_patterns {
+            eprintln!("  - {}", pattern);
+        }
+        eprintln!();
+        eprintln!("Likely causes:");
+        eprintln!("  • skip_verification=true prevents object creation during prepare phase");
+        eprintln!("  • Objects were deleted from a previous run");
+        eprintln!("  • Wrong path patterns in workload operations");
+        eprintln!();
+        eprintln!("Recommendations:");
+        eprintln!("  • Set skip_verification=false (default) to create objects during prepare");
+        eprintln!("  • Run prepare phase separately first");
+        eprintln!("  • Verify target URI and paths match your storage");
+        eprintln!();
+        eprintln!("Workload will start in 5 seconds - press Ctrl+C to cancel...");
+        eprintln!("{}", "=".repeat(80));
+        eprintln!();
+        
+        // Give user 5 seconds to cancel
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+    
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // CLI definition
 // -----------------------------------------------------------------------------
 #[derive(Parser)]
@@ -1255,6 +1363,9 @@ fn run_workload(
             .context("Failed to finalize global operation logger")?;
     }
     
+    // v0.8.19: Preflight check - verify objects exist if skip_verification=true and workload has GET ops
+    rt.block_on(preflight_check_get_objects(&config, &results_dir))?;
+    
     // Run the workload using the configured processing mode
     let summary = if num_processes > 1 {
         // Multi-worker execution
@@ -1339,29 +1450,32 @@ fn run_workload(
                         .unwrap_or_default();
                     
                     let stats = tracker_for_task.snapshot();
+                    let metrics = sai3_bench::perf_log::PerfMetrics {
+                        get_ops: stats.get_ops,
+                        get_bytes: stats.get_bytes,
+                        put_ops: stats.put_ops,
+                        put_bytes: stats.put_bytes,
+                        meta_ops: stats.meta_ops,
+                        errors: 0,  // errors not tracked
+                        get_mean_us: stats.get_mean_us,
+                        get_p50_us: stats.get_p50_us,
+                        get_p90_us: stats.get_p90_us,
+                        get_p99_us: stats.get_p99_us,
+                        put_mean_us: stats.put_mean_us,
+                        put_p50_us: stats.put_p50_us,
+                        put_p90_us: stats.put_p90_us,
+                        put_p99_us: stats.put_p99_us,
+                        meta_mean_us: stats.meta_mean_us,
+                        meta_p50_us: stats.meta_p50_us,
+                        meta_p90_us: stats.meta_p90_us,
+                        meta_p99_us: stats.meta_p99_us,
+                        cpu_user_percent: cpu_util.user_percent,
+                        cpu_system_percent: cpu_util.system_percent,
+                        cpu_iowait_percent: cpu_util.iowait_percent,
+                    };
                     let entry = tracker_mut.compute_delta(
                         "standalone",
-                        stats.get_ops,
-                        stats.get_bytes,
-                        stats.put_ops,
-                        stats.put_bytes,
-                        stats.meta_ops,
-                        0,  // errors not tracked
-                        stats.get_mean_us,
-                        stats.get_p50_us,
-                        stats.get_p90_us,
-                        stats.get_p99_us,
-                        stats.put_mean_us,
-                        stats.put_p50_us,
-                        stats.put_p90_us,
-                        stats.put_p99_us,
-                        stats.meta_mean_us,
-                        stats.meta_p50_us,
-                        stats.meta_p90_us,
-                        stats.meta_p99_us,
-                        cpu_util.user_percent,
-                        cpu_util.system_percent,
-                        cpu_util.iowait_percent,
+                        &metrics,
                         sai3_bench::live_stats::WorkloadStage::Workload,
                         String::new(),
                     );

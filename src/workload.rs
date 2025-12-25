@@ -1535,6 +1535,51 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     // v0.7.13: Create error tracker for resilient error handling
     let error_tracker = ErrorTracker::new(cfg.error_handling.clone());
     
+    // v0.8.19: Early error detection for skip_verification issues
+    // Monitor error rate in first 5-10 seconds and warn if very high (indicates config problem)
+    if let Some(ref prepare) = cfg.prepare {
+        if prepare.skip_verification {
+            let has_get_ops = cfg.workload.iter().any(|op| matches!(op.spec, OpSpec::Get { .. }));
+            
+            if has_get_ops {
+                let error_tracker_clone = error_tracker.clone();
+                let ops_clone_for_early = live_ops.clone();
+                
+                tokio::spawn(async move {
+                    // Wait 5 seconds for workload warmup
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    
+                    let (errors, _rate) = error_tracker_clone.get_stats();
+                    let ops = ops_clone_for_early.load(Ordering::Relaxed);
+                    
+                    // Check if error rate > 90% (very high, likely config issue)
+                    if ops > 10 && errors > 0 {
+                        let error_rate_pct = (errors as f64 / ops as f64) * 100.0;
+                        
+                        if error_rate_pct > 90.0 {
+                            eprintln!("\n{}", "=".repeat(80));
+                            eprintln!("⚠️  WARNING: Very high error rate detected!");
+                            eprintln!("{}", "=".repeat(80));
+                            eprintln!("After 5 seconds: {} errors out of {} operations ({:.1}% error rate)",
+                                errors, ops, error_rate_pct);
+                            eprintln!();
+                            eprintln!("This usually means:");
+                            eprintln!("  • skip_verification=true is set, but objects don't exist");
+                            eprintln!("  • GET operations are trying to read non-existent objects");
+                            eprintln!();
+                            eprintln!("Recommended action:");
+                            eprintln!("  1. Stop this workload (Ctrl-C)");
+                            eprintln!("  2. Set skip_verification=false in your config");
+                            eprintln!("  3. Re-run to create objects during prepare phase");
+                            eprintln!("{}", "=".repeat(80));
+                            eprintln!();
+                        }
+                    }
+                });
+            }
+        }
+    }
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
