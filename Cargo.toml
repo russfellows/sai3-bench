@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.19"
+version = "0.8.20"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,11 +22,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio v0.9.25: Azure/GCS custom endpoint support, S3 force_path_style, CLI streaming progress
-# Key features: AZURE_STORAGE_ENDPOINT, GCS_ENDPOINT_URL env vars for local emulators/proxies
-# For local development, override with: s3dlio = { path = "../s3dlio" }
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
+# s3dlio v0.9.35: Hardware detection API, runtime NUMA/CPU affinity detection
+# Use local path for development (includes hardware module and streaming API)
+s3dlio = { path = "../s3dlio" }
+# s3dlio = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
+s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
+# s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", branch = "main" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

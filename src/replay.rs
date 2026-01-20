@@ -268,7 +268,8 @@ async fn execute_operation(op: &OpLogEntry, uri: &str) -> Result<()> {
         }
         OpType::PUT => {
             // Generate data with s3dlio (dedup=1, compress=1 for random)
-            let data = s3dlio::data_gen::generate_controlled_data(op.bytes as usize, 1, 1);
+            // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
+            let data = crate::data_gen_pool::generate_data_optimized(op.bytes as usize, 1, 1);
             workload::put_object_multi_backend(uri, &data).await?;
         }
         OpType::DELETE => {
