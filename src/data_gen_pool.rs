@@ -50,6 +50,8 @@ static GLOBAL_RNG_SEED: AtomicU64 = AtomicU64::new(0);
 /// 
 /// # Example
 /// ```rust
+/// use sai3_bench::data_gen_pool::set_global_rng_seed;
+/// 
 /// // At agent startup (distributed mode)
 /// set_global_rng_seed(Some("agent-1"));
 /// 

@@ -6,6 +6,31 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.20] - 2025-01-20
+
+### Changed
+
+- **Updated s3dlio dependency to v0.9.35**
+  - Integrated hardware detection API for automatic optimal configuration
+  - Per-run unique RNG seeding ensures non-repeating data patterns across distributed agents
+  - Leverages 51.09 GB/s data generation performance from s3dlio v0.9.35
+  - Zero-copy architecture with reduced memory overhead
+
+- **Hardware-aware data generation**
+  - Automatically detects NUMA nodes and CPU count at runtime
+  - Configures optimal parallelism for data generation without manual tuning
+  - Each workload run gets unique seed (agent_id + PID + nanosecond timestamp)
+  - Eliminates data pattern repetition in multi-run and distributed scenarios
+
+### Fixed
+
+- **PerfLogEntry struct compatibility**
+  - Added `get_mean_us`, `put_mean_us`, `meta_mean_us` fields to all test initializations
+  - Updated field count assertions from 28 to 31 columns
+  - Fixed doctest import in `set_global_rng_seed` example
+
+---
+
 ## [0.8.19] - 2025-12-24
 
 ### Fixed
