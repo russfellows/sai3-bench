@@ -451,6 +451,14 @@ impl Agent for AgentSvc {
         debug!("Agent index: {}/{}", agent_index, num_agents);
         debug!("Config YAML: {} bytes", config_yaml.len());
 
+        // CRITICAL: Initialize RNG seed for THIS RUN to ensure unique data generation
+        // This combines agent_id + PID + current nanosecond timestamp
+        // Each successive run will get a different timestamp = different data
+        sai3_bench::data_gen_pool::set_global_rng_seed(Some(&agent_id));
+        
+        // Print hardware detection info (helps diagnose performance issues)
+        sai3_bench::data_gen_pool::print_hardware_info();
+
         // Parse the YAML configuration
         let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
             .map_err(|e| {

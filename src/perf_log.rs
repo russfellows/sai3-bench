@@ -427,6 +427,7 @@ mod tests {
             get_bytes: 102400,
             get_iops: 100.0,
             get_mbps: 0.098,
+            get_mean_us: 800,
             get_p50_us: 1000,
             get_p90_us: 3000,
             get_p99_us: 5000,
@@ -434,11 +435,13 @@ mod tests {
             put_bytes: 51200,
             put_iops: 50.0,
             put_mbps: 0.049,
+            put_mean_us: 1500,
             put_p50_us: 2000,
             put_p90_us: 5000,
             put_p99_us: 8000,
             meta_ops: 10,
             meta_iops: 10.0,
+            meta_mean_us: 400,
             meta_p50_us: 500,
             meta_p90_us: 1500,
             meta_p99_us: 2000,
@@ -452,12 +455,12 @@ mod tests {
         let tsv = entry.to_tsv();
         let parts: Vec<&str> = tsv.split('\t').collect();
         
-        assert_eq!(parts.len(), 28);  // Updated column count with agent_id
+        assert_eq!(parts.len(), 31);  // Updated column count with mean_us fields
         assert_eq!(parts[0], "agent-1");
         assert_eq!(parts[1], "1733836800000");
         assert_eq!(parts[3], "Workload");
         assert_eq!(parts[4], "100");  // get_ops
-        assert_eq!(parts[27], "0");   // is_warmup
+        assert_eq!(parts[30], "0");   // is_warmup
     }
     
     #[test]
@@ -472,6 +475,7 @@ mod tests {
             get_bytes: 0,
             get_iops: 0.0,
             get_mbps: 0.0,
+            get_mean_us: 0,
             get_p50_us: 0,
             get_p90_us: 0,
             get_p99_us: 0,
@@ -479,11 +483,13 @@ mod tests {
             put_bytes: 0,
             put_iops: 0.0,
             put_mbps: 0.0,
+            put_mean_us: 0,
             put_p50_us: 0,
             put_p90_us: 0,
             put_p99_us: 0,
             meta_ops: 0,
             meta_iops: 0.0,
+            meta_mean_us: 0,
             meta_p50_us: 0,
             meta_p90_us: 0,
             meta_p99_us: 0,
@@ -516,6 +522,7 @@ mod tests {
             get_bytes: 102400,
             get_iops: 100.0,
             get_mbps: 0.1,
+            get_mean_us: 800,
             get_p50_us: 1000,
             get_p90_us: 3000,
             get_p99_us: 5000,
@@ -523,11 +530,13 @@ mod tests {
             put_bytes: 0,
             put_iops: 0.0,
             put_mbps: 0.0,
+            put_mean_us: 0,
             put_p50_us: 0,
             put_p90_us: 0,
             put_p99_us: 0,
             meta_ops: 0,
             meta_iops: 0.0,
+            meta_mean_us: 0,
             meta_p50_us: 0,
             meta_p90_us: 0,
             meta_p99_us: 0,
@@ -645,8 +654,8 @@ mod tests {
     #[test]
     fn test_header_format() {
         let parts: Vec<&str> = PERF_LOG_HEADER.split('\t').collect();
-        assert_eq!(parts.len(), 28);  // Updated column count with agent_id
+        assert_eq!(parts.len(), 31);  // Updated column count with mean_us fields
         assert_eq!(parts[0], "agent_id");
-        assert_eq!(parts[27], "is_warmup");
+        assert_eq!(parts[30], "is_warmup");
     }
 }

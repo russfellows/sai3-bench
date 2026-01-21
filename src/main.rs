@@ -398,6 +398,11 @@ fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
     
+    // Print hardware detection info to help users understand performance
+    if cli.verbose > 0 {
+        sai3_bench::data_gen_pool::print_hardware_info();
+    }
+    
     // Initialize operation logger if requested
     if let Some(ref op_log_path) = cli.op_log {
         info!("Initializing operation logger: {}", op_log_path.display());

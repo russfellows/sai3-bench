@@ -13,6 +13,7 @@ pub mod config;
 pub mod cleanup; // Cleanup operations for prepared objects (v0.8.7+)
 pub mod constants; // Central constants and defaults (v0.8.0+)
 pub mod cpu_monitor;
+pub mod data_gen_pool; // Thread-local data generator pool for 50+ GB/s performance (v0.8.20+)
 pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)

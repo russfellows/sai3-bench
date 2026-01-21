@@ -1076,10 +1076,11 @@ async fn prepare_sequential(
                         let _permit = sem2.acquire_owned().await.unwrap();
                         
                         // Generate data using s3dlio's controlled data generation
+                        // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
                         let data = match fill {
                             FillPattern::Zero => vec![0u8; size as usize],
                             FillPattern::Random => {
-                                s3dlio::generate_controlled_data(size as usize, dedup, compress)
+                                crate::data_gen_pool::generate_data_optimized(size as usize, dedup, compress).to_vec()
                             }
                             FillPattern::Prand => {
                                 s3dlio::generate_controlled_data_prand(size as usize, dedup, compress)
@@ -1682,10 +1683,11 @@ async fn prepare_parallel(
             let _permit = sem2.acquire_owned().await.unwrap();
             
             // Generate data using s3dlio's controlled data generation
+            // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             let data = match task.fill {
                 FillPattern::Zero => vec![0u8; task.size as usize],
                 FillPattern::Random => {
-                    s3dlio::generate_controlled_data(task.size as usize, task.dedup, task.compress)
+                    crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress).to_vec()
                 }
                 FillPattern::Prand => {
                     s3dlio::generate_controlled_data_prand(task.size as usize, task.dedup, task.compress)
@@ -2199,11 +2201,12 @@ pub async fn create_directory_tree(
                             // This file belongs to us - create it
                             
                             // Generate file data using EXACT same pattern as regular prepare_objects
+                            // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
                             let size = size_generator.generate();
                             let data = match fill_pattern {
                                 FillPattern::Zero => vec![0u8; size as usize],
                                 FillPattern::Random => {
-                                    s3dlio::generate_controlled_data(size as usize, dedup_factor, compress_factor)
+                                    crate::data_gen_pool::generate_data_optimized(size as usize, dedup_factor, compress_factor).to_vec()
                                 }
                                 FillPattern::Prand => {
                                     s3dlio::generate_controlled_data_prand(size as usize, dedup_factor, compress_factor)

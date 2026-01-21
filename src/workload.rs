@@ -1236,6 +1236,11 @@ where
 pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Summary> {
     info!("Starting workload execution: duration={:?}, concurrency={}", cfg.duration, cfg.concurrency);
     
+    // CRITICAL: Initialize RNG seed for THIS RUN
+    // Combines PID + nanosecond timestamp to ensure each run generates different data
+    // This prevents successive runs from generating identical data patterns
+    crate::data_gen_pool::set_global_rng_seed(None);
+    
     let start = Instant::now();
     let deadline = start + cfg.duration;
 
@@ -1720,7 +1725,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             (full_uri, sz)
                         };
                         
-                        let buf = s3dlio::generate_controlled_data(
+                        // OPTIMIZED: Use cached data generator to reuse thread pool (50+ GB/s)
+                        // Previously: s3dlio::generate_controlled_data() created new pool each call (~1-2 GB/s)
+                        let buf = crate::data_gen_pool::generate_data_optimized(
                             sz as usize,
                             *dedup_factor,
                             *compress_factor
