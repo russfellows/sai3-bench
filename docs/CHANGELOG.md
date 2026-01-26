@@ -6,6 +6,35 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.21] - 2026-01-26
+
+### Changed
+
+- **BREAKING: Zero-copy API migration for s3dlio v0.9.36 compatibility**
+  - Updated all PUT operations to accept `Bytes` instead of `&[u8]` (eliminates hidden memcpy)
+  - Updated all GET operations to return `Bytes` instead of `Vec<u8>` (true zero-copy throughout)
+  - Maintains s3dlio's zero-copy architecture: no data copies from storage backend to application
+
+- **Enhanced data generation with fill_controlled_data()**
+  - Replaced deprecated `generate_controlled_data_prand()` with high-performance `fill_controlled_data()`
+  - Performance improvement: 86-163 GB/s (parallel) vs 3-4 GB/s (old sequential method)
+  - Zero-copy workflow: `BytesMut` → in-place fill → `freeze()` to `Bytes`
+  - All FillPattern variants now use zero-copy: Zero, Random, and Prand
+
+- **Updated s3dlio dependency to v0.9.36**
+  - API breaking change: `ObjectStore::put()` now takes `Bytes` for true zero-copy
+  - New `fill_controlled_data()` function for in-place buffer filling
+  - Deprecated `generate_controlled_data_prand()` removed from hot paths
+
+### Performance Impact
+
+- **Data generation**: 20-50x faster (86-163 GB/s vs 3-4 GB/s)
+- **PUT operations**: Eliminated hidden `.to_vec()` copy (s3dlio v0.9.35 → v0.9.36 migration)
+- **GET operations**: Eliminated all `.to_vec()` conversions (returned `Bytes` only used for `.len()`)
+- **Memory efficiency**: No intermediate Vec<u8> allocations in hot path
+
+---
+
 ## [0.8.20] - 2025-01-20
 
 ### Changed

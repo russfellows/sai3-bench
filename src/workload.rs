@@ -337,7 +337,7 @@ pub fn build_full_uri(backend: BackendType, base_uri: &str, key: &str) -> String
 /// - file:// whole-file:    0.57 GiB/s (acceptable, keep simple)
 /// - direct:// whole-file:  0.01 GiB/s (CATASTROPHIC - 76 seconds!)
 /// - direct:// 4M chunks:   1.73 GiB/s (OPTIMAL - 0.6 seconds, 173x faster!)
-pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation starting for URI: {}", uri);
     
     let is_direct_io = uri.starts_with("direct://");
@@ -396,7 +396,7 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
     };
     
     trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
-    Ok(bytes.to_vec())
+    Ok(bytes)  // Zero-copy: return Bytes directly
 }
 
 /// Chunked read implementation for optimal direct:// performance
@@ -410,7 +410,7 @@ pub async fn get_object_multi_backend(uri: &str) -> anyhow::Result<Vec<u8>> {
 /// 
 /// # Safety
 /// This function should NEVER be called for cloud storage URIs.
-async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>> {
+async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<bytes::Bytes> {
     // Safety check: Ensure this is only called for direct:// URIs
     if !uri.starts_with("direct://") {
         bail!("INTERNAL ERROR: get_object_chunked called for non-direct:// URI: {}", uri);
@@ -419,7 +419,8 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
     let store = create_store_with_logger(uri)?;
     trace!("Chunked read starting for URI: {}, size: {} bytes", uri, file_size);
     
-    let mut result = Vec::with_capacity(file_size as usize);
+    // Use BytesMut for zero-copy assembly
+    let mut result = bytes::BytesMut::with_capacity(file_size as usize);
     let mut offset = 0u64;
     let chunk_size = DIRECT_IO_CHUNK_SIZE as u64;
     
@@ -439,17 +440,18 @@ async fn get_object_chunked(uri: &str, file_size: u64) -> anyhow::Result<Vec<u8>
     
     trace!("Chunked read completed: {} bytes in {} chunks", result.len(), 
            file_size.div_ceil(chunk_size));
-    Ok(result)
+    Ok(result.freeze())  // Zero-copy: BytesMut→Bytes
 
 }
 
-/// Multi-backend PUT operation using ObjectStore trait
-pub async fn put_object_multi_backend(uri: &str, data: &[u8]) -> anyhow::Result<()> {
+/// Multi-backend PUT operation using ObjectStore trait (zero-copy with Bytes)
+pub async fn put_object_multi_backend(uri: &str, data: bytes::Bytes) -> anyhow::Result<()> {
     trace!("PUT operation starting for URI: {}, {} bytes", uri, data.len());
     let store = create_store_with_logger(uri)?;
     trace!("ObjectStore created successfully for URI: {}", uri);
     
     // Use ObjectStore put method with full URI (s3dlio handles URI parsing)
+    // Zero-copy: Bytes is Arc-like, clone() just increments refcount
     store.put(uri, data).await
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
     
@@ -567,7 +569,7 @@ async fn get_object_cached(
     cache: &StoreCache,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
@@ -575,13 +577,13 @@ async fn get_object_cached(
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
     
     trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
-    Ok(bytes.to_vec())
+    Ok(bytes)  // Zero-copy: return Bytes directly
 }
 
 /// Internal PUT operation with cached store (for performance-critical workloads)
 async fn put_object_cached(
     uri: &str,
-    data: &[u8],
+    data: bytes::Bytes,  // Zero-copy: Bytes instead of &[u8]
     cache: &StoreCache,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
@@ -589,7 +591,7 @@ async fn put_object_cached(
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
     let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
     
-    store.put(uri, data).await
+    store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
     
     trace!("PUT operation completed successfully for URI: {}", uri);
@@ -690,18 +692,18 @@ async fn rmdir_with_config(
 // -----------------------------------------------------------------------------
 
 /// GET operation WITHOUT logging (for replay)
-pub async fn get_object_no_log(uri: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn get_object_no_log(uri: &str) -> anyhow::Result<bytes::Bytes> {
     let store = create_store_for_uri(uri)?;
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
-    // Convert Bytes to Vec<u8> for compatibility
-    Ok(bytes.to_vec())
+    // Zero-copy: return Bytes directly
+    Ok(bytes)
 }
 
 /// PUT operation WITHOUT logging (for replay)
-pub async fn put_object_no_log(uri: &str, data: &[u8]) -> anyhow::Result<()> {
+pub async fn put_object_no_log(uri: &str, data: bytes::Bytes) -> anyhow::Result<()> {
     let store = create_store_for_uri(uri)?;
-    store.put(uri, data).await
+    store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))
 }
 
@@ -771,17 +773,17 @@ pub fn get_or_create_store(
 }
 
 /// GET operation with cached store (for replay - no per-call store creation)
-pub async fn get_object_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<Vec<u8>> {
+pub async fn get_object_cached_simple(uri: &str, cache: &StoreCache) -> anyhow::Result<bytes::Bytes> {
     let store = get_or_create_store(uri, cache)?;
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
-    Ok(bytes.to_vec())
+    Ok(bytes)  // Zero-copy: return Bytes directly
 }
 
 /// PUT operation with cached store (for replay - no per-call store creation)
-pub async fn put_object_cached_simple(uri: &str, data: &[u8], cache: &StoreCache) -> anyhow::Result<()> {
+pub async fn put_object_cached_simple(uri: &str, data: bytes::Bytes, cache: &StoreCache) -> anyhow::Result<()> {
     let store = get_or_create_store(uri, cache)?;
-    store.put(uri, data).await
+    store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))
 }
 
@@ -1745,7 +1747,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let t0 = Instant::now();
                                 put_object_cached(
                                     &uri_for_closure,
-                                    &buf,
+                                    buf.clone(),  // Clone is cheap: Bytes is Arc-like
                                     &store_cache_put,
                                     range_engine.as_ref(),
                                     page_cache,

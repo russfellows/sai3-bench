@@ -1077,13 +1077,21 @@ async fn prepare_sequential(
                         
                         // Generate data using s3dlio's controlled data generation
                         // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
-                        let data = match fill {
-                            FillPattern::Zero => vec![0u8; size as usize],
+                        let data: bytes::Bytes = match fill {
+                            FillPattern::Zero => {
+                                let buf = bytes::BytesMut::zeroed(size as usize);
+                                // Buffer already zeroed, just freeze to Bytes
+                                buf.freeze()
+                            }
                             FillPattern::Random => {
-                                crate::data_gen_pool::generate_data_optimized(size as usize, dedup, compress).to_vec()
+                                // Already returns Bytes - zero-copy
+                                crate::data_gen_pool::generate_data_optimized(size as usize, dedup, compress)
                             }
                             FillPattern::Prand => {
-                                s3dlio::generate_controlled_data_prand(size as usize, dedup, compress)
+                                // Use fill_controlled_data() for in-place generation (86-163 GB/s)
+                                let mut buf = bytes::BytesMut::zeroed(size as usize);
+                                s3dlio::fill_controlled_data(&mut buf, dedup, compress);
+                                buf.freeze()
                             }
                         };
                         
@@ -1098,9 +1106,9 @@ async fn prepare_sequential(
                             || {
                                 let store_ref = store.clone();
                                 let uri_ref = uri_for_retry.clone();
-                                let data_ref = data.clone();
+                                let data_ref = data.clone();  // Cheap: Bytes is Arc-like
                                 async move {
-                                    store_ref.put(&uri_ref, &data_ref).await
+                                    store_ref.put(&uri_ref, data_ref).await  // Zero-copy: Bytes passed directly
                                         .map_err(|e| anyhow::anyhow!("{}", e))
                                 }
                             }
@@ -1685,12 +1693,19 @@ async fn prepare_parallel(
             // Generate data using s3dlio's controlled data generation
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             let data = match task.fill {
-                FillPattern::Zero => vec![0u8; task.size as usize],
+                FillPattern::Zero => {
+                    let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                    buf.freeze()  // Zero-copy: BytesMut→Bytes
+                }
                 FillPattern::Random => {
-                    crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress).to_vec()
+                    // Already returns Bytes - zero-copy
+                    crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
                 }
                 FillPattern::Prand => {
-                    s3dlio::generate_controlled_data_prand(task.size as usize, task.dedup, task.compress)
+                    #[allow(unused_mut)]  // Suppress false warning - mut required for fill_controlled_data
+                    let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                    s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
+                    buf.freeze()
                 }
             };
             
@@ -1709,9 +1724,9 @@ async fn prepare_parallel(
                 || {
                     let store_ref = store.clone();
                     let uri_ref = uri_for_retry.clone();
-                    let data_ref = data.clone();
+                    let data_ref = data.clone();  // Cheap: Bytes is Arc-like
                     async move {
-                        store_ref.put(&uri_ref, &data_ref).await
+                        store_ref.put(&uri_ref, data_ref).await  // Zero-copy: Bytes passed directly
                             .map_err(|e| anyhow::anyhow!("{}", e))
                     }
                 }
@@ -2204,17 +2219,25 @@ pub async fn create_directory_tree(
                             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
                             let size = size_generator.generate();
                             let data = match fill_pattern {
-                                FillPattern::Zero => vec![0u8; size as usize],
+                                FillPattern::Zero => {
+                                    let mut buf = bytes::BytesMut::zeroed(size as usize);
+                                    buf.freeze()  // Zero-copy: BytesMut→Bytes
+                                }
                                 FillPattern::Random => {
-                                    crate::data_gen_pool::generate_data_optimized(size as usize, dedup_factor, compress_factor).to_vec()
+                                    // Already returns Bytes - zero-copy
+                                    crate::data_gen_pool::generate_data_optimized(size as usize, dedup_factor, compress_factor)
                                 }
                                 FillPattern::Prand => {
-                                    s3dlio::generate_controlled_data_prand(size as usize, dedup_factor, compress_factor)
+                                    // Zero-copy data generation using BytesMut→Bytes pattern
+                                    #[allow(unused_mut)]  // Suppress false warning - mut required for fill_controlled_data
+                                    let mut buf = bytes::BytesMut::zeroed(size as usize);
+                                    s3dlio::fill_controlled_data(&mut buf, dedup_factor, compress_factor);
+                                    buf.freeze()
                                 }
                             };
                             
                             let put_start = Instant::now();
-                            store.put(&file_uri, &data).await
+                            store.put(&file_uri, data).await  // Zero-copy: Bytes passed directly
                                 .with_context(|| format!("Failed to create file: {}", file_uri))?;
                             let latency = put_start.elapsed();
                             

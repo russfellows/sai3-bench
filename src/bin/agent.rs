@@ -402,20 +402,22 @@ impl Agent for AgentSvc {
         let keys: Vec<String> = (0..objects as usize)
             .map(|i| format!("{}{}obj_{}", base_uri, prefix, i))
             .collect();
-        let data = vec![0u8; object_size as usize];
+        // Generate zero-filled data for all objects
+        // Convert to Bytes for zero-copy semantics
+        let data = bytes::Bytes::from(vec![0u8; object_size as usize]);
 
         let started = Instant::now();
         let sem = Arc::new(Semaphore::new(concurrency as usize));
         let mut futs = FuturesUnordered::new();
         
         for full_uri in keys {
-            let d = data.clone();
+            let d = data.clone();  // Clone is cheap: Bytes is Arc-like
             let sem2 = sem.clone();
             futs.push(tokio::spawn(async move {
                 let _p = sem2.acquire_owned().await.unwrap();
                 // Use ObjectStore pattern with full URI
                 let store = store_for_uri(&full_uri).map_err(|e| anyhow::anyhow!(e))?;
-                store.put(&full_uri, &d).await?;
+                store.put(&full_uri, d).await?;  // Zero-copy: Bytes passed directly
                 Ok::<(), anyhow::Error>(())
             }));
         }
