@@ -655,8 +655,9 @@ async fn execute_operation(entry: &OpLogEntry, uri: &str, cache: &StoreCache) ->
         OpType::PUT => {
             // Generate data with s3dlio (dedup=1, compress=1 for random)
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
+            // Returns Bytes directly - zero-copy
             let data = crate::data_gen_pool::generate_data_optimized(entry.bytes as usize, 1, 1);
-            put_object_cached_simple(uri, &data, cache).await?;
+            put_object_cached_simple(uri, data, cache).await?;  // Bytes passed directly
         }
         OpType::DELETE => {
             delete_object_cached_simple(uri, cache).await?;

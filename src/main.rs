@@ -896,8 +896,9 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
             }
         };
         
-        // Generate random data for all objects
-        let data = vec![0u8; object_size];
+        // Generate zero-filled data for all objects
+        // Convert to Bytes for zero-copy semantics
+        let data = bytes::Bytes::from(vec![0u8; object_size]);
         // TODO: Consider using random data generation for more realistic testing
         
         eprintln!("Uploading {} objects ({} bytes each) with {} jobs…", 
@@ -933,7 +934,7 @@ fn put_cmd(uri: &str, object_size: usize, objects: usize, concurrency: usize) ->
                     let _permit = sem2.acquire_owned().await.unwrap();
                     let t1 = Instant::now();
                     
-                    put_object_multi_backend(&obj_uri, &data).await?;
+                    put_object_multi_backend(&obj_uri, data.clone()).await?;  // Clone is cheap: Bytes is Arc-like
                     let idx = bucket_index(data.len());
                     hist2.record(idx, t1.elapsed());
                     

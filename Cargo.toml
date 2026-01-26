@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.20"
+version = "0.8.21"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,9 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio v0.9.35: Hardware detection API, runtime NUMA/CPU affinity detection
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.35" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.35" }
+# s3dlio v0.9.36: Latest version with parallel read enhancements
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.36" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.36" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

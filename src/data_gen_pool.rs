@@ -156,25 +156,11 @@ pub fn generate_data_cached(size: usize, dedup: usize, compress: usize) -> Bytes
         
         if needs_new_data {
             // Generate new data with optimal settings
-            use s3dlio::data_gen_alt::{generate_data, GeneratorConfig, NumaMode};
-            
-            // Auto-detect optimal thread count (respects CPU affinity, NUMA, etc.)
-            let num_threads = hardware::recommended_data_gen_threads(None, None);
-            
-            let config = GeneratorConfig {
-                size,
-                dedup_factor: dedup,
-                compress_factor: compress,
-                block_size: Some(1 * 1024 * 1024),  // 1 MB blocks (optimal from testing)
-                max_threads: Some(num_threads),     // Use all available cores
-                numa_mode: NumaMode::Auto,          // Auto-detect NUMA
-                numa_node: None,                    // Auto-detect which node
-                seed: Some(seed),                   // Per-agent, per-run unique seed
-            };
-            
-            // Generate all data at once (uses streaming internally with 64MB chunks)
-            let buffer = generate_data(config);
-            let data = Bytes::copy_from_slice(buffer.as_slice());
+            // Generate all data at once using fill_controlled_data() for zero-copy
+            // IMPORTANT: Use fill_controlled_data() instead of generate_data() to avoid allocation+copy
+            let mut buf = bytes::BytesMut::zeroed(size);
+            s3dlio::fill_controlled_data(&mut buf, dedup, compress);
+            let data = buf.freeze();  // Zero-copy conversion BytesMut→Bytes
             
             *cache_ref = Some(CachedData {
                 config: (size, dedup, compress, seed),
