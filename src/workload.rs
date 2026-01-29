@@ -615,9 +615,55 @@ pub type StoreCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc
 fn get_cached_store(
     uri: &str,
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
+    // v0.8.22: Multi-endpoint support - create store based on configuration priority
+    // If multi-endpoint is configured (global or per-agent), we use a special cache key
+    // and create a MultiEndpointStore that handles load balancing across multiple endpoints
+    
+    // Check if multi-endpoint is configured (per-agent takes priority over global)
+    let has_multi_endpoint = agent_config
+        .and_then(|a| a.multi_endpoint.as_ref())
+        .is_some() || config.multi_endpoint.is_some();
+    
+    if has_multi_endpoint {
+        // For multi-endpoint, create a cache key that represents the entire endpoint set
+        // This ensures we reuse the same MultiEndpointStore across all operations
+        let multi_ep = agent_config
+            .and_then(|a| a.multi_endpoint.as_ref())
+            .or(config.multi_endpoint.as_ref())
+            .unwrap();
+        
+        let cache_key = format!("multi_ep:{}:{}:{:?}:{:?}",
+            multi_ep.strategy,
+            multi_ep.endpoints.join(","),
+            config.range_engine.as_ref().map(|c| c.enabled),
+            config.page_cache_mode
+        );
+        
+        // Check cache first
+        {
+            let cache_lock = cache.lock().unwrap();
+            if let Some(store) = cache_lock.get(&cache_key) {
+                return Ok(Arc::clone(store));
+            }
+        }
+        
+        // Not in cache - create new MultiEndpointStore
+        let store = create_store_from_config(config, agent_config)?;
+        let arc_store = Arc::new(store);
+        
+        // Add to cache
+        {
+            let mut cache_lock = cache.lock().unwrap();
+            cache_lock.insert(cache_key, Arc::clone(&arc_store));
+        }
+        
+        return Ok(arc_store);
+    }
+    
+    // Traditional single-endpoint path (existing behavior)
     // Extract base URI (protocol + bucket/container)
     let base_uri = if let Some(idx) = uri.find("://") {
         let after_proto = &uri[idx+3..];
@@ -633,8 +679,8 @@ fn get_cached_store(
     // Create cache key including config settings
     let cache_key = format!("{}_range:{:?}_cache:{:?}", 
         base_uri,
-        range_config.map(|c| c.enabled),
-        page_cache_mode
+        config.range_engine.as_ref().map(|c| c.enabled),
+        config.page_cache_mode
     );
     
     // Check cache first
@@ -646,7 +692,7 @@ fn get_cached_store(
     }
     
     // Not in cache - create new store
-    let store = create_store_with_logger_and_config(uri, range_config, page_cache_mode)?;
+    let store = create_store_with_logger_and_config(uri, config.range_engine.as_ref(), config.page_cache_mode)?;
     let arc_store = Arc::new(store);
     
     // Add to cache
@@ -666,11 +712,11 @@ fn get_cached_store(
 async fn get_object_cached(
     uri: &str,
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    let store = get_cached_store(uri, cache, config, agent_config)?;
     
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
@@ -684,11 +730,11 @@ async fn put_object_cached(
     uri: &str,
     data: bytes::Bytes,  // Zero-copy: Bytes instead of &[u8]
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<()> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
-    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    let store = get_cached_store(uri, cache, config, agent_config)?;
     
     store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
@@ -701,11 +747,11 @@ async fn put_object_cached(
 async fn delete_object_cached(
     uri: &str,
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<()> {
     trace!("DELETE operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    let store = get_cached_store(uri, cache, config, agent_config)?;
     
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
@@ -718,11 +764,11 @@ async fn delete_object_cached(
 async fn list_objects_cached(
     uri: &str,
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<Vec<String>> {
     trace!("LIST operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    let store = get_cached_store(uri, cache, config, agent_config)?;
     
     let keys = store.list(uri, true).await
         .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
@@ -735,11 +781,11 @@ async fn list_objects_cached(
 async fn stat_object_cached(
     uri: &str,
     cache: &StoreCache,
-    range_config: Option<&crate::config::RangeEngineConfig>,
-    page_cache_mode: Option<crate::config::PageCacheMode>,
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<u64> {
     trace!("STAT operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, range_config, page_cache_mode)?;
+    let store = get_cached_store(uri, cache, config, agent_config)?;
     
     let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
@@ -1749,8 +1795,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_get = store_cache.clone();
-                        let range_engine = cfg.range_engine.clone();
-                        let page_cache = cfg.page_cache_mode;
+                        let cfg_for_get = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
                         let result = execute_with_error_handling(
@@ -1761,8 +1806,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let bytes = get_object_cached(
                                     &uri_for_closure,
                                     &store_cache_get,
-                                    range_engine.as_ref(),
-                                    page_cache,
+                                    &cfg_for_get,
+                                    None,  // agent_config: None for standalone mode
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok((bytes, duration))
@@ -1835,8 +1880,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         );
 
                         let store_cache_put = store_cache.clone();
-                        let range_engine = cfg.range_engine.clone();
-                        let page_cache = cfg.page_cache_mode;
+                        let cfg_for_put = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
                         let result = execute_with_error_handling(
@@ -1848,8 +1892,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &uri_for_closure,
                                     buf.clone(),  // Clone is cheap: Bytes is Arc-like
                                     &store_cache_put,
-                                    range_engine.as_ref(),
-                                    page_cache,
+                                    &cfg_for_put,
+                                    None,  // agent_config: None for standalone mode
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -1883,8 +1927,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // v0.7.13: Wrap LIST operation with error handling
                         let uri = cfg.get_meta_uri(op);
                         let store_cache_list = store_cache.clone();
-                        let range_engine = cfg.range_engine.clone();
-                        let page_cache = cfg.page_cache_mode;
+                        let cfg_for_list = cfg.clone();
                         
                         let result = execute_with_error_handling(
                             "LIST",
@@ -1894,8 +1937,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let _keys = list_objects_cached(
                                     &uri,
                                     &store_cache_list,
-                                    range_engine.as_ref(),
-                                    page_cache
+                                    &cfg_for_list,
+                                    None,  // agent_config: None for standalone mode
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -1944,8 +1987,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_stat = store_cache.clone();
-                        let range_engine = cfg.range_engine.clone();
-                        let page_cache = cfg.page_cache_mode;
+                        let cfg_for_stat = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
                         let result = execute_with_error_handling(
@@ -1956,8 +1998,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let _size = stat_object_cached(
                                     &uri_for_closure,
                                     &store_cache_stat,
-                                    range_engine.as_ref(),
-                                    page_cache
+                                    &cfg_for_stat,
+                                    None,  // agent_config: None for standalone mode
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -2006,8 +2048,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_delete = store_cache.clone();
-                        let range_engine = cfg.range_engine.clone();
-                        let page_cache = cfg.page_cache_mode;
+                        let cfg_for_delete = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
                         let result = execute_with_error_handling(
@@ -2018,8 +2059,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 delete_object_cached(
                                     &uri_for_closure,
                                     &store_cache_delete,
-                                    range_engine.as_ref(),
-                                    page_cache,
+                                    &cfg_for_delete,
+                                    None,  // agent_config: None for standalone mode
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
