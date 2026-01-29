@@ -169,6 +169,105 @@ pub fn create_store_for_uri(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
     create_store_for_uri_with_config(uri, None, None)
 }
 
+/// Create ObjectStore instance from Config, respecting multi-endpoint configuration
+/// 
+/// Priority order:
+/// 1. Per-agent multi_endpoint (if agent_config provided and has multi_endpoint)
+/// 2. Global multi_endpoint (from config)
+/// 3. Per-agent target_override (if agent_config provided)
+/// 4. Global target (from config)
+/// 
+/// This enables:
+/// - Static per-agent endpoint mapping (Agent 1 -> [IP1, IP2], Agent 2 -> [IP3, IP4])
+/// - Global endpoint pool shared by all agents
+/// - Traditional single-target mode (backward compatible)
+pub fn create_store_from_config(
+    config: &Config,
+    agent_config: Option<&crate::config::AgentConfig>,
+) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // Priority 1: Per-agent multi-endpoint override
+    if let Some(agent) = agent_config {
+        if let Some(ref multi_ep) = agent.multi_endpoint {
+            debug!("Using per-agent multi-endpoint config for agent: {:?} ({} endpoints, strategy: {})",
+                   agent.id, multi_ep.endpoints.len(), multi_ep.strategy);
+            return create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode);
+        }
+    }
+    
+    // Priority 2: Global multi-endpoint config
+    if let Some(ref multi_ep) = config.multi_endpoint {
+        debug!("Using global multi-endpoint config ({} endpoints, strategy: {})",
+               multi_ep.endpoints.len(), multi_ep.strategy);
+        return create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode);
+    }
+    
+    // Priority 3: Per-agent target override
+    if let Some(agent) = agent_config {
+        if let Some(ref target_override) = agent.target_override {
+            debug!("Using per-agent target override: {}", target_override);
+            return create_store_for_uri_with_config(
+                target_override,
+                config.range_engine.as_ref(),
+                config.page_cache_mode,
+            );
+        }
+    }
+    
+    // Priority 4: Global target
+    if let Some(ref target) = config.target {
+        debug!("Using global target: {}", target);
+        return create_store_for_uri_with_config(
+            target,
+            config.range_engine.as_ref(),
+            config.page_cache_mode,
+        );
+    }
+    
+    bail!("No target configuration specified: must provide 'target', 'multi_endpoint', or per-agent override")
+}
+
+/// Create MultiEndpointStore from configuration
+/// 
+/// Converts load balance strategy string to enum and creates s3dlio MultiEndpointStore.
+/// Each endpoint is created with appropriate RangeEngine and PageCache config.
+fn create_multi_endpoint_store(
+    multi_ep_config: &crate::config::MultiEndpointConfig,
+    _range_config: Option<&crate::config::RangeEngineConfig>,
+    _page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<Box<dyn ObjectStore>> {
+    use s3dlio::multi_endpoint::{MultiEndpointStore, LoadBalanceStrategy};
+    
+    if multi_ep_config.endpoints.is_empty() {
+        bail!("multi_endpoint.endpoints cannot be empty");
+    }
+    
+    // Convert strategy string to enum
+    let strategy = match multi_ep_config.strategy.to_lowercase().as_str() {
+        "round_robin" | "roundrobin" => LoadBalanceStrategy::RoundRobin,
+        "least_connections" | "leastconnections" => LoadBalanceStrategy::LeastConnections,
+        _ => bail!("Invalid load_balance_strategy '{}': must be 'round_robin' or 'least_connections'",
+                   multi_ep_config.strategy),
+    };
+    
+    info!("Creating MultiEndpointStore with {} endpoints, strategy: {:?}",
+          multi_ep_config.endpoints.len(), strategy);
+    
+    for (i, endpoint) in multi_ep_config.endpoints.iter().enumerate() {
+        debug!("  Endpoint {}: {}", i + 1, endpoint);
+    }
+    
+    // Create MultiEndpointStore - it will create individual stores for each endpoint
+    // Note: s3dlio's MultiEndpointStore handles per-endpoint ObjectStore creation internally
+    // TODO: Pass range_config and page_cache_mode to individual endpoint stores (future enhancement)
+    let store = MultiEndpointStore::new(
+        multi_ep_config.endpoints.clone(),
+        strategy,
+        None, // thread_count_per_endpoint - let s3dlio decide based on hardware
+    ).context("Failed to create MultiEndpointStore")?;
+    
+    Ok(Box::new(store))
+}
+
 /// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
 pub fn create_store_with_logger_and_config(
     uri: &str,

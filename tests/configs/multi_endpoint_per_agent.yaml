@@ -1,0 +1,74 @@
+# Per-agent multi-endpoint configuration example
+# Each agent targets specific subset of endpoints for static mapping
+#
+# Use case: 4 test hosts, 8 storage IPs (VAST system), 2 IPs per host
+# Result: Perfect load distribution - each IP used by exactly one host
+#
+# Architecture:
+#   - 4 physical storage nodes with 2 NICs each = 8 total IPs
+#   - 4 test hosts, each with 2 bonded NICs
+#   - Each test host targets 2 storage IPs to hit all 4 nodes
+
+duration: 300s
+concurrency: 64
+
+distributed:
+  shared_filesystem: true  # VAST provides unified namespace across all IPs
+  tree_creation_mode: coordinator  # Controller creates tree once
+  path_selection: random  # All agents access any directory
+  
+  agents:
+    # Test Host 1: Targets Node 1 NIC A + Node 2 NIC A
+    - address: "testhost1:7761"
+      id: agent1
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - s3://192.168.1.10:9000/bucket/  # Node 1 NIC A
+          - s3://192.168.1.12:9000/bucket/  # Node 2 NIC A
+    
+    # Test Host 2: Targets Node 1 NIC B + Node 2 NIC B
+    - address: "testhost2:7761"
+      id: agent2
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - s3://192.168.1.11:9000/bucket/  # Node 1 NIC B
+          - s3://192.168.1.13:9000/bucket/  # Node 2 NIC B
+    
+    # Test Host 3: Targets Node 3 NIC A + Node 4 NIC A
+    - address: "testhost3:7761"
+      id: agent3
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - s3://192.168.1.14:9000/bucket/  # Node 3 NIC A
+          - s3://192.168.1.16:9000/bucket/  # Node 4 NIC A
+    
+    # Test Host 4: Targets Node 3 NIC B + Node 4 NIC B
+    - address: "testhost4:7761"
+      id: agent4
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - s3://192.168.1.15:9000/bucket/  # Node 3 NIC B
+          - s3://192.168.1.17:9000/bucket/  # Node 4 NIC B
+
+prepare:
+  ensure_objects:
+    - base_uri: "s3://192.168.1.10:9000/bucket/data/"
+      count: 40000  # 10000 per agent
+      min_size: 1048576  # 1 MiB
+      max_size: 1048576
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 30

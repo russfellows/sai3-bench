@@ -93,6 +93,20 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!();
     }
     
+    // Multi-endpoint configuration for standalone mode (v0.8.22+)
+    if config.multi_endpoint.is_some() && config.distributed.is_none() {
+        if let Some(ref multi) = config.multi_endpoint {
+            println!("┌─ Multi-Endpoint Configuration ───────────────────────────────────────┐");
+            println!("│ Strategy:     {}", multi.strategy);
+            println!("│ Endpoints:    {} total", multi.endpoints.len());
+            for (idx, endpoint) in multi.endpoints.iter().enumerate() {
+                println!("│   {}: {}", idx + 1, endpoint);
+            }
+            println!("└──────────────────────────────────────────────────────────────────────┘");
+            println!();
+        }
+    }
+    
     // Distributed configuration (v0.7.5+)
     if let Some(ref dist) = config.distributed {
         println!("┌─ Distributed Configuration ──────────────────────────────────────────┐");
@@ -103,11 +117,39 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         if matches!(dist.path_selection, crate::config::PathSelectionStrategy::Partitioned | crate::config::PathSelectionStrategy::Weighted) {
             println!("│ Partition Overlap: {:.1}%", dist.partition_overlap * 100.0);
         }
+        
+        // v0.8.22: Display global multi-endpoint configuration if present
+        if let Some(ref global_multi) = config.multi_endpoint {
+            println!("│");
+            println!("│ Global Multi-Endpoint Configuration:");
+            println!("│   Strategy:       {}", global_multi.strategy);
+            println!("│   Endpoints:      {} total", global_multi.endpoints.len());
+            for (idx, endpoint) in global_multi.endpoints.iter().enumerate() {
+                println!("│     {}: {}", idx + 1, endpoint);
+            }
+            println!("│   (applies to agents without per-agent override)");
+        }
+        
         println!("│");
         println!("│ Agent List:");
         for (idx, agent) in dist.agents.iter().enumerate() {
             let id = agent.id.as_deref().unwrap_or("auto");
             println!("│   {}: {} (id: {})", idx + 1, agent.address, id);
+            
+            // v0.8.22: Display per-agent multi-endpoint configuration if present
+            if let Some(ref agent_multi) = agent.multi_endpoint {
+                println!("│      Multi-Endpoint:  {} strategy", agent_multi.strategy);
+                println!("│      Endpoints:       {} total", agent_multi.endpoints.len());
+                for (ep_idx, endpoint) in agent_multi.endpoints.iter().enumerate() {
+                    println!("│        {}: {}", ep_idx + 1, endpoint);
+                }
+            } else if config.multi_endpoint.is_some() {
+                println!("│      Multi-Endpoint:  (using global configuration)");
+            }
+            
+            if idx < dist.agents.len() - 1 {
+                println!("│");
+            }
         }
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();

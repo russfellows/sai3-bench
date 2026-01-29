@@ -94,6 +94,13 @@ pub struct Config {
     /// Default: None (no performance logging)
     #[serde(default)]
     pub perf_log: Option<PerfLogConfig>,
+    
+    /// Optional multi-endpoint configuration (v0.8.22+)
+    /// Enables load balancing across multiple storage endpoints (S3, Azure, GCS, file://)
+    /// All agents use these endpoints unless per-agent override is specified in distributed.agents
+    /// Default: None (single target URI)
+    #[serde(default)]
+    pub multi_endpoint: Option<MultiEndpointConfig>,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -244,6 +251,36 @@ pub struct PerfLogConfig {
 
 fn default_perf_log_interval() -> std::time::Duration {
     std::time::Duration::from_secs(crate::constants::DEFAULT_PERF_LOG_INTERVAL_SECS)
+}
+
+/// Multi-endpoint configuration for load balancing across multiple storage endpoints (v0.8.22+)
+/// 
+/// Enables distributing I/O operations across multiple storage endpoints for improved
+/// performance and bandwidth utilization. Particularly useful for:
+/// - Multi-NIC storage systems (VAST, Weka, etc.)
+/// - Distributed object storage (multiple S3 endpoints, MinIO clusters)
+/// - Multi-mount NFS with identical namespaces
+/// 
+/// Example use case: 4 test hosts, each targeting 2 of 8 storage IPs
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MultiEndpointConfig {
+    /// Load balancing strategy (default: round_robin)
+    /// - round_robin: Cycle through endpoints sequentially (simple, predictable)
+    /// - least_connections: Route to endpoint with fewest active requests (adaptive)
+    #[serde(default = "default_load_balance_strategy")]
+    pub strategy: String,
+    
+    /// List of endpoint URIs to load balance across
+    /// All endpoints must present identical namespace (same files accessible from each)
+    /// Examples:
+    ///   - S3: ["s3://192.168.1.10:9000/bucket/", "s3://192.168.1.11:9000/bucket/"]
+    ///   - NFS: ["file:///mnt/nfs1/data/", "file:///mnt/nfs2/data/"]
+    ///   - Azure: ["az://account/container/", "az://192.168.1.10:10000/container/"]
+    pub endpoints: Vec<String>,
+}
+
+fn default_load_balance_strategy() -> String {
+    "round_robin".to_string()
 }
 
 /// Custom serde module for Option<Duration> with humantime parsing
@@ -990,6 +1027,13 @@ pub struct AgentConfig {
     /// Listen port for agent (SSH mode only, default: 7761)
     #[serde(default = "default_agent_port")]
     pub listen_port: u16,
+    
+    /// Per-agent multi-endpoint override (v0.8.22+)
+    /// If specified, this agent uses these endpoints instead of global multi_endpoint config
+    /// Enables static endpoint mapping: assign specific endpoints to specific agents
+    /// Example: Agent 1 -> [IP1, IP2], Agent 2 -> [IP3, IP4], etc.
+    #[serde(default)]
+    pub multi_endpoint: Option<MultiEndpointConfig>,
 }
 
 /// SSH configuration for automated deployment

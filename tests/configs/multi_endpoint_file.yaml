@@ -1,0 +1,32 @@
+# Multi-endpoint configuration for file:// protocol
+# Use case: Multiple NFS mount points to the same storage namespace
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///mnt/nfs1/shared/
+    - file:///mnt/nfs2/shared/
+    - file:///mnt/nfs3/shared/
+    - file:///mnt/nfs4/shared/
+
+duration: 60s
+concurrency: 16
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///mnt/nfs1/shared/testdata/"
+      count: 100
+      min_size: 4096
+      max_size: 4096
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 70
+  
+  - op: put
+    path: "testdata/"
+    object_size: 4096
+    weight: 30

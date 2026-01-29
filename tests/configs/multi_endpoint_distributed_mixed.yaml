@@ -1,0 +1,66 @@
+# Multi-endpoint distributed configuration with mixed protocols
+# Use case: Each agent uses different storage protocol to test heterogeneous environments
+
+duration: 120s
+concurrency: 32
+
+distributed:
+  agents:
+    # Agent 1: S3 protocol
+    - address: "testhost1:7761"
+      id: "agent1-s3"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - s3://192.168.1.10:9000/bucket/
+          - s3://192.168.1.11:9000/bucket/
+    
+    # Agent 2: Azure protocol
+    - address: "testhost2:7761"
+      id: "agent2-azure"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - az://storage1.blob.core.windows.net/container/
+          - az://storage2.blob.core.windows.net/container/
+    
+    # Agent 3: GCS protocol
+    - address: "testhost3:7761"
+      id: "agent3-gcs"
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - gs://bucket-east/
+          - gs://bucket-west/
+    
+    # Agent 4: File protocol (NFS)
+    - address: "testhost4:7761"
+      id: "agent4-nfs"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - file:///mnt/nfs1/shared/
+          - file:///mnt/nfs2/shared/
+
+  shared_filesystem: false
+  tree_creation_mode: coordinator
+  path_selection: random
+
+prepare:
+  ensure_objects:
+    - base_uri: "s3://192.168.1.10:9000/bucket/testdata/"
+      count: 500
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 70
+  
+  - op: put
+    path: "testdata/"
+    object_size: 1048576
+    weight: 30

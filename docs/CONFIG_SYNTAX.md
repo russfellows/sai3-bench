@@ -1,6 +1,18 @@
 # sai3-bench Configuration Syntax Reference
 
-This document defines the correct YAML syntax for sai3-bench workload configurations.
+This document defines the correct YAML configuration syntax for sai3-bench workload configurations.
+
+## Table of Contents
+
+- [Configuration Validation](#configuration-validation)
+- [Basic Structure](#basic-structure)
+- [Multi-Endpoint Load Balancing](#multi-endpoint-load-balancing)
+- [Page Cache Control](#page-cache-control)
+- [Operation Logging](#operation-logging)
+- [Target URI](#target-uri)
+- [Pattern Syntax](#pattern-syntax)
+- [Operation Types](#operation-types)
+- [Prepare Stage](#prepare-stage)
 
 ## Configuration Validation
 

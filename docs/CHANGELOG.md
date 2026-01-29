@@ -6,6 +6,100 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.22] - 2026-01-29
+
+### Added
+
+- **Multi-endpoint load balancing for distributed storage systems**
+  - Enables distributing I/O operations across multiple storage endpoints (IPs, mount points)
+  - Perfect for multi-NIC storage systems (VAST, Weka, MinIO clusters)
+  - Supports both global and per-agent endpoint configuration
+  
+- **Static per-agent endpoint mapping**
+  - Assign specific endpoints to specific agents for optimal load distribution
+  - Example: 4 test hosts × 2 endpoints/host = 8 storage IPs fully utilized
+  - Prevents endpoint overlap in distributed testing scenarios
+  
+- **Multi-endpoint NFS support**
+  - Load balance across multiple NFS mount points with identical namespaces
+  - Works with any distributed filesystem presenting unified namespace (VAST, Weka, Lustre)
+  
+- **Configuration schema enhancements**
+  - Added `multi_endpoint` field to top-level Config (global configuration)
+  - Added `multi_endpoint` field to AgentConfig (per-agent override)
+  - Strategy options: `round_robin` (simple), `least_connections` (adaptive)
+  
+- **New workload creation API**
+  - Added `create_store_from_config()` function for multi-endpoint aware store creation
+  - Respects configuration priority: per-agent > global > target fallback
+  - Added `create_multi_endpoint_store()` internal helper function
+
+### Configuration Examples
+
+**Global multi-endpoint** (all agents share endpoints):
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - s3://192.168.1.10:9000/bucket/
+    - s3://192.168.1.11:9000/bucket/
+    - s3://192.168.1.12:9000/bucket/
+```
+
+**Per-agent static mapping** (each agent gets specific endpoints):
+```yaml
+distributed:
+  agents:
+    - address: "testhost1:7761"
+      id: agent1
+      multi_endpoint:
+        endpoints:
+          - s3://192.168.1.10:9000/bucket/
+          - s3://192.168.1.11:9000/bucket/
+    
+    - address: "testhost2:7761"
+      id: agent2
+      multi_endpoint:
+        endpoints:
+          - s3://192.168.1.12:9000/bucket/
+          - s3://192.168.1.13:9000/bucket/
+```
+
+**NFS multi-mount**:
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///mnt/nfs1/benchmark/
+    - file:///mnt/nfs2/benchmark/
+```
+
+### Technical Details
+
+- Leverages s3dlio v0.9.14+ `MultiEndpointStore` with per-endpoint statistics
+- Compatible with all storage backends (S3, Azure, GCS, file://, direct://)
+- Requires identical namespace across all endpoints (same files accessible from each)
+- Load balancing strategies implemented at s3dlio layer (zero overhead in sai3-bench)
+
+### Test Configurations
+
+- `tests/configs/multi_endpoint_global.yaml` - Global shared endpoint pool
+- `tests/configs/multi_endpoint_per_agent.yaml` - Static per-agent mapping (4×2 example)
+- `tests/configs/multi_endpoint_nfs.yaml` - NFS mount point load balancing
+
+### Documentation
+
+- See [MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](docs/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) for design rationale
+- Updated CONFIG_SYNTAX.md with multi-endpoint configuration reference
+- Updated README.md feature list
+
+### Related Issues
+
+- Addresses requirement for targeting multiple storage IPs from distributed agents
+- Enables optimal bandwidth utilization for multi-NIC storage systems
+
+---
+
 ## [0.8.21] - 2026-01-26
 
 ### Changed
