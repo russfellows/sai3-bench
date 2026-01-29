@@ -13,7 +13,8 @@ concurrency: 20
 
 prepare:
   ensure_objects:
-    - base_uri: "gs://bucket-us-east1/testdata/"
+    - base_uri: "testdata/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 3 GCS buckets
       count: 100
       min_size: 524288
       max_size: 524288

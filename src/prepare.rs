@@ -678,6 +678,7 @@ pub async fn prepare_objects(
     config: &PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
@@ -732,11 +733,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
     };
     
@@ -775,6 +776,7 @@ async fn prepare_sequential(
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -799,7 +801,20 @@ async fn prepare_sequential(
             
             info!("Preparing objects{}: {} at {}", pool_desc, spec.count, spec.base_uri);
             
-            let store = create_store_for_uri(&spec.base_uri)?;
+            // v0.8.22: Multi-endpoint support for prepare phase
+            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
+            // This distributes object creation across all endpoints for maximum network bandwidth
+            let store: Box<dyn s3dlio::object_store::ObjectStore> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
+                          multi_ep.endpoints.len(), multi_ep.strategy);
+                    crate::workload::create_multi_endpoint_store(multi_ep, None, None)?
+                } else {
+                    anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
+                }
+            } else {
+                create_store_for_uri(&spec.base_uri)?
+            };
             
             // 1. List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
@@ -1247,6 +1262,7 @@ async fn prepare_parallel(
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -1302,7 +1318,20 @@ async fn prepare_parallel(
             
             info!("Checking{}: {} at {}", pool_desc, spec.count, spec.base_uri);
             
-            let store = create_store_for_uri(&spec.base_uri)?;
+            // v0.8.22: Multi-endpoint support for prepare phase
+            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
+            // This distributes object creation across all endpoints for maximum network bandwidth
+            let store: Box<dyn s3dlio::object_store::ObjectStore> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
+                          multi_ep.endpoints.len(), multi_ep.strategy);
+                    crate::workload::create_multi_endpoint_store(multi_ep, None, None)?
+                } else {
+                    anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
+                }
+            } else {
+                create_store_for_uri(&spec.base_uri)?
+            };
             
             // List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
@@ -2960,7 +2989,7 @@ mod tests {
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, 0, 1, test_concurrency).await
+            prepare_objects(&config, None, None, None, 0, 1, test_concurrency).await
         });
         
         // Should succeed with empty object list
@@ -2988,7 +3017,7 @@ mod tests {
         // Test with various concurrency values
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, 0, 1, concurrency).await
+                prepare_objects(&config, None, None, None, 0, 1, concurrency).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);

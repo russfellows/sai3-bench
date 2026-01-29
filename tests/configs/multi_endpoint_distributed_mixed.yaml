@@ -48,7 +48,8 @@ distributed:
 
 prepare:
   ensure_objects:
-    - base_uri: "s3://192.168.1.10:9000/bucket/testdata/"
+    - base_uri: "testdata/"  # Path component only - agents use their own multi-endpoint configs
+      use_multi_endpoint: true  # Each agent creates objects across its assigned endpoints
       count: 500
       min_size: 1048576
       max_size: 1048576

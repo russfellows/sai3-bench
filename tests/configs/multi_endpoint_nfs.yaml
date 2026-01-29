@@ -30,12 +30,7 @@ page_cache_mode: sequential
 
 prepare:
   ensure_objects:
-    - base_uri: "file:///mnt/nfs1/benchmark/data/"
-      count: 10000
-      min_size: 4194304  # 4 MiB
-      max_size: 4194304
-      fill: random
-  cleanup: true
+    - base_uri: "data/\"  # Path component only\n      use_multi_endpoint: true  # Objects created across all 8 NFS mount points\n      count: 10000\n      min_size: 4194304  # 4 MiB\n      max_size: 4194304\n      fill: random\n  cleanup: true
 
 workload:
   - op: get

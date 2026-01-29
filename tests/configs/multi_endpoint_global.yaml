@@ -22,7 +22,8 @@ concurrency: 64
 
 prepare:
   ensure_objects:
-    - base_uri: "s3://192.168.1.10:9000/bucket/data/"
+    - base_uri: "data/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 8 endpoints
       count: 10000
       min_size: 1048576  # 1 MiB
       max_size: 1048576

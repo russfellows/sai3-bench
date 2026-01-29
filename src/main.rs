@@ -1151,7 +1151,8 @@ fn run_workload(
             let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(
                 prepare_config, 
                 Some(&config.workload), 
-                None, 
+                None,  // live_stats_tracker
+                config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
                 config.concurrency,
                 0,  // agent_id (standalone mode)
                 1,  // num_agents (standalone mode)

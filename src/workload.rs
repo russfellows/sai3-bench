@@ -230,7 +230,7 @@ pub fn create_store_from_config(
 /// 
 /// Converts load balance strategy string to enum and creates s3dlio MultiEndpointStore.
 /// Each endpoint is created with appropriate RangeEngine and PageCache config.
-fn create_multi_endpoint_store(
+pub fn create_multi_endpoint_store(
     multi_ep_config: &crate::config::MultiEndpointConfig,
     _range_config: Option<&crate::config::RangeEngineConfig>,
     _page_cache_mode: Option<crate::config::PageCacheMode>,

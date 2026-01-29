@@ -513,7 +513,15 @@ pub struct PrepareConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
+    /// When use_multi_endpoint=true, this provides the path component only (after the endpoint)
     pub base_uri: String,
+    
+    /// Use multi-endpoint configuration for object creation (v0.8.22+)
+    /// When true, objects are distributed across all configured endpoints
+    /// This is CRITICAL for performance when endpoints represent different network paths
+    /// Default: false (use base_uri directly)
+    #[serde(default)]
+    pub use_multi_endpoint: bool,
     
     /// Target number of objects to ensure exist
     pub count: u64,

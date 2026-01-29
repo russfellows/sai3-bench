@@ -546,7 +546,8 @@ impl Agent for AgentSvc {
             let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(
                 prepare_config,
                 Some(&config.workload),
-                None,
+                None,  // live_stats_tracker
+                config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
                 config.concurrency,
                 agent_index as usize,
                 num_agents as usize,
@@ -1753,7 +1754,15 @@ impl Agent for AgentSvc {
                                                 tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
                                             }
                                             
-                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency, agent_index, num_agents).await {
+                                            match sai3_bench::workload::prepare_objects(
+                                                prepare_config, 
+                                                Some(&config_exec.workload), 
+                                                Some(tracker_for_prepare.clone()), 
+                                                config_exec.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                                                config_exec.concurrency, 
+                                                agent_index, 
+                                                num_agents
+                                            ).await {
                                                 Ok((prepared, manifest, prepare_metrics)) => {
                                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                                     

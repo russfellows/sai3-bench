@@ -13,7 +13,8 @@ concurrency: 24
 
 prepare:
   ensure_objects:
-    - base_uri: "az://storageacct1.blob.core.windows.net/container/testdata/"
+    - base_uri: "testdata/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 3 Azure storage accounts
       count: 150
       min_size: 1048576
       max_size: 1048576

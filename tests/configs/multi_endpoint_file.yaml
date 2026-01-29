@@ -14,7 +14,8 @@ concurrency: 16
 
 prepare:
   ensure_objects:
-    - base_uri: "file:///mnt/nfs1/shared/testdata/"
+    - base_uri: "testdata/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 4 mount points
       count: 100
       min_size: 4096
       max_size: 4096
