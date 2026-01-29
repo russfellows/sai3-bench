@@ -543,11 +543,18 @@ impl Agent for AgentSvc {
         } else if let Some(ref prepare_config) = config.prepare {
             // Normal mode: Execute prepare phase
             debug!("Executing prepare phase");
+            
+            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
+            use std::sync::{Arc, Mutex};
+            use std::collections::HashMap;
+            let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
+            
             let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(
                 prepare_config,
                 Some(&config.workload),
                 None,  // live_stats_tracker
                 config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                 config.concurrency,
                 agent_index as usize,
                 num_agents as usize,
@@ -717,6 +724,7 @@ impl Agent for AgentSvc {
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
+                    endpoint_stats: None,
                 }
             } else {
                 // No tracker - return empty summary
@@ -738,6 +746,7 @@ impl Agent for AgentSvc {
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
+                    endpoint_stats: None,
                 }
             }
         } else {
@@ -1754,11 +1763,17 @@ impl Agent for AgentSvc {
                                                 tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
                                             }
                                             
+                                            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
+                                            use std::sync::{Arc, Mutex};
+                                            use std::collections::HashMap;
+                                            let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
+                                            
                                             match sai3_bench::workload::prepare_objects(
                                                 prepare_config, 
                                                 Some(&config_exec.workload), 
                                                 Some(tracker_for_prepare.clone()), 
                                                 config_exec.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                                                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                                                 config_exec.concurrency, 
                                                 agent_index, 
                                                 num_agents
@@ -1911,6 +1926,7 @@ impl Agent for AgentSvc {
                                                             meta_hists: Default::default(),  // Would need histogram export method
                                                             total_errors: 0,
                                                             error_rate: 0.0,
+                                                            endpoint_stats: None,
                                                         })
                                                     } else {
                                                         // No tracker - return empty summary
@@ -1932,6 +1948,7 @@ impl Agent for AgentSvc {
                                                             meta_hists: Default::default(),
                                                             total_errors: 0,
                                                             error_rate: 0.0,
+                                                            endpoint_stats: None,
                                                         })
                                                     }
                                                 }

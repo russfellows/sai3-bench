@@ -190,7 +190,8 @@ pub fn create_store_from_config(
         if let Some(ref multi_ep) = agent.multi_endpoint {
             debug!("Using per-agent multi-endpoint config for agent: {:?} ({} endpoints, strategy: {})",
                    agent.id, multi_ep.endpoints.len(), multi_ep.strategy);
-            return create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode);
+            let (boxed_store, _arc_store) = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
+            return Ok(boxed_store);
         }
     }
     
@@ -198,7 +199,8 @@ pub fn create_store_from_config(
     if let Some(ref multi_ep) = config.multi_endpoint {
         debug!("Using global multi-endpoint config ({} endpoints, strategy: {})",
                multi_ep.endpoints.len(), multi_ep.strategy);
-        return create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode);
+        let (boxed_store, _arc_store) = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
+        return Ok(boxed_store);
     }
     
     // Priority 3: Per-agent target override
@@ -230,11 +232,13 @@ pub fn create_store_from_config(
 /// 
 /// Converts load balance strategy string to enum and creates s3dlio MultiEndpointStore.
 /// Each endpoint is created with appropriate RangeEngine and PageCache config.
+/// 
+/// Returns tuple: (Box<dyn ObjectStore> for caching, Arc<MultiEndpointStore> for stats)
 pub fn create_multi_endpoint_store(
     multi_ep_config: &crate::config::MultiEndpointConfig,
     _range_config: Option<&crate::config::RangeEngineConfig>,
     _page_cache_mode: Option<crate::config::PageCacheMode>,
-) -> anyhow::Result<Box<dyn ObjectStore>> {
+) -> anyhow::Result<(Box<dyn ObjectStore>, Arc<s3dlio::MultiEndpointStore>)> {
     use s3dlio::multi_endpoint::{MultiEndpointStore, LoadBalanceStrategy};
     
     if multi_ep_config.endpoints.is_empty() {
@@ -256,16 +260,22 @@ pub fn create_multi_endpoint_store(
         debug!("  Endpoint {}: {}", i + 1, endpoint);
     }
     
-    // Create MultiEndpointStore - it will create individual stores for each endpoint
-    // Note: s3dlio's MultiEndpointStore handles per-endpoint ObjectStore creation internally
+    // Create TWO MultiEndpointStore instances - they both point to the same endpoints
+    // One for trait object use, one Arc-wrapped for stats collection
     // TODO: Pass range_config and page_cache_mode to individual endpoint stores (future enhancement)
-    let store = MultiEndpointStore::new(
+    let store1 = MultiEndpointStore::new(
         multi_ep_config.endpoints.clone(),
         strategy,
         None, // thread_count_per_endpoint - let s3dlio decide based on hardware
-    ).context("Failed to create MultiEndpointStore")?;
+    ).context("Failed to create MultiEndpointStore (instance 1)")?;
     
-    Ok(Box::new(store))
+    let store2 = MultiEndpointStore::new(
+        multi_ep_config.endpoints.clone(),
+        strategy,
+        None, // thread_count_per_endpoint - let s3dlio decide based on hardware
+    ).context("Failed to create MultiEndpointStore (instance 2)")?;
+    
+    Ok((Box::new(store1), Arc::new(store2)))
 }
 
 /// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
@@ -610,11 +620,19 @@ pub async fn delete_object_multi_backend(uri: &str) -> anyhow::Result<()> {
 /// Uses base URI as key to reuse HTTP clients and connection pools.
 pub type StoreCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Box<dyn ObjectStore>>>>>;
 
+/// Multi-endpoint store cache for per-endpoint statistics collection (v0.8.22+)
+/// Parallel to StoreCache, stores concrete MultiEndpointStore instances for stats access.
+/// Key format: "multi_ep:{strategy}:{endpoints}:{range_config}:{cache_mode}"
+pub type MultiEndpointCache = Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<s3dlio::MultiEndpointStore>>>>;
+
 /// Get or create an ObjectStore from cache
 /// Cache key is based on base URI + config settings to ensure correct store for each combination
+/// 
+/// For multi-endpoint configs, populates both StoreCache and MultiEndpointCache
 fn get_cached_store(
     uri: &str,
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
@@ -651,13 +669,22 @@ fn get_cached_store(
         }
         
         // Not in cache - create new MultiEndpointStore
-        let store = create_store_from_config(config, agent_config)?;
-        let arc_store = Arc::new(store);
+        // create_multi_endpoint_store now returns (boxed_store, arc_multi_store)
+        let (boxed_store, multi_store) = create_multi_endpoint_store(
+            multi_ep,
+            config.range_engine.as_ref(),
+            config.page_cache_mode,
+        )?;
+        let arc_store = Arc::new(boxed_store);
         
-        // Add to cache
+        // Add to BOTH caches - StoreCache for operations, MultiEndpointCache for stats
         {
             let mut cache_lock = cache.lock().unwrap();
-            cache_lock.insert(cache_key, Arc::clone(&arc_store));
+            cache_lock.insert(cache_key.clone(), Arc::clone(&arc_store));
+        }
+        {
+            let mut multi_cache_lock = multi_ep_cache.lock().unwrap();
+            multi_cache_lock.insert(cache_key, multi_store);
         }
         
         return Ok(arc_store);
@@ -712,11 +739,12 @@ fn get_cached_store(
 async fn get_object_cached(
     uri: &str,
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
     
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
@@ -730,11 +758,12 @@ async fn put_object_cached(
     uri: &str,
     data: bytes::Bytes,  // Zero-copy: Bytes instead of &[u8]
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<()> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
-    let store = get_cached_store(uri, cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
     
     store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
@@ -747,11 +776,12 @@ async fn put_object_cached(
 async fn delete_object_cached(
     uri: &str,
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<()> {
     trace!("DELETE operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
     
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
@@ -764,11 +794,12 @@ async fn delete_object_cached(
 async fn list_objects_cached(
     uri: &str,
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<Vec<String>> {
     trace!("LIST operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
     
     let keys = store.list(uri, true).await
         .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
@@ -781,11 +812,12 @@ async fn list_objects_cached(
 async fn stat_object_cached(
     uri: &str,
     cache: &StoreCache,
+    multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
 ) -> anyhow::Result<u64> {
     trace!("STAT operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
     
     let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
@@ -1095,6 +1127,21 @@ pub struct Summary {
     // v0.7.13: Error statistics
     pub total_errors: u64,
     pub error_rate: f64,  // Errors per second at end of workload
+    
+    // v0.8.22: Multi-endpoint statistics (per-endpoint request/byte counts)
+    pub endpoint_stats: Option<Vec<EndpointStatsSnapshot>>,
+}
+
+/// Snapshot of per-endpoint statistics (v0.8.22+)
+/// Captured at end of workload to verify load balancing behavior
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointStatsSnapshot {
+    pub uri: String,
+    pub total_requests: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub error_count: u64,
+    pub active_requests: usize,
 }
 
 // -----------------------------------------------------------------------------
@@ -1377,6 +1424,44 @@ where
     
     // Should never reach here, but return None as fallback
     Ok(None)
+}
+
+/// Collect per-endpoint statistics from MultiEndpointStore instances.
+/// Returns None if no multi-endpoint stores are found, otherwise returns a Vec
+/// with stats for each endpoint across all cached MultiEndpointStore instances.
+fn collect_endpoint_stats(multi_ep_cache: &MultiEndpointCache) -> Option<Vec<EndpointStatsSnapshot>> {
+    let cache = multi_ep_cache.lock().unwrap();
+    
+    if cache.is_empty() {
+        return None;
+    }
+    
+    let mut all_stats = Vec::new();
+    
+    for (_cache_key, multi_store) in cache.iter() {
+        // Get per-endpoint stats from s3dlio MultiEndpointStore
+        let endpoint_stats = multi_store.get_all_stats();
+        
+        for (endpoint_uri, s3dlio_stats) in endpoint_stats {
+            // Convert s3dlio::EndpointStatsSnapshot to sai3-bench::EndpointStatsSnapshot
+            all_stats.push(EndpointStatsSnapshot {
+                uri: endpoint_uri,
+                total_requests: s3dlio_stats.total_requests,
+                bytes_read: s3dlio_stats.bytes_read,
+                bytes_written: s3dlio_stats.bytes_written,
+                error_count: s3dlio_stats.error_count,
+                active_requests: s3dlio_stats.active_requests,
+            });
+        }
+    }
+    
+    if all_stats.is_empty() {
+        None
+    } else {
+        debug!("Collected endpoint stats from {} MultiEndpointStore instance(s), {} total endpoints",
+               cache.len(), all_stats.len());
+        Some(all_stats)
+    }
 }
 
 /// Public entry: run a config and print a summary-like struct back.
@@ -1684,6 +1769,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     // we create stores once and reuse them across all operations
     let store_cache: StoreCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
     
+    // v0.8.22: Create parallel cache for MultiEndpointStore instances (for stats collection)
+    let multi_ep_cache: MultiEndpointCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    
     // v0.7.13: Create error tracker for resilient error handling
     let error_tracker = ErrorTracker::new(cfg.error_handling.clone());
     
@@ -1745,6 +1833,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         let ops_counter = live_ops.clone();  // Clone atomic counter for live stats
         let bytes_counter = live_bytes.clone();  // Clone atomic counter for live stats
         let store_cache = store_cache.clone();  // Clone store cache for this worker
+        let multi_ep_cache = multi_ep_cache.clone();  // Clone multi-endpoint cache for this worker
         let error_tracker = error_tracker.clone();  // Clone error tracker for this worker
 
         handles.push(tokio::spawn(async move {
@@ -1795,6 +1884,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_get = store_cache.clone();
+                        let multi_ep_cache_get = multi_ep_cache.clone();
                         let cfg_for_get = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
@@ -1806,6 +1896,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let bytes = get_object_cached(
                                     &uri_for_closure,
                                     &store_cache_get,
+                                    &multi_ep_cache_get,
                                     &cfg_for_get,
                                     None,  // agent_config: None for standalone mode
                                 ).await?;
@@ -1880,6 +1971,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         );
 
                         let store_cache_put = store_cache.clone();
+                        let multi_ep_cache_put = multi_ep_cache.clone();
                         let cfg_for_put = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
@@ -1892,6 +1984,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &uri_for_closure,
                                     buf.clone(),  // Clone is cheap: Bytes is Arc-like
                                     &store_cache_put,
+                                    &multi_ep_cache_put,
                                     &cfg_for_put,
                                     None,  // agent_config: None for standalone mode
                                 ).await?;
@@ -1927,6 +2020,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // v0.7.13: Wrap LIST operation with error handling
                         let uri = cfg.get_meta_uri(op);
                         let store_cache_list = store_cache.clone();
+                        let multi_ep_cache_list = multi_ep_cache.clone();
                         let cfg_for_list = cfg.clone();
                         
                         let result = execute_with_error_handling(
@@ -1937,6 +2031,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let _keys = list_objects_cached(
                                     &uri,
                                     &store_cache_list,
+                                    &multi_ep_cache_list,
                                     &cfg_for_list,
                                     None,  // agent_config: None for standalone mode
                                 ).await?;
@@ -1987,6 +2082,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_stat = store_cache.clone();
+                        let multi_ep_cache_stat = multi_ep_cache.clone();
                         let cfg_for_stat = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
@@ -1998,6 +2094,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 let _size = stat_object_cached(
                                     &uri_for_closure,
                                     &store_cache_stat,
+                                    &multi_ep_cache_stat,
                                     &cfg_for_stat,
                                     None,  // agent_config: None for standalone mode
                                 ).await?;
@@ -2048,6 +2145,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         };
 
                         let store_cache_delete = store_cache.clone();
+                        let multi_ep_cache_delete = multi_ep_cache.clone();
                         let cfg_for_delete = cfg.clone();
                         let uri_for_closure = full_uri.clone();
                         
@@ -2059,6 +2157,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 delete_object_cached(
                                     &uri_for_closure,
                                     &store_cache_delete,
+                                    &multi_ep_cache_delete,
                                     &cfg_for_delete,
                                     None,  // agent_config: None for standalone mode
                                 ).await?;
@@ -2342,6 +2441,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         warn!("Workload completed with {} errors ({:.2} errors/sec)", final_total_errors, final_error_rate);
     }
 
+    // v0.8.22: Collect per-endpoint statistics from MultiEndpointStore(s)
+    let endpoint_stats = collect_endpoint_stats(&multi_ep_cache);
+    if let Some(ref stats) = endpoint_stats {
+        info!("Collected endpoint statistics from {} endpoint(s)", stats.len());
+    }
+
     Ok(Summary {
         wall_seconds: wall,
         total_bytes,
@@ -2360,6 +2465,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         meta_hists: merged_meta,
         total_errors: final_total_errors,
         error_rate: final_error_rate,
+        endpoint_stats,
     })
 }
 

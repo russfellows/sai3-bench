@@ -24,6 +24,7 @@ use crate::config::{FillPattern, PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
 use crate::live_stats::{LiveStatsTracker, WorkloadStage};
 use crate::size_generator::SizeGenerator;
+use crate::workload::MultiEndpointCache;
 use crate::constants::{
     DEFAULT_PREPARE_MAX_ERRORS, 
     DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS,
@@ -679,6 +680,7 @@ pub async fn prepare_objects(
     workload: Option<&[crate::config::WeightedOp]>,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &crate::workload::MultiEndpointCache,
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
@@ -733,11 +735,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
     };
     
@@ -777,6 +779,7 @@ async fn prepare_sequential(
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &MultiEndpointCache,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -808,7 +811,23 @@ async fn prepare_sequential(
                 if let Some(multi_ep) = multi_endpoint_config {
                     info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
                           multi_ep.endpoints.len(), multi_ep.strategy);
-                    crate::workload::create_multi_endpoint_store(multi_ep, None, None)?
+                    
+                    // Create cache key for prepare phase multi-endpoint store
+                    let cache_key = format!("prepare_seq:{}:{}:{}",
+                        spec.base_uri,
+                        multi_ep.strategy,
+                        multi_ep.endpoints.join(","));
+                    
+                    // Create both boxed store and Arc<MultiEndpointStore>
+                    let (boxed_store, arc_multi_store) = crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+                    
+                    // Store in multi_ep_cache for stats collection
+                    {
+                        let mut cache_lock = multi_ep_cache.lock().unwrap();
+                        cache_lock.insert(cache_key, arc_multi_store);
+                    }
+                    
+                    boxed_store
                 } else {
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
@@ -1263,6 +1282,7 @@ async fn prepare_parallel(
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
     multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &MultiEndpointCache,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -1325,7 +1345,23 @@ async fn prepare_parallel(
                 if let Some(multi_ep) = multi_endpoint_config {
                     info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
                           multi_ep.endpoints.len(), multi_ep.strategy);
-                    crate::workload::create_multi_endpoint_store(multi_ep, None, None)?
+                    
+                    // Create cache key for prepare phase multi-endpoint store
+                    let cache_key = format!("prepare_par:{}:{}:{}",
+                        spec.base_uri,
+                        multi_ep.strategy,
+                        multi_ep.endpoints.join(","));
+                    
+                    // Create both boxed store and Arc<MultiEndpointStore>
+                    let (boxed_store, arc_multi_store) = crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+                    
+                    // Store in multi_ep_cache for stats collection
+                    {
+                        let mut cache_lock = multi_ep_cache.lock().unwrap();
+                        cache_lock.insert(cache_key, arc_multi_store);
+                    }
+                    
+                    boxed_store
                 } else {
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
@@ -1723,7 +1759,7 @@ async fn prepare_parallel(
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             let data = match task.fill {
                 FillPattern::Zero => {
-                    let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                    let buf = bytes::BytesMut::zeroed(task.size as usize);
                     buf.freeze()  // Zero-copy: BytesMut→Bytes
                 }
                 FillPattern::Random => {
@@ -2249,7 +2285,7 @@ pub async fn create_directory_tree(
                             let size = size_generator.generate();
                             let data = match fill_pattern {
                                 FillPattern::Zero => {
-                                    let mut buf = bytes::BytesMut::zeroed(size as usize);
+                                    let buf = bytes::BytesMut::zeroed(size as usize);
                                     buf.freeze()  // Zero-copy: BytesMut→Bytes
                                 }
                                 FillPattern::Random => {

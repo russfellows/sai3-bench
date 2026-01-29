@@ -229,6 +229,7 @@ fn merge_summaries(summaries: Vec<IpcSummary>) -> Result<Summary> {
         meta_hists: merged_meta_hists,
         total_errors,
         error_rate: avg_error_rate,
+        endpoint_stats: None,  // Not supported in multiprocess mode
     })
 }
 
