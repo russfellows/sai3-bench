@@ -15,6 +15,7 @@
 // Run with: cargo test --test azure_tests -- --test-threads=1 --nocapture
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use std::env;
 
 use sai3_bench::workload::{
@@ -128,14 +129,14 @@ async fn test_azure_put_get_delete() -> Result<()> {
     print_test_config();
     println!("🧪 Testing Azure PUT/GET/DELETE cycle");
     
-    // Test data
+    // Test data (zero-copy: create as Bytes from start)
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from sai3-bench Azure test!";
+    let test_data = Bytes::from_static(b"Hello from sai3-bench Azure test!");
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation
     println!("  📤 PUT: {}", test_uri);
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     println!("     ✓ PUT completed: {} bytes", test_data.len());
     
     // GET operation
@@ -171,14 +172,14 @@ async fn test_azure_list_operations() -> Result<()> {
     print_test_config();
     println!("🧪 Testing Azure LIST operations");
     
-    // Create test objects
+    // Create test objects (zero-copy: create as Bytes from start)
     let prefix = format!("{}list-test/", base_uri);
-    let test_data = b"list test data";
+    let test_data = Bytes::from_static(b"list test data");
     
     println!("  📤 Creating test objects...");
     for i in 0..5 {
         let uri = format!("{}object-{:03}.txt", prefix, i);
-        put_object_no_log(&uri, test_data).await?;
+        put_object_no_log(&uri, test_data.clone()).await?;
     }
     println!("     ✓ Created 5 test objects");
     
@@ -215,12 +216,12 @@ async fn test_azure_stat_operations() -> Result<()> {
     print_test_config();
     println!("🧪 Testing Azure STAT operations");
     
-    // Create test object
+    // Create test object (zero-copy: create as Bytes from start)
     let test_uri = format!("{}stat-test.txt", base_uri);
-    let test_data = b"stat test data - 1024 bytes minimum content for size validation";
+    let test_data = Bytes::from_static(b"stat test data - 1024 bytes minimum content for size validation");
     
     println!("  📤 Creating test object");
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     
     // STAT operation
     println!("  📊 STAT: {}", test_uri);
@@ -254,7 +255,7 @@ async fn test_azure_concurrent_operations() -> Result<()> {
     
     let prefix = format!("{}concurrent-test/", base_uri);
     let num_objects = 10;
-    let test_data = vec![0u8; 1024]; // 1KB test data
+    let test_data = Bytes::from(vec![0u8; 1024]); // 1KB test data (Bytes::from takes ownership)
     
     // Concurrent PUTs
     println!("  📤 Concurrent PUT: {} objects", num_objects);
@@ -263,9 +264,9 @@ async fn test_azure_concurrent_operations() -> Result<()> {
     let mut handles = vec![];
     for i in 0..num_objects {
         let uri = format!("{}object-{:03}.dat", prefix, i);
-        let data = test_data.clone();
+        let data = test_data.clone(); // Cheap: just increments refcount
         handles.push(tokio::spawn(async move {
-            put_object_no_log(&uri, &data).await
+            put_object_no_log(&uri, data).await
         }));
     }
     
@@ -324,11 +325,11 @@ async fn test_azure_large_object() -> Result<()> {
     
     let test_uri = format!("{}large-object.bin", base_uri);
     let size_mb = 5;
-    let test_data = vec![0xAB; size_mb * 1024 * 1024]; // 5MB
+    let test_data = Bytes::from(vec![0xAB; size_mb * 1024 * 1024]); // 5MB (Bytes::from takes ownership)
     
     println!("  📤 PUT: {} MB object", size_mb);
     let start = std::time::Instant::now();
-    put_object_no_log(&test_uri, &test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     let put_duration = start.elapsed();
     println!("     ✓ PUT completed in {:?} ({:.2} MB/s)", 
              put_duration, 
@@ -368,16 +369,16 @@ async fn test_azure_alternate_scheme() -> Result<()> {
     let uri1 = format!("az://{}/sai3-bench-test/scheme-test-1.txt", container);
     let uri2 = format!("az://{}/sai3-bench-test/scheme-test-2.txt", container);
     
-    let test_data1 = b"testing scheme path 1";
-    let test_data2 = b"testing scheme path 2";
+    let test_data1 = Bytes::from_static(b"testing scheme path 1");
+    let test_data2 = Bytes::from_static(b"testing scheme path 2");
     
     // PUT first object
     println!("  📤 PUT first object");
-    put_object_no_log(&uri1, test_data1).await?;
+    put_object_no_log(&uri1, test_data1.clone()).await?;
     
     // PUT second object  
     println!("  📤 PUT second object");
-    put_object_no_log(&uri2, test_data2).await?;
+    put_object_no_log(&uri2, test_data2.clone()).await?;
     
     // GET both back
     println!("  📥 GET first object");
@@ -420,10 +421,10 @@ async fn test_azure_custom_endpoint() -> Result<()> {
     
     // Test basic operations with custom endpoint
     let test_uri = format!("{}custom-endpoint-test.txt", base_uri);
-    let test_data = b"Testing custom Azure endpoint!";
+    let test_data = Bytes::from_static(b"Testing custom Azure endpoint!");
     
     println!("  📤 PUT to custom endpoint");
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     
     println!("  📥 GET from custom endpoint");
     let result = get_object_no_log(&test_uri).await?;

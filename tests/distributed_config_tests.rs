@@ -903,6 +903,7 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
                 volumes: vec![],
                 path_template: None,
                 listen_port: 7761,
+                multi_endpoint: None,
             }
         ],
         ssh: None,

@@ -11,6 +11,7 @@ use sai3_bench::directory_tree::DirectoryStructureConfig;
 use sai3_bench::size_generator::SizeSpec;
 use sai3_bench::workload::prepare_objects;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// Helper to create a test prepare config with directory structure
@@ -26,6 +27,7 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
             fill: FillPattern::Zero,
             dedup_factor: 1,
             compress_factor: 1,
+            use_multi_endpoint: false,
         }],
         directory_structure: Some(DirectoryStructureConfig {
             width: 3,
@@ -65,12 +67,15 @@ async fn test_distributed_prepare_no_overlap() {
     let num_agents = 2;
     
     let config = create_test_config(&base_uri, total_files);
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     
     // Agent 0 prepares
     let (prepared0, _manifest0, _metrics0) = prepare_objects(
         &config,
         None,
         None,
+        None,
+        &multi_ep_cache,
         4,
         0,
         num_agents,
@@ -81,6 +86,8 @@ async fn test_distributed_prepare_no_overlap() {
         &config,
         None,
         None,
+        None,
+        &multi_ep_cache,
         4,
         1,
         num_agents,
@@ -109,6 +116,7 @@ async fn test_distributed_prepare_complete_coverage() {
     let num_agents = 3;
     
     let config = create_test_config(&base_uri, total_files);
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     
     let mut all_indices = HashSet::new();
     
@@ -118,6 +126,8 @@ async fn test_distributed_prepare_complete_coverage() {
             &config,
             None,
             None,
+            None,
+            &multi_ep_cache,
             4,
             agent_id,
             num_agents,
@@ -151,6 +161,7 @@ async fn test_distributed_prepare_modulo_distribution() {
     let num_agents = 4;
     
     let config = create_test_config(&base_uri, total_files);
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     
     // Collect what each agent creates
     let mut agent_indices: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -160,6 +171,8 @@ async fn test_distributed_prepare_modulo_distribution() {
             &config,
             None,
             None,
+            None,
+            &multi_ep_cache,
             4,
             agent_id,
             num_agents,
@@ -206,6 +219,7 @@ async fn test_distributed_prepare_balanced() {
     let num_agents = 3;
     
     let config = create_test_config(&base_uri, total_files);
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     
     let mut counts = Vec::new();
     
@@ -214,6 +228,8 @@ async fn test_distributed_prepare_balanced() {
             &config,
             None,
             None,
+            None,
+            &multi_ep_cache,
             4,
             agent_id,
             num_agents,
@@ -243,11 +259,14 @@ async fn test_standalone_mode() {
     let total_files = 45;
     
     let config = create_test_config(&base_uri, total_files);
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     
     let (prepared, _manifest, _metrics) = prepare_objects(
         &config,
         None,
         None,
+        None,
+        &multi_ep_cache,
         4,
         0,  // agent_id
         1,  // num_agents (standalone)

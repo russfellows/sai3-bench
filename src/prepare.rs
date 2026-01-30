@@ -3031,10 +3031,11 @@ mod tests {
         
         // Test that the function can be called with different concurrency values
         // Without actual storage, this will just verify parameter passing
+        let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, None, 0, 1, test_concurrency).await
+            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0).await
         });
         
         // Should succeed with empty object list
@@ -3060,9 +3061,10 @@ mod tests {
         };
         
         // Test with various concurrency values
+        let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, None, 0, 1, concurrency).await
+                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);

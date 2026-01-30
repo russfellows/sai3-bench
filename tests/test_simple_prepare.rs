@@ -3,6 +3,8 @@
 use sai3_bench::config::{CleanupMode, PrepareConfig, FillPattern, EnsureSpec, PrepareStrategy};
 use sai3_bench::size_generator::SizeSpec;
 use sai3_bench::workload::prepare_objects;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -26,6 +28,7 @@ async fn test_single_agent_prepare() {
             fill: FillPattern::Zero,
             dedup_factor: 1,
             compress_factor: 1,
+            use_multi_endpoint: false,
         }],
         directory_structure: None,  // No directory structure - flat files
         skip_verification: false,  // Enable LIST to test distributed prepare
@@ -36,11 +39,15 @@ async fn test_single_agent_prepare() {
     };
     println!("Config created");
     
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    
     println!("About to call prepare_objects for agent 0/2...");
     let result = prepare_objects(
         &config,
         None,
         None,
+        None,  // multi_endpoint_config
+        &multi_ep_cache,
         2,  // concurrency
         0,  // agent_id
         2,  // num_agents

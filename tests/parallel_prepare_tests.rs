@@ -6,6 +6,7 @@ use sai3_bench::config::{Config, PrepareConfig, EnsureSpec, PrepareStrategy};
 use sai3_bench::workload::prepare_objects;
 use sai3_bench::size_generator::SizeSpec;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// Test that sequential strategy creates objects in size-group order
@@ -26,6 +27,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -36,6 +38,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -46,6 +49,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -57,7 +61,8 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 16, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0).await?;
     
     // Should have created 30 objects total
     assert_eq!(objects.len(), 30, "Should create 30 objects");
@@ -99,6 +104,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -109,6 +115,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -119,6 +126,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -130,7 +138,8 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 64, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 64, 0).await?;
     
     // Should have created 60 objects total
     assert_eq!(objects.len(), 60, "Should create 60 objects");
@@ -177,6 +186,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -187,6 +197,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -197,6 +208,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -208,7 +220,8 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 8, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 8, 0).await?;
     
     // Count sizes
     let mut size_counts = HashMap::new();
@@ -334,6 +347,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -345,7 +359,8 @@ async fn test_parallel_with_single_size() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0).await?;
     
     assert_eq!(objects.len(), 20, "Should create 20 objects total");
     
@@ -377,6 +392,7 @@ async fn test_files_created_correctly() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri_2kb.clone(),
@@ -387,6 +403,7 @@ async fn test_files_created_correctly() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -398,7 +415,8 @@ async fn test_files_created_correctly() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 24, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0).await?;
     
     // Verify files exist on disk with correct sizes
     for obj in &objects {
@@ -431,6 +449,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -441,6 +460,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
             EnsureSpec {
                 base_uri: base_uri.clone(),
@@ -451,6 +471,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -462,7 +483,8 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         skip_verification: false,
     };
     
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, 48, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 48, 0).await?;
     
     // Should have created 90 objects total
     assert_eq!(objects.len(), 90, "Should create 90 objects");
@@ -542,6 +564,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -555,7 +578,8 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     
     // Test with different concurrency values to verify parameter is accepted
     for concurrency in [1, 16, 32, 64, 128] {
-        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, concurrency, 0, 1).await?;
+        let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, concurrency, 0).await?;
         
         // Verify objects were created
         assert_eq!(objects.len(), 5, "Should create 5 objects with concurrency={}", concurrency);
@@ -579,6 +603,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
                 fill: sai3_bench::config::FillPattern::Zero,
                 dedup_factor: 1,
                 compress_factor: 1,
+                use_multi_endpoint: false,
             },
         ],
         cleanup: false,
@@ -595,7 +620,8 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     std::fs::create_dir_all(base_path)?;
     
     // Test parallel strategy with high concurrency
-    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, 64, 0, 1).await?;
+    let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
+    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, None, &multi_ep_cache, 1, 64, 0).await?;
     assert_eq!(objects.len(), 5, "Parallel strategy should create 5 objects with concurrency=64");
     assert_eq!(metrics.objects_created, 5, "Metrics should show 5 objects created");
     

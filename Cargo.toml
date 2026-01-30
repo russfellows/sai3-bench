@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.21"
+version = "0.8.22"
 edition = "2021"
 build   = "build.rs"
 
@@ -22,9 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio: Use local path for development (switch to git tag for releases)
-s3dlio = { path = "../s3dlio" }
-s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
+# s3dlio: Use git tag for releases (switch to local path for development)
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.37" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.37" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
