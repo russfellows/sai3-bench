@@ -10,6 +10,13 @@ All notable changes to sai3-bench are documented in this file.
 
 ### Added
 
+- **Multi-endpoint statistics tracking** (endpoint-level performance visibility)
+  - New `workload_endpoint_stats.tsv` file with per-endpoint metrics
+  - New `prepare_endpoint_stats.tsv` file for data preparation phase
+  - Columns: endpoint, operation_count, bytes, errors, latency percentiles (p50, p90, p99, p99.9)
+  - Essential for diagnosing multi-endpoint load balancing effectiveness
+  - Works with both global and per-agent endpoint configurations
+
 - **Multi-endpoint load balancing for distributed storage systems**
   - Enables distributing I/O operations across multiple storage endpoints (IPs, mount points)
   - Perfect for multi-NIC storage systems (VAST, Weka, MinIO clusters)
@@ -33,6 +40,31 @@ All notable changes to sai3-bench are documented in this file.
   - Added `create_store_from_config()` function for multi-endpoint aware store creation
   - Respects configuration priority: per-agent > global > target fallback
   - Added `create_multi_endpoint_store()` internal helper function
+
+- **Excel timestamp formatting** in sai3-analyze
+  - Auto-detects timestamp columns by suffix (_ms, _us, _ns)
+  - Converts epoch timestamps to Excel datetime format: "2026-01-29 22:21:51.000"
+  - Column width: 22 for timestamps, 15 for regular columns
+  - Fixes scientific notation display (1.77E+18 → readable dates)
+
+- **Version option** for sai3-analyze
+  - Added `-V` and `--version` flags
+  - Displays: "sai3bench-analyze 0.8.22"
+
+- **Comprehensive documentation consolidation**
+  - Created [DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md) (620+ lines)
+    - Multi-host architecture with verified YAML examples
+    - Multi-endpoint testing patterns (critical common use case)
+    - Real-world examples: multi-region, multi-account, load balancing
+    - Troubleshooting guide and performance analysis tools
+  - Created [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
+    - Consolidated SSH_SETUP_GUIDE + CONTAINER_DEPLOYMENT_GUIDE + DOCKER_PRODUCTION_DEPLOYMENT
+    - SSH deployment with automated ssh-setup command
+    - Container deployment with host network mode
+    - Production best practices (tmux + daemon patterns)
+  - Updated [README.md](README.md) as clean documentation index
+  - Reduced from 27+ documentation files to 9 essential docs
+  - Moved 18 planning/design docs to archive/ directory
 
 ### Configuration Examples
 
@@ -74,29 +106,74 @@ multi_endpoint:
     - file:///mnt/nfs2/benchmark/
 ```
 
+### Changed
+
+- **Breaking: perf_log.tsv format** - Removed `is_warmup` column
+  - Old format: 31 columns (with is_warmup)
+  - New format: 30 columns (cleaner, less redundant)
+  - sai3-analyze updated to handle both formats
+
+- **Controller config serialization** - Per-agent YAML generation
+  - Controller now serializes agent-specific YAML with only assigned endpoints
+  - Lines 1272-1301 in `src/bin/controller.rs`
+  - Prevents agents from seeing/accessing non-assigned endpoints
+  - Critical for endpoint isolation in distributed testing
+
+### Fixed
+
+- **Critical: Per-agent endpoint isolation bug**
+  - **Problem**: Controller sent same config YAML to all agents (all endpoints visible)
+  - **Impact**: Each agent accessed ALL endpoints instead of only assigned ones
+  - **Root cause**: Controller didn't override `multi_endpoint` in serialized agent config
+  - **Fix**: Controller generates per-agent YAML with `multi_endpoint` override matching AgentConfig
+  - **Validated**: Real distributed tests confirm Agent-1 only accesses endpoints A&B, Agent-2 only C&D
+
+- **Excel timestamp scientific notation**
+  - Timestamps no longer display as 1.77E+18
+  - Auto-detection: Parses column names for time unit suffixes
+  - Conversion: Applies correct divisor (1000 for ms, 1000000 for us, 1000000000 for ns)
+
+### Validated
+
+- ✅ Two distributed workload tests compared in Excel (multi_endpoint_comparison.xlsx)
+- ✅ Endpoint stats files prove per-agent endpoint isolation
+  - Agent-1: Only endpoints A & B in endpoint_stats.tsv
+  - Agent-2: Only endpoints C & D in endpoint_stats.tsv
+- ✅ All YAML examples verified with `--dry-run`:
+  - `tests/configs/local_test_2agents.yaml` - 2 agents, 320 files, tree structure
+  - `tests/configs/distributed_mixed_test.yaml` - 3 size groups (1KB, 128KB, 1MB)
+  - `tests/configs/multi_endpoint_prepare.yaml` - Per-agent endpoints, 100 objects
+  - `tests/configs/multi_endpoint_workload.yaml` - 20s duration, 75/20/5 GET/PUT/LIST
+- ✅ 3-phase distributed test: prepare → replicate → workload (full validation)
+
 ### Technical Details
 
-- Leverages s3dlio v0.9.14+ `MultiEndpointStore` with per-endpoint statistics
+- Leverages s3dlio v0.9.37 zero-copy `Bytes` API (277 tests passing)
+- Multi-endpoint support from s3dlio v0.9.14+ `MultiEndpointStore` with per-endpoint statistics
 - Compatible with all storage backends (S3, Azure, GCS, file://, direct://)
 - Requires identical namespace across all endpoints (same files accessible from each)
 - Load balancing strategies implemented at s3dlio layer (zero overhead in sai3-bench)
 
 ### Test Configurations
 
-- `tests/configs/multi_endpoint_global.yaml` - Global shared endpoint pool
-- `tests/configs/multi_endpoint_per_agent.yaml` - Static per-agent mapping (4×2 example)
-- `tests/configs/multi_endpoint_nfs.yaml` - NFS mount point load balancing
+- `tests/configs/local_test_2agents.yaml` - Basic 2-agent distributed test
+- `tests/configs/distributed_mixed_test.yaml` - Mixed size workload (1KB, 128KB, 1MB)
+- `tests/configs/multi_endpoint_prepare.yaml` - Per-agent endpoint assignment (Phase 1: prepare)
+- `tests/configs/multi_endpoint_workload.yaml` - Multi-endpoint workload test (Phase 3)
+- All configs validated with `--dry-run` before release
 
 ### Documentation
 
-- See [MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](docs/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) for design rationale
-- Updated CONFIG_SYNTAX.md with multi-endpoint configuration reference
-- Updated README.md feature list
+- See [DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md) for multi-endpoint architecture and examples
+- See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for SSH and container deployment
+- See [archive/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](archive/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) for design rationale
+- See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for multi-endpoint configuration reference
+- See [README.md](README.md) for documentation index
 
-### Related Issues
+### Dependencies
 
-- Addresses requirement for targeting multiple storage IPs from distributed agents
-- Enables optimal bandwidth utilization for multi-NIC storage systems
+- s3dlio v0.9.37 (zero-copy Bytes API)
+- Compatible with s3dlio v0.9.16+ (multi-endpoint support)
 
 ---
 

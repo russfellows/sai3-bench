@@ -1,0 +1,61 @@
+# Multi-Endpoint Distributed Test - PHASE 1: PREPARE
+# Creates test data distributed across 4 endpoints by 2 agents
+
+duration: 0s  # Skip workload phase
+concurrency: 8
+
+# Global multi-endpoint (fallback for agents without per-agent override)
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/sai3-multi-ep-test/endpoint-a/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-b/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-c/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-d/"
+
+# Distributed configuration with per-agent endpoint assignments
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  
+  agents:
+    # Agent 1: Creates files across endpoints A & B (round robin)
+    - address: "localhost:7761"
+      id: "agent-dc-a"
+      concurrency_override: 4
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/sai3-multi-ep-test/endpoint-a/"
+          - "file:///tmp/sai3-multi-ep-test/endpoint-b/"
+        strategy: round_robin
+    
+    # Agent 2: Creates files across endpoints C & D (least connections)
+    - address: "localhost:7762"
+      id: "agent-dc-b"
+      concurrency_override: 4
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/sai3-multi-ep-test/endpoint-c/"
+          - "file:///tmp/sai3-multi-ep-test/endpoint-d/"
+        strategy: least_connections
+  
+  start_delay: 2
+
+# Prepare phase: Create 100 objects distributed across endpoints
+prepare:
+  ensure_objects:
+    - base_uri: "testdata/"  # Path component only - agents use their multi_endpoint endpoints
+      use_multi_endpoint: true  # CRITICAL: Objects created across assigned endpoints
+      count: 100
+      min_size: 524288
+      max_size: 524288
+      fill: zero
+  cleanup: false  # KEEP FILES for phase 2 (workload test)
+
+# Dummy workload (won't run - duration: 0s)
+workload:
+  - op: put
+    path: "dummy-{}.dat"
+    object_size: 1024
+    weight: 100

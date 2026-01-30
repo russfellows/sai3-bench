@@ -236,7 +236,7 @@ prepare:
       count: 500
       min_size: 65536
       max_size: 1048576
-      fill: zero
+      fill: zero     # DO NOT USE - only for testing zero-data behavior
 
 workload:
   - op: get

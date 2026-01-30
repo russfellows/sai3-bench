@@ -497,7 +497,7 @@ prepare:
       count: 2000            # Create 2000 objects
       min_size: 1048576      # Minimum size: 1 MiB
       max_size: 1048576      # Maximum size: 1 MiB (same = fixed size)
-      fill: random           # Fill pattern: random, zero, or pattern
+      fill: random           # Fill pattern: random (default) or zero (DO NOT USE)
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test

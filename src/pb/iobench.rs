@@ -164,6 +164,31 @@ pub struct WorkloadSummary {
     /// Per-bucket ops and bytes for META
     #[prost(message, optional, tag = "21")]
     pub meta_bins: ::core::option::Option<SizeBins>,
+    /// v0.8.22: Per-endpoint statistics for multi-endpoint configurations
+    #[prost(message, repeated, tag = "22")]
+    pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
+}
+/// v0.8.22: Per-endpoint statistics snapshot
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EndpointStatsSnapshot {
+    /// Full URI of the endpoint
+    #[prost(string, tag = "1")]
+    pub uri: ::prost::alloc::string::String,
+    /// Total requests to this endpoint
+    #[prost(uint64, tag = "2")]
+    pub total_requests: u64,
+    /// Total bytes read from this endpoint
+    #[prost(uint64, tag = "3")]
+    pub bytes_read: u64,
+    /// Total bytes written to this endpoint
+    #[prost(uint64, tag = "4")]
+    pub bytes_written: u64,
+    /// Number of errors on this endpoint
+    #[prost(uint64, tag = "5")]
+    pub error_count: u64,
+    /// Currently active requests (usually 0 at end)
+    #[prost(uint64, tag = "6")]
+    pub active_requests: u64,
 }
 /// v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -202,6 +227,9 @@ pub struct PrepareSummary {
     /// Per-bucket ops and bytes for PUT
     #[prost(message, optional, tag = "11")]
     pub put_bins: ::core::option::Option<SizeBins>,
+    /// v0.8.22: Per-endpoint statistics for multi-endpoint configurations
+    #[prost(message, repeated, tag = "12")]
+    pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
 }
 /// v0.7.5: Live performance statistics for distributed execution
 /// Sent every 1 second during workload execution for real-time visibility

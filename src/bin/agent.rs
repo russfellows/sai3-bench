@@ -2262,6 +2262,24 @@ impl Agent for AgentSvc {
     }
 }
 
+/// Convert endpoint stats to proto format (v0.8.22)
+fn endpoint_stats_to_proto(
+    endpoint_stats: Option<&Vec<sai3_bench::workload::EndpointStatsSnapshot>>
+) -> Vec<pb::iobench::EndpointStatsSnapshot> {
+    endpoint_stats
+        .map(|stats| {
+            stats.iter().map(|s| pb::iobench::EndpointStatsSnapshot {
+                uri: s.uri.clone(),
+                total_requests: s.total_requests,
+                bytes_read: s.bytes_read,
+                bytes_written: s.bytes_written,
+                error_count: s.error_count,
+                active_requests: s.active_requests as u64,
+            }).collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Convert SizeBins to protobuf SizeBins message (v0.8.18)
 fn size_bins_to_proto(bins: &sai3_bench::workload::SizeBins) -> pb::iobench::SizeBins {
     let buckets = bins.by_bucket
@@ -2339,6 +2357,7 @@ async fn summary_to_proto(
         get_bins: Some(size_bins_to_proto(&summary.get_bins)),
         put_bins: Some(size_bins_to_proto(&summary.put_bins)),
         meta_bins: Some(size_bins_to_proto(&summary.meta_bins)),
+        endpoint_stats: endpoint_stats_to_proto(summary.endpoint_stats.as_ref()),
     })
 }
 
@@ -2411,10 +2430,11 @@ async fn prepare_metrics_to_proto(
         tsv_content,
         results_path: results_path.display().to_string(),
         put_bins: Some(size_bins_to_proto(&metrics.put_bins)),
+        endpoint_stats: endpoint_stats_to_proto(metrics.endpoint_stats.as_ref()),
     })
 }
 
-/// Create agent results directory and capture output files (v0.6.4)
+/// Convert endpoint stats to proto format (v0.8.22)
 /// Returns: (metadata_json, tsv_content, results_path, op_log_path, histogram_bytes)
 async fn create_agent_results(
     agent_id: &str,
