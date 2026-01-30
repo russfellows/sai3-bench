@@ -246,15 +246,14 @@ prepare:
         type: uniform
         min: 4096         # 4 KiB
         max: 16384        # 16 KiB
-      fill: random        # "random" (recommended) or "prand" (faster)
+      fill: random        # Cryptographic random data (recommended)
       dedup_factor: 1     # 1 = unique, 2+ = duplicate blocks
       compress_factor: 1  # 1 = incompressible, 2+ = compressible
 ```
 
 **Fill Pattern Options:**
 - **`random`** (default, recommended): Cryptographic random data - realistic, incompressible
-- **`prand`**: Pseudo-random using XorShift - faster generation, still unique per file
-- **`zero`**: All zeros - AVOID for benchmarks (triggers dedup/compression, unrealistic)
+- ***⚠️ `zero`: DO NOT USE for benchmarks - triggers dedup/compression, produces unrealistic results***
 
 **Key Features:**
 - **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
@@ -394,35 +393,67 @@ See [remap_examples.yaml](tests/configs/remap_examples.yaml) for complete exampl
 
 ## 💾 Storage Efficiency Testing
 
-Test deduplication and compression with controlled data patterns:
+Test deduplication and compression with controlled data patterns.
 
+**Important**: `dedup_factor` and `compress_factor` are **optional** - if omitted, both default to `1` (no dedup, no compression).
+
+### Example 1: Default Behavior (No Dedup/Compression)
 ```yaml
 prepare:
   ensure_objects:
-    - base_uri: "s3://bucket/templates/"
-      count: 100
-      size_spec: 10485760  # 10 MB fixed size
-      fill: random         # Recommended: realistic, incompressible
-      dedup_factor: 20     # 95% duplicate blocks (1/20 unique)
-      compress_factor: 2   # 2:1 compressible
-    
-    - base_uri: "s3://bucket/media/"
+    - base_uri: "s3://bucket/unique-media/"
       count: 500
+      size_spec: 10485760  # 10 MB fixed size
+      fill: random
+      # dedup_factor: 1 (default - omitted, all blocks unique)
+      # compress_factor: 1 (default - omitted, incompressible)
+```
+
+### Example 2: Testing Storage Deduplication (3:1 Ratio)
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/vm-snapshots/"
+      count: 100
+      size_spec: 52428800  # 50 MB
+      fill: random
+      dedup_factor: 3      # 3:1 dedup (1/3 blocks unique, 2/3 duplicates)
+      compress_factor: 1   # No compression (incompressible data)
+```
+**Result**: 100 files × 50 MB = 5 GB logical, but only ~1.67 GB unique data (3:1 dedup).
+
+### Example 3: Combined Dedup + Compression (5:1 and 2:1)
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/log-archives/"
+      count: 200
       size_spec:
         type: uniform
         min: 5242880       # 5 MB
         max: 52428800      # 50 MB
-      fill: prand          # Faster pseudo-random, still unique per file
-      dedup_factor: 1      # All unique blocks
-      compress_factor: 1   # Incompressible
+      fill: random
+      dedup_factor: 5      # 5:1 dedup (1/5 blocks unique)
+      compress_factor: 2   # 2:1 compression (50% zeros)
 ```
+**Result**: Avg 28.5 MB × 200 files = 5.7 GB logical → ~1.14 GB unique (5:1) → ~570 MB after compression (2:1).
+
+### Dedup/Compression Ratios Explained
+
+| Setting | Value | Meaning | Storage Impact |
+|---------|-------|---------|----------------|
+| `dedup_factor: 1` | 1:1 (default) | All blocks unique | No dedup savings |
+| `dedup_factor: 3` | 3:1 | 1/3 unique, 2/3 duplicate | 67% space savings |
+| `dedup_factor: 5` | 5:1 | 1/5 unique, 4/5 duplicate | 80% space savings |
+| `compress_factor: 1` | 1:1 (default) | Incompressible | No compression savings |
+| `compress_factor: 2` | 2:1 | 50% zeros | 50% compression savings |
+| `compress_factor: 4` | 4:1 | 75% zeros | 75% compression savings |
 
 **Fill Pattern Guidelines:**
 | Pattern | Speed | Use Case |
 |---------|-------|----------|
-| `random` | Slower | Production benchmarks, realistic workloads |
-| `prand` | Faster | Large-scale testing, still unique data per file |
-| `zero` | Fastest | ⚠️ AVOID - triggers dedup/compression, unrealistic results |
+| `random` | Standard | Production benchmarks, realistic workloads (RECOMMENDED) |
+| ***⚠️ `zero`*** | Fastest | ***DO NOT USE - triggers dedup/compression, unrealistic results*** |
 
 **Use Cases**: Validate vendor dedup/compression claims, predict migration space requirements, model hot vs. cold data.
 
@@ -443,7 +474,7 @@ workload:
       std_dev: 524288    # Std dev: 512 KB
       min: 1024          # Floor: 1 KB
       max: 10485760      # Ceiling: 10 MB
-    fill: random         # "random" or "prand"
+    fill: random         # Cryptographic random (recommended)
 ```
 
 **Why lognormal?** Research shows object storage naturally follows lognormal distributions (many small configs/thumbnails, few large videos/backups).
