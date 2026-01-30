@@ -38,73 +38,6 @@ All operations work identically across protocols - just change the URI scheme:
 
 See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides.
 
-## 🌳 Directory Tree Workloads
-
-Test realistic shared filesystem scenarios with configurable directory hierarchies:
-
-```yaml
-prepare:
-  directory_structure:
-    width: 3              # Subdirectories per level
-    depth: 2              # Tree depth (2 = 3 + 9 directories)
-    files_per_dir: 10     # Files per directory
-    distribution: bottom  # "bottom" (leaf only) or "all" (every level)
-    dir_mask: "d%d_w%d.dir"  # Directory naming pattern
-  
-  ensure_objects:
-    - base_uri: "file:///tmp/tree-test/"
-      count: 0            # Files created by directory_structure
-      size_spec: 
-        type: uniform
-        min: 4096         # 4 KiB
-        max: 16384        # 16 KiB
-      fill: random        # "random" (recommended) or "prand" (faster)
-      dedup_factor: 1     # 1 = unique, 2+ = duplicate blocks
-      compress_factor: 1  # 1 = incompressible, 2+ = compressible
-```
-
-**Fill Pattern Options:**
-- **`random`** (default, recommended): Cryptographic random data - realistic, incompressible
-- **`prand`**: Pseudo-random using XorShift - faster generation, still unique per file
-- **`zero`**: All zeros - AVOID for benchmarks (triggers dedup/compression, unrealistic)
-
-**Key Features:**
-- **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
-- **Multi-level distributions**: Place files only in leaves (`bottom`) or at all levels (`all`)
-- **Cloud storage compatible**: Works seamlessly with S3, Azure Blob, GCS (implicit directories)
-- **Distributed coordination**: TreeManifest ensures collision-free file numbering across agents
-- **Realistic data**: Random fill default provides compression-resistant patterns
-
-**Example:**
-```bash
-# Validate configuration with enhanced dry-run
-./sai3-bench run --config tree-test.yaml --dry-run
-# Output: Total Directories: 12, Total Files: 60, Total Data: 600 KiB
-
-# Run workload on Azure Blob Storage
-./sai3-bench run --config tree-test.yaml
-```
-
-See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for examples.
-
-## 📦 Architecture & Binaries
-
-- **`sai3-bench`** - Single-node CLI with subcommands: `run`, `replay`, `util`
-- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
-- **`sai3bench-ctl`** - Controller for coordinating distributed agents
-- **`sai3-analyze`** - Results consolidation tool (Excel spreadsheet generation) ✨ NEW in v0.8.17
-
-## 📖 Documentation
-
-- **[Usage Guide](docs/USAGE.md)** - Getting started and common workflows
-- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - Complete YAML configuration reference
-- **[Config Examples](tests/configs/README.md)** - Annotated test configurations
-- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation
-- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication
-- **[Data Generation Guide](docs/DATA_GENERATION.md)** - Deduplication and compression testing
-- **[Results Analysis Tool](docs/ANALYZE_TOOL.md)** - Consolidating multiple results into Excel ✨ NEW
-- **[Changelog](docs/CHANGELOG.md)** - Complete version history
-
 ## 🚀 Quick Start
 
 ### One-Time Setup
@@ -127,6 +60,29 @@ The build creates 4 executables in `target/release/`:
 - `sai3bench-agent` - Distributed agent (runs on each test host)
 - `sai3bench-ctl` - Distributed controller (coordinates agents)
 - `sai3-analyze` - Results analysis tool (Excel export)
+
+**3. Install Executables** (optional):
+
+Choose one of the following installation methods:
+
+**Option A: User-local install** (recommended, no sudo required):
+```bash
+cargo install --path .
+```
+Installs to `~/.cargo/bin/` (already in your PATH from Rust installation).
+
+**Option B: System-wide install**:
+```bash
+sudo install -m 755 target/release/{sai3-bench,sai3bench-ctl,sai3bench-agent,sai3-analyze} /usr/local/bin/
+```
+Installs to `/usr/local/bin/` for all users.
+
+**Option C: Run from build directory**:
+```bash
+# No installation needed - use full path:
+./target/release/sai3-bench --version
+./target/release/sai3bench-ctl --version
+```
 
 ### Testing Modes
 
@@ -269,6 +225,75 @@ EOF
 ```
 
 See [Usage Guide](docs/USAGE.md) for detailed examples and [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) for multi-host patterns.
+
+## 🌳 Directory Tree Workloads
+
+Test realistic shared filesystem scenarios with configurable directory hierarchies:
+
+```yaml
+prepare:
+  directory_structure:
+    width: 3              # Subdirectories per level
+    depth: 2              # Tree depth (2 = 3 + 9 directories)
+    files_per_dir: 10     # Files per directory
+    distribution: bottom  # "bottom" (leaf only) or "all" (every level)
+    dir_mask: "d%d_w%d.dir"  # Directory naming pattern
+  
+  ensure_objects:
+    - base_uri: "file:///tmp/tree-test/"
+      count: 0            # Files created by directory_structure
+      size_spec: 
+        type: uniform
+        min: 4096         # 4 KiB
+        max: 16384        # 16 KiB
+      fill: random        # "random" (recommended) or "prand" (faster)
+      dedup_factor: 1     # 1 = unique, 2+ = duplicate blocks
+      compress_factor: 1  # 1 = incompressible, 2+ = compressible
+```
+
+**Fill Pattern Options:**
+- **`random`** (default, recommended): Cryptographic random data - realistic, incompressible
+- **`prand`**: Pseudo-random using XorShift - faster generation, still unique per file
+- **`zero`**: All zeros - AVOID for benchmarks (triggers dedup/compression, unrealistic)
+
+**Key Features:**
+- **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
+- **Multi-level distributions**: Place files only in leaves (`bottom`) or at all levels (`all`)
+- **Cloud storage compatible**: Works seamlessly with S3, Azure Blob, GCS (implicit directories)
+- **Distributed coordination**: TreeManifest ensures collision-free file numbering across agents
+- **Realistic data**: Random fill default provides compression-resistant patterns
+
+**Example:**
+```bash
+# Validate configuration with enhanced dry-run
+./sai3-bench run --config tree-test.yaml --dry-run
+# Output: Total Directories: 12, Total Files: 60, Total Data: 600 KiB
+
+# Run workload on Azure Blob Storage
+./sai3-bench run --config tree-test.yaml
+```
+
+See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for examples.
+
+## 📦 Architecture & Binaries
+
+- **`sai3-bench`** - Single-node CLI with subcommands: `run`, `replay`, `util`
+- **`sai3bench-agent`** - Distributed gRPC agent for multi-node load generation  
+- **`sai3bench-ctl`** - Controller for coordinating distributed agents
+- **`sai3-analyze`** - Results consolidation tool (Excel spreadsheet generation) ✨ NEW in v0.8.17
+
+## 📖 Documentation
+
+- **[Usage Guide](docs/USAGE.md)** - Getting started and common workflows
+- **[Config Syntax](docs/CONFIG_SYNTAX.md)** - Complete YAML configuration reference
+- **[Config Examples](tests/configs/README.md)** - Annotated test configurations
+- **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation
+- **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication
+- **[Data Generation Guide](docs/DATA_GENERATION.md)** - Deduplication and compression testing
+- **[Results Analysis Tool](docs/ANALYZE_TOOL.md)** - Consolidating multiple results into Excel ✨ NEW
+- **[Changelog](docs/CHANGELOG.md)** - Complete version history
+
+
 
 ## 🔬 Workload Replay
 
