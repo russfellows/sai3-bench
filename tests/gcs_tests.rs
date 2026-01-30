@@ -14,6 +14,7 @@
 // Run with: cargo test --test gcs_tests -- --test-threads=1 --nocapture
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use std::env;
 
 use sai3_bench::workload::{
@@ -121,14 +122,14 @@ async fn test_gcs_put_get_delete() -> Result<()> {
     print_test_config();
     println!("🧪 Testing GCS PUT/GET/DELETE cycle");
     
-    // Test data
+    // Test data (zero-copy: create as Bytes from start)
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from sai3-bench GCS test!";
+    let test_data = Bytes::from_static(b"Hello from sai3-bench GCS test!");
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation
     println!("  📤 PUT: {}", test_uri);
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     println!("     ✓ PUT completed: {} bytes", test_data.len());
     
     // GET operation
@@ -164,14 +165,14 @@ async fn test_gcs_list_operations() -> Result<()> {
     print_test_config();
     println!("🧪 Testing GCS LIST operations");
     
-    // Create test objects
+    // Create test objects (zero-copy: create as Bytes from start)
     let prefix = format!("{}list-test/", base_uri);
-    let test_data = b"list test data";
+    let test_data = Bytes::from_static(b"list test data");
     
     println!("  📤 Creating test objects...");
     for i in 0..5 {
         let uri = format!("{}object-{:03}.txt", prefix, i);
-        put_object_no_log(&uri, test_data).await?;
+        put_object_no_log(&uri, test_data.clone()).await?;
     }
     println!("     ✓ Created 5 test objects");
     
@@ -208,12 +209,12 @@ async fn test_gcs_stat_operations() -> Result<()> {
     print_test_config();
     println!("🧪 Testing GCS STAT operations");
     
-    // Create test object
+    // Create test object (zero-copy: create as Bytes from start)
     let test_uri = format!("{}stat-test.txt", base_uri);
-    let test_data = b"stat test data - 1024 bytes minimum content for size validation";
+    let test_data = Bytes::from_static(b"stat test data - 1024 bytes minimum content for size validation");
     
     println!("  📤 Creating test object");
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     
     // STAT operation
     println!("  📊 STAT: {}", test_uri);
@@ -247,7 +248,7 @@ async fn test_gcs_concurrent_operations() -> Result<()> {
     
     let prefix = format!("{}concurrent-test/", base_uri);
     let num_objects = 10;
-    let test_data = vec![0u8; 1024]; // 1KB test data
+    let test_data = Bytes::from(vec![0u8; 1024]); // 1KB test data - zero-copy
     
     // Concurrent PUTs
     println!("  📤 Concurrent PUT: {} objects", num_objects);
@@ -256,9 +257,9 @@ async fn test_gcs_concurrent_operations() -> Result<()> {
     let mut handles = vec![];
     for i in 0..num_objects {
         let uri = format!("{}object-{:03}.dat", prefix, i);
-        let data = test_data.clone();
+        let data = test_data.clone(); // Cheap: just increments refcount
         handles.push(tokio::spawn(async move {
-            put_object_no_log(&uri, &data).await
+            put_object_no_log(&uri, data).await
         }));
     }
     
@@ -317,11 +318,11 @@ async fn test_gcs_large_object() -> Result<()> {
     
     let test_uri = format!("{}large-object.bin", base_uri);
     let size_mb = 5;
-    let test_data = vec![0xAB; size_mb * 1024 * 1024]; // 5MB
+    let test_data = Bytes::from(vec![0xAB; size_mb * 1024 * 1024]); // 5MB (Bytes::from takes ownership)
     
     println!("  📤 PUT: {} MB object", size_mb);
     let start = std::time::Instant::now();
-    put_object_no_log(&test_uri, &test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     let put_duration = start.elapsed();
     println!("     ✓ PUT completed in {:?} ({:.2} MB/s)", 
              put_duration, 
@@ -361,11 +362,11 @@ async fn test_gcs_alternate_scheme() -> Result<()> {
     let gs_uri = format!("gs://{}/sai3-bench-test/scheme-test.txt", bucket);
     let gcs_uri = format!("gcs://{}/sai3-bench-test/scheme-test.txt", bucket);
     
-    let test_data = b"testing alternate schemes";
+    let test_data = Bytes::from_static(b"testing alternate schemes");
     
     // PUT with gs://
     println!("  📤 PUT with gs:// scheme");
-    put_object_no_log(&gs_uri, test_data).await?;
+    put_object_no_log(&gs_uri, test_data.clone()).await?;
     
     // GET with gcs:// (should work - same object)
     println!("  📥 GET with gcs:// scheme");
@@ -403,10 +404,10 @@ async fn test_gcs_custom_endpoint() -> Result<()> {
     
     // Test basic operations with custom endpoint
     let test_uri = format!("{}custom-endpoint-test.txt", base_uri);
-    let test_data = b"Testing custom GCS endpoint!";
+    let test_data = Bytes::from_static(b"Testing custom GCS endpoint!");
     
     println!("  📤 PUT to custom endpoint");
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     
     println!("  📥 GET from custom endpoint");
     let result = get_object_no_log(&test_uri).await?;

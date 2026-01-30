@@ -7,6 +7,7 @@
 // Run with: cargo test --test file_tests -- --test-threads=1 --nocapture
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use tempfile::TempDir;
 
 use sai3_bench::workload::{
@@ -54,14 +55,14 @@ async fn test_file_put_get_delete() -> Result<()> {
     
     println!("🧪 Testing file PUT/GET/DELETE cycle");
     
-    // Test data
+    // Test data (zero-copy: create as Bytes from start)
     let test_key = "test_put_get_delete.txt";
-    let test_data = b"Hello from sai3-bench file test!";
+    let test_data = Bytes::from_static(b"Hello from sai3-bench file test!");
     let test_uri = format!("{}{}", base_uri, test_key);
     
     // PUT operation
     println!("  📤 PUT: {}", test_uri);
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     println!("     ✓ PUT completed: {} bytes", test_data.len());
     
     // GET operation
@@ -93,14 +94,14 @@ async fn test_file_list_operations() -> Result<()> {
     
     println!("🧪 Testing file LIST operations");
     
-    // Create test objects
+    // Create test objects (zero-copy: create as Bytes from start)
     let prefix = format!("{}list-test/", base_uri);
-    let test_data = b"list test data";
+    let test_data = Bytes::from_static(b"list test data");
     
     println!("  📤 Creating test objects...");
     for i in 0..5 {
         let uri = format!("{}object-{:03}.txt", prefix, i);
-        put_object_no_log(&uri, test_data).await?;
+        put_object_no_log(&uri, test_data.clone()).await?;
     }
     println!("     ✓ Created 5 test objects");
     
@@ -138,12 +139,12 @@ async fn test_file_stat_operations() -> Result<()> {
     
     println!("🧪 Testing file STAT operations");
     
-    // Create test object
+    // Create test object (zero-copy: create as Bytes from start)
     let test_uri = format!("{}stat-test.txt", base_uri);
-    let test_data = b"stat test data - 1024 bytes minimum content for size validation";
+    let test_data = Bytes::from_static(b"stat test data - 1024 bytes minimum content for size validation");
     
     println!("  📤 Creating test object");
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     
     // STAT operation
     println!("  📊 STAT: {}", test_uri);
@@ -168,7 +169,7 @@ async fn test_file_concurrent_operations() -> Result<()> {
     
     let prefix = format!("{}concurrent-test/", base_uri);
     let num_objects = 10;
-    let test_data = vec![0u8; 1024]; // 1KB test data
+    let test_data = Bytes::from(vec![0u8; 1024]); // 1KB test data - zero-copy
     
     // Concurrent PUTs
     println!("  📤 Concurrent PUT: {} objects", num_objects);
@@ -177,9 +178,9 @@ async fn test_file_concurrent_operations() -> Result<()> {
     let mut handles = vec![];
     for i in 0..num_objects {
         let uri = format!("{}object-{:03}.dat", prefix, i);
-        let data = test_data.clone();
+        let data = test_data.clone(); // Cheap: just increments refcount
         handles.push(tokio::spawn(async move {
-            put_object_no_log(&uri, &data).await
+            put_object_no_log(&uri, data).await
         }));
     }
     
@@ -229,11 +230,11 @@ async fn test_file_large_object() -> Result<()> {
     
     let test_uri = format!("{}large-object.bin", base_uri);
     let size_mb = 10;
-    let test_data = vec![0xAB; size_mb * 1024 * 1024]; // 10MB
+    let test_data = Bytes::from(vec![0xAB; size_mb * 1024 * 1024]); // 10MB (Bytes::from takes ownership)
     
     println!("  📤 PUT: {} MB object", size_mb);
     let start = std::time::Instant::now();
-    put_object_no_log(&test_uri, &test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     let put_duration = start.elapsed();
     println!("     ✓ PUT completed in {:?} ({:.2} MB/s)", 
              put_duration, 
@@ -263,12 +264,12 @@ async fn test_file_nested_directories() -> Result<()> {
     
     println!("🧪 Testing file nested directory operations");
     
-    // Create deeply nested path
+    // Create deeply nested path (zero-copy: create as Bytes from start)
     let nested_uri = format!("{}level1/level2/level3/deep-file.txt", base_uri);
-    let test_data = b"data in nested directory";
+    let test_data = Bytes::from_static(b"data in nested directory");
     
     println!("  📤 PUT to nested path: {}", nested_uri);
-    put_object_no_log(&nested_uri, test_data).await?;
+    put_object_no_log(&nested_uri, test_data.clone()).await?;
     println!("     ✓ PUT completed");
     
     println!("  📥 GET from nested path");
@@ -297,20 +298,18 @@ async fn test_file_special_characters() -> Result<()> {
     
     println!("🧪 Testing file paths with special characters");
     
-    // Test various special characters in filenames
+    // Test various special characters in filenames (zero-copy: create as Bytes from start)
     let test_cases = vec![
-        ("spaces in name.txt", b"data with spaces" as &[u8]),
-        ("file-with-dashes.txt", b"data with dashes"),
-        ("file_with_underscores.txt", b"data with underscores"),
-        ("file.multiple.dots.txt", b"data with dots"),
-        ("UPPERCASE.TXT", b"uppercase data"),
-        ("MixedCase.Txt", b"mixed case data"),
+        ("file_with_underscores.txt", Bytes::from_static(b"data with underscores")),
+        ("file.multiple.dots.txt", Bytes::from_static(b"data with dots")),
+        ("UPPERCASE.TXT", Bytes::from_static(b"uppercase data")),
+        ("MixedCase.Txt", Bytes::from_static(b"mixed case data")),
     ];
     
     for (filename, data) in &test_cases {
         let uri = format!("{}{}", base_uri, filename);
         println!("  📤 PUT: {}", filename);
-        put_object_no_log(&uri, data).await?;
+        put_object_no_log(&uri, data.clone()).await?;
         
         let result = get_object_no_log(&uri).await?;
         assert_eq!(&result, data, "Data mismatch for {}", filename);
@@ -329,10 +328,10 @@ async fn test_file_empty_object() -> Result<()> {
     println!("🧪 Testing file empty object operations");
     
     let test_uri = format!("{}empty-file.txt", base_uri);
-    let empty_data: &[u8] = b"";
+    let empty_data = Bytes::new(); // Zero-copy empty Bytes
     
     println!("  📤 PUT empty object");
-    put_object_no_log(&test_uri, empty_data).await?;
+    put_object_no_log(&test_uri, empty_data.clone()).await?;
     
     println!("  📥 GET empty object");
     let result = get_object_no_log(&test_uri).await?;
@@ -358,9 +357,9 @@ async fn test_file_absolute_path() -> Result<()> {
     println!("🧪 Testing file absolute path: {}", uri);
     
     let test_uri = format!("{}absolute-path-test.txt", uri);
-    let test_data = b"testing absolute path";
+    let test_data = Bytes::from_static(b"testing absolute path");
     
-    put_object_no_log(&test_uri, test_data).await?;
+    put_object_no_log(&test_uri, test_data.clone()).await?;
     let result = get_object_no_log(&test_uri).await?;
     assert_eq!(result, test_data);
     delete_object_no_log(&test_uri).await?;

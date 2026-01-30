@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::metrics::OpHists;
 use crate::constants::BUCKET_LABELS;
 use crate::prepare::PrepareMetrics;
-use crate::workload::SizeBins;
+use crate::workload::{SizeBins, EndpointStatsSnapshot};
 
 /// TSV exporter for benchmark results
 pub struct TsvExporter {
@@ -224,6 +224,73 @@ impl TsvExporter {
         // Write sorted rows
         for (_, row) in rows {
             writeln!(f, "{}", row)?;
+        }
+
+        Ok(())
+    }
+
+    /// Export per-endpoint statistics to TSV file (v0.8.23+)
+    /// 
+    /// Creates endpoint_stats.tsv with columns:
+    /// - endpoint_idx: 1-based endpoint index
+    /// - endpoint_uri: Full URI of the endpoint
+    /// - total_requests: Number of requests to this endpoint
+    /// - bytes_read: Total bytes read from this endpoint
+    /// - bytes_written: Total bytes written to this endpoint
+    /// - error_count: Number of errors on this endpoint
+    /// - active_requests: Currently active requests (usually 0 at end)
+    /// - request_pct: Percentage of total requests
+    /// - read_pct: Percentage of total bytes read
+    /// - write_pct: Percentage of total bytes written
+    pub fn export_endpoint_stats(&self, endpoint_stats: &[EndpointStatsSnapshot]) -> Result<()> {
+        let mut f = File::create(&self.output_path)
+            .with_context(|| format!("Failed to create {}", self.output_path.display()))?;
+
+        // Write header
+        writeln!(
+            f,
+            "endpoint_idx\tendpoint_uri\ttotal_requests\tbytes_read\tbytes_written\terror_count\tactive_requests\trequest_pct\tread_pct\twrite_pct"
+        )?;
+
+        // Calculate totals for percentage calculations
+        let total_requests: u64 = endpoint_stats.iter().map(|s| s.total_requests).sum();
+        let total_bytes_read: u64 = endpoint_stats.iter().map(|s| s.bytes_read).sum();
+        let total_bytes_written: u64 = endpoint_stats.iter().map(|s| s.bytes_written).sum();
+
+        // Write each endpoint row
+        for (idx, stats) in endpoint_stats.iter().enumerate() {
+            let request_pct = if total_requests > 0 {
+                (stats.total_requests as f64 / total_requests as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let read_pct = if total_bytes_read > 0 {
+                (stats.bytes_read as f64 / total_bytes_read as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let write_pct = if total_bytes_written > 0 {
+                (stats.bytes_written as f64 / total_bytes_written as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            writeln!(
+                f,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}",
+                idx + 1,
+                stats.uri,
+                stats.total_requests,
+                stats.bytes_read,
+                stats.bytes_written,
+                stats.error_count,
+                stats.active_requests,
+                request_pct,
+                read_pct,
+                write_pct
+            )?;
         }
 
         Ok(())

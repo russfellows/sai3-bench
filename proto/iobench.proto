@@ -91,6 +91,19 @@ message WorkloadSummary {
   SizeBins get_bins = 19;        // Per-bucket ops and bytes for GET
   SizeBins put_bins = 20;        // Per-bucket ops and bytes for PUT
   SizeBins meta_bins = 21;       // Per-bucket ops and bytes for META
+  
+  // v0.8.22: Per-endpoint statistics for multi-endpoint configurations
+  repeated EndpointStatsSnapshot endpoint_stats = 22;
+}
+
+// v0.8.22: Per-endpoint statistics snapshot
+message EndpointStatsSnapshot {
+  string uri = 1;                // Full URI of the endpoint
+  uint64 total_requests = 2;     // Total requests to this endpoint
+  uint64 bytes_read = 3;         // Total bytes read from this endpoint
+  uint64 bytes_written = 4;      // Total bytes written to this endpoint
+  uint64 error_count = 5;        // Number of errors on this endpoint
+  uint64 active_requests = 6;    // Currently active requests (usually 0 at end)
 }
 
 // v0.7.9: Prepare phase summary (similar to WorkloadSummary but for object creation)
@@ -116,6 +129,9 @@ message PrepareSummary {
   
   // v0.8.18: Per-bucket byte counts for accurate avg_bytes calculation
   SizeBins put_bins = 11;        // Per-bucket ops and bytes for PUT
+  
+  // v0.8.22: Per-endpoint statistics for multi-endpoint configurations
+  repeated EndpointStatsSnapshot endpoint_stats = 12;
 }
 
 // v0.7.5: Live performance statistics for distributed execution

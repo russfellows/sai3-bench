@@ -93,6 +93,20 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!();
     }
     
+    // Multi-endpoint configuration for standalone mode (v0.8.22+)
+    if config.multi_endpoint.is_some() && config.distributed.is_none() {
+        if let Some(ref multi) = config.multi_endpoint {
+            println!("┌─ Multi-Endpoint Configuration ───────────────────────────────────────┐");
+            println!("│ Strategy:     {}", multi.strategy);
+            println!("│ Endpoints:    {} total", multi.endpoints.len());
+            for (idx, endpoint) in multi.endpoints.iter().enumerate() {
+                println!("│   {}: {}", idx + 1, endpoint);
+            }
+            println!("└──────────────────────────────────────────────────────────────────────┘");
+            println!();
+        }
+    }
+    
     // Distributed configuration (v0.7.5+)
     if let Some(ref dist) = config.distributed {
         println!("┌─ Distributed Configuration ──────────────────────────────────────────┐");
@@ -103,11 +117,39 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         if matches!(dist.path_selection, crate::config::PathSelectionStrategy::Partitioned | crate::config::PathSelectionStrategy::Weighted) {
             println!("│ Partition Overlap: {:.1}%", dist.partition_overlap * 100.0);
         }
+        
+        // v0.8.22: Display global multi-endpoint configuration if present
+        if let Some(ref global_multi) = config.multi_endpoint {
+            println!("│");
+            println!("│ Global Multi-Endpoint Configuration:");
+            println!("│   Strategy:       {}", global_multi.strategy);
+            println!("│   Endpoints:      {} total", global_multi.endpoints.len());
+            for (idx, endpoint) in global_multi.endpoints.iter().enumerate() {
+                println!("│     {}: {}", idx + 1, endpoint);
+            }
+            println!("│   (applies to agents without per-agent override)");
+        }
+        
         println!("│");
         println!("│ Agent List:");
         for (idx, agent) in dist.agents.iter().enumerate() {
             let id = agent.id.as_deref().unwrap_or("auto");
             println!("│   {}: {} (id: {})", idx + 1, agent.address, id);
+            
+            // v0.8.22: Display per-agent multi-endpoint configuration if present
+            if let Some(ref agent_multi) = agent.multi_endpoint {
+                println!("│      Multi-Endpoint:  {} strategy", agent_multi.strategy);
+                println!("│      Endpoints:       {} total", agent_multi.endpoints.len());
+                for (ep_idx, endpoint) in agent_multi.endpoints.iter().enumerate() {
+                    println!("│        {}: {}", ep_idx + 1, endpoint);
+                }
+            } else if config.multi_endpoint.is_some() {
+                println!("│      Multi-Endpoint:  (using global configuration)");
+            }
+            
+            if idx < dist.agents.len() - 1 {
+                println!("│");
+            }
         }
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
@@ -250,10 +292,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
         
         let (op_name, details) = match &weighted_op.spec {
-            crate::config::OpSpec::Get { path } => {
+            crate::config::OpSpec::Get { path, .. } => {
                 ("GET", format!("path: {}", path))
             },
-            crate::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor } => {
+            crate::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor, .. } => {
                 let mut details = format!("path: {}", path);
                 if let Some(ref spec) = size_spec {
                     let mut generator = SizeGenerator::new(spec)?;
@@ -264,13 +306,13 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 details.push_str(&format!(", dedup: {}, compress: {}", dedup_factor, compress_factor));
                 ("PUT", details)
             },
-            crate::config::OpSpec::List { path } => {
+            crate::config::OpSpec::List { path, .. } => {
                 ("LIST", format!("path: {}", path))
             },
-            crate::config::OpSpec::Stat { path } => {
+            crate::config::OpSpec::Stat { path, .. } => {
                 ("STAT", format!("path: {}", path))
             },
-            crate::config::OpSpec::Delete { path } => {
+            crate::config::OpSpec::Delete { path, .. } => {
                 ("DELETE", format!("path: {}", path))
             },
             crate::config::OpSpec::Mkdir { path } => {

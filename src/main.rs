@@ -53,7 +53,7 @@ async fn preflight_check_get_objects(
     // Check if workload has any GET operations
     let get_operations: Vec<_> = config.workload.iter()
         .filter_map(|w| {
-            if let sai3_bench::config::OpSpec::Get { path } = &w.spec {
+            if let sai3_bench::config::OpSpec::Get { path, .. } = &w.spec {
                 Some(path.as_str())
             } else {
                 None
@@ -1147,11 +1147,18 @@ fn run_workload(
             println!("{}", prepare_header);
             results_dir.write_console(prepare_header)?;
             
+            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
+            use std::sync::{Arc, Mutex};
+            use std::collections::HashMap;
+            let prepare_multi_ep_cache: workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
+            
             info!("Executing prepare step");
             let (prepared, manifest, prepare_metrics) = rt.block_on(workload::prepare_objects(
                 prepare_config, 
                 Some(&config.workload), 
-                None, 
+                None,  // live_stats_tracker
+                config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                 config.concurrency,
                 0,  // agent_id (standalone mode)
                 1,  // num_agents (standalone mode)
@@ -1198,6 +1205,67 @@ fn run_workload(
                 results_dir.write_console(&mkdir_summary)?;
             }
             
+            // v0.8.23: Display per-endpoint statistics if multi-endpoint was used during prepare
+            if let Some(ref endpoint_stats) = prepare_metrics.endpoint_stats {
+                let endpoint_header = "\nPrepare Per-Endpoint Statistics:";
+                println!("{}", endpoint_header);
+                results_dir.write_console(endpoint_header)?;
+                
+                let endpoint_count_msg = format!("  Total endpoints: {}", endpoint_stats.len());
+                println!("{}", endpoint_count_msg);
+                results_dir.write_console(&endpoint_count_msg)?;
+                
+                for (idx, stats) in endpoint_stats.iter().enumerate() {
+                    let endpoint_msg = format!("\n  Endpoint {}: {}", idx + 1, stats.uri);
+                    println!("{}", endpoint_msg);
+                    results_dir.write_console(&endpoint_msg)?;
+                    
+                    let requests_msg = format!("    Total requests: {}", stats.total_requests);
+                    println!("{}", requests_msg);
+                    results_dir.write_console(&requests_msg)?;
+                    
+                    let write_msg = format!("    Bytes written: {} ({:.2} MiB)", 
+                        stats.bytes_written, stats.bytes_written as f64 / 1_048_576.0);
+                    println!("{}", write_msg);
+                    results_dir.write_console(&write_msg)?;
+                    
+                    if stats.error_count > 0 {
+                        let error_msg = format!("    Errors: {}", stats.error_count);
+                        println!("{}", error_msg);
+                        results_dir.write_console(&error_msg)?;
+                    }
+                }
+                
+                // Show load distribution for round-robin verification
+                if endpoint_stats.len() > 1 {
+                    let distribution_header = "\n  Load Distribution:";
+                    println!("{}", distribution_header);
+                    results_dir.write_console(distribution_header)?;
+                    
+                    let total_requests: u64 = endpoint_stats.iter().map(|s| s.total_requests).sum();
+                    let total_bytes_written: u64 = endpoint_stats.iter().map(|s| s.bytes_written).sum();
+                    
+                    for (idx, stats) in endpoint_stats.iter().enumerate() {
+                        let req_pct = if total_requests > 0 {
+                            (stats.total_requests as f64 / total_requests as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        
+                        let write_pct = if total_bytes_written > 0 {
+                            (stats.bytes_written as f64 / total_bytes_written as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        
+                        let dist_msg = format!("    Endpoint {}: {:.1}% requests, {:.1}% write",
+                            idx + 1, req_pct, write_pct);
+                        println!("{}", dist_msg);
+                        results_dir.write_console(&dist_msg)?;
+                    }
+                }
+            }
+            
             // Export prepare metrics to TSV
             if prepare_metrics.put.ops > 0 {
                 use sai3_bench::tsv_export::TsvExporter;
@@ -1208,6 +1276,17 @@ fn run_workload(
                 let export_msg = format!("Prepare metrics exported to: {}", prepare_tsv_path.display());
                 println!("{}", export_msg);
                 results_dir.write_console(&export_msg)?;
+                
+                // v0.8.23: Export prepare phase endpoint stats if multi-endpoint was used
+                if let Some(ref endpoint_stats) = prepare_metrics.endpoint_stats {
+                    let ep_tsv_path = results_dir.prepare_endpoint_stats_tsv_path();
+                    let ep_exporter = TsvExporter::with_path(&ep_tsv_path)?;
+                    ep_exporter.export_endpoint_stats(endpoint_stats)?;
+                    
+                    let ep_export_msg = format!("Prepare endpoint stats exported to: {}", ep_tsv_path.display());
+                    println!("{}", ep_export_msg);
+                    results_dir.write_console(&ep_export_msg)?;
+                }
             }
             
             // Use configurable delay from YAML (only if objects were created)
@@ -1653,6 +1732,85 @@ fn run_workload(
         results_dir.write_console(&meta_latency_msg)?;
     }
     
+    // v0.8.22: Display per-endpoint statistics if multi-endpoint was used
+    if let Some(ref endpoint_stats) = summary.endpoint_stats {
+        let endpoint_header = "\nPer-Endpoint Statistics:";
+        println!("{}", endpoint_header);
+        results_dir.write_console(endpoint_header)?;
+        
+        let endpoint_count_msg = format!("  Total endpoints: {}", endpoint_stats.len());
+        println!("{}", endpoint_count_msg);
+        results_dir.write_console(&endpoint_count_msg)?;
+        
+        for (idx, stats) in endpoint_stats.iter().enumerate() {
+            let endpoint_msg = format!("\n  Endpoint {}: {}", idx + 1, stats.uri);
+            println!("{}", endpoint_msg);
+            results_dir.write_console(&endpoint_msg)?;
+            
+            let requests_msg = format!("    Total requests: {}", stats.total_requests);
+            println!("{}", requests_msg);
+            results_dir.write_console(&requests_msg)?;
+            
+            let read_msg = format!("    Bytes read: {} ({:.2} MiB)", 
+                stats.bytes_read, stats.bytes_read as f64 / 1_048_576.0);
+            println!("{}", read_msg);
+            results_dir.write_console(&read_msg)?;
+            
+            let write_msg = format!("    Bytes written: {} ({:.2} MiB)", 
+                stats.bytes_written, stats.bytes_written as f64 / 1_048_576.0);
+            println!("{}", write_msg);
+            results_dir.write_console(&write_msg)?;
+            
+            if stats.error_count > 0 {
+                let error_msg = format!("    Errors: {}", stats.error_count);
+                println!("{}", error_msg);
+                results_dir.write_console(&error_msg)?;
+            }
+            
+            if stats.active_requests > 0 {
+                let active_msg = format!("    Active requests: {}", stats.active_requests);
+                println!("{}", active_msg);
+                results_dir.write_console(&active_msg)?;
+            }
+        }
+        
+        // Show load distribution for round-robin verification
+        if endpoint_stats.len() > 1 {
+            let distribution_header = "\n  Load Distribution:";
+            println!("{}", distribution_header);
+            results_dir.write_console(distribution_header)?;
+            
+            let total_requests: u64 = endpoint_stats.iter().map(|s| s.total_requests).sum();
+            let total_bytes_read: u64 = endpoint_stats.iter().map(|s| s.bytes_read).sum();
+            let total_bytes_written: u64 = endpoint_stats.iter().map(|s| s.bytes_written).sum();
+            
+            for (idx, stats) in endpoint_stats.iter().enumerate() {
+                let req_pct = if total_requests > 0 {
+                    (stats.total_requests as f64 / total_requests as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let read_pct = if total_bytes_read > 0 {
+                    (stats.bytes_read as f64 / total_bytes_read as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let write_pct = if total_bytes_written > 0 {
+                    (stats.bytes_written as f64 / total_bytes_written as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let dist_msg = format!("    Endpoint {}: {:.1}% requests, {:.1}% read, {:.1}% write",
+                    idx + 1, req_pct, read_pct, write_pct);
+                println!("{}", dist_msg);
+                results_dir.write_console(&dist_msg)?;
+            }
+        }
+    }
+    
     // Export TSV results to the results directory
     {
         use sai3_bench::tsv_export::TsvExporter;
@@ -1675,6 +1833,17 @@ fn run_workload(
         let export_complete_msg = format!("TSV results exported to: {}", tsv_path.display());
         println!("{}", export_complete_msg);
         results_dir.write_console(&export_complete_msg)?;
+        
+        // v0.8.23: Export endpoint stats if multi-endpoint was used
+        if let Some(ref endpoint_stats) = summary.endpoint_stats {
+            let ep_tsv_path = results_dir.endpoint_stats_tsv_path();
+            let ep_exporter = TsvExporter::with_path(&ep_tsv_path)?;
+            ep_exporter.export_endpoint_stats(endpoint_stats)?;
+            
+            let ep_export_msg = format!("Endpoint stats exported to: {}", ep_tsv_path.display());
+            println!("{}", ep_export_msg);
+            results_dir.write_console(&ep_export_msg)?;
+        }
     }
     
     // Cleanup prepared objects if configured

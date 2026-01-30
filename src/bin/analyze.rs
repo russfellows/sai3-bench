@@ -25,6 +25,7 @@ use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(name = "sai3bench-analyze")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Consolidate sai3-bench results into Excel spreadsheet", long_about = None)]
 struct Args {
     /// Glob pattern for results directories (e.g., "sai3-*")
@@ -58,6 +59,8 @@ struct ResultsDir {
     results_tsv: Option<PathBuf>,
     prepare_results_tsv: Option<PathBuf>,
     perf_log_tsv: Option<PathBuf>,
+    workload_endpoint_stats_tsv: Option<PathBuf>,
+    prepare_endpoint_stats_tsv: Option<PathBuf>,
 }
 
 impl ResultsDir {
@@ -104,6 +107,8 @@ impl ResultsDir {
         let results_tsv = path.join("results.tsv");
         let prepare_results_tsv = path.join("prepare_results.tsv");
         let perf_log_tsv = path.join("perf_log.tsv");
+        let workload_endpoint_stats_tsv = path.join("workload_endpoint_stats.tsv");
+        let prepare_endpoint_stats_tsv = path.join("prepare_endpoint_stats.tsv");
 
         Ok(Self {
             path,
@@ -121,11 +126,21 @@ impl ResultsDir {
             } else {
                 None
             },
+            workload_endpoint_stats_tsv: if workload_endpoint_stats_tsv.exists() {
+                Some(workload_endpoint_stats_tsv)
+            } else {
+                None
+            },
+            prepare_endpoint_stats_tsv: if prepare_endpoint_stats_tsv.exists() {
+                Some(prepare_endpoint_stats_tsv)
+            } else {
+                None
+            },
         })
     }
 
     /// Generate a short, unique tab name (Excel limit: 31 chars)
-    /// Format: MMDD-HHMM-workload_Xh-R/P/L
+    /// Format: MMDD-HHMM-workload_Xh-R/P/L/WE/PE
     fn generate_tab_name(&self, file_type: &str) -> String {
         // Extract MMDD-HHMM from timestamp (20251222-1744 -> 1222-1744)
         let short_time = if self.timestamp.len() >= 13 {
@@ -143,19 +158,30 @@ impl ResultsDir {
         let short_hosts = self.hosts.replace("hosts", "h");
 
         // Combine: 1222-1744-resnet50_1h-R
-        let tab_name = format!("{}-{}_{}-{}", 
+        let mut tab_name = format!("{}-{}_{}-{}", 
             short_time, 
             short_workload, 
             short_hosts,
             file_type
         );
 
-        // Truncate to 31 characters if needed
+        // Truncate to 31 characters if needed (preserve file_type suffix)
         if tab_name.len() > 31 {
-            tab_name[..31].to_string()
-        } else {
-            tab_name
+            // Find the workload portion and trim it
+            let suffix = format!("_{}-{}", short_hosts, file_type);
+            let prefix_len = short_time.len() + 1; // "MMDD-HHMM-"
+            let workload_max_len = 31 - prefix_len - suffix.len();
+            
+            let trimmed_workload = if short_workload.len() > workload_max_len {
+                &short_workload[..workload_max_len]
+            } else {
+                short_workload
+            };
+            
+            tab_name = format!("{}-{}{}", short_time, trimmed_workload, suffix);
         }
+
+        tab_name
     }
 }
 
@@ -253,20 +279,62 @@ fn write_tsv_to_worksheet(
     header_format: &Format,
     data_format: &Format,
 ) -> Result<()> {
+    // Create a datetime format for timestamp columns
+    let datetime_format = Format::new()
+        .set_font_name("Aptos")
+        .set_num_format("yyyy-mm-dd hh:mm:ss.000");
+    
+    // Detect timestamp columns from header (row 0)
+    // Returns (column_index, divisor_for_seconds)
+    let timestamp_cols: Vec<(usize, f64)> = if let Some(header_row) = rows.first() {
+        header_row.iter()
+            .enumerate()
+            .filter_map(|(idx, col_name)| {
+                if col_name.contains("timestamp_epoch_ms") || col_name.contains("time_ms") {
+                    Some((idx, 1000.0))  // Milliseconds
+                } else if col_name.contains("timestamp_epoch_us") || col_name.contains("time_us") {
+                    Some((idx, 1_000_000.0))  // Microseconds
+                } else if col_name.contains("timestamp_epoch_ns") || col_name.contains("time_ns") {
+                    Some((idx, 1_000_000_000.0))  // Nanoseconds
+                } else if col_name.contains("timestamp_epoch") || col_name.contains("timestamp") {
+                    Some((idx, 1.0))  // Assume seconds if no unit specified
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    
     for (row_idx, row) in rows.iter().enumerate() {
         for (col_idx, cell) in row.iter().enumerate() {
             let row = row_idx as u32;
             let col = col_idx as u16;
 
-            // Try to parse as number first
-            if let Ok(num) = cell.parse::<f64>() {
-                worksheet.write_number_with_format(row, col, num, data_format)?;
-            } else {
-                // Write as string
-                if row_idx == 0 {
-                    // Header row - use bold format
-                    worksheet.write_string_with_format(row, col, cell, header_format)?;
+            if row_idx == 0 {
+                // Header row - use bold format
+                worksheet.write_string_with_format(row, col, cell, header_format)?;
+            } else if let Some(&(_, divisor)) = timestamp_cols.iter().find(|(idx, _)| *idx == col_idx) {
+                // Timestamp column - convert Unix epoch to Excel datetime
+                if let Ok(epoch_value) = cell.parse::<i64>() {
+                    // Convert to seconds based on the unit (ms, us, ns, or s)
+                    let epoch_seconds = epoch_value as f64 / divisor;
+                    // Convert to Excel datetime:
+                    // 1. Convert seconds to days: seconds / 86400
+                    // 2. Add Excel epoch offset: 25569 days (Jan 1, 1970 - Jan 1, 1900)
+                    let excel_datetime = (epoch_seconds / 86400.0) + 25569.0;
+                    worksheet.write_number_with_format(row, col, excel_datetime, &datetime_format)?;
                 } else {
+                    // If parsing fails, write as string
+                    worksheet.write_string_with_format(row, col, cell, data_format)?;
+                }
+            } else {
+                // Regular data cell - try to parse as number first
+                if let Ok(num) = cell.parse::<f64>() {
+                    worksheet.write_number_with_format(row, col, num, data_format)?;
+                } else {
+                    // Write as string
                     worksheet.write_string_with_format(row, col, cell, data_format)?;
                 }
             }
@@ -275,9 +343,14 @@ fn write_tsv_to_worksheet(
 
     // Auto-fit columns (approximate based on content)
     if let Some(first_row) = rows.first() {
-        for (col_idx, _) in first_row.iter().enumerate() {
-            // Set a reasonable default width
-            worksheet.set_column_width(col_idx as u16, 15)?;
+        for (col_idx, _header) in first_row.iter().enumerate() {
+            // Set wider width for timestamp columns
+            if timestamp_cols.iter().any(|(idx, _)| *idx == col_idx) {
+                worksheet.set_column_width(col_idx as u16, 22)?;
+            } else {
+                // Set a reasonable default width
+                worksheet.set_column_width(col_idx as u16, 15)?;
+            }
         }
     }
 
@@ -339,6 +412,36 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             let rows = read_tsv_file(tsv_path)
                 .with_context(|| format!("Failed to read perf_log.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add workload_endpoint_stats.tsv tab
+        if let Some(ref tsv_path) = results_dir.workload_endpoint_stats_tsv {
+            let tab_name = results_dir.generate_tab_name("WE");
+            println!("  Creating tab: {} (workload_endpoint_stats.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read workload_endpoint_stats.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add prepare_endpoint_stats.tsv tab
+        if let Some(ref tsv_path) = results_dir.prepare_endpoint_stats_tsv {
+            let tab_name = results_dir.generate_tab_name("PE");
+            println!("  Creating tab: {} (prepare_endpoint_stats.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read prepare_endpoint_stats.tsv from {:?}", results_dir.path))?;
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
@@ -429,6 +532,8 @@ mod tests {
             results_tsv: None,
             prepare_results_tsv: None,
             perf_log_tsv: None,
+            workload_endpoint_stats_tsv: None,
+            prepare_endpoint_stats_tsv: None,
         };
 
         let tab_name = results_dir.generate_tab_name("R");
@@ -446,6 +551,8 @@ mod tests {
             results_tsv: None,
             prepare_results_tsv: None,
             perf_log_tsv: None,
+            workload_endpoint_stats_tsv: None,
+            prepare_endpoint_stats_tsv: None,
         };
 
         let tab_name = results_dir.generate_tab_name("R");

@@ -1,0 +1,35 @@
+# Multi-endpoint configuration for file:// protocol
+# Use case: Multiple NFS mount points to the same storage namespace
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///tmp/ep1/
+    - file:///tmp/ep2/
+    - file:///tmp/ep3/
+    - file:///tmp/ep4/
+
+duration: 60s
+concurrency: 16
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/ep1/testdata/"  # Full URI for one endpoint
+      use_multi_endpoint: true  # Objects created across all 4 mount points
+      count: 100
+      min_size: 4096
+      max_size: 4096
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "file:///tmp/ep1/testdata/*"  # Full URI, multi-endpoint will round-robin
+    use_multi_endpoint: true
+    weight: 70
+  
+  - op: put
+    path: "file:///tmp/ep1/testdata/"  # Full URI, multi-endpoint will round-robin
+    use_multi_endpoint: true
+    object_size: 4096
+    weight: 30

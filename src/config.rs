@@ -94,6 +94,13 @@ pub struct Config {
     /// Default: None (no performance logging)
     #[serde(default)]
     pub perf_log: Option<PerfLogConfig>,
+    
+    /// Optional multi-endpoint configuration (v0.8.22+)
+    /// Enables load balancing across multiple storage endpoints (S3, Azure, GCS, file://)
+    /// All agents use these endpoints unless per-agent override is specified in distributed.agents
+    /// Default: None (single target URI)
+    #[serde(default)]
+    pub multi_endpoint: Option<MultiEndpointConfig>,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -246,6 +253,36 @@ fn default_perf_log_interval() -> std::time::Duration {
     std::time::Duration::from_secs(crate::constants::DEFAULT_PERF_LOG_INTERVAL_SECS)
 }
 
+/// Multi-endpoint configuration for load balancing across multiple storage endpoints (v0.8.22+)
+/// 
+/// Enables distributing I/O operations across multiple storage endpoints for improved
+/// performance and bandwidth utilization. Particularly useful for:
+/// - Multi-NIC storage systems (VAST, Weka, etc.)
+/// - Distributed object storage (multiple S3 endpoints, MinIO clusters)
+/// - Multi-mount NFS with identical namespaces
+/// 
+/// Example use case: 4 test hosts, each targeting 2 of 8 storage IPs
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MultiEndpointConfig {
+    /// Load balancing strategy (default: round_robin)
+    /// - round_robin: Cycle through endpoints sequentially (simple, predictable)
+    /// - least_connections: Route to endpoint with fewest active requests (adaptive)
+    #[serde(default = "default_load_balance_strategy")]
+    pub strategy: String,
+    
+    /// List of endpoint URIs to load balance across
+    /// All endpoints must present identical namespace (same files accessible from each)
+    /// Examples:
+    ///   - S3: ["s3://192.168.1.10:9000/bucket/", "s3://192.168.1.11:9000/bucket/"]
+    ///   - NFS: ["file:///mnt/nfs1/data/", "file:///mnt/nfs2/data/"]
+    ///   - Azure: ["az://account/container/", "az://192.168.1.10:10000/container/"]
+    pub endpoints: Vec<String>,
+}
+
+fn default_load_balance_strategy() -> String {
+    "round_robin".to_string()
+}
+
 /// Custom serde module for Option<Duration> with humantime parsing
 /// 
 /// This allows YAML like:
@@ -314,7 +351,13 @@ pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
     /// Can be absolute URI (s3://bucket/key) or relative path (data/file.txt) when target is set.
     Get { 
-        path: String 
+        path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// PUT objects with configurable sizes.
@@ -346,24 +389,48 @@ pub enum OpSpec {
         /// Controls compressibility of generated data (v0.5.3+)
         #[serde(default = "default_compress_factor")]
         compress_factor: usize,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// LIST objects under a path/prefix.
     /// Uses 'path' relative to target, or absolute URI.
     List {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// STAT/HEAD a single object to get metadata.
     /// Uses 'path' relative to target, or absolute URI.
     Stat {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// DELETE objects (single or glob pattern).
     /// Uses 'path' relative to target, or absolute URI.
     Delete {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// MKDIR - Create a directory (filesystem backends only).
@@ -476,7 +543,15 @@ pub struct PrepareConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
+    /// When use_multi_endpoint=true, this provides the path component only (after the endpoint)
     pub base_uri: String,
+    
+    /// Use multi-endpoint configuration for object creation (v0.8.22+)
+    /// When true, objects are distributed across all configured endpoints
+    /// This is CRITICAL for performance when endpoints represent different network paths
+    /// Default: false (use base_uri directly)
+    #[serde(default)]
+    pub use_multi_endpoint: bool,
     
     /// Target number of objects to ensure exist
     pub count: u64,
@@ -595,7 +670,7 @@ impl Config {
     /// Get the resolved URI for a GET operation
     pub fn get_uri(&self, get_op: &OpSpec) -> String {
         match get_op {
-            OpSpec::Get { path } => self.resolve_uri(path),
+            OpSpec::Get { path, .. } => self.resolve_uri(path),
             _ => panic!("Expected GET operation"),
         }
     }
@@ -653,9 +728,9 @@ impl Config {
     /// Get the resolved URI for a metadata operation (List, Stat, Delete, Mkdir, Rmdir)
     pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
         match meta_op {
-            OpSpec::List { path } 
-            | OpSpec::Stat { path } 
-            | OpSpec::Delete { path }
+            OpSpec::List { path, .. } 
+            | OpSpec::Stat { path, .. } 
+            | OpSpec::Delete { path, .. }
             | OpSpec::Mkdir { path }
             | OpSpec::Rmdir { path, .. } => {
                 self.resolve_uri(path)
@@ -990,6 +1065,13 @@ pub struct AgentConfig {
     /// Listen port for agent (SSH mode only, default: 7761)
     #[serde(default = "default_agent_port")]
     pub listen_port: u16,
+    
+    /// Per-agent multi-endpoint override (v0.8.22+)
+    /// If specified, this agent uses these endpoints instead of global multi_endpoint config
+    /// Enables static endpoint mapping: assign specific endpoints to specific agents
+    /// Example: Agent 1 -> [IP1, IP2], Agent 2 -> [IP3, IP4], etc.
+    #[serde(default)]
+    pub multi_endpoint: Option<MultiEndpointConfig>,
 }
 
 /// SSH configuration for automated deployment

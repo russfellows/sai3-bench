@@ -1,0 +1,52 @@
+# Multi-endpoint NFS mount point configuration example
+# Load balancing across multiple NFS mount points with identical namespace
+#
+# Use case: VAST or Weka system with multiple VIP mount points
+# Result: Operations distributed across mount points for better bandwidth
+#
+# Prerequisites:
+#   - All mount points present identical file namespace
+#   - File written to /mnt/nfs1/data/file.dat is also visible at /mnt/nfs2/data/file.dat
+#   - This is automatic for VAST/Weka (unified namespace)
+
+# Multi-endpoint configuration for file:// URIs
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///mnt/nfs1/benchmark/
+    - file:///mnt/nfs2/benchmark/
+    - file:///mnt/nfs3/benchmark/
+    - file:///mnt/nfs4/benchmark/
+    - file:///mnt/nfs5/benchmark/
+    - file:///mnt/nfs6/benchmark/
+    - file:///mnt/nfs7/benchmark/
+    - file:///mnt/nfs8/benchmark/
+
+duration: 300s
+concurrency: 64
+
+# Page cache optimization for file:// URIs
+page_cache_mode: sequential
+
+prepare:
+  ensure_objects:
+    - base_uri: "data/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 8 NFS mount points
+      count: 10000
+      min_size: 4194304  # 4 MiB
+      max_size: 4194304
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  
+  - op: put
+    path: "data/"
+    object_size: 4194304
+    weight: 30
+
+# Note: Prepare writes to /mnt/nfs1/benchmark/data/ but workload will
+# read/write through all 8 mount points via round-robin load balancing

@@ -16,6 +16,7 @@
 //! Run with: `cargo test --test streaming_replay_tests -- --test-threads=1`
 
 use anyhow::Result;
+use bytes::Bytes;
 use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
 use sai3_bench::workload::{init_operation_logger, finalize_operation_logger, create_store_with_logger};
 use s3dlio_oplog::OpLogStreamReader;
@@ -79,8 +80,9 @@ async fn test_01_generate_oplog() -> Result<()> {
     for i in 0..50 {
         let key = format!("test-object-{:04}.dat", i);
         let uri = format!("{}/{}", base_uri.trim_end_matches('/'), key);
-        let data = format!("test-data-{}", i).repeat(100); // ~1KB per object
-        store.put(&uri, data.as_bytes()).await?;
+        let data_str = format!("test-data-{}", i).repeat(100); // ~1KB per object
+        let data = Bytes::from(data_str.into_bytes()); // Zero-copy: String -> Bytes
+        store.put(&uri, data).await?;
     }
     
     // Perform GET operations on all objects

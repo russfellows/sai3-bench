@@ -1,0 +1,33 @@
+# Multi-endpoint configuration for direct:// protocol
+# Use case: Multiple direct I/O paths (e.g., different block devices or NVMe namespaces)
+
+multi_endpoint:
+  strategy: least_connections
+  endpoints:
+    - direct:///nvme0n1/storage/
+    - direct:///nvme1n1/storage/
+    - direct:///nvme2n1/storage/
+    - direct:///nvme3n1/storage/
+
+duration: 60s
+concurrency: 32
+
+prepare:
+  ensure_objects:
+    - base_uri: "testdata/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 4 direct I/O paths
+      count: 200
+      min_size: 8192
+      max_size: 8192
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 80
+  
+  - op: put
+    path: "testdata/"
+    object_size: 8192
+    weight: 20

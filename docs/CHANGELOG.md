@@ -6,6 +6,177 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.22] - 2026-01-29
+
+### Added
+
+- **Multi-endpoint statistics tracking** (endpoint-level performance visibility)
+  - New `workload_endpoint_stats.tsv` file with per-endpoint metrics
+  - New `prepare_endpoint_stats.tsv` file for data preparation phase
+  - Columns: endpoint, operation_count, bytes, errors, latency percentiles (p50, p90, p99, p99.9)
+  - Essential for diagnosing multi-endpoint load balancing effectiveness
+  - Works with both global and per-agent endpoint configurations
+
+- **Multi-endpoint load balancing for distributed storage systems**
+  - Enables distributing I/O operations across multiple storage endpoints (IPs, mount points)
+  - Perfect for multi-NIC storage systems (VAST, Weka, MinIO clusters)
+  - Supports both global and per-agent endpoint configuration
+  
+- **Static per-agent endpoint mapping**
+  - Assign specific endpoints to specific agents for optimal load distribution
+  - Example: 4 test hosts × 2 endpoints/host = 8 storage IPs fully utilized
+  - Prevents endpoint overlap in distributed testing scenarios
+  
+- **Multi-endpoint NFS support**
+  - Load balance across multiple NFS mount points with identical namespaces
+  - Works with any distributed filesystem presenting unified namespace (VAST, Weka, Lustre)
+  
+- **Configuration schema enhancements**
+  - Added `multi_endpoint` field to top-level Config (global configuration)
+  - Added `multi_endpoint` field to AgentConfig (per-agent override)
+  - Strategy options: `round_robin` (simple), `least_connections` (adaptive)
+  
+- **New workload creation API**
+  - Added `create_store_from_config()` function for multi-endpoint aware store creation
+  - Respects configuration priority: per-agent > global > target fallback
+  - Added `create_multi_endpoint_store()` internal helper function
+
+- **Excel timestamp formatting** in sai3-analyze
+  - Auto-detects timestamp columns by suffix (_ms, _us, _ns)
+  - Converts epoch timestamps to Excel datetime format: "2026-01-29 22:21:51.000"
+  - Column width: 22 for timestamps, 15 for regular columns
+  - Fixes scientific notation display (1.77E+18 → readable dates)
+
+- **Version option** for sai3-analyze
+  - Added `-V` and `--version` flags
+  - Displays: "sai3bench-analyze 0.8.22"
+
+- **Comprehensive documentation consolidation**
+  - Created [DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md) (620+ lines)
+    - Multi-host architecture with verified YAML examples
+    - Multi-endpoint testing patterns (critical common use case)
+    - Real-world examples: multi-region, multi-account, load balancing
+    - Troubleshooting guide and performance analysis tools
+  - Created [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
+    - Consolidated SSH_SETUP_GUIDE + CONTAINER_DEPLOYMENT_GUIDE + DOCKER_PRODUCTION_DEPLOYMENT
+    - SSH deployment with automated ssh-setup command
+    - Container deployment with host network mode
+    - Production best practices (tmux + daemon patterns)
+  - Updated [README.md](README.md) as clean documentation index
+  - Reduced from 27+ documentation files to 9 essential docs
+  - Moved 18 planning/design docs to archive/ directory
+
+### Configuration Examples
+
+**Global multi-endpoint** (all agents share endpoints):
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - s3://192.168.1.10:9000/bucket/
+    - s3://192.168.1.11:9000/bucket/
+    - s3://192.168.1.12:9000/bucket/
+```
+
+**Per-agent static mapping** (each agent gets specific endpoints):
+```yaml
+distributed:
+  agents:
+    - address: "testhost1:7761"
+      id: agent1
+      multi_endpoint:
+        endpoints:
+          - s3://192.168.1.10:9000/bucket/
+          - s3://192.168.1.11:9000/bucket/
+    
+    - address: "testhost2:7761"
+      id: agent2
+      multi_endpoint:
+        endpoints:
+          - s3://192.168.1.12:9000/bucket/
+          - s3://192.168.1.13:9000/bucket/
+```
+
+**NFS multi-mount**:
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///mnt/nfs1/benchmark/
+    - file:///mnt/nfs2/benchmark/
+```
+
+### Changed
+
+- **Breaking: perf_log.tsv format** - Removed `is_warmup` column
+  - Old format: 31 columns (with is_warmup)
+  - New format: 30 columns (cleaner, less redundant)
+  - sai3-analyze updated to handle both formats
+
+- **Controller config serialization** - Per-agent YAML generation
+  - Controller now serializes agent-specific YAML with only assigned endpoints
+  - Lines 1272-1301 in `src/bin/controller.rs`
+  - Prevents agents from seeing/accessing non-assigned endpoints
+  - Critical for endpoint isolation in distributed testing
+
+### Fixed
+
+- **Critical: Per-agent endpoint isolation bug**
+  - **Problem**: Controller sent same config YAML to all agents (all endpoints visible)
+  - **Impact**: Each agent accessed ALL endpoints instead of only assigned ones
+  - **Root cause**: Controller didn't override `multi_endpoint` in serialized agent config
+  - **Fix**: Controller generates per-agent YAML with `multi_endpoint` override matching AgentConfig
+  - **Validated**: Real distributed tests confirm Agent-1 only accesses endpoints A&B, Agent-2 only C&D
+
+- **Excel timestamp scientific notation**
+  - Timestamps no longer display as 1.77E+18
+  - Auto-detection: Parses column names for time unit suffixes
+  - Conversion: Applies correct divisor (1000 for ms, 1000000 for us, 1000000000 for ns)
+
+### Validated
+
+- ✅ Two distributed workload tests compared in Excel (multi_endpoint_comparison.xlsx)
+- ✅ Endpoint stats files prove per-agent endpoint isolation
+  - Agent-1: Only endpoints A & B in endpoint_stats.tsv
+  - Agent-2: Only endpoints C & D in endpoint_stats.tsv
+- ✅ All YAML examples verified with `--dry-run`:
+  - `tests/configs/local_test_2agents.yaml` - 2 agents, 320 files, tree structure
+  - `tests/configs/distributed_mixed_test.yaml` - 3 size groups (1KB, 128KB, 1MB)
+  - `tests/configs/multi_endpoint_prepare.yaml` - Per-agent endpoints, 100 objects
+  - `tests/configs/multi_endpoint_workload.yaml` - 20s duration, 75/20/5 GET/PUT/LIST
+- ✅ 3-phase distributed test: prepare → replicate → workload (full validation)
+
+### Technical Details
+
+- Leverages s3dlio v0.9.37 zero-copy `Bytes` API (277 tests passing)
+- Multi-endpoint support from s3dlio v0.9.14+ `MultiEndpointStore` with per-endpoint statistics
+- Compatible with all storage backends (S3, Azure, GCS, file://, direct://)
+- Requires identical namespace across all endpoints (same files accessible from each)
+- Load balancing strategies implemented at s3dlio layer (zero overhead in sai3-bench)
+
+### Test Configurations
+
+- `tests/configs/local_test_2agents.yaml` - Basic 2-agent distributed test
+- `tests/configs/distributed_mixed_test.yaml` - Mixed size workload (1KB, 128KB, 1MB)
+- `tests/configs/multi_endpoint_prepare.yaml` - Per-agent endpoint assignment (Phase 1: prepare)
+- `tests/configs/multi_endpoint_workload.yaml` - Multi-endpoint workload test (Phase 3)
+- All configs validated with `--dry-run` before release
+
+### Documentation
+
+- See [DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md) for multi-endpoint architecture and examples
+- See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for SSH and container deployment
+- See [archive/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](archive/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) for design rationale
+- See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for multi-endpoint configuration reference
+- See [README.md](README.md) for documentation index
+
+### Dependencies
+
+- s3dlio v0.9.37 (zero-copy Bytes API)
+- Compatible with s3dlio v0.9.16+ (multi-endpoint support)
+
+---
+
 ## [0.8.21] - 2026-01-26
 
 ### Changed

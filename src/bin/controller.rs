@@ -1292,7 +1292,38 @@ async fn run_distributed_workload(
         debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}", 
                idx + 1, agent_id, path_prefix, effective_prefix, agent_addr, is_shared_storage);
         
-        let config = config_yaml.clone();
+        // v0.8.22: Apply per-agent multi_endpoint override if specified
+        // This allows static endpoint mapping: each agent uses specific subset of endpoints
+        let agent_specific_config = if let Some(ref distributed) = config.distributed {
+            if idx < distributed.agents.len() {
+                if let Some(ref agent_multi_ep) = distributed.agents[idx].multi_endpoint {
+                    // Agent has multi_endpoint override - replace global config
+                    let mut modified_config = config.clone();
+                    modified_config.multi_endpoint = Some(agent_multi_ep.clone());
+                    
+                    // Serialize modified config to YAML
+                    match serde_yaml::to_string(&modified_config) {
+                        Ok(yaml) => {
+                            debug!("Agent {}: Using per-agent multi_endpoint override ({} endpoints)", 
+                                   agent_id, agent_multi_ep.endpoints.len());
+                            yaml
+                        }
+                        Err(e) => {
+                            error!("Failed to serialize agent-specific config: {}", e);
+                            config_yaml.clone()  // Fallback to original config
+                        }
+                    }
+                } else {
+                    // No override - use global config
+                    config_yaml.clone()
+                }
+            } else {
+                config_yaml.clone()
+            }
+        } else {
+            config_yaml.clone()
+        };
+        
         let addr = agent_addr.clone();
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
@@ -1324,7 +1355,7 @@ async fn run_distributed_workload(
             // Phase 1: Send START command with config
             let config_msg = ControlMessage {
                 command: control_message::Command::Start as i32,
-                config_yaml: config.clone(),
+                config_yaml: agent_specific_config.clone(),
                 agent_id: agent_id.clone(),
                 path_prefix: effective_prefix.clone(),
                 shared_storage: shared,
@@ -2228,7 +2259,6 @@ async fn run_distributed_workload(
                     cpu_system_percent: agg.cpu_system_percent,
                     cpu_iowait_percent: agg.cpu_iowait_percent,
                     errors: 0,
-                    is_warmup: perf_log_tracker.is_warmup(),
                 };
                         
                 if let Err(e) = perf_log_writer.write_entry(&entry) {
@@ -2385,6 +2415,29 @@ async fn run_distributed_workload(
             info!("✓ Consolidated results.tsv created with accurate histogram aggregation");
         }
         
+        // v0.8.22: Aggregate and export endpoint stats if any agent used multi-endpoint
+        let all_endpoint_stats: Vec<_> = agent_summaries.iter()
+            .map(|s| proto_to_endpoint_stats(&s.endpoint_stats))
+            .filter(|stats| !stats.is_empty())
+            .collect();
+        
+        if !all_endpoint_stats.is_empty() {
+            let aggregated_stats = aggregate_endpoint_stats(&all_endpoint_stats);
+            let ep_tsv_path = results_dir.endpoint_stats_tsv_path();
+            match sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path) {
+                Ok(exporter) => {
+                    if let Err(e) = exporter.export_endpoint_stats(&aggregated_stats) {
+                        error!("Failed to export aggregated endpoint stats: {}", e);
+                    } else {
+                        info!("✓ Aggregated endpoint stats written to: {}", ep_tsv_path.display());
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to create endpoint stats TSV exporter: {}", e);
+                }
+            }
+        }
+        
         // Print detailed per-agent summary
         if let Err(e) = print_distributed_results(&agent_summaries, &mut results_dir) {
             error!("Failed to print distributed results: {}", e);
@@ -2410,6 +2463,29 @@ async fn run_distributed_workload(
             error!("Failed to create consolidated prepare TSV: {}", e);
         } else {
             info!("✓ Consolidated prepare_results.tsv created");
+        }
+        
+        // v0.8.22: Aggregate and export prepare endpoint stats if any agent used multi-endpoint
+        let all_prepare_endpoint_stats: Vec<_> = prepare_summaries.iter()
+            .map(|s| proto_to_endpoint_stats(&s.endpoint_stats))
+            .filter(|stats| !stats.is_empty())
+            .collect();
+        
+        if !all_prepare_endpoint_stats.is_empty() {
+            let aggregated_stats = aggregate_endpoint_stats(&all_prepare_endpoint_stats);
+            let ep_tsv_path = results_dir.prepare_endpoint_stats_tsv_path();
+            match sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path) {
+                Ok(exporter) => {
+                    if let Err(e) = exporter.export_endpoint_stats(&aggregated_stats) {
+                        error!("Failed to export aggregated prepare endpoint stats: {}", e);
+                    } else {
+                        info!("✓ Aggregated prepare endpoint stats written to: {}", ep_tsv_path.display());
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to create prepare endpoint stats TSV exporter: {}", e);
+                }
+            }
         }
     }
     
@@ -2807,6 +2883,16 @@ fn write_agent_results(
             .with_context(|| format!("Failed to write agent TSV: {}", tsv_path.display()))?;
     }
     
+    // v0.8.22: Write endpoint stats TSV if multi-endpoint was used
+    if !summary.endpoint_stats.is_empty() {
+        let ep_stats = proto_to_endpoint_stats(&summary.endpoint_stats);
+        let ep_tsv_path = agent_dir.join("workload_endpoint_stats.tsv");
+        let ep_exporter = sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path)
+            .with_context(|| format!("Failed to create endpoint stats TSV exporter: {}", ep_tsv_path.display()))?;
+        ep_exporter.export_endpoint_stats(&ep_stats)
+            .with_context(|| format!("Failed to export endpoint stats: {}", ep_tsv_path.display()))?;
+    }
+    
     // Write console_log.txt (if provided - currently agents don't generate this)
     if !summary.console_log.is_empty() {
         let console_path = agent_dir.join("console_log.txt");
@@ -2858,6 +2944,16 @@ fn write_agent_prepare_results(
             .with_context(|| format!("Failed to write agent prepare TSV: {}", tsv_path.display()))?;
     }
     
+    // v0.8.22: Write endpoint stats TSV if multi-endpoint was used during prepare
+    if !summary.endpoint_stats.is_empty() {
+        let ep_stats = proto_to_endpoint_stats(&summary.endpoint_stats);
+        let ep_tsv_path = agent_dir.join("prepare_endpoint_stats.tsv");
+        let ep_exporter = sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path)
+            .with_context(|| format!("Failed to create endpoint stats TSV exporter: {}", ep_tsv_path.display()))?;
+        ep_exporter.export_endpoint_stats(&ep_stats)
+            .with_context(|| format!("Failed to export prepare endpoint stats: {}", ep_tsv_path.display()))?;
+    }
+    
     // Write a note about the agent's local results path
     if !summary.results_path.is_empty() {
         let note_path = agent_dir.join("prepare_local_path.txt");
@@ -2866,6 +2962,48 @@ fn write_agent_prepare_results(
     }
     
     Ok(())
+}
+
+/// Convert protobuf EndpointStatsSnapshot to local EndpointStatsSnapshot (v0.8.22)
+fn proto_to_endpoint_stats(
+    proto_stats: &[pb::iobench::EndpointStatsSnapshot]
+) -> Vec<sai3_bench::workload::EndpointStatsSnapshot> {
+    proto_stats.iter().map(|s| sai3_bench::workload::EndpointStatsSnapshot {
+        uri: s.uri.clone(),
+        total_requests: s.total_requests,
+        bytes_read: s.bytes_read,
+        bytes_written: s.bytes_written,
+        error_count: s.error_count,
+        active_requests: s.active_requests as usize,
+    }).collect()
+}
+
+/// Aggregate endpoint stats from multiple agents (v0.8.22)
+/// Combines stats for endpoints with same URI
+fn aggregate_endpoint_stats(
+    all_agent_stats: &[Vec<sai3_bench::workload::EndpointStatsSnapshot>]
+) -> Vec<sai3_bench::workload::EndpointStatsSnapshot> {
+    use std::collections::HashMap;
+    
+    let mut aggregated: HashMap<String, sai3_bench::workload::EndpointStatsSnapshot> = HashMap::new();
+    
+    for agent_stats in all_agent_stats {
+        for stat in agent_stats {
+            aggregated.entry(stat.uri.clone())
+                .and_modify(|agg| {
+                    agg.total_requests += stat.total_requests;
+                    agg.bytes_read += stat.bytes_read;
+                    agg.bytes_written += stat.bytes_written;
+                    agg.error_count += stat.error_count;
+                    agg.active_requests += stat.active_requests;
+                })
+                .or_insert(stat.clone());
+        }
+    }
+    
+    let mut result: Vec<_> = aggregated.into_values().collect();
+    result.sort_by(|a, b| a.uri.cmp(&b.uri));  // Sort by URI for consistent output
+    result
 }
 
 /// Convert protobuf SizeBins to local SizeBins (v0.8.18)
@@ -3345,7 +3483,7 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     // Validate each operation
     for weighted_op in &config.workload {
         match &weighted_op.spec {
-            OpSpec::Get { path } => {
+            OpSpec::Get { path, .. } => {
                 // For file:// backends, verify files exist
                 if path.starts_with("file://") {
                     let file_path = path.replace("file://", "");
@@ -3366,19 +3504,19 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                     bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
                 }
             }
-            OpSpec::Delete { path } => {
+            OpSpec::Delete { path, .. } => {
                 // Delete needs a valid path
                 if path.is_empty() {
                     bail!("DELETE operation requires non-empty path");
                 }
             }
-            OpSpec::List { path } => {
+            OpSpec::List { path, .. } => {
                 // List needs a valid path
                 if path.is_empty() {
                     bail!("LIST operation requires non-empty path");
                 }
             }
-            OpSpec::Stat { path } => {
+            OpSpec::Stat { path, .. } => {
                 // Stat needs a valid path
                 if path.is_empty() {
                     bail!("STAT operation requires non-empty path");
@@ -3392,3 +3530,393 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     
     Ok(())
 }
+
+// v0.8.22: Unit tests for per-agent multi_endpoint override
+#[cfg(test)]
+mod tests {
+    use sai3_bench::config::Config;
+
+    /// Test that per-agent multi_endpoint override correctly replaces global config
+    #[test]
+    fn test_agent_multi_endpoint_override() {
+        // Create a config with global multi_endpoint and per-agent overrides
+        let config_yaml = r#"
+duration: 10s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/global-a/"
+    - "file:///tmp/global-b/"
+    - "file:///tmp/global-c/"
+    - "file:///tmp/global-d/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "file:///tmp/agent1-a/"
+          - "file:///tmp/agent1-b/"
+    - address: "localhost:7762"
+      id: "agent-2"
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "file:///tmp/agent2-c/"
+          - "file:///tmp/agent2-d/"
+    - address: "localhost:7763"
+      id: "agent-3"
+      # No override - should use global
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 100
+"#;
+
+        let config: Config = serde_yaml::from_str(config_yaml)
+            .expect("Failed to parse base config");
+
+        // Test agent 0 (has override)
+        let agent0_config = if let Some(ref distributed) = config.distributed {
+            if let Some(ref agent_multi_ep) = distributed.agents[0].multi_endpoint {
+                let mut modified = config.clone();
+                modified.multi_endpoint = Some(agent_multi_ep.clone());
+                modified
+            } else {
+                panic!("Agent 0 should have multi_endpoint override");
+            }
+        } else {
+            panic!("Config should have distributed section");
+        };
+
+        // Verify agent 0's config has the override endpoints
+        assert!(agent0_config.multi_endpoint.is_some());
+        let agent0_ep = agent0_config.multi_endpoint.as_ref().unwrap();
+        assert_eq!(agent0_ep.endpoints.len(), 2);
+        assert_eq!(agent0_ep.endpoints[0], "file:///tmp/agent1-a/");
+        assert_eq!(agent0_ep.endpoints[1], "file:///tmp/agent1-b/");
+        assert_eq!(agent0_ep.strategy, "round_robin");
+
+        // Test agent 1 (has different override)
+        let agent1_config = if let Some(ref distributed) = config.distributed {
+            if let Some(ref agent_multi_ep) = distributed.agents[1].multi_endpoint {
+                let mut modified = config.clone();
+                modified.multi_endpoint = Some(agent_multi_ep.clone());
+                modified
+            } else {
+                panic!("Agent 1 should have multi_endpoint override");
+            }
+        } else {
+            panic!("Config should have distributed section");
+        };
+
+        let agent1_ep = agent1_config.multi_endpoint.as_ref().unwrap();
+        assert_eq!(agent1_ep.endpoints.len(), 2);
+        assert_eq!(agent1_ep.endpoints[0], "file:///tmp/agent2-c/");
+        assert_eq!(agent1_ep.endpoints[1], "file:///tmp/agent2-d/");
+        assert_eq!(agent1_ep.strategy, "least_connections");
+
+        // Test agent 2 (no override - should keep global)
+        let agent2_has_override = config.distributed.as_ref()
+            .and_then(|d| d.agents.get(2))
+            .and_then(|a| a.multi_endpoint.as_ref())
+            .is_some();
+        
+        assert!(!agent2_has_override, "Agent 2 should not have multi_endpoint override");
+        
+        // Agent 2 should use global config unchanged
+        let global_ep = config.multi_endpoint.as_ref().unwrap();
+        assert_eq!(global_ep.endpoints.len(), 4);
+        assert_eq!(global_ep.endpoints[0], "file:///tmp/global-a/");
+    }
+
+    /// Test that modified config can be serialized back to YAML and parsed correctly
+    #[test]
+    fn test_agent_config_yaml_round_trip() {
+        let config_yaml = r#"
+duration: 10s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/global-a/"
+    - "file:///tmp/global-b/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "file:///tmp/agent1-x/"
+          - "file:///tmp/agent1-y/"
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 100
+"#;
+
+        let base_config: Config = serde_yaml::from_str(config_yaml)
+            .expect("Failed to parse base config");
+
+        // Simulate controller applying agent-specific override
+        let agent_override = base_config.distributed.as_ref()
+            .and_then(|d| d.agents.first())
+            .and_then(|a| a.multi_endpoint.as_ref())
+            .expect("Agent should have multi_endpoint override");
+
+        let mut agent_config = base_config.clone();
+        agent_config.multi_endpoint = Some(agent_override.clone());
+
+        // Serialize to YAML (this is what controller sends to agent)
+        let agent_yaml = serde_yaml::to_string(&agent_config)
+            .expect("Failed to serialize agent config");
+
+        println!("Agent-specific YAML:\n{}", agent_yaml);
+
+        // Parse it back (simulating agent receiving the config)
+        let parsed_config: Config = serde_yaml::from_str(&agent_yaml)
+            .expect("Failed to parse agent-specific YAML");
+
+        // Verify the agent received the correct multi_endpoint config
+        assert!(parsed_config.multi_endpoint.is_some());
+        let parsed_ep = parsed_config.multi_endpoint.as_ref().unwrap();
+        assert_eq!(parsed_ep.endpoints.len(), 2);
+        assert_eq!(parsed_ep.endpoints[0], "file:///tmp/agent1-x/");
+        assert_eq!(parsed_ep.endpoints[1], "file:///tmp/agent1-y/");
+        assert_eq!(parsed_ep.strategy, "least_connections");
+
+        // Verify the global endpoints are NOT in the modified config
+        assert_ne!(parsed_ep.endpoints[0], "file:///tmp/global-a/");
+        assert_ne!(parsed_ep.endpoints[1], "file:///tmp/global-b/");
+    }
+
+    /// Test that agent without override receives global config unchanged
+    #[test]
+    fn test_agent_without_override_uses_global() {
+        let config_yaml = r#"
+duration: 10s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/global-1/"
+    - "file:///tmp/global-2/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+      # No multi_endpoint override
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 100
+"#;
+
+        let config: Config = serde_yaml::from_str(config_yaml)
+            .expect("Failed to parse base config");
+
+        // Check that agent has no override
+        let agent_has_override = config.distributed.as_ref()
+            .and_then(|d| d.agents.first())
+            .and_then(|a| a.multi_endpoint.as_ref())
+            .is_some();
+
+        assert!(!agent_has_override);
+
+        // Agent should use the config as-is (global multi_endpoint)
+        let global_ep = config.multi_endpoint.as_ref().unwrap();
+        assert_eq!(global_ep.endpoints.len(), 2);
+        assert_eq!(global_ep.endpoints[0], "file:///tmp/global-1/");
+        assert_eq!(global_ep.endpoints[1], "file:///tmp/global-2/");
+        assert_eq!(global_ep.strategy, "round_robin");
+    }
+
+    /// Test mixed scenario: some agents with overrides, some without
+    #[test]
+    fn test_mixed_agent_overrides() {
+        let config_yaml = r#"
+duration: 10s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/global-1/"
+    - "file:///tmp/global-2/"
+    - "file:///tmp/global-3/"
+    - "file:///tmp/global-4/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "file:///tmp/agent1-a/"
+          - "file:///tmp/agent1-b/"
+    - address: "localhost:7762"
+      id: "agent-2"
+      # No override
+    - address: "localhost:7763"
+      id: "agent-3"
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "file:///tmp/agent3-c/"
+          - "file:///tmp/agent3-d/"
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 100
+"#;
+
+        let config: Config = serde_yaml::from_str(config_yaml)
+            .expect("Failed to parse config");
+
+        let distributed = config.distributed.as_ref().expect("Should have distributed config");
+
+        // Agent 0: has override
+        assert!(distributed.agents[0].multi_endpoint.is_some());
+        let agent0_ep = distributed.agents[0].multi_endpoint.as_ref().unwrap();
+        assert_eq!(agent0_ep.endpoints.len(), 2);
+        assert!(agent0_ep.endpoints[0].contains("agent1-a"));
+
+        // Agent 1: no override
+        assert!(distributed.agents[1].multi_endpoint.is_none());
+
+        // Agent 2: has override
+        assert!(distributed.agents[2].multi_endpoint.is_some());
+        let agent2_ep = distributed.agents[2].multi_endpoint.as_ref().unwrap();
+        assert_eq!(agent2_ep.endpoints.len(), 2);
+        assert!(agent2_ep.endpoints[0].contains("agent3-c"));
+        assert_eq!(agent2_ep.strategy, "least_connections");
+    }
+
+    /// Test that the logic matches what the controller actually does
+    #[test]
+    fn test_controller_logic_simulation() {
+        let config_yaml = r#"
+duration: 10s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/ep-a/"
+    - "file:///tmp/ep-b/"
+    - "file:///tmp/ep-c/"
+    - "file:///tmp/ep-d/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "localhost:7761"
+      id: "agent-dc-a"
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/ep-a/"
+          - "file:///tmp/ep-b/"
+        strategy: round_robin
+    - address: "localhost:7762"
+      id: "agent-dc-b"
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/ep-c/"
+          - "file:///tmp/ep-d/"
+        strategy: least_connections
+
+workload:
+  - op: get
+    path: "testdata/*"
+    use_multi_endpoint: true
+    weight: 100
+"#;
+
+        let config: Config = serde_yaml::from_str(config_yaml)
+            .expect("Failed to parse config");
+
+        // Simulate controller loop for each agent
+        for (idx, _agent_addr) in ["localhost:7761", "localhost:7762"].iter().enumerate() {
+            // This is the exact logic from the controller
+            let agent_specific_yaml = if let Some(ref distributed) = config.distributed {
+                if idx < distributed.agents.len() {
+                    if let Some(ref agent_multi_ep) = distributed.agents[idx].multi_endpoint {
+                        // Agent has multi_endpoint override - replace global config
+                        let mut modified_config = config.clone();
+                        modified_config.multi_endpoint = Some(agent_multi_ep.clone());
+                        
+                        // Serialize modified config to YAML
+                        serde_yaml::to_string(&modified_config)
+                            .expect("Failed to serialize agent config")
+                    } else {
+                        // No override - use global config
+                        config_yaml.to_string()
+                    }
+                } else {
+                    config_yaml.to_string()
+                }
+            } else {
+                config_yaml.to_string()
+            };
+
+            // Parse back to verify
+            let agent_config: Config = serde_yaml::from_str(&agent_specific_yaml)
+                .expect("Agent should be able to parse the YAML");
+
+            // Verify agent got correct endpoints
+            let agent_ep = agent_config.multi_endpoint.as_ref()
+                .expect("Agent config should have multi_endpoint");
+            
+            match idx {
+                0 => {
+                    // Agent 0 should have endpoints a & b
+                    assert_eq!(agent_ep.endpoints.len(), 2);
+                    assert!(agent_ep.endpoints[0].contains("ep-a"));
+                    assert!(agent_ep.endpoints[1].contains("ep-b"));
+                    assert_eq!(agent_ep.strategy, "round_robin");
+                }
+                1 => {
+                    // Agent 1 should have endpoints c & d
+                    assert_eq!(agent_ep.endpoints.len(), 2);
+                    assert!(agent_ep.endpoints[0].contains("ep-c"));
+                    assert!(agent_ep.endpoints[1].contains("ep-d"));
+                    assert_eq!(agent_ep.strategy, "least_connections");
+                }
+                _ => panic!("Unexpected agent index"),
+            }
+
+            // CRITICAL: Verify agent does NOT have all 4 global endpoints
+            assert_ne!(agent_ep.endpoints.len(), 4, 
+                      "Agent {} should NOT have all 4 global endpoints!", idx);
+        }
+    }
+}
+

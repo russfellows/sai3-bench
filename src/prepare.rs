@@ -24,6 +24,7 @@ use crate::config::{FillPattern, PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
 use crate::live_stats::{LiveStatsTracker, WorkloadStage};
 use crate::size_generator::SizeGenerator;
+use crate::workload::MultiEndpointCache;
 use crate::constants::{
     DEFAULT_PREPARE_MAX_ERRORS, 
     DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS,
@@ -163,6 +164,9 @@ pub struct PrepareMetrics {
     
     /// Prepare strategy used
     pub strategy: PrepareStrategy,
+    
+    /// v0.8.23: Per-endpoint statistics (if multi-endpoint was used)
+    pub endpoint_stats: Option<Vec<crate::workload::EndpointStatsSnapshot>>,
 }
 
 impl Default for PrepareMetrics {
@@ -177,6 +181,7 @@ impl Default for PrepareMetrics {
             objects_created: 0,
             objects_existed: 0,
             strategy: PrepareStrategy::Sequential,
+            endpoint_stats: None,
         }
     }
 }
@@ -678,6 +683,8 @@ pub async fn prepare_objects(
     config: &PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &crate::workload::MultiEndpointCache,
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
@@ -732,11 +739,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
         }
     };
     
@@ -750,6 +757,9 @@ pub async fn prepare_objects(
     metrics.wall_seconds = prepare_start.elapsed().as_secs_f64();
     metrics.objects_created = all_prepared.iter().filter(|obj| obj.created).count() as u64;
     metrics.objects_existed = all_prepared.iter().filter(|obj| !obj.created).count() as u64;
+    
+    // v0.8.23: Collect per-endpoint statistics from multi-endpoint stores
+    metrics.endpoint_stats = crate::workload::collect_endpoint_stats(&multi_ep_cache);
     
     // Compute aggregates from histograms
     if metrics.put.ops > 0 {
@@ -775,6 +785,8 @@ async fn prepare_sequential(
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &MultiEndpointCache,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -799,7 +811,38 @@ async fn prepare_sequential(
             
             info!("Preparing objects{}: {} at {}", pool_desc, spec.count, spec.base_uri);
             
-            let store = create_store_for_uri(&spec.base_uri)?;
+            // v0.8.22: Multi-endpoint support for prepare phase
+            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
+            // This distributes object creation across all endpoints for maximum network bandwidth
+            // v0.8.23: Use Arc<Box<...>> to allow sharing store across concurrent PUT tasks
+            let shared_store: Arc<Box<dyn s3dlio::object_store::ObjectStore>> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
+                          multi_ep.endpoints.len(), multi_ep.strategy);
+                    
+                    // Create cache key for prepare phase multi-endpoint store
+                    let cache_key = format!("prepare_seq:{}:{}:{}",
+                        spec.base_uri,
+                        multi_ep.strategy,
+                        multi_ep.endpoints.join(","));
+                    
+                    // Create Arc<MultiEndpointStore> - can be used for both operations and stats
+                    let arc_multi_store = crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+                    
+                    // Store in multi_ep_cache for stats collection
+                    {
+                        let mut cache_lock = multi_ep_cache.lock().unwrap();
+                        cache_lock.insert(cache_key, Arc::clone(&arc_multi_store));
+                    }
+                    
+                    // Wrap for Arc<Box<dyn ObjectStore>>
+                    Arc::new(Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store)) as Box<dyn s3dlio::object_store::ObjectStore>)
+                } else {
+                    anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
+                }
+            } else {
+                Arc::new(create_store_for_uri(&spec.base_uri)?)
+            };
             
             // 1. List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
@@ -811,7 +854,7 @@ async fn prepare_sequential(
             } else if tree_manifest.is_some() {
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
-                    store.as_ref(),
+                    shared_store.as_ref().as_ref(),
                     &spec.base_uri,
                     tree_manifest,
                     agent_id,
@@ -833,7 +876,7 @@ async fn prepare_sequential(
                 
                 // Use streaming list for flat mode too
                 let listing_result = list_existing_objects_distributed(
-                    store.as_ref(),
+                    shared_store.as_ref().as_ref(),
                     &list_pattern,
                     None,  // No tree manifest for flat mode
                     agent_id,
@@ -1055,9 +1098,8 @@ async fn prepare_sequential(
                 // v0.8.13: Error tracking for resilient prepare phase
                 let error_tracker = Arc::new(PrepareErrorTracker::new());
                 
-                // v0.8.9: Create store ONCE before loop (was creating per-object, causing massive overhead)
-                let shared_store = Arc::new(create_store_for_uri(&spec.base_uri)
-                    .context("Failed to create object store for prepare")?);
+                // v0.8.23: shared_store is now created at beginning of loop (supports multi-endpoint)
+                // Removed redundant create_store_for_uri() call that bypassed multi-endpoint
                 
                 for (uri, size) in tasks {
                     let sem2 = sem.clone();
@@ -1247,6 +1289,8 @@ async fn prepare_parallel(
     needs_separate_pools: bool,
     metrics: &mut PrepareMetrics,
     live_stats_tracker: Option<Arc<crate::live_stats::LiveStatsTracker>>,
+    multi_endpoint_config: Option<&crate::config::MultiEndpointConfig>,
+    multi_ep_cache: &MultiEndpointCache,
     tree_manifest: Option<&TreeManifest>,
     concurrency: usize,
     agent_id: usize,
@@ -1302,7 +1346,37 @@ async fn prepare_parallel(
             
             info!("Checking{}: {} at {}", pool_desc, spec.count, spec.base_uri);
             
-            let store = create_store_for_uri(&spec.base_uri)?;
+            // v0.8.22: Multi-endpoint support for prepare phase
+            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
+            // This distributes object creation across all endpoints for maximum network bandwidth
+            let store: Box<dyn s3dlio::object_store::ObjectStore> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
+                          multi_ep.endpoints.len(), multi_ep.strategy);
+                    
+                    // Create cache key for prepare phase multi-endpoint store
+                    let cache_key = format!("prepare_par:{}:{}:{}",
+                        spec.base_uri,
+                        multi_ep.strategy,
+                        multi_ep.endpoints.join(","));
+                    
+                    // Create Arc<MultiEndpointStore> - can be used for both operations and stats
+                    let arc_multi_store = crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+                    
+                    // Store in multi_ep_cache for stats collection
+                    {
+                        let mut cache_lock = multi_ep_cache.lock().unwrap();
+                        cache_lock.insert(cache_key, Arc::clone(&arc_multi_store));
+                    }
+                    
+                    // Wrap for Box<dyn ObjectStore>
+                    Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store)) as Box<dyn s3dlio::object_store::ObjectStore>
+                } else {
+                    anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
+                }
+            } else {
+                create_store_for_uri(&spec.base_uri)?
+            };
             
             // List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
@@ -1694,7 +1768,7 @@ async fn prepare_parallel(
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             let data = match task.fill {
                 FillPattern::Zero => {
-                    let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                    let buf = bytes::BytesMut::zeroed(task.size as usize);
                     buf.freeze()  // Zero-copy: BytesMut→Bytes
                 }
                 FillPattern::Random => {
@@ -2220,7 +2294,7 @@ pub async fn create_directory_tree(
                             let size = size_generator.generate();
                             let data = match fill_pattern {
                                 FillPattern::Zero => {
-                                    let mut buf = bytes::BytesMut::zeroed(size as usize);
+                                    let buf = bytes::BytesMut::zeroed(size as usize);
                                     buf.freeze()  // Zero-copy: BytesMut→Bytes
                                 }
                                 FillPattern::Random => {
@@ -2957,10 +3031,11 @@ mod tests {
         
         // Test that the function can be called with different concurrency values
         // Without actual storage, this will just verify parameter passing
+        let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, 0, 1, test_concurrency).await
+            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0).await
         });
         
         // Should succeed with empty object list
@@ -2986,9 +3061,10 @@ mod tests {
         };
         
         // Test with various concurrency values
+        let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, 0, 1, concurrency).await
+                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);

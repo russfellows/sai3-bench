@@ -1,0 +1,29 @@
+# Test multi-endpoint per-endpoint statistics collection
+# Creates 4 file:// endpoints in /tmp for testing
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - file:///tmp/sai3-ep1/
+    - file:///tmp/sai3-ep2/
+    - file:///tmp/sai3-ep3/
+    - file:///tmp/sai3-ep4/
+
+duration: 10s
+concurrency: 8
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-ep1/testdata/"  # Full URI for first endpoint
+      use_multi_endpoint: false  # Will create in one location
+      count: 40  # 10 objects per endpoint
+      min_size: 1048576  # 1 MiB
+      max_size: 1048576
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "testdata/*"  # Multi-endpoint will distribute reads across all 4 endpoints
+    weight: 100
+

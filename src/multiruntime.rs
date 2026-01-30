@@ -358,6 +358,7 @@ mod tests {
             meta_hists: OpHists::new(),
             total_errors: 0,
             error_rate: 0.0,
+            endpoint_stats: None,
         };
         
         let sum2 = Summary {
@@ -378,6 +379,7 @@ mod tests {
             meta_hists: OpHists::new(),
             total_errors: 0,
             error_rate: 0.0,
+            endpoint_stats: None,
         };
         
         // Add some data to histograms (bucket 0)

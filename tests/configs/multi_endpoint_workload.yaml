@@ -1,0 +1,68 @@
+# Multi-Endpoint Distributed Test - PHASE 3: WORKLOAD (Run 2)
+# Modified: Higher concurrency, different operation mix
+# REQUIRES: Phase 1 (prepare) + Phase 2 (manual data replication) completed
+
+duration: 20s
+concurrency: 8
+
+# Global multi-endpoint (fallback)
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///tmp/sai3-multi-ep-test/endpoint-a/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-b/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-c/"
+    - "file:///tmp/sai3-multi-ep-test/endpoint-d/"
+
+# Distributed configuration with per-agent endpoint assignments
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  
+  agents:
+    # Agent 1: Uses endpoints A & B only
+    - address: "localhost:7761"
+      id: "agent-dc-a"
+      concurrency_override: 8
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/sai3-multi-ep-test/endpoint-a/"
+          - "file:///tmp/sai3-multi-ep-test/endpoint-b/"
+        strategy: round_robin
+    
+    # Agent 2: Uses endpoints C & D only
+    - address: "localhost:7762"
+      id: "agent-dc-b"
+      concurrency_override: 8
+      multi_endpoint:
+        endpoints:
+          - "file:///tmp/sai3-multi-ep-test/endpoint-c/"
+          - "file:///tmp/sai3-multi-ep-test/endpoint-d/"
+        strategy: least_connections
+  
+  start_delay: 2
+
+# Workload operations (Modified: More reads, fewer lists)
+workload:
+  - op: get
+    path: "testdata/*"
+    use_multi_endpoint: true
+    weight: 75
+  
+  - op: put
+    path: "testdata/newfile-{}.dat"
+    object_size: 524288
+    use_multi_endpoint: true
+    weight: 20
+  
+  - op: list
+    path: "testdata/"
+    use_multi_endpoint: true
+    weight: 5
+
+# Performance logging
+perf_log:
+  enabled: true
+  path: "perf_log.tsv"
+  interval_seconds: 1

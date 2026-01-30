@@ -238,24 +238,16 @@ name the controller uses, add --agent-domain.
 
 # 2 Data Generation Methods
 
-## Fill Patterns: Random vs Prand
+## Fill Patterns
 
-sai3-bench supports three data generation methods: `zero`, `random`, and `prand`. For realistic storage performance testing, **always use `fill: random`**.
+For realistic storage performance testing, **always use `fill: random`** (the default).
 
-### Performance Comparison (Measured)
+### Available Fill Patterns
 
-| Method | Latency | Throughput | Compressibility | Storage Test Quality |
-|--------|---------|------------|-----------------|----------------------|
-| `random` | 1954µs | 234 MiB/s | 0% (65,549 bytes from 64KB) | ✅ **RECOMMENDED** |
-| `prand` | 1340µs | 254 MiB/s | 90% (8,995 bytes from 64KB) | ⚠️ NOT RECOMMENDED |
-| `zero` | 2910µs | 273 MiB/s | 100% (22 bytes from 64KB) | ❌ UNREALISTIC |
+- **`random`** (default): ✅ **ALWAYS USE THIS** - Produces truly incompressible data for realistic storage testing
+- **`zero`**: ❌ **DO NOT USE** - All-zero data (100% compressible, completely unrealistic for storage testing)
 
-**Why this matters**: Storage systems perform differently with compressible vs incompressible data. Using `prand` or `zero` will show artificially high performance that doesn't represent real-world behavior.
-
-**When to use each method**:
-- **`random`** (default): ✅ All storage performance testing - produces truly incompressible data
-- **`prand`**: ⚠️ Only when data generation CPU is a proven bottleneck (31% faster but 90% compressible)
-- **`zero`**: ❌ Only for testing all-zero data behavior (100% compressible, completely unrealistic)
+**Why this matters**: Storage systems with compression or deduplication perform very differently with incompressible vs compressible data. Using `zero` will show artificially high performance that doesn't represent real-world behavior.
 
 ### Configuration Example
 
@@ -266,10 +258,8 @@ prepare:
       count: 1000
       min_size: 1048576
       max_size: 1048576
-      fill: random              # ✅ ALWAYS use this for storage testing
+      fill: random              # ✅ Default - use for all storage testing
 ```
-
-For detailed documentation on data generation, see [DATA_GENERATION.md](DATA_GENERATION.md).
 
 # 3 Quick Start — Single Host (PLAINTEXT)
 In one terminal:

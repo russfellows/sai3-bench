@@ -1,6 +1,18 @@
 # sai3-bench Configuration Syntax Reference
 
-This document defines the correct YAML syntax for sai3-bench workload configurations.
+This document defines the correct YAML configuration syntax for sai3-bench workload configurations.
+
+## Table of Contents
+
+- [Configuration Validation](#configuration-validation)
+- [Basic Structure](#basic-structure)
+- [Multi-Endpoint Load Balancing](#multi-endpoint-load-balancing)
+- [Page Cache Control](#page-cache-control)
+- [Operation Logging](#operation-logging)
+- [Target URI](#target-uri)
+- [Pattern Syntax](#pattern-syntax)
+- [Operation Types](#operation-types)
+- [Prepare Stage](#prepare-stage)
 
 ## Configuration Validation
 
@@ -485,7 +497,7 @@ prepare:
       count: 2000            # Create 2000 objects
       min_size: 1048576      # Minimum size: 1 MiB
       max_size: 1048576      # Maximum size: 1 MiB (same = fixed size)
-      fill: random           # Fill pattern: random, zero, or pattern
+      fill: random           # Fill pattern: random (default) or zero (DO NOT USE)
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test

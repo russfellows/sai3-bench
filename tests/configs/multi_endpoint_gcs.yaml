@@ -1,0 +1,32 @@
+# Multi-endpoint configuration for gs:// (Google Cloud Storage) protocol
+# Use case: Multiple GCS bucket endpoints for geo-distribution
+
+multi_endpoint:
+  strategy: least_connections
+  endpoints:
+    - gs://bucket-us-east1/
+    - gs://bucket-us-west1/
+    - gs://bucket-us-central1/
+
+duration: 60s
+concurrency: 20
+
+prepare:
+  ensure_objects:
+    - base_uri: "testdata/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 3 GCS buckets
+      count: 100
+      min_size: 524288
+      max_size: 524288
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "testdata/*"
+    weight: 75
+  
+  - op: put
+    path: "testdata/"
+    object_size: 524288
+    weight: 25

@@ -1,0 +1,41 @@
+# Global multi-endpoint configuration example
+# All agents round-robin across the same set of 8 endpoints
+#
+# Use case: Simple load distribution where all agents share endpoint pool
+# Result: Each agent can hit any of the 8 endpoints
+
+# Multi-endpoint configuration (v0.8.22+)
+multi_endpoint:
+  strategy: round_robin  # or least_connections
+  endpoints:
+    - s3://192.168.1.10:9000/bucket/
+    - s3://192.168.1.11:9000/bucket/
+    - s3://192.168.1.12:9000/bucket/
+    - s3://192.168.1.13:9000/bucket/
+    - s3://192.168.1.14:9000/bucket/
+    - s3://192.168.1.15:9000/bucket/
+    - s3://192.168.1.16:9000/bucket/
+    - s3://192.168.1.17:9000/bucket/
+
+duration: 300s
+concurrency: 64
+
+prepare:
+  ensure_objects:
+    - base_uri: "data/"  # Path component only
+      use_multi_endpoint: true  # Objects created across all 8 endpoints
+      count: 10000
+      min_size: 1048576  # 1 MiB
+      max_size: 1048576
+      fill: random
+  cleanup: true
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  
+  - op: put
+    path: "data/"
+    object_size: 1048576
+    weight: 30

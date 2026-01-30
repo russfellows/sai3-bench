@@ -114,8 +114,6 @@ pub struct PerfLogEntry {
     
     /// Error count in this interval
     pub errors: u64,
-    /// Whether this interval is within the warmup period
-    pub is_warmup: bool,
 }
 
 impl PerfLogEntry {
@@ -128,7 +126,7 @@ impl PerfLogEntry {
         };
         
         format!(
-            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
+            "{}\t{}\t{:.3}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}",
             self.agent_id,
             self.timestamp_epoch_ms,
             self.elapsed_s,
@@ -159,7 +157,6 @@ impl PerfLogEntry {
             self.cpu_system_percent,
             self.cpu_iowait_percent,
             self.errors,
-            if self.is_warmup { 1 } else { 0 },
         )
     }
 }
@@ -344,11 +341,6 @@ impl PerfLogDeltaTracker {
         let put_mbps = (delta_put_bytes as f64 / (1024.0 * 1024.0)) / interval_s;
         let meta_iops = delta_meta_ops as f64 / interval_s;
         
-        // Check warmup status
-        let is_warmup = self.warmup_end
-            .map(|end| now < end)
-            .unwrap_or(false);
-        
         // Update previous values
         self.prev_get_ops = metrics.get_ops;
         self.prev_get_bytes = metrics.get_bytes;
@@ -390,7 +382,6 @@ impl PerfLogDeltaTracker {
             cpu_system_percent: metrics.cpu_system_percent,
             cpu_iowait_percent: metrics.cpu_iowait_percent,
             errors: delta_errors,
-            is_warmup,
         }
     }
     
@@ -449,59 +440,17 @@ mod tests {
             cpu_system_percent: 10.2,
             cpu_iowait_percent: 5.3,
             errors: 0,
-            is_warmup: false,
         };
         
         let tsv = entry.to_tsv();
         let parts: Vec<&str> = tsv.split('\t').collect();
         
-        assert_eq!(parts.len(), 31);  // Updated column count with mean_us fields
+        assert_eq!(parts.len(), 30);  // Updated: removed is_warmup column
         assert_eq!(parts[0], "agent-1");
         assert_eq!(parts[1], "1733836800000");
         assert_eq!(parts[3], "Workload");
         assert_eq!(parts[4], "100");  // get_ops
-        assert_eq!(parts[30], "0");   // is_warmup
-    }
-    
-    #[test]
-    fn test_perf_log_entry_warmup_flag() {
-        let entry = PerfLogEntry {
-            agent_id: "local".to_string(),
-            timestamp_epoch_ms: 1733836800000,
-            elapsed_s: 5.0,
-            stage: WorkloadStage::Workload,
-            stage_name: String::new(),
-            get_ops: 0,
-            get_bytes: 0,
-            get_iops: 0.0,
-            get_mbps: 0.0,
-            get_mean_us: 0,
-            get_p50_us: 0,
-            get_p90_us: 0,
-            get_p99_us: 0,
-            put_ops: 0,
-            put_bytes: 0,
-            put_iops: 0.0,
-            put_mbps: 0.0,
-            put_mean_us: 0,
-            put_p50_us: 0,
-            put_p90_us: 0,
-            put_p99_us: 0,
-            meta_ops: 0,
-            meta_iops: 0.0,
-            meta_mean_us: 0,
-            meta_p50_us: 0,
-            meta_p90_us: 0,
-            meta_p99_us: 0,
-            cpu_user_percent: 0.0,
-            cpu_system_percent: 0.0,
-            cpu_iowait_percent: 0.0,
-            errors: 0,
-            is_warmup: true,
-        };
-        
-        let tsv = entry.to_tsv();
-        assert!(tsv.ends_with("\t1"));
+        assert_eq!(parts[29], "0");   // errors (last column)
     }
     
     #[test]
@@ -544,7 +493,6 @@ mod tests {
             cpu_system_percent: 5.0,
             cpu_iowait_percent: 2.0,
             errors: 0,
-            is_warmup: false,
         };
         
         writer.write_entry(&entry).unwrap();
@@ -584,7 +532,6 @@ mod tests {
         assert_eq!(entry1.agent_id, "agent-1");
         assert_eq!(entry1.get_ops, 100);
         assert_eq!(entry1.get_bytes, 102400);
-        assert!(!entry1.is_warmup);
         
         // Second interval: 250 ops total (delta = 150)
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -609,53 +556,10 @@ mod tests {
     }
     
     #[test]
-    fn test_delta_tracker_warmup() {
-        let mut tracker = PerfLogDeltaTracker::new();
-        tracker.start(Some(Duration::from_millis(50)));
-        
-        // During warmup
-        let metrics1 = PerfMetrics {
-            get_ops: 100, get_bytes: 102400,
-            put_ops: 0, put_bytes: 0,
-            meta_ops: 0, errors: 0,
-            get_mean_us: 500, get_p50_us: 1000, get_p90_us: 3000, get_p99_us: 5000,
-            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
-            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
-            cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0,
-        };
-        let entry1 = tracker.compute_delta(
-            "local",
-            &metrics1,
-            WorkloadStage::Workload,
-            String::new(),
-        );
-        assert!(entry1.is_warmup);
-        
-        // After warmup
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        let metrics2 = PerfMetrics {
-            get_ops: 200, get_bytes: 204800,
-            put_ops: 0, put_bytes: 0,
-            meta_ops: 0, errors: 0,
-            get_mean_us: 500, get_p50_us: 1000, get_p90_us: 3000, get_p99_us: 5000,
-            put_mean_us: 0, put_p50_us: 0, put_p90_us: 0, put_p99_us: 0,
-            meta_mean_us: 0, meta_p50_us: 0, meta_p90_us: 0, meta_p99_us: 0,
-            cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0,
-        };
-        let entry2 = tracker.compute_delta(
-            "local",
-            &metrics2,
-            WorkloadStage::Workload,
-            String::new(),
-        );
-        assert!(!entry2.is_warmup);
-    }
-    
-    #[test]
     fn test_header_format() {
         let parts: Vec<&str> = PERF_LOG_HEADER.split('\t').collect();
-        assert_eq!(parts.len(), 31);  // Updated column count with mean_us fields
+        assert_eq!(parts.len(), 30);  // Updated: removed is_warmup column
         assert_eq!(parts[0], "agent_id");
-        assert_eq!(parts[30], "is_warmup");
+        assert_eq!(parts[29], "errors");  // Last column
     }
 }

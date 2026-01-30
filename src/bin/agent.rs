@@ -543,10 +543,18 @@ impl Agent for AgentSvc {
         } else if let Some(ref prepare_config) = config.prepare {
             // Normal mode: Execute prepare phase
             debug!("Executing prepare phase");
+            
+            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
+            use std::sync::{Arc, Mutex};
+            use std::collections::HashMap;
+            let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
+            
             let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(
                 prepare_config,
                 Some(&config.workload),
-                None,
+                None,  // live_stats_tracker
+                config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                 config.concurrency,
                 agent_index as usize,
                 num_agents as usize,
@@ -716,6 +724,7 @@ impl Agent for AgentSvc {
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
+                    endpoint_stats: None,
                 }
             } else {
                 // No tracker - return empty summary
@@ -737,6 +746,7 @@ impl Agent for AgentSvc {
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
+                    endpoint_stats: None,
                 }
             }
         } else {
@@ -1753,7 +1763,21 @@ impl Agent for AgentSvc {
                                                 tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
                                             }
                                             
-                                            match sai3_bench::workload::prepare_objects(prepare_config, Some(&config_exec.workload), Some(tracker_for_prepare.clone()), config_exec.concurrency, agent_index, num_agents).await {
+                                            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
+                                            use std::sync::{Arc, Mutex};
+                                            use std::collections::HashMap;
+                                            let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
+                                            
+                                            match sai3_bench::workload::prepare_objects(
+                                                prepare_config, 
+                                                Some(&config_exec.workload), 
+                                                Some(tracker_for_prepare.clone()), 
+                                                config_exec.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
+                                                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
+                                                config_exec.concurrency, 
+                                                agent_index, 
+                                                num_agents
+                                            ).await {
                                                 Ok((prepared, manifest, prepare_metrics)) => {
                                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
                                                     
@@ -1902,6 +1926,7 @@ impl Agent for AgentSvc {
                                                             meta_hists: Default::default(),  // Would need histogram export method
                                                             total_errors: 0,
                                                             error_rate: 0.0,
+                                                            endpoint_stats: None,
                                                         })
                                                     } else {
                                                         // No tracker - return empty summary
@@ -1923,6 +1948,7 @@ impl Agent for AgentSvc {
                                                             meta_hists: Default::default(),
                                                             total_errors: 0,
                                                             error_rate: 0.0,
+                                                            endpoint_stats: None,
                                                         })
                                                     }
                                                 }
@@ -2236,6 +2262,24 @@ impl Agent for AgentSvc {
     }
 }
 
+/// Convert endpoint stats to proto format (v0.8.22)
+fn endpoint_stats_to_proto(
+    endpoint_stats: Option<&Vec<sai3_bench::workload::EndpointStatsSnapshot>>
+) -> Vec<pb::iobench::EndpointStatsSnapshot> {
+    endpoint_stats
+        .map(|stats| {
+            stats.iter().map(|s| pb::iobench::EndpointStatsSnapshot {
+                uri: s.uri.clone(),
+                total_requests: s.total_requests,
+                bytes_read: s.bytes_read,
+                bytes_written: s.bytes_written,
+                error_count: s.error_count,
+                active_requests: s.active_requests as u64,
+            }).collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Convert SizeBins to protobuf SizeBins message (v0.8.18)
 fn size_bins_to_proto(bins: &sai3_bench::workload::SizeBins) -> pb::iobench::SizeBins {
     let buckets = bins.by_bucket
@@ -2313,6 +2357,7 @@ async fn summary_to_proto(
         get_bins: Some(size_bins_to_proto(&summary.get_bins)),
         put_bins: Some(size_bins_to_proto(&summary.put_bins)),
         meta_bins: Some(size_bins_to_proto(&summary.meta_bins)),
+        endpoint_stats: endpoint_stats_to_proto(summary.endpoint_stats.as_ref()),
     })
 }
 
@@ -2385,10 +2430,11 @@ async fn prepare_metrics_to_proto(
         tsv_content,
         results_path: results_path.display().to_string(),
         put_bins: Some(size_bins_to_proto(&metrics.put_bins)),
+        endpoint_stats: endpoint_stats_to_proto(metrics.endpoint_stats.as_ref()),
     })
 }
 
-/// Create agent results directory and capture output files (v0.6.4)
+/// Convert endpoint stats to proto format (v0.8.22)
 /// Returns: (metadata_json, tsv_content, results_path, op_log_path, histogram_bytes)
 async fn create_agent_results(
     agent_id: &str,
@@ -2580,7 +2626,7 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     // Validate each operation
     for weighted_op in &config.workload {
         match &weighted_op.spec {
-            OpSpec::Get { path } => {
+            OpSpec::Get { path, .. } => {
                 // For file:// backends, verify files exist
                 if path.starts_with("file://") {
                     let file_path = path.replace("file://", "");
@@ -2601,19 +2647,19 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                     anyhow::bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
                 }
             }
-            OpSpec::Delete { path } => {
+            OpSpec::Delete { path, .. } => {
                 // Delete needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("DELETE operation requires non-empty path");
                 }
             }
-            OpSpec::List { path } => {
+            OpSpec::List { path, .. } => {
                 // List needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("LIST operation requires non-empty path");
                 }
             }
-            OpSpec::Stat { path } => {
+            OpSpec::Stat { path, .. } => {
                 // Stat needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("STAT operation requires non-empty path");

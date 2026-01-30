@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.21-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.22-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-283%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-277%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.22)**: Multi-endpoint load balancing with per-agent static endpoint mapping for shared storage systems with multiple endpoints (NFS, S3, or object storage).
 
 **🚀 NEW (v0.8.21)**: Zero-copy API migration with s3dlio v0.9.36 and enhanced data generation via `fill_controlled_data()` (86-163 GB/s, 20-50x faster).
 
@@ -30,7 +32,7 @@ All operations work identically across protocols - just change the URI scheme:
 
 - **File System** (`file://`) - Local filesystem with standard POSIX operations
 - **Direct I/O** (`direct://`) - High-performance direct I/O bypassing page cache (optimized chunked reads)
-- **Amazon S3** (`s3://`) - S3 and S3-compatible storage (MinIO, Ceph, etc.)
+- **Amazon S3** (`s3://`) - S3 and S3-compatible storage
 - **Azure Blob** (`az://`) - Microsoft Azure Blob Storage
 - **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API
 
@@ -105,33 +107,168 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 
 ## 🚀 Quick Start
 
+### One-Time Setup
+
+**1. Install Rust** (if not already installed):
 ```bash
-# Build
-cargo build --release
-
-# Test local filesystem
-./target/release/sai3-bench util health --uri "file:///tmp/test/"
-
-# Validate config before running
-./target/release/sai3-bench run --config my-workload.yaml --dry-run
-
-# Run workload
-./target/release/sai3-bench run --config my-workload.yaml
-
-# Capture and replay workload
-./target/release/sai3-bench --op-log /tmp/workload.tsv.zst run --config my-workload.yaml
-./target/release/sai3-bench replay --op-log /tmp/workload.tsv.zst --target "az://test/"
-
-# Consolidate multiple results into Excel (NEW in v0.8.17)
-./target/release/sai3-analyze --pattern "sai3-*" --output results.xlsx
-
-# Test cloud storage (requires authentication)
-export AZURE_STORAGE_ACCOUNT="your-storage-account"
-export AZURE_STORAGE_ACCOUNT_KEY="your-account-key"
-./target/release/sai3-bench util health --uri "az://your-storage-account/container/"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
 ```
 
-See [Usage Guide](docs/USAGE.md) for detailed examples.
+**2. Clone and Build sai3-bench**:
+```bash
+git clone https://github.com/russfellows/sai3-bench.git
+cd sai3-bench
+cargo build --release
+```
+
+The build creates 4 executables in `target/release/`:
+- `sai3-bench` - Single-node testing CLI
+- `sai3bench-agent` - Distributed agent (runs on each test host)
+- `sai3bench-ctl` - Distributed controller (coordinates agents)
+- `sai3-analyze` - Results analysis tool (Excel export)
+
+### Testing Modes
+
+sai3-bench supports two testing modes: **Single-Node** and **Distributed**.
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                        SINGLE-NODE MODE                           │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌──────────────┐                                                 │
+│  │              │        I/O Operations                           │
+│  │  sai3-bench  │  ─────────────────────►  Storage System         │
+│  │              │                          (S3/NFS/Azure/etc)     │
+│  └──────────────┘                                                 │
+│                                                                   │
+│  • Simple: One command to run workloads                           │
+│  • Use for: Single host testing, development, quick validation    │
+│  • Command: ./sai3-bench run --config workload.yaml               │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                       DISTRIBUTED MODE                           │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐                                            │
+│  │                  │  gRPC: Config, Start/Stop, Stats           │
+│  │  sai3bench-ctl   │────────┬──────────┬──────────┐             │
+│  │  (Controller)    │        │          │          │             │
+│  └──────────────────┘        ▼          ▼          ▼             │
+│                                                                  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐        │
+│  │sai3bench-    │    │sai3bench-    │    │sai3bench-    │        │
+│  │agent (Host 1)│    │agent (Host 2)│    │agent (Host N)│        │
+│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘        │
+│         │ I/O               │ I/O               │ I/O            │
+│         ▼                    ▼                    ▼              │
+│    ┌────────────────────────────────────────────────────┐        │
+│    │         Storage System (NFS/S3/Azure/etc)          │        │
+│    │  • Multiple endpoints for load balancing           │        │
+│    │  • Unified namespace across all endpoints          │        │
+│    └────────────────────────────────────────────────────┘        │
+│                                                                  │
+│  • Scalable: Generate load from multiple hosts                   │
+│  • Use for: Large-scale testing, multi-endpoint storage          │
+│  • Command: ./sai3bench-ctl run --config distributed.yaml        │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Running Your First Workload
+
+**Single-Node Mode** - Test local filesystem:
+```bash
+# Create a simple config file
+cat > my-test.yaml <<EOF
+target: "file:///tmp/benchmark/"
+duration: "30s"
+concurrency: 8
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///tmp/benchmark/data/"
+      count: 100
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  - op: put
+    path: "data/"
+    size_spec: 1048576
+    weight: 30
+EOF
+
+# Validate config (dry-run)
+./target/release/sai3-bench run --config my-test.yaml --dry-run
+
+# Run the workload
+./target/release/sai3-bench run --config my-test.yaml
+```
+
+**Distributed Mode** - Multi-host testing:
+```bash
+# On each test host (Host 1, Host 2, etc.), start an agent:
+./target/release/sai3bench-agent --listen 0.0.0.0:7761
+
+# On the controller host, create a distributed config:
+cat > distributed-test.yaml <<EOF
+target: "file:///shared/benchmark/"
+duration: "60s"
+concurrency: 16
+
+distributed:
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"
+    - address: "host2:7761"
+      id: "agent-2"
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///shared/benchmark/data/"
+      count: 1000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  - op: put
+    path: "data/"
+    size_spec: 1048576
+    weight: 30
+EOF
+
+# Run distributed workload (controller coordinates agents)
+./target/release/sai3bench-ctl run --config distributed-test.yaml
+```
+
+**Common Operations**:
+```bash
+# Test storage connectivity
+./target/release/sai3-bench util health --uri "s3://my-bucket/"
+
+# Capture workload for replay
+./target/release/sai3-bench --op-log trace.tsv.zst run --config my-test.yaml
+
+# Replay captured workload
+./target/release/sai3-bench replay --op-log trace.tsv.zst --target "s3://test-bucket/"
+
+# Analyze results (generate Excel report)
+./target/release/sai3-analyze --pattern "sai3-*" --output results.xlsx
+```
+
+See [Usage Guide](docs/USAGE.md) for detailed examples and [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) for multi-host patterns.
 
 ## 🔬 Workload Replay
 
