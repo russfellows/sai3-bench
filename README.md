@@ -140,14 +140,24 @@ sai3-bench supports two testing modes: **Single-Node** and **Distributed**.
 ```bash
 # Create a simple config file
 cat > my-test.yaml <<EOF
-target: "file:///tmp/benchmark/"
-duration: "30s"
-concurrency: 8
+target: "file:///shared/benchmark/"
+duration: "60s"
+concurrency: 16
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"
+    - address: "host2:7761"
+      id: "agent-2"
 
 prepare:
   ensure_objects:
-    - base_uri: "file:///tmp/benchmark/data/"
-      count: 100
+    - base_uri: "data/"
+      count: 1000
       min_size: 1048576
       max_size: 1048576
       fill: random
@@ -177,10 +187,17 @@ EOF
 # On the controller host, create a distributed config:
 cat > distributed-test.yaml <<EOF
 target: "file:///shared/benchmark/"
-duration: "60s"
-concurrency: 16
+duration: "120s"
+concurrency: 32
+
+perf_log:
+  enabled: true
+  interval: 1s
 
 distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
   agents:
     - address: "host1:7761"
       id: "agent-1"
@@ -189,20 +206,23 @@ distributed:
 
 prepare:
   ensure_objects:
-    - base_uri: "file:///shared/benchmark/data/"
-      count: 1000
-      min_size: 1048576
-      max_size: 1048576
+    - base_uri: "data/"
+      count: 5000
+      min_size: 524288
+      max_size: 10485760
       fill: random
 
 workload:
   - op: get
     path: "data/*"
-    weight: 70
+    weight: 60
   - op: put
     path: "data/"
-    size_spec: 1048576
+    size_spec: 2097152
     weight: 30
+  - op: list
+    path: "data/"
+    weight: 10
 EOF
 
 # Run distributed workload (controller coordinates agents)
