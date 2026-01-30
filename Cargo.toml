@@ -22,9 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio v0.9.36: Latest version with parallel read enhancements
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.36" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.36" }
+# s3dlio: Use local path for development (switch to git tag for releases)
+s3dlio = { path = "../s3dlio" }
+s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

@@ -89,6 +89,76 @@ impl BackendType {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Multi-endpoint wrapper for shared stats collection (v0.8.23+)
+// -----------------------------------------------------------------------------
+
+use std::pin::Pin;
+use futures::Stream;
+
+/// Wrapper around Arc<MultiEndpointStore> that implements ObjectStore trait.
+/// 
+/// This allows us to create a single MultiEndpointStore instance, wrap it in Arc,
+/// and use it both as a Box<dyn ObjectStore> (via this wrapper) and as an
+/// Arc<MultiEndpointStore> for stats collection. Both share the same underlying
+/// instance, so stats are correctly tracked.
+pub struct ArcMultiEndpointWrapper(pub Arc<s3dlio::MultiEndpointStore>);
+
+#[async_trait::async_trait]
+impl ObjectStore for ArcMultiEndpointWrapper {
+    async fn get(&self, uri: &str) -> anyhow::Result<bytes::Bytes> {
+        self.0.get(uri).await
+    }
+    
+    async fn get_range(&self, uri: &str, offset: u64, length: Option<u64>) -> anyhow::Result<bytes::Bytes> {
+        self.0.get_range(uri, offset, length).await
+    }
+    
+    async fn put(&self, uri: &str, data: bytes::Bytes) -> anyhow::Result<()> {
+        self.0.put(uri, data).await
+    }
+    
+    async fn put_multipart(&self, uri: &str, data: bytes::Bytes, part_size: Option<usize>) -> anyhow::Result<()> {
+        self.0.put_multipart(uri, data, part_size).await
+    }
+    
+    async fn delete(&self, uri: &str) -> anyhow::Result<()> {
+        self.0.delete(uri).await
+    }
+    
+    async fn delete_batch(&self, uris: &[String]) -> anyhow::Result<()> {
+        self.0.delete_batch(uris).await
+    }
+    
+    async fn delete_prefix(&self, uri_prefix: &str) -> anyhow::Result<()> {
+        self.0.delete_prefix(uri_prefix).await
+    }
+    
+    async fn list(&self, prefix: &str, recursive: bool) -> anyhow::Result<Vec<String>> {
+        self.0.list(prefix, recursive).await
+    }
+    
+    fn list_stream<'a>(&'a self, uri_prefix: &'a str, recursive: bool) -> Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send + 'a>> {
+        self.0.list_stream(uri_prefix, recursive)
+    }
+    
+    async fn stat(&self, uri: &str) -> anyhow::Result<s3dlio::object_store::ObjectMetadata> {
+        self.0.stat(uri).await
+    }
+    
+    async fn create_container(&self, name: &str) -> anyhow::Result<()> {
+        self.0.create_container(name).await
+    }
+    
+    async fn delete_container(&self, name: &str) -> anyhow::Result<()> {
+        self.0.delete_container(name).await
+    }
+    
+    async fn get_writer(&self, uri: &str) -> anyhow::Result<Box<dyn s3dlio::object_store::ObjectWriter>> {
+        self.0.get_writer(uri).await
+    }
+}
+
 /// Create ObjectStore instance for given URI with optional RangeEngine and PageCache configuration
 /// 
 /// If range_config is provided and enabled=true for GCS/Azure/S3 backends, creates
@@ -190,8 +260,9 @@ pub fn create_store_from_config(
         if let Some(ref multi_ep) = agent.multi_endpoint {
             debug!("Using per-agent multi-endpoint config for agent: {:?} ({} endpoints, strategy: {})",
                    agent.id, multi_ep.endpoints.len(), multi_ep.strategy);
-            let (boxed_store, _arc_store) = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
-            return Ok(boxed_store);
+            let multi_store = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
+            // Coerce Arc<MultiEndpointStore> to Box<dyn ObjectStore>
+            return Ok(Box::new(ArcMultiEndpointWrapper(multi_store)));
         }
     }
     
@@ -199,8 +270,8 @@ pub fn create_store_from_config(
     if let Some(ref multi_ep) = config.multi_endpoint {
         debug!("Using global multi-endpoint config ({} endpoints, strategy: {})",
                multi_ep.endpoints.len(), multi_ep.strategy);
-        let (boxed_store, _arc_store) = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
-        return Ok(boxed_store);
+        let multi_store = create_multi_endpoint_store(multi_ep, config.range_engine.as_ref(), config.page_cache_mode)?;
+        return Ok(Box::new(ArcMultiEndpointWrapper(multi_store)));
     }
     
     // Priority 3: Per-agent target override
@@ -233,12 +304,15 @@ pub fn create_store_from_config(
 /// Converts load balance strategy string to enum and creates s3dlio MultiEndpointStore.
 /// Each endpoint is created with appropriate RangeEngine and PageCache config.
 /// 
-/// Returns tuple: (Box<dyn ObjectStore> for caching, Arc<MultiEndpointStore> for stats)
+/// v0.8.23: Returns Arc<MultiEndpointStore> which can be:
+/// - Cloned and coerced to Arc<dyn ObjectStore> for operations (Arc coercion)
+/// - Used directly for stats collection via get_all_stats()
+/// Both share the SAME underlying instance, so stats are correctly tracked.
 pub fn create_multi_endpoint_store(
     multi_ep_config: &crate::config::MultiEndpointConfig,
     _range_config: Option<&crate::config::RangeEngineConfig>,
     _page_cache_mode: Option<crate::config::PageCacheMode>,
-) -> anyhow::Result<(Box<dyn ObjectStore>, Arc<s3dlio::MultiEndpointStore>)> {
+) -> anyhow::Result<Arc<s3dlio::MultiEndpointStore>> {
     use s3dlio::multi_endpoint::{MultiEndpointStore, LoadBalanceStrategy};
     
     if multi_ep_config.endpoints.is_empty() {
@@ -260,22 +334,18 @@ pub fn create_multi_endpoint_store(
         debug!("  Endpoint {}: {}", i + 1, endpoint);
     }
     
-    // Create TWO MultiEndpointStore instances - they both point to the same endpoints
-    // One for trait object use, one Arc-wrapped for stats collection
-    // TODO: Pass range_config and page_cache_mode to individual endpoint stores (future enhancement)
-    let store1 = MultiEndpointStore::new(
+    // Create ONE MultiEndpointStore wrapped in Arc for shared ownership
+    // The Arc can be:
+    // 1. Cloned and coerced to Arc<dyn ObjectStore> for operations
+    // 2. Kept as Arc<MultiEndpointStore> for stats collection
+    // Both point to the SAME instance, so stats are correctly tracked
+    let store = Arc::new(MultiEndpointStore::new(
         multi_ep_config.endpoints.clone(),
         strategy,
         None, // thread_count_per_endpoint - let s3dlio decide based on hardware
-    ).context("Failed to create MultiEndpointStore (instance 1)")?;
+    ).context("Failed to create MultiEndpointStore")?);
     
-    let store2 = MultiEndpointStore::new(
-        multi_ep_config.endpoints.clone(),
-        strategy,
-        None, // thread_count_per_endpoint - let s3dlio decide based on hardware
-    ).context("Failed to create MultiEndpointStore (instance 2)")?;
-    
-    Ok((Box::new(store1), Arc::new(store2)))
+    Ok(store)
 }
 
 /// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
@@ -629,23 +699,31 @@ pub type MultiEndpointCache = Arc<std::sync::Mutex<std::collections::HashMap<Str
 /// Cache key is based on base URI + config settings to ensure correct store for each combination
 /// 
 /// For multi-endpoint configs, populates both StoreCache and MultiEndpointCache
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - Operation-level flag to enable multi-endpoint routing (v0.8.23+)
+///   When true AND multi-endpoint config exists, routes to MultiEndpointStore
+///   When false, uses single-endpoint store regardless of config
 fn get_cached_store(
     uri: &str,
     cache: &StoreCache,
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
-    // v0.8.22: Multi-endpoint support - create store based on configuration priority
-    // If multi-endpoint is configured (global or per-agent), we use a special cache key
-    // and create a MultiEndpointStore that handles load balancing across multiple endpoints
+    // v0.8.23: Multi-endpoint support - operation-level flag controls routing
+    // Only use multi-endpoint store when:
+    // 1. Operation has use_multi_endpoint=true AND
+    // 2. Multi-endpoint config exists (global or per-agent)
     
     // Check if multi-endpoint is configured (per-agent takes priority over global)
-    let has_multi_endpoint = agent_config
+    let has_multi_endpoint_config = agent_config
         .and_then(|a| a.multi_endpoint.as_ref())
         .is_some() || config.multi_endpoint.is_some();
     
-    if has_multi_endpoint {
+    // Route to multi-endpoint only when operation requests it AND config exists
+    if use_multi_endpoint && has_multi_endpoint_config {
         // For multi-endpoint, create a cache key that represents the entire endpoint set
         // This ensures we reuse the same MultiEndpointStore across all operations
         let multi_ep = agent_config
@@ -660,7 +738,7 @@ fn get_cached_store(
             config.page_cache_mode
         );
         
-        // Check cache first
+        // Check cache first - if we've already created the wrapper, return it
         {
             let cache_lock = cache.lock().unwrap();
             if let Some(store) = cache_lock.get(&cache_key) {
@@ -669,15 +747,22 @@ fn get_cached_store(
         }
         
         // Not in cache - create new MultiEndpointStore
-        // create_multi_endpoint_store now returns (boxed_store, arc_multi_store)
-        let (boxed_store, multi_store) = create_multi_endpoint_store(
+        // v0.8.23: Create ONE Arc<MultiEndpointStore> and share it between both caches
+        // - MultiEndpointCache gets Arc<MultiEndpointStore> for stats access
+        // - StoreCache gets Arc<Box<ArcMultiEndpointWrapper>> which delegates to same Arc
+        // Both point to the SAME underlying instance, so stats are correctly tracked!
+        let multi_store = create_multi_endpoint_store(
             multi_ep,
             config.range_engine.as_ref(),
             config.page_cache_mode,
         )?;
-        let arc_store = Arc::new(boxed_store);
         
-        // Add to BOTH caches - StoreCache for operations, MultiEndpointCache for stats
+        // Create wrapper that delegates to the Arc<MultiEndpointStore>
+        // The wrapper holds Arc::clone, so operations go through the SAME stats counters
+        let wrapper = ArcMultiEndpointWrapper(Arc::clone(&multi_store));
+        let arc_store: Arc<Box<dyn ObjectStore>> = Arc::new(Box::new(wrapper));
+        
+        // Add to BOTH caches - they share the SAME underlying MultiEndpointStore
         {
             let mut cache_lock = cache.lock().unwrap();
             cache_lock.insert(cache_key.clone(), Arc::clone(&arc_store));
@@ -720,7 +805,8 @@ fn get_cached_store(
     
     // Not in cache - create new store
     let store = create_store_with_logger_and_config(uri, config.range_engine.as_ref(), config.page_cache_mode)?;
-    let arc_store = Arc::new(store);
+    // Wrap Box<dyn ObjectStore> in Arc for the cache
+    let arc_store: Arc<Box<dyn ObjectStore>> = Arc::new(store);
     
     // Add to cache
     {
@@ -736,15 +822,19 @@ fn get_cached_store(
 // -----------------------------------------------------------------------------
 
 /// Internal GET operation with cached store (for performance-critical workloads)
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn get_object_cached(
     uri: &str,
     cache: &StoreCache,
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
     
     let bytes = store.get(uri).await
         .with_context(|| format!("Failed to get object from URI: {}", uri))?;
@@ -754,6 +844,9 @@ async fn get_object_cached(
 }
 
 /// Internal PUT operation with cached store (for performance-critical workloads)
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn put_object_cached(
     uri: &str,
     data: bytes::Bytes,  // Zero-copy: Bytes instead of &[u8]
@@ -761,9 +854,10 @@ async fn put_object_cached(
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<()> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
-    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
     
     store.put(uri, data).await  // Zero-copy: Bytes passed directly
         .with_context(|| format!("Failed to put object to URI: {}", uri))?;
@@ -773,15 +867,19 @@ async fn put_object_cached(
 }
 
 /// Internal DELETE operation with cached store (for performance-critical workloads)
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn delete_object_cached(
     uri: &str,
     cache: &StoreCache,
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<()> {
     trace!("DELETE operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
     
     store.delete(uri).await
         .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
@@ -791,15 +889,19 @@ async fn delete_object_cached(
 }
 
 /// Internal LIST operation with cached store (for performance-critical workloads)
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn list_objects_cached(
     uri: &str,
     cache: &StoreCache,
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<Vec<String>> {
     trace!("LIST operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
     
     let keys = store.list(uri, true).await
         .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
@@ -809,15 +911,19 @@ async fn list_objects_cached(
 }
 
 /// Internal STAT operation with cached store (for performance-critical workloads)
+/// 
+/// # Arguments
+/// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn stat_object_cached(
     uri: &str,
     cache: &StoreCache,
     multi_ep_cache: &MultiEndpointCache,
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<u64> {
     trace!("STAT operation (cached store) starting for URI: {}", uri);
-    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config)?;
+    let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
     
     let metadata = store.stat(uri).await
         .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
@@ -1429,7 +1535,9 @@ where
 /// Collect per-endpoint statistics from MultiEndpointStore instances.
 /// Returns None if no multi-endpoint stores are found, otherwise returns a Vec
 /// with stats for each endpoint across all cached MultiEndpointStore instances.
-fn collect_endpoint_stats(multi_ep_cache: &MultiEndpointCache) -> Option<Vec<EndpointStatsSnapshot>> {
+/// 
+/// v0.8.23: Made public for use by prepare phase
+pub fn collect_endpoint_stats(multi_ep_cache: &MultiEndpointCache) -> Option<Vec<EndpointStatsSnapshot>> {
     let cache = multi_ep_cache.lock().unwrap();
     
     if cache.is_empty() {
@@ -1510,10 +1618,35 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     if tree_manifest.is_none() && total_patterns > 0 {
         println!("Resolving {} operation patterns ({} GET, {} DELETE, {} STAT)...", 
                  total_patterns, get_count, delete_count, stat_count);
+        
+        // v0.8.24: Create multi-endpoint store for pattern resolution if configured
+        // This is needed to list objects distributed across multiple endpoints
+        let multi_store_for_resolution: Option<s3dlio::MultiEndpointStore> = if let Some(ref me_cfg) = cfg.multi_endpoint {
+            let strategy = match me_cfg.strategy.as_str() {
+                "least_connections" => s3dlio::LoadBalanceStrategy::LeastConnections,
+                _ => s3dlio::LoadBalanceStrategy::RoundRobin,
+            };
+            match s3dlio::MultiEndpointStore::new(
+                me_cfg.endpoints.clone(),
+                strategy,
+                None, // thread_count_per_endpoint - let s3dlio decide
+            ) {
+                Ok(store) => {
+                    info!("Created MultiEndpointStore for pattern resolution ({} endpoints)", me_cfg.endpoints.len());
+                    Some(store)
+                }
+                Err(e) => {
+                    warn!("Failed to create MultiEndpointStore for pattern resolution: {}. Falling back to single-endpoint.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
                  
         for wo in &cfg.workload {
         match &wo.spec {
-            OpSpec::Get { .. } => {
+            OpSpec::Get { use_multi_endpoint, .. } => {
                 let original_uri = cfg.get_uri(&wo.spec);
                 let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
                 
@@ -1522,7 +1655,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 }
                 info!("Resolving GET pattern: {}", uri);
                 
-                match prefetch_uris_multi_backend(&uri).await {
+                // v0.8.24: Use multi-endpoint resolution if enabled for this operation
+                let prefetch_result = if *use_multi_endpoint {
+                    if let Some(ref multi_store) = multi_store_for_resolution {
+                        prefetch_uris_multi_endpoint(&uri, multi_store).await
+                    } else {
+                        prefetch_uris_multi_backend(&uri).await
+                    }
+                } else {
+                    prefetch_uris_multi_backend(&uri).await
+                };
+                
+                match prefetch_result {
                     Ok(full_uris) if !full_uris.is_empty() => {
                         info!("Found {} objects for GET pattern: {}", full_uris.len(), uri);
                         
@@ -1561,7 +1705,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     }
                 }
             }
-            OpSpec::Delete { .. } => {
+            OpSpec::Delete { use_multi_endpoint, .. } => {
                 let original_uri = cfg.get_meta_uri(&wo.spec);
                 let uri = rewrite_pattern_for_pool(&original_uri, true, needs_separate_pools);
                 
@@ -1570,7 +1714,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 }
                 info!("Resolving DELETE pattern: {}", uri);
                 
-                match prefetch_uris_multi_backend(&uri).await {
+                // v0.8.24: Use multi-endpoint resolution if enabled for this operation
+                let prefetch_result = if *use_multi_endpoint {
+                    if let Some(ref multi_store) = multi_store_for_resolution {
+                        prefetch_uris_multi_endpoint(&uri, multi_store).await
+                    } else {
+                        prefetch_uris_multi_backend(&uri).await
+                    }
+                } else {
+                    prefetch_uris_multi_backend(&uri).await
+                };
+                
+                match prefetch_result {
                     Ok(full_uris) if !full_uris.is_empty() => {
                         info!("Found {} objects for DELETE pattern: {}", full_uris.len(), uri);
                         pre.delete_lists.push(UriSource {
@@ -1586,7 +1741,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     }
                 }
             }
-            OpSpec::Stat { .. } => {
+            OpSpec::Stat { use_multi_endpoint, .. } => {
                 let original_uri = cfg.get_meta_uri(&wo.spec);
                 let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
                 
@@ -1595,7 +1750,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 }
                 info!("Resolving STAT pattern: {}", uri);
                 
-                match prefetch_uris_multi_backend(&uri).await {
+                // v0.8.24: Use multi-endpoint resolution if enabled for this operation
+                let prefetch_result = if *use_multi_endpoint {
+                    if let Some(ref multi_store) = multi_store_for_resolution {
+                        prefetch_uris_multi_endpoint(&uri, multi_store).await
+                    } else {
+                        prefetch_uris_multi_backend(&uri).await
+                    }
+                } else {
+                    prefetch_uris_multi_backend(&uri).await
+                };
+                
+                match prefetch_result {
                     Ok(full_uris) if !full_uris.is_empty() => {
                         info!("Found {} objects for STAT pattern: {}", full_uris.len(), uri);
                         pre.stat_lists.push(UriSource {
@@ -1862,7 +2028,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 let op = &workload[idx].spec;
 
                 match op {
-                    OpSpec::Get { .. } => {
+                    OpSpec::Get { use_multi_endpoint, .. } => {
+                        // v0.8.23: Extract use_multi_endpoint flag for routing
+                        let use_multi_ep = *use_multi_endpoint;
+                        
                         // v0.7.13: Wrap GET operation with error handling
                         // URI resolution needs to happen outside the retry closure
                         let full_uri = if let Some(ref selector) = path_selector {
@@ -1899,6 +2068,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &multi_ep_cache_get,
                                     &cfg_for_get,
                                     None,  // agent_config: None for standalone mode
+                                    use_multi_ep,
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok((bytes, duration))
@@ -1929,7 +2099,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Put { dedup_factor, compress_factor, .. } => {
+                    OpSpec::Put { dedup_factor, compress_factor, use_multi_endpoint, .. } => {
+                        // v0.8.23: Extract use_multi_endpoint flag for routing
+                        let use_multi_ep = *use_multi_endpoint;
+                        
                         // v0.7.13: Wrap PUT operation with error handling
                         let (full_uri, sz) = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
@@ -1987,6 +2160,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &multi_ep_cache_put,
                                     &cfg_for_put,
                                     None,  // agent_config: None for standalone mode
+                                    use_multi_ep,
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -2016,7 +2190,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::List { .. } => {
+                    OpSpec::List { use_multi_endpoint, .. } => {
+                        // v0.8.23: Extract use_multi_endpoint flag for routing
+                        let use_multi_ep = *use_multi_endpoint;
+                        
                         // v0.7.13: Wrap LIST operation with error handling
                         let uri = cfg.get_meta_uri(op);
                         let store_cache_list = store_cache.clone();
@@ -2034,6 +2211,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &multi_ep_cache_list,
                                     &cfg_for_list,
                                     None,  // agent_config: None for standalone mode
+                                    use_multi_ep,
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -2060,7 +2238,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Stat { .. } => {
+                    OpSpec::Stat { use_multi_endpoint, .. } => {
+                        // v0.8.23: Extract use_multi_endpoint flag for routing
+                        let use_multi_ep = *use_multi_endpoint;
+                        
                         // v0.7.13: Wrap STAT operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
@@ -2097,6 +2278,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &multi_ep_cache_stat,
                                     &cfg_for_stat,
                                     None,  // agent_config: None for standalone mode
+                                    use_multi_ep,
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -2123,7 +2305,10 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Delete { .. } => {
+                    OpSpec::Delete { use_multi_endpoint, .. } => {
+                        // v0.8.23: Extract use_multi_endpoint flag for routing
+                        let use_multi_ep = *use_multi_endpoint;
+                        
                         // v0.7.13: Wrap DELETE operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
@@ -2160,6 +2345,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     &multi_ep_cache_delete,
                                     &cfg_for_delete,
                                     None,  // agent_config: None for standalone mode
+                                    use_multi_ep,
                                 ).await?;
                                 let duration = t0.elapsed();
                                 Ok(duration)
@@ -2533,6 +2719,67 @@ async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
         store.list(base_uri, false).await
     } else {
         // Exact URI
+        Ok(vec![base_uri.to_string()])
+    }
+}
+
+/// Prefetch URIs using a MultiEndpointStore (v0.8.24+).
+/// 
+/// When using multi-endpoint configuration with relative paths, objects are distributed
+/// across multiple endpoints. This function queries ALL endpoints and merges results.
+///
+/// # Arguments
+/// * `base_uri` - The URI pattern (can contain * for glob matching, or be relative path)
+/// * `multi_store` - The MultiEndpointStore to use for listing all endpoints
+async fn prefetch_uris_multi_endpoint(
+    base_uri: &str,
+    multi_store: &s3dlio::MultiEndpointStore,
+) -> Result<Vec<String>> {
+    // For shared storage (on-premises S3/NAS with multiple endpoints for load balancing),
+    // all endpoints see the same files. We just need to list from any one endpoint.
+    // The MultiEndpointStore.list() handles URI rewriting for relative paths.
+    use s3dlio::ObjectStore;
+    
+    if base_uri.contains('*') {
+        // Glob pattern: list directory and filter with regex
+        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
+        let list_prefix = &base_uri[..base_end];
+        
+        debug!("Multi-endpoint list: prefix='{}' from base_uri='{}'", list_prefix, base_uri);
+        
+        // Use regular list() - storage is shared, so any endpoint sees all files
+        let uris = multi_store.list(list_prefix, false).await?;
+        
+        debug!("Multi-endpoint list returned {} URIs", uris.len());
+        if !uris.is_empty() {
+            debug!("First few URIs: {:?}", uris.iter().take(3).collect::<Vec<_>>());
+        }
+        
+        // For multi-endpoint with relative paths, the returned URIs will be full URIs
+        // (e.g., "file:///tmp/ep1/data/prepared-00000000.dat")
+        // We need to match the filename portion against the glob pattern
+        let glob_pattern = base_uri.rfind('/').map(|i| &base_uri[i + 1..]).unwrap_or(base_uri);
+        
+        // Build regex: escape the glob pattern, then replace escaped \* with .*
+        // Prefix with .* to match any path prefix (full URIs have endpoint prefix)
+        let escaped = regex::escape(glob_pattern).replace(r"\*", ".*");
+        let re = regex::Regex::new(&format!(".*{}", escaped))?;
+        
+        debug!("Glob pattern: '{}', regex: '{}'", glob_pattern, re.as_str());
+        
+        let matched_uris: Vec<String> = uris.into_iter()
+            .filter(|uri| re.is_match(uri))
+            .collect();
+            
+        info!("Multi-endpoint pattern resolution: {} matched {} URIs", 
+              base_uri, matched_uris.len());
+        Ok(matched_uris)
+    } else if base_uri.ends_with('/') {
+        // Directory listing
+        use s3dlio::ObjectStore;
+        multi_store.list(base_uri, false).await
+    } else {
+        // Exact URI - no special handling needed
         Ok(vec![base_uri.to_string()])
     }
 }

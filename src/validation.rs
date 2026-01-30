@@ -292,10 +292,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
         
         let (op_name, details) = match &weighted_op.spec {
-            crate::config::OpSpec::Get { path } => {
+            crate::config::OpSpec::Get { path, .. } => {
                 ("GET", format!("path: {}", path))
             },
-            crate::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor } => {
+            crate::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor, .. } => {
                 let mut details = format!("path: {}", path);
                 if let Some(ref spec) = size_spec {
                     let mut generator = SizeGenerator::new(spec)?;
@@ -306,13 +306,13 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 details.push_str(&format!(", dedup: {}, compress: {}", dedup_factor, compress_factor));
                 ("PUT", details)
             },
-            crate::config::OpSpec::List { path } => {
+            crate::config::OpSpec::List { path, .. } => {
                 ("LIST", format!("path: {}", path))
             },
-            crate::config::OpSpec::Stat { path } => {
+            crate::config::OpSpec::Stat { path, .. } => {
                 ("STAT", format!("path: {}", path))
             },
-            crate::config::OpSpec::Delete { path } => {
+            crate::config::OpSpec::Delete { path, .. } => {
                 ("DELETE", format!("path: {}", path))
             },
             crate::config::OpSpec::Mkdir { path } => {

@@ -142,6 +142,16 @@ impl ResultsDir {
         self.path.join("prepare_results.tsv")
     }
 
+    /// Get the path for workload endpoint statistics TSV file (v0.8.23+)
+    pub fn endpoint_stats_tsv_path(&self) -> PathBuf {
+        self.path.join("workload_endpoint_stats.tsv")
+    }
+
+    /// Get the path for prepare phase endpoint statistics TSV file (v0.8.23+)
+    pub fn prepare_endpoint_stats_tsv_path(&self) -> PathBuf {
+        self.path.join("prepare_endpoint_stats.tsv")
+    }
+
     /// Get the path for console log
     pub fn console_log_path(&self) -> PathBuf {
         self.path.join("console_log.txt")

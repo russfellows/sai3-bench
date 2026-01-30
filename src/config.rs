@@ -351,7 +351,13 @@ pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
     /// Can be absolute URI (s3://bucket/key) or relative path (data/file.txt) when target is set.
     Get { 
-        path: String 
+        path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// PUT objects with configurable sizes.
@@ -383,24 +389,48 @@ pub enum OpSpec {
         /// Controls compressibility of generated data (v0.5.3+)
         #[serde(default = "default_compress_factor")]
         compress_factor: usize,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// LIST objects under a path/prefix.
     /// Uses 'path' relative to target, or absolute URI.
     List {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// STAT/HEAD a single object to get metadata.
     /// Uses 'path' relative to target, or absolute URI.
     Stat {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// DELETE objects (single or glob pattern).
     /// Uses 'path' relative to target, or absolute URI.
     Delete {
         path: String,
+        
+        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
+        /// When true, operations are distributed across all configured endpoints
+        /// Default: false (use path directly as single endpoint)
+        #[serde(default)]
+        use_multi_endpoint: bool,
     },
 
     /// MKDIR - Create a directory (filesystem backends only).
@@ -640,7 +670,7 @@ impl Config {
     /// Get the resolved URI for a GET operation
     pub fn get_uri(&self, get_op: &OpSpec) -> String {
         match get_op {
-            OpSpec::Get { path } => self.resolve_uri(path),
+            OpSpec::Get { path, .. } => self.resolve_uri(path),
             _ => panic!("Expected GET operation"),
         }
     }
@@ -698,9 +728,9 @@ impl Config {
     /// Get the resolved URI for a metadata operation (List, Stat, Delete, Mkdir, Rmdir)
     pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
         match meta_op {
-            OpSpec::List { path } 
-            | OpSpec::Stat { path } 
-            | OpSpec::Delete { path }
+            OpSpec::List { path, .. } 
+            | OpSpec::Stat { path, .. } 
+            | OpSpec::Delete { path, .. }
             | OpSpec::Mkdir { path }
             | OpSpec::Rmdir { path, .. } => {
                 self.resolve_uri(path)

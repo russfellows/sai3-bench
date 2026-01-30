@@ -2606,7 +2606,7 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
     // Validate each operation
     for weighted_op in &config.workload {
         match &weighted_op.spec {
-            OpSpec::Get { path } => {
+            OpSpec::Get { path, .. } => {
                 // For file:// backends, verify files exist
                 if path.starts_with("file://") {
                     let file_path = path.replace("file://", "");
@@ -2627,19 +2627,19 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                     anyhow::bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
                 }
             }
-            OpSpec::Delete { path } => {
+            OpSpec::Delete { path, .. } => {
                 // Delete needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("DELETE operation requires non-empty path");
                 }
             }
-            OpSpec::List { path } => {
+            OpSpec::List { path, .. } => {
                 // List needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("LIST operation requires non-empty path");
                 }
             }
-            OpSpec::Stat { path } => {
+            OpSpec::Stat { path, .. } => {
                 // Stat needs a valid path
                 if path.is_empty() {
                     anyhow::bail!("STAT operation requires non-empty path");
