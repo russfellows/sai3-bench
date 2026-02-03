@@ -29,7 +29,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType};
 
 /// Helper function to get current timestamp with optional simulated clock skew.
 /// 
@@ -305,11 +305,110 @@ impl AgentSvc {
     }
 }
 
+/// Extract filesystem path from Config.target or return None if not a file:// or direct:// URI
+fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> Option<std::path::PathBuf> {
+    config.target.as_ref().and_then(|target| {
+        if target.starts_with("file://") {
+            Some(std::path::PathBuf::from(&target[7..])) // Strip "file://"
+        } else if target.starts_with("direct://") {
+            Some(std::path::PathBuf::from(&target[9..])) // Strip "direct://"
+        } else {
+            None // Not a filesystem target
+        }
+    })
+}
+
 #[tonic::async_trait]
 impl Agent for AgentSvc {
     async fn ping(&self, _req: Request<Empty>) -> Result<Response<PingReply>, Status> {
         Ok(Response::new(PingReply {
             version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
+    async fn pre_flight_validation(
+        &self,
+        req: Request<PreFlightRequest>,
+    ) -> Result<Response<PreFlightResponse>, Status> {
+        let PreFlightRequest { config_yaml, agent_id } = req.into_inner();
+        
+        info!("Running pre-flight validation for agent {}", agent_id);
+        
+        // Parse the YAML configuration
+        let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            .map_err(|e| {
+                error!("Failed to parse YAML config: {}", e);
+                Status::invalid_argument(format!("Invalid YAML config: {}", e))
+            })?;
+        
+        // Run filesystem validation only if target is file:// or direct://
+        let fs_path = extract_filesystem_path_from_config(&config);
+        let fs_summary = if let Some(path) = fs_path {
+            sai3_bench::preflight::filesystem::validate_filesystem(
+                &path,
+                true,  // check_write = true
+                Some(1024 * 1024),  // require at least 1 MB free space
+            ).await.map_err(|e| {
+                error!("Filesystem validation failed: {}", e);
+                Status::internal(format!("Filesystem validation error: {}", e))
+            })?
+        } else {
+            // Not a filesystem target - skip filesystem validation
+            sai3_bench::preflight::ValidationSummary::new(vec![
+                sai3_bench::preflight::ValidationResult {
+                    level: sai3_bench::preflight::ResultLevel::Info,
+                    error_type: None,
+                    message: "Skipping filesystem validation (target is object storage)".to_string(),
+                    suggestion: String::new(),
+                    details: None,
+                    test_phase: "filesystem".to_string(),
+                }
+            ])
+        };
+        
+        // TODO Phase 2: Add object storage validation
+        // let obj_summary = sai3_bench::preflight::object_storage::validate_object_storage(&config).await;
+        
+        // Convert ValidationSummary to proto response
+        let results: Vec<ValidationResult> = fs_summary.results.iter().map(|r| {
+            ValidationResult {
+                level: match r.level {
+                    sai3_bench::preflight::ResultLevel::Success => ResultLevel::Success as i32,
+                    sai3_bench::preflight::ResultLevel::Info => ResultLevel::Info as i32,
+                    sai3_bench::preflight::ResultLevel::Warning => ResultLevel::Warning as i32,
+                    sai3_bench::preflight::ResultLevel::Error => ResultLevel::Error as i32,
+                },
+                error_type: match r.error_type {
+                    Some(sai3_bench::preflight::ErrorType::Authentication) => ErrorType::Authentication as i32,
+                    Some(sai3_bench::preflight::ErrorType::Permission) => ErrorType::Permission as i32,
+                    Some(sai3_bench::preflight::ErrorType::Network) => ErrorType::Network as i32,
+                    Some(sai3_bench::preflight::ErrorType::Configuration) => ErrorType::Configuration as i32,
+                    Some(sai3_bench::preflight::ErrorType::Resource) => ErrorType::Resource as i32,
+                    Some(sai3_bench::preflight::ErrorType::System) => ErrorType::System as i32,
+                    None => ErrorType::Unknown as i32,
+                },
+                message: r.message.clone(),
+                suggestion: r.suggestion.clone(),
+                details: r.details.clone().unwrap_or_default(),
+                test_phase: r.test_phase.clone(),
+            }
+        }).collect();
+        
+        let passed = !fs_summary.has_errors();
+        
+        info!(
+            "Pre-flight validation completed: {} errors, {} warnings, {} info",
+            fs_summary.error_count(),
+            fs_summary.warning_count(),
+            fs_summary.info_count()
+        );
+        
+        Ok(Response::new(PreFlightResponse {
+            passed,
+            results,
+            error_count: fs_summary.error_count() as i32,
+            warning_count: fs_summary.warning_count() as i32,
+            info_count: fs_summary.info_count() as i32,
         }))
     }
 
@@ -2100,6 +2199,122 @@ impl Agent for AgentSvc {
                                 }
                                 
                                 info!("Control reader: Abort complete, agent returned to Idle");
+                            }
+                            Ok(Command::Preflight) => {
+                                info!("Control reader: Received PREFLIGHT command - running validation");
+                                
+                                // Extract config from PREFLIGHT message (same fields as START)
+                                let config_yaml = control_msg.config_yaml;
+                                let agent_id = control_msg.agent_id;
+                                
+                                // Run filesystem validation
+                                let fs_summary = match serde_yaml::from_str::<sai3_bench::config::Config>(&config_yaml) {
+                                    Ok(config) => {
+                                        // Extract filesystem path from target URI
+                                        if let Some(fs_path) = extract_filesystem_path_from_config(&config) {
+                                            match sai3_bench::preflight::filesystem::validate_filesystem(
+                                                &fs_path,
+                                                true,  // check_write = true
+                                                Some(1024 * 1024),  // require at least 1 MB free space
+                                            ).await {
+                                                Ok(summary) => summary,
+                                                Err(e) => {
+                                                    error!("Control reader: Filesystem validation error: {}", e);
+                                                    sai3_bench::preflight::ValidationSummary::new(vec![
+                                                        sai3_bench::preflight::ValidationResult {
+                                                            level: sai3_bench::preflight::ResultLevel::Error,
+                                                            error_type: Some(sai3_bench::preflight::ErrorType::System),
+                                                            message: format!("Validation error: {}", e),
+                                                            suggestion: "Check filesystem permissions and disk space".to_string(),
+                                                            details: None,
+                                                            test_phase: "validation".to_string(),
+                                                        }
+                                                    ])
+                                                }
+                                            }
+                                        } else {
+                                            // Not a filesystem target - skip validation
+                                            sai3_bench::preflight::ValidationSummary::new(vec![
+                                                sai3_bench::preflight::ValidationResult {
+                                                    level: sai3_bench::preflight::ResultLevel::Info,
+                                                    error_type: None,
+                                                    message: "Skipping filesystem validation (target is object storage)".to_string(),
+                                                    suggestion: String::new(),
+                                                    details: None,
+                                                    test_phase: "filesystem".to_string(),
+                                                }
+                                            ])
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Config parse error becomes a validation error
+                                        error!("Control reader: Failed to parse config for pre-flight: {}", e);
+                                        sai3_bench::preflight::ValidationSummary::new(vec![
+                                            sai3_bench::preflight::ValidationResult {
+                                                level: sai3_bench::preflight::ResultLevel::Error,
+                                                error_type: Some(sai3_bench::preflight::ErrorType::Configuration),
+                                                message: format!("YAML parse error: {}", e),
+                                                suggestion: "Check YAML syntax and field names".to_string(),
+                                                details: None,
+                                                test_phase: "config_parse".to_string(),
+                                            }
+                                        ])
+                                    }
+                                };
+                                
+                                // Convert to proto and send via LiveStats status=7 (PREFLIGHT_RESULT)
+                                // We encode validation results in error_message as JSON for now
+                                // TODO Phase 2: Add proper PreFlightResult field to LiveStats message
+                                let passed = !fs_summary.has_errors();
+                                let results_json = serde_json::json!({
+                                    "passed": passed,
+                                    "error_count": fs_summary.error_count(),
+                                    "warning_count": fs_summary.warning_count(),
+                                    "info_count": fs_summary.info_count(),
+                                    "results": fs_summary.results.iter().map(|r| {
+                                        serde_json::json!({
+                                            "level": format!("{:?}", r.level),
+                                            "error_type": format!("{:?}", r.error_type),
+                                            "message": r.message,
+                                            "suggestion": r.suggestion,
+                                            "details": r.details,
+                                            "test_phase": r.test_phase,
+                                        })
+                                    }).collect::<Vec<_>>()
+                                }).to_string();
+                                
+                                let preflight_msg = LiveStats {
+                                    agent_id,
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: 7,  // PREFLIGHT_RESULT (new status code)
+                                    error_message: results_json,
+                                    in_prepare_phase: false,
+                                    prepare_objects_created: 0,
+                                    prepare_objects_total: 0,
+                                    prepare_summary: None,
+                                    cpu_user_percent: 0.0,
+                                    cpu_system_percent: 0.0,
+                                    cpu_iowait_percent: 0.0,
+                                    cpu_total_percent: 0.0,
+                                    agent_timestamp_ns: 0,
+                                    sequence: 0,
+                                    current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                    concurrency: 0,
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(preflight_msg).await {
+                                    error!("Control reader: Failed to send PREFLIGHT_RESULT: {}", e);
+                                    break;
+                                }
+                                
+                                info!("Control reader: Pre-flight validation completed (passed={}, errors={}, warnings={})",
+                                      passed, fs_summary.error_count(), fs_summary.warning_count());
                             }
                             Ok(Command::Acknowledge) => {
                                 debug!("Control reader: Received ACK for sequence {}", control_msg.ack_sequence);

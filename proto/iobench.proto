@@ -249,6 +249,11 @@ service Agent {
   // Agent sends stats updates (ready, progress, completed)
   // Allows real-time coordination without blocking either side
   rpc ExecuteWorkload(stream ControlMessage) returns (stream LiveStats);
+  
+  // v0.8.23: Pre-flight validation before workload execution
+  // Agent validates filesystem/object storage access and returns detailed errors
+  // Controller aggregates results and aborts if any agent fails validation
+  rpc PreFlightValidation(PreFlightRequest) returns (PreFlightResponse);
 }
 
 // v0.8.4: Control messages from controller to agent
@@ -258,6 +263,7 @@ message ControlMessage {
     START = 1;          // Begin workload execution
     ABORT = 2;          // Cancel workload immediately
     ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
+    PREFLIGHT = 4;      // v0.8.23: Run pre-flight validation
   }
   Command command = 1;
   
@@ -277,5 +283,45 @@ message ControlMessage {
   // Used for deterministic object distribution: file_idx % num_agents == agent_index
   uint32 agent_index = 8;
   uint32 num_agents = 9;
+}
+
+// v0.8.23: Pre-flight validation request/response
+message PreFlightRequest {
+  string config_yaml = 1;  // Configuration to validate (same as START would receive)
+  string agent_id = 2;     // Agent identifier for logging
+}
+
+message PreFlightResponse {
+  bool passed = 1;                    // true if no errors (warnings OK)
+  repeated ValidationResult results = 2;
+  int32 error_count = 3;
+  int32 warning_count = 4;
+  int32 info_count = 5;
+}
+
+message ValidationResult {
+  ResultLevel level = 1;
+  ErrorType error_type = 2;
+  string message = 3;
+  string suggestion = 4;
+  string details = 5;        // Optional technical details (uid/gid, etc)
+  string test_phase = 6;     // "stat", "list", "read", "write", "delete", etc.
+}
+
+enum ResultLevel {
+  RESULT_LEVEL_SUCCESS = 0;
+  RESULT_LEVEL_INFO = 1;
+  RESULT_LEVEL_WARNING = 2;
+  RESULT_LEVEL_ERROR = 3;
+}
+
+enum ErrorType {
+  ERROR_TYPE_UNKNOWN = 0;
+  ERROR_TYPE_AUTHENTICATION = 1;
+  ERROR_TYPE_PERMISSION = 2;
+  ERROR_TYPE_NETWORK = 3;
+  ERROR_TYPE_CONFIGURATION = 4;
+  ERROR_TYPE_RESOURCE = 5;
+  ERROR_TYPE_SYSTEM = 6;
 }
 
