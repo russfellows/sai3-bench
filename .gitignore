@@ -25,3 +25,6 @@ sai3-*/
 
 # Handoff documents (session-specific, not for version control)
 docs/sai3-bench-handoff.md
+
+# Production test configs with sensitive infrastructure details
+tests/configs/distributed_4node_16endpoint_test.yaml
