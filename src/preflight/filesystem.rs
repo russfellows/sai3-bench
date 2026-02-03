@@ -48,7 +48,10 @@ pub async fn validate_filesystem(
     // 1. User/Group ID Analysis
     results.extend(check_user_identity());
 
-    // 2. Test stat access (most basic - does directory exist?)
+    // 2. Check for protected/system directories (safety check)
+    results.extend(check_protected_paths(data_root));
+
+    // 3. Test stat access (most basic - does directory exist?)
     match test_stat_access(data_root).await {
         Ok(result) => {
             results.push(result.clone());
@@ -189,6 +192,62 @@ pub async fn validate_filesystem(
     Ok(ValidationSummary::new(results))
 }
 
+/// Check for protected/system directories that should not be used for testing
+fn check_protected_paths(path: &Path) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    
+    let path_str = path.to_string_lossy();
+    
+    // Critical system directories - ERROR
+    let critical_dirs = ["/etc", "/usr", "/sys", "/proc", "/boot", "/root"];
+    for critical_dir in &critical_dirs {
+        if path_str.starts_with(critical_dir) {
+            results.push(ValidationResult::error(
+                ErrorType::Configuration,
+                "safety",
+                format!("Refusing to test in system directory: {}", path.display()),
+                format!("Do not use {} for benchmarking - use /tmp or a dedicated mount point", critical_dir),
+            ));
+            return results; // Stop immediately
+        }
+    }
+    
+    // Device directory - WARN (allow if device exists, but warn)
+    if path_str.starts_with("/dev/") {
+        if path.exists() && path.metadata().map(|m| m.is_file()).unwrap_or(false) {
+            results.push(ValidationResult::warning(
+                ErrorType::Configuration,
+                "safety",
+                format!("Testing against device file: {}", path.display()),
+                "Ensure this is a block device intended for testing (data will be overwritten)",
+            ));
+        } else if !path.exists() {
+            results.push(ValidationResult::error(
+                ErrorType::Configuration,
+                "safety",
+                format!("Device does not exist: {}", path.display()),
+                "Verify device path is correct",
+            ));
+            return results;
+        }
+    }
+    
+    // Sensitive writable directories - WARN
+    let sensitive_dirs = ["/var/lib", "/var/log", "/var/spool"];
+    for sensitive_dir in &sensitive_dirs {
+        if path_str.starts_with(sensitive_dir) {
+            results.push(ValidationResult::warning(
+                ErrorType::Configuration,
+                "safety",
+                format!("Using sensitive system directory: {}", path.display()),
+                format!("Consider using /tmp or dedicated mount point instead of {}", sensitive_dir),
+            ));
+        }
+    }
+    
+    results
+}
+
 /// Check current user and group identity
 fn check_user_identity() -> Vec<ValidationResult> {
     let mut results = Vec::new();
@@ -239,7 +298,7 @@ async fn test_stat_access(path: &Path) -> Result<ValidationResult> {
                 ErrorType::Configuration,
                 "stat",
                 format!("Directory does not exist: {}", path.display()),
-                format!("Create directory: mkdir -p {}", path.display()),
+                "Directory must be created manually before running benchmarks for safety",
             ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {

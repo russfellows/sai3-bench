@@ -33,7 +33,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, ResultLevel, ErrorType};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest};
 
 /// v0.7.13: Controller's view of agent states
 /// 
@@ -1116,41 +1116,55 @@ async fn run_preflight_validation(
                 println!("\n{} Agent: {}", status_icon, agent_id);
                 
                 if result.error_count > 0 || result.warning_count > 0 || result.info_count > 0 {
-                    // Display each validation result
-                    for vr in &result.results {
-                        let level_icon = match ResultLevel::try_from(vr.level) {
-                            Ok(ResultLevel::Success) => "✓",
-                            Ok(ResultLevel::Info) => "ℹ",
-                            Ok(ResultLevel::Warning) => "⚠",
-                            Ok(ResultLevel::Error) => "✗",
-                            _ => "?",
+                    // Convert proto results to internal ValidationResult for shared display
+                    use sai3_bench::preflight::ValidationResult;
+                    
+                    let validation_results: Vec<ValidationResult> = result.results.iter().map(|vr| {
+                        let level = match pb::iobench::ResultLevel::try_from(vr.level) {
+                            Ok(pb::iobench::ResultLevel::Success) => sai3_bench::preflight::ResultLevel::Success,
+                            Ok(pb::iobench::ResultLevel::Info) => sai3_bench::preflight::ResultLevel::Info,
+                            Ok(pb::iobench::ResultLevel::Warning) => sai3_bench::preflight::ResultLevel::Warning,
+                            Ok(pb::iobench::ResultLevel::Error) => sai3_bench::preflight::ResultLevel::Error,
+                            _ => sai3_bench::preflight::ResultLevel::Error,
                         };
                         
-                        let error_type_name = match ErrorType::try_from(vr.error_type) {
-                            Ok(ErrorType::Authentication) => "AUTH",
-                            Ok(ErrorType::Permission) => "PERM",
-                            Ok(ErrorType::Network) => "NET",
-                            Ok(ErrorType::Configuration) => "CONFIG",
-                            Ok(ErrorType::Resource) => "RESOURCE",
-                            Ok(ErrorType::System) => "SYSTEM",
-                            _ => "UNKNOWN",
+                        let error_type = match pb::iobench::ErrorType::try_from(vr.error_type) {
+                            Ok(pb::iobench::ErrorType::Authentication) => Some(sai3_bench::preflight::ErrorType::Authentication),
+                            Ok(pb::iobench::ErrorType::Permission) => Some(sai3_bench::preflight::ErrorType::Permission),
+                            Ok(pb::iobench::ErrorType::Network) => Some(sai3_bench::preflight::ErrorType::Network),
+                            Ok(pb::iobench::ErrorType::Configuration) => Some(sai3_bench::preflight::ErrorType::Configuration),
+                            Ok(pb::iobench::ErrorType::Resource) => Some(sai3_bench::preflight::ErrorType::Resource),
+                            Ok(pb::iobench::ErrorType::System) => Some(sai3_bench::preflight::ErrorType::System),
+                            _ => None,
                         };
                         
-                        println!("  {} [{}] {}", level_icon, error_type_name, vr.message);
-                        if !vr.suggestion.is_empty() {
-                            println!("      → {}", vr.suggestion);
+                        ValidationResult {
+                            level,
+                            error_type,
+                            message: vr.message.clone(),
+                            suggestion: vr.suggestion.clone(),
+                            details: if vr.details.is_empty() { None } else { Some(vr.details.clone()) },
+                            test_phase: vr.test_phase.clone(),
                         }
-                        if !vr.details.is_empty() {
-                            println!("      Details: {}", vr.details);
-                        }
+                    }).collect();
+                    
+                    // Use shared display function
+                    let (passed, _errors, _warnings) = 
+                        sai3_bench::preflight::display_validation_results(&validation_results, None);
+                    
+                    // Update totals (use proto counts which are authoritative)
+                    total_errors += result.error_count;
+                    total_warnings += result.warning_count;
+                    if !passed {
+                        all_passed = false;
                     }
-                }
-                
-                // Track totals
-                total_errors += result.error_count;
-                total_warnings += result.warning_count;
-                if !result.passed {
-                    all_passed = false;
+                } else {
+                    // All passed with no messages
+                    total_errors += result.error_count;
+                    total_warnings += result.warning_count;
+                    if !result.passed {
+                        all_passed = false;
+                    }
                 }
             }
             Err(e) => {

@@ -299,3 +299,60 @@ impl Default for ValidationSummary {
         }
     }
 }
+
+/// Display validation results in a consistent format for both standalone and distributed modes
+/// Returns a tuple of (passed: bool, error_count: usize, warning_count: usize)
+pub fn display_validation_results(
+    results: &[ValidationResult],
+    agent_name: Option<&str>,
+) -> (bool, usize, usize) {
+    let mut error_count = 0;
+    let mut warning_count = 0;
+    
+    for result in results {
+        if result.level == ResultLevel::Error {
+            error_count += 1;
+        } else if result.level == ResultLevel::Warning {
+            warning_count += 1;
+        }
+        
+        let icon = match result.level {
+            ResultLevel::Success => "✓",
+            ResultLevel::Info => "ℹ",
+            ResultLevel::Warning => "⚠",
+            ResultLevel::Error => "✗",
+        };
+        
+        let error_tag = if let Some(ref err_type) = result.error_type {
+            match err_type {
+                ErrorType::Authentication => "[AUTH]",
+                ErrorType::Permission => "[PERM]",
+                ErrorType::Network => "[NET]",
+                ErrorType::Configuration => "[CONFIG]",
+                ErrorType::Resource => "[RESOURCE]",
+                ErrorType::System => "[SYSTEM]",
+            }
+        } else {
+            "[UNKNOWN]"
+        };
+        
+        if let Some(agent) = agent_name {
+            println!("  {} {} {} (agent: {})", icon, error_tag, result.message, agent);
+        } else {
+            println!("  {} {} {}", icon, error_tag, result.message);
+        }
+        
+        if !result.suggestion.is_empty() {
+            println!("      → {}", result.suggestion);
+        }
+        
+        if let Some(ref details) = result.details {
+            if !details.is_empty() {
+                println!("      Details: {}", details);
+            }
+        }
+    }
+    
+    let passed = error_count == 0;
+    (passed, error_count, warning_count)
+}

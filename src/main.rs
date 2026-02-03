@@ -1119,6 +1119,64 @@ fn run_workload(
     
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
     
+    // v0.8.23: Pre-flight validation for filesystem targets (standalone mode)
+    if let Some(ref target) = config.target {
+        if target.starts_with("file://") || target.starts_with("direct://") {
+            use sai3_bench::preflight::filesystem;
+            use std::path::PathBuf;
+            
+            // Extract filesystem path
+            let fs_path = if let Some(stripped) = target.strip_prefix("file://") {
+                stripped
+            } else if let Some(stripped) = target.strip_prefix("direct://") {
+                stripped
+            } else {
+                target.as_str()
+            };
+            
+            let path = PathBuf::from(fs_path);
+            
+            let preflight_header = "\n🔍 Pre-flight Validation\n━━━━━━━━━━━━━━━━━━━━━━";
+            println!("{}", preflight_header);
+            results_dir.write_console(preflight_header)?;
+            
+            // Run filesystem validation
+            let check_write = config.prepare.is_some(); // Only check write if prepare phase exists
+            let validation_result = rt.block_on(filesystem::validate_filesystem(
+                &path,
+                check_write,
+                Some(1024 * 1024 * 1024),  // 1 GB required space
+            ))?;
+            
+            // Display results using shared display function
+            let (passed, error_count, warning_count) = 
+                sai3_bench::preflight::display_validation_results(&validation_result.results, None);
+            
+            let separator = "━━━━━━━━━━━━━━━━━━━━━━";
+            println!("{}", separator);
+            results_dir.write_console(separator)?;
+            
+            // Check for errors
+            if !passed {
+                let error_summary = format!("❌ Pre-flight validation FAILED\n   {} errors, {} warnings\n\nFix the above errors before running the workload.",
+                    error_count,
+                    warning_count
+                );
+                println!("{}", error_summary);
+                results_dir.write_console(&error_summary)?;
+                bail!("Pre-flight validation failed with {} errors", error_count);
+            } else {
+                let info_count = validation_result.results.len() - error_count - warning_count;
+                let success_msg = format!("✅ Pre-flight validation passed\n   {} warnings, {} info messages",
+                    warning_count,
+                    info_count
+                );
+                println!("{}", success_msg);
+                results_dir.write_console(&success_msg)?;
+            }
+        }
+    }
+    
     // Verify-only mode: check that prepared objects exist and are accessible
     if verify {
         if let Some(ref prepare_config) = config.prepare {
