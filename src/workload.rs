@@ -307,6 +307,7 @@ pub fn create_store_from_config(
 /// v0.8.23: Returns Arc<MultiEndpointStore> which can be:
 /// - Cloned and coerced to Arc<dyn ObjectStore> for operations (Arc coercion)
 /// - Used directly for stats collection via get_all_stats()
+///
 /// Both share the SAME underlying instance, so stats are correctly tracked.
 pub fn create_multi_endpoint_store(
     multi_ep_config: &crate::config::MultiEndpointConfig,

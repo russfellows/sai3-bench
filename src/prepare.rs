@@ -679,6 +679,7 @@ pub async fn list_existing_objects_distributed(
 /// - If num_agents > 1: Each agent creates only its assigned subset using modulo distribution
 ///   - Agent i creates object j if (j % num_agents == agent_id)
 ///   - Ensures no overlap and complete coverage across all agents
+#[allow(clippy::too_many_arguments)]  // TODO: Refactor to params struct in future release
 pub async fn prepare_objects(
     config: &PrepareConfig,
     workload: Option<&[crate::config::WeightedOp]>,
@@ -759,7 +760,7 @@ pub async fn prepare_objects(
     metrics.objects_existed = all_prepared.iter().filter(|obj| !obj.created).count() as u64;
     
     // v0.8.23: Collect per-endpoint statistics from multi-endpoint stores
-    metrics.endpoint_stats = crate::workload::collect_endpoint_stats(&multi_ep_cache);
+    metrics.endpoint_stats = crate::workload::collect_endpoint_stats(multi_ep_cache);
     
     // Compute aggregates from histograms
     if metrics.put.ops > 0 {
