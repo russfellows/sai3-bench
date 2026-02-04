@@ -2931,7 +2931,7 @@ pub fn generate_cleanup_objects(
             .unwrap_or_else(|_| {
                 // Fallback: try to extract from environment or use a default
                 warn!("Failed to determine base_uri for cleanup - skipping spec");
-                return String::new();
+                String::new()
             });
         
         if base_uri.is_empty() {

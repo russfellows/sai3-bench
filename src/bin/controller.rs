@@ -1089,7 +1089,7 @@ async fn wait_for_shutdown_signal() -> &'static str {
 /// Returns Ok(()) if all agents pass validation (errors=0)
 /// Returns Err if any agent reports errors
 async fn run_preflight_validation(
-    agent_clients: &mut Vec<(String, AgentClient<Channel>)>,
+    agent_clients: &mut [(String, AgentClient<Channel>)],
     config_yaml: &str,
 ) -> Result<()> {
     info!("Running pre-flight validation on {} agents", agent_clients.len());

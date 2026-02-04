@@ -227,7 +227,7 @@ async fn test_preflight_grpc_success() -> Result<()> {
     // Verify response
     assert!(result.passed, "Pre-flight should pass for writable directory");
     assert_eq!(result.error_count, 0);
-    assert!(result.results.len() > 0, "Should have validation results");
+    assert!(!result.results.is_empty(), "Should have validation results");
 
     // Cleanup
     server_handle.abort();
@@ -365,7 +365,7 @@ fn test_validation_result_aggregation() {
     // Test that we correctly aggregate errors/warnings across multiple agents
     use pb::iobench::PreFlightResponse;
     
-    let responses = vec![
+    let responses = [
         PreFlightResponse {
             passed: true,
             results: vec![],

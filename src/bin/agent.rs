@@ -308,13 +308,9 @@ impl AgentSvc {
 /// Extract filesystem path from Config.target or return None if not a file:// or direct:// URI
 fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> Option<std::path::PathBuf> {
     config.target.as_ref().and_then(|target| {
-        if target.starts_with("file://") {
-            Some(std::path::PathBuf::from(&target[7..])) // Strip "file://"
-        } else if target.starts_with("direct://") {
-            Some(std::path::PathBuf::from(&target[9..])) // Strip "direct://"
-        } else {
-            None // Not a filesystem target
-        }
+        target.strip_prefix("file://")
+            .or_else(|| target.strip_prefix("direct://"))
+            .map(std::path::PathBuf::from)
     })
 }
 

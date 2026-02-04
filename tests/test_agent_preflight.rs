@@ -6,13 +6,9 @@ use std::path::PathBuf;
 /// Helper function to extract filesystem path (duplicated from agent.rs for testing)
 fn extract_filesystem_path_from_config(config: &Config) -> Option<PathBuf> {
     config.target.as_ref().and_then(|target| {
-        if target.starts_with("file://") {
-            Some(PathBuf::from(&target[7..])) // Strip "file://"
-        } else if target.starts_with("direct://") {
-            Some(PathBuf::from(&target[9..])) // Strip "direct://"
-        } else {
-            None // Not a filesystem target
-        }
+        target.strip_prefix("file://")
+            .or_else(|| target.strip_prefix("direct://"))
+            .map(PathBuf::from)
     })
 }
 

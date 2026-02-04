@@ -42,7 +42,7 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                         // Check if all agents have multi_endpoint configured
                         let agents_without_multiep: Vec<String> = dist.agents.iter()
                             .filter(|a| a.multi_endpoint.is_none())
-                            .map(|a| a.id.as_ref().map(|s| s.as_str()).unwrap_or(&a.address).to_string())
+                            .map(|a| a.id.as_deref().unwrap_or(&a.address).to_string())
                             .collect();
                         
                         if !agents_without_multiep.is_empty() {
@@ -77,9 +77,7 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                         results.push(ValidationResult {
                             level: ResultLevel::Error,
                             error_type: Some(ErrorType::Configuration),
-                            message: format!(
-                                "base_uri should not be specified in isolated mode with per-agent storage"
-                            ),
+                            message: "base_uri should not be specified in isolated mode with per-agent storage".to_string(),
                             suggestion: format!(
                                 "RECOMMENDED FIX: Remove 'base_uri' field from ensure_objects.\n\n\
                                  Current configuration:\n\

@@ -193,7 +193,7 @@ impl ValidationResult {
 }
 
 /// Summary of all validation results
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationSummary {
     /// All validation results
     pub results: Vec<ValidationResult>,
@@ -289,14 +289,6 @@ impl ValidationSummary {
 
         if let Some(ref details) = result.details {
             println!("      📋 Details: {}", details);
-        }
-    }
-}
-
-impl Default for ValidationSummary {
-    fn default() -> Self {
-        Self {
-            results: Vec::new(),
         }
     }
 }
