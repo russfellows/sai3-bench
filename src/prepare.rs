@@ -717,10 +717,14 @@ pub async fn prepare_objects(
         info!("Creating directory tree structure (agent {}/{})...", agent_id, num_agents);
         
         let base_uri = config.ensure_objects.first()
-            .map(|spec| spec.base_uri.as_str())
+            .and_then(|spec| {
+                // Get effective base_uri - use first endpoint if base_uri is None
+                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+                spec.get_base_uri(multi_endpoint_uris).ok()
+            })
             .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
         
-        let manifest = create_tree_manifest_only(config, agent_id, num_agents, base_uri)?;
+        let manifest = create_tree_manifest_only(config, agent_id, num_agents, &base_uri)?;
         
         if num_agents > 1 {
             info!("Tree structure: {} directories, {} files total ({} assigned to this agent)", 
@@ -750,8 +754,13 @@ pub async fn prepare_objects(
     
     // Create directories if needed (after files exist with correct paths)
     if tree_manifest.is_some() {
-        let base_uri = config.ensure_objects.first().unwrap().base_uri.as_str();
-        finalize_tree_with_mkdir(config, base_uri, &mut metrics, live_stats_tracker).await?;
+        let base_uri = config.ensure_objects.first()
+            .and_then(|spec| {
+                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+                spec.get_base_uri(multi_endpoint_uris).ok()
+            })
+            .ok_or_else(|| anyhow!("Failed to get base_uri for finalizing tree"))?;
+        finalize_tree_with_mkdir(config, &base_uri, &mut metrics, live_stats_tracker).await?;
     }
     
     // Finalize metrics
@@ -803,6 +812,11 @@ async fn prepare_sequential(
             vec![("prepared", false)]  // Single pool (backward compatible)
         };
         
+        // Get effective base_uri for this agent (may use first endpoint in isolated mode)
+        let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+        let base_uri = spec.get_base_uri(multi_endpoint_uris)
+            .context("Failed to determine base_uri for prepare phase")?;
+        
         for (prefix, is_readonly) in pools_to_create {
             let pool_desc = if needs_separate_pools {
                 if is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
@@ -810,7 +824,7 @@ async fn prepare_sequential(
                 ""
             };
             
-            info!("Preparing objects{}: {} at {}", pool_desc, spec.count, spec.base_uri);
+            info!("Preparing objects{}: {} at {}", pool_desc, spec.count, base_uri);
             
             // v0.8.22: Multi-endpoint support for prepare phase
             // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
@@ -823,7 +837,7 @@ async fn prepare_sequential(
                     
                     // Create cache key for prepare phase multi-endpoint store
                     let cache_key = format!("prepare_seq:{}:{}:{}",
-                        spec.base_uri,
+                        base_uri,
                         multi_ep.strategy,
                         multi_ep.endpoints.join(","));
                     
@@ -842,7 +856,7 @@ async fn prepare_sequential(
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
             } else {
-                Arc::new(create_store_for_uri(&spec.base_uri)?)
+                Arc::new(create_store_for_uri(&base_uri)?)
             };
             
             // 1. List existing objects with this prefix (unless skip_verification is enabled)
@@ -856,7 +870,7 @@ async fn prepare_sequential(
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     shared_store.as_ref().as_ref(),
-                    &spec.base_uri,
+                    &base_uri,
                     tree_manifest,
                     agent_id,
                     num_agents,
@@ -867,10 +881,10 @@ async fn prepare_sequential(
                 (listing_result.file_count, listing_result.indices)
             } else {
                 // Flat file mode: use streaming list with progress
-                let list_pattern = if spec.base_uri.ends_with('/') {
-                    format!("{}{}-", spec.base_uri, prefix)
+                let list_pattern = if base_uri.ends_with('/') {
+                    format!("{}{}-", base_uri, prefix)
                 } else {
-                    format!("{}/{}-", spec.base_uri, prefix)
+                    format!("{}/{}-", base_uri, prefix)
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", list_pattern);
@@ -910,10 +924,10 @@ async fn prepare_sequential(
                     
                     for i in 0..spec.count {
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
-                            let uri = if spec.base_uri.ends_with('/') {
-                                format!("{}{}", spec.base_uri, rel_path)
+                            let uri = if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, rel_path)
                             } else {
-                                format!("{}/{}", spec.base_uri, rel_path)
+                                format!("{}/{}", base_uri, rel_path)
                             };
                             let size = size_generator.generate();
                             all_prepared.push(PreparedObject {
@@ -931,10 +945,10 @@ async fn prepare_sequential(
                     
                     for i in 0..spec.count {
                         let key = format!("{}-{:08}.dat", prefix, i);
-                        let uri = if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, key)
+                        let uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, key)
                         } else {
-                            format!("{}/{}", spec.base_uri, key)
+                            format!("{}/{}", base_uri, key)
                         };
                         let size = size_generator.generate();
                         all_prepared.push(PreparedObject {
@@ -953,7 +967,7 @@ async fn prepare_sequential(
                 // v0.7.9: Pre-generate ALL sizes with deterministic seeded generator
                 // This ensures: (1) deterministic sizes, (2) gap-filling uses correct sizes
                 let size_spec = spec.get_size_spec();
-                let seed = spec.base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
                 
@@ -1065,10 +1079,10 @@ async fn prepare_sequential(
                     // Create files at specific missing indices in directory structure
                     for &missing_idx in &missing_indices {
                         if let Some(rel_path) = manifest.get_file_path(missing_idx as usize) {
-                            let uri = if spec.base_uri.ends_with('/') {
-                                format!("{}{}", spec.base_uri, rel_path)
+                            let uri = if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, rel_path)
                             } else {
-                                format!("{}/{}", spec.base_uri, rel_path)
+                                format!("{}/{}", base_uri, rel_path)
                             };
                             let size = all_sizes[missing_idx as usize];
                             tasks.push((uri, size));
@@ -1080,10 +1094,10 @@ async fn prepare_sequential(
                     // Flat file mode: create at specific missing indices
                     for &missing_idx in &missing_indices {
                         let key = format!("{}-{:08}.dat", prefix, missing_idx);
-                        let uri = if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, key)
+                        let uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, key)
                         } else {
-                            format!("{}/{}", spec.base_uri, key)
+                            format!("{}/{}", base_uri, key)
                         };
                         let size = all_sizes[missing_idx as usize];
                         tasks.push((uri, size));
@@ -1338,6 +1352,11 @@ async fn prepare_parallel(
     
     // Phase 1: List existing objects and build task specs for all sizes
     for spec in &config.ensure_objects {
+        // Get effective base_uri for this agent (may use first endpoint in isolated mode)
+        let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+        let base_uri = spec.get_base_uri(multi_endpoint_uris)
+            .context("Failed to determine base_uri for prepare phase")?;
+        
         for (prefix, is_readonly) in &pools_to_create {
             let pool_desc = if needs_separate_pools {
                 if *is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
@@ -1345,7 +1364,7 @@ async fn prepare_parallel(
                 ""
             };
             
-            info!("Checking{}: {} at {}", pool_desc, spec.count, spec.base_uri);
+            info!("Checking{}: {} at {}", pool_desc, spec.count, base_uri);
             
             // v0.8.22: Multi-endpoint support for prepare phase
             // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
@@ -1357,7 +1376,7 @@ async fn prepare_parallel(
                     
                     // Create cache key for prepare phase multi-endpoint store
                     let cache_key = format!("prepare_par:{}:{}:{}",
-                        spec.base_uri,
+                        base_uri,
                         multi_ep.strategy,
                         multi_ep.endpoints.join(","));
                     
@@ -1376,7 +1395,7 @@ async fn prepare_parallel(
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
             } else {
-                create_store_for_uri(&spec.base_uri)?
+                create_store_for_uri(&base_uri)?
             };
             
             // List existing objects with this prefix (unless skip_verification is enabled)
@@ -1390,7 +1409,7 @@ async fn prepare_parallel(
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     store.as_ref(),
-                    &spec.base_uri,
+                    &base_uri,
                     tree_manifest,
                     agent_id,
                     num_agents,
@@ -1401,10 +1420,10 @@ async fn prepare_parallel(
                 (listing_result.file_count, listing_result.indices)
             } else {
                 // Flat file mode: use streaming list with progress
-                let pattern = if spec.base_uri.ends_with('/') {
-                    format!("{}{}-", spec.base_uri, prefix)
+                let pattern = if base_uri.ends_with('/') {
+                    format!("{}{}-", base_uri, prefix)
                 } else {
-                    format!("{}/{}-", spec.base_uri, prefix)
+                    format!("{}/{}-", base_uri, prefix)
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", pattern);
@@ -1426,7 +1445,7 @@ async fn prepare_parallel(
             info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
             
             // Store existing count and indices for this pool
-            let pool_key = (spec.base_uri.clone(), prefix.to_string());
+            let pool_key = (base_uri.clone(), prefix.to_string());
             existing_count_per_pool.insert(pool_key.clone(), existing_count);
             existing_indices_per_pool.insert(pool_key.clone(), existing_indices.clone());
             
@@ -1446,7 +1465,7 @@ async fn prepare_parallel(
             if to_create > 0 {
                 // Pre-generate ALL sizes with deterministic seeded generator
                 let size_spec = spec.get_size_spec();
-                let seed = spec.base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
                 
@@ -1491,7 +1510,7 @@ async fn prepare_parallel(
                     
                     task_specs.push(TaskSpec {
                         size,
-                        store_uri: spec.base_uri.clone(),
+                        store_uri: base_uri.clone(),
                         fill: spec.fill,
                         dedup: spec.dedup_factor,
                         compress: spec.compress_factor,
@@ -1511,6 +1530,11 @@ async fn prepare_parallel(
         
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
+            // Get effective base_uri for this spec
+            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+            let base_uri = spec.get_base_uri(multi_endpoint_uris)
+                .context("Failed to determine base_uri for reconstructing existing objects")?;
+            
             let pools_to_create = if needs_separate_pools {
                 vec![("prepared", true), ("deletable", false)]
             } else {
@@ -1526,10 +1550,10 @@ async fn prepare_parallel(
                     let uri = if let Some(manifest) = tree_manifest {
                         // Tree mode: use manifest paths
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
-                            if spec.base_uri.ends_with('/') {
-                                format!("{}{}", spec.base_uri, rel_path)
+                            if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, rel_path)
                             } else {
-                                format!("{}/{}", spec.base_uri, rel_path)
+                                format!("{}/{}", base_uri, rel_path)
                             }
                         } else {
                             continue;  // Skip if manifest doesn't have this index
@@ -1537,10 +1561,10 @@ async fn prepare_parallel(
                     } else {
                         // Flat mode: traditional naming
                         let key = format!("{}-{:08}.dat", prefix, i);
-                        if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, key)
+                        if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, key)
                         } else {
-                            format!("{}/{}", spec.base_uri, key)
+                            format!("{}/{}", base_uri, key)
                         }
                     };
                     
@@ -1621,6 +1645,11 @@ async fn prepare_parallel(
         
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
+            // Get effective base_uri for this spec
+            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+            let base_uri = spec.get_base_uri(multi_endpoint_uris)
+                .context("Failed to determine base_uri for assigning URIs to existing objects")?;
+            
             let pools_to_create = if needs_separate_pools {
                 vec![("prepared", true), ("deletable", false)]
             } else {
@@ -1636,10 +1665,10 @@ async fn prepare_parallel(
                     let uri = if let Some(manifest) = tree_manifest {
                         // Tree mode: use manifest paths
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
-                            if spec.base_uri.ends_with('/') {
-                                format!("{}{}", spec.base_uri, rel_path)
+                            if base_uri.ends_with('/') {
+                                format!("{}{}", base_uri, rel_path)
                             } else {
-                                format!("{}/{}", spec.base_uri, rel_path)
+                                format!("{}/{}", base_uri, rel_path)
                             }
                         } else {
                             continue;  // Skip if manifest doesn't have this index
@@ -1647,10 +1676,10 @@ async fn prepare_parallel(
                     } else {
                         // Flat mode: traditional naming
                         let key = format!("{}-{:08}.dat", prefix, i);
-                        if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, key)
+                        if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, key)
                         } else {
-                            format!("{}/{}", spec.base_uri, key)
+                            format!("{}/{}", base_uri, key)
                         }
                     };
                     
@@ -2896,6 +2925,19 @@ pub fn generate_cleanup_objects(
     let mut objects = Vec::new();
     
     for spec in &config.ensure_objects {
+        // Get effective base_uri for cleanup
+        // Note: In cleanup, we don't have multi_endpoint_config, so just use the base_uri or fail gracefully
+        let base_uri = spec.get_base_uri(None)
+            .unwrap_or_else(|_| {
+                // Fallback: try to extract from environment or use a default
+                warn!("Failed to determine base_uri for cleanup - skipping spec");
+                return String::new();
+            });
+        
+        if base_uri.is_empty() {
+            continue;
+        }
+        
         // Determine which pool(s) to clean
         // For simplicity, cleanup both prepared and deletable if they exist
         let pools = vec!["prepared", "deletable"];
@@ -2911,10 +2953,10 @@ pub fn generate_cleanup_objects(
                 
                 // Generate URI using same naming convention as prepare
                 let key = format!("{}-{:08}.dat", prefix, i);
-                let uri = if spec.base_uri.ends_with('/') {
-                    format!("{}{}", spec.base_uri, key)
+                let uri = if base_uri.ends_with('/') {
+                    format!("{}{}", base_uri, key)
                 } else {
-                    format!("{}/{}", spec.base_uri, key)
+                    format!("{}/{}", base_uri, key)
                 };
                 
                 // Mark as created=true so cleanup will process them
@@ -2942,11 +2984,15 @@ pub async fn verify_prepared_objects(config: &PrepareConfig) -> Result<()> {
     info!("Starting verification of prepared objects");
     
     for spec in &config.ensure_objects {
-        let store = create_store_for_uri(&spec.base_uri)?;
+        // Get effective base_uri for verification
+        let base_uri = spec.get_base_uri(None)
+            .context("Failed to determine base_uri for verification")?;
+        
+        let store = create_store_for_uri(&base_uri)?;
         
         // List existing objects
-        info!("Verifying objects at {}", spec.base_uri);
-        let existing = store.list(&spec.base_uri, true).await
+        info!("Verifying objects at {}", base_uri);
+        let existing = store.list(&base_uri, true).await
             .context("Failed to list objects during verification")?;
         
         let found_count = existing.len();
@@ -2954,7 +3000,7 @@ pub async fn verify_prepared_objects(config: &PrepareConfig) -> Result<()> {
         
         if found_count < expected_count {
             anyhow::bail!("Verification failed: Found {} objects but expected {} at {}",
-                  found_count, expected_count, spec.base_uri);
+                  found_count, expected_count, base_uri);
         }
         
         info!("Found {}/{} objects, verifying accessibility...", found_count, expected_count);
@@ -2990,11 +3036,11 @@ pub async fn verify_prepared_objects(config: &PrepareConfig) -> Result<()> {
                 eprintln!("  ✗ {}", issue);
             }
             anyhow::bail!("Verification failed: {}/{} objects accessible at {}",
-                  accessible_count, expected_count, spec.base_uri);
+                  accessible_count, expected_count, base_uri);
         }
         
         println!("✓ {}/{} objects verified and accessible at {}", 
-                 accessible_count, expected_count, spec.base_uri);
+                 accessible_count, expected_count, base_uri);
         info!("Verification successful: {}/{} objects", accessible_count, expected_count);
     }
     

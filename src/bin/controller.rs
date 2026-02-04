@@ -1404,6 +1404,37 @@ async fn run_distributed_workload(
         }
     }
     
+    // v0.8.23: DISTRIBUTED CONFIG VALIDATION - Check for common configuration errors
+    // Validates base_uri usage with multi-endpoint in isolated mode
+    info!("Validating distributed configuration");
+    match sai3_bench::preflight::distributed::validate_distributed_config(&config) {
+        Ok(validation_results) => {
+            if !validation_results.is_empty() {
+                println!("\n🔍 Distributed Config Validation");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                
+                let (passed, errors, warnings) = 
+                    sai3_bench::preflight::display_validation_results(&validation_results, None);
+                
+                if !passed {
+                    println!("\n❌ Distributed configuration validation FAILED");
+                    println!("   {} errors, {} warnings", errors, warnings);
+                    println!("\nFix the above configuration errors before running the workload.");
+                    bail!("Distributed configuration validation failed with {} errors", errors);
+                } else if warnings > 0 {
+                    println!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
+                    println!();
+                }
+            } else {
+                debug!("Distributed configuration validation passed (no issues detected)");
+            }
+        }
+        Err(e) => {
+            error!("Distributed config validation error: {}", e);
+            bail!("Failed to validate distributed configuration: {}", e);
+        }
+    }
+    
     // Run pre-flight validation on all connected agents
     run_preflight_validation(&mut agent_clients, &config_yaml).await?;
     

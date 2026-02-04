@@ -19,7 +19,7 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
     PrepareConfig {
         prepare_strategy: PrepareStrategy::Sequential,
         ensure_objects: vec![EnsureSpec {
-            base_uri: base_uri.to_string(),
+            base_uri: Some(base_uri.to_string()),
             count: total_files,
             min_size: None,
             max_size: None,

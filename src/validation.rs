@@ -219,8 +219,11 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 continue;
             }
             
+            let base_uri = spec.get_base_uri(None)
+                .unwrap_or_else(|_| String::from("<not configured>"));
+            
             println!("│ Flat Objects Section {}:", idx + 1);
-            println!("│   URI:              {}", spec.base_uri);
+            println!("│   URI:              {}", base_uri);
             println!("│   Count:            {} objects", spec.count);
             
             // Display size information

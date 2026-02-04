@@ -19,7 +19,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 10,
                 min_size: None,
                 max_size: None,
@@ -30,7 +30,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 10,
                 min_size: None,
                 max_size: None,
@@ -41,7 +41,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 10,
                 min_size: None,
                 max_size: None,
@@ -96,7 +96,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 20,
                 min_size: None,
                 max_size: None,
@@ -107,7 +107,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 20,
                 min_size: None,
                 max_size: None,
@@ -118,7 +118,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 20,
                 min_size: None,
                 max_size: None,
@@ -178,7 +178,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 13,  // Odd number
                 min_size: None,
                 max_size: None,
@@ -189,7 +189,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 27,  // Another odd number
                 min_size: None,
                 max_size: None,
@@ -200,7 +200,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 8,   // Small even number
                 min_size: None,
                 max_size: None,
@@ -339,7 +339,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 20,
                 min_size: None,
                 max_size: None,
@@ -384,7 +384,7 @@ async fn test_files_created_correctly() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri_1kb.clone(),
+                base_uri: Some(base_uri_1kb.clone()),
                 count: 3,
                 min_size: None,
                 max_size: None,
@@ -395,7 +395,7 @@ async fn test_files_created_correctly() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri_2kb.clone(),
+                base_uri: Some(base_uri_2kb.clone()),
                 count: 3,
                 min_size: None,
                 max_size: None,
@@ -441,7 +441,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 30,
                 min_size: None,
                 max_size: None,
@@ -452,7 +452,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 30,
                 min_size: None,
                 max_size: None,
@@ -463,7 +463,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
                 use_multi_endpoint: false,
             },
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 30,
                 min_size: None,
                 max_size: None,
@@ -556,7 +556,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     let prepare_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 5,
                 min_size: None,
                 max_size: None,
@@ -595,7 +595,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     let parallel_config = PrepareConfig {
         ensure_objects: vec![
             EnsureSpec {
-                base_uri: base_uri.clone(),
+                base_uri: Some(base_uri.clone()),
                 count: 5,
                 min_size: None,
                 max_size: None,

@@ -1403,13 +1403,13 @@ fn run_workload(
             info!("Recreating directory tree structure for cleanup...");
             let base_uri = prepare_config.ensure_objects.first()
                 .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry"))?
-                .base_uri.as_str();
+                .get_base_uri(None)?;
             
             Some(sai3_bench::prepare::create_tree_manifest_only(
                 prepare_config, 
                 0,  // agent_id
                 1,  // num_agents
-                base_uri
+                &base_uri
             )?)
         } else {
             None
@@ -1418,17 +1418,20 @@ fn run_workload(
         // Reconstruct object list (same logic as prepare, but we mark all as created=true)
         let mut objects_to_cleanup = Vec::new();
         for spec in &prepare_config.ensure_objects {
-            let prefix = spec.base_uri.trim_end_matches('/');
+            // Get effective base_uri for this spec
+            let base_uri = spec.get_base_uri(None)?;
+            
+            let prefix = base_uri.trim_end_matches('/');
             let prefix_name = prefix.rsplit('/').next().unwrap_or("prepared");
             
             if let Some(ref manifest) = tree_manifest_for_cleanup {
                 // Tree mode: enumerate all file paths
                 for file_idx in 0..manifest.total_files {
                     if let Some(relative_path) = manifest.get_file_path(file_idx) {
-                        let uri = if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, relative_path)
+                        let uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, relative_path)
                         } else {
-                            format!("{}/{}", spec.base_uri, relative_path)
+                            format!("{}/{}", base_uri, relative_path)
                         };
                         objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
                             uri,
@@ -1441,10 +1444,10 @@ fn run_workload(
                 // Flat mode: enumerate numbered files
                 for idx in 0..spec.count {
                     let key = format!("{}-{:08}.dat", prefix_name, idx);
-                    let uri = if spec.base_uri.ends_with('/') {
-                        format!("{}{}", spec.base_uri, key)
+                    let uri = if base_uri.ends_with('/') {
+                        format!("{}{}", base_uri, key)
                     } else {
-                        format!("{}/{}", spec.base_uri, key)
+                        format!("{}/{}", base_uri, key)
                     };
                     objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
                         uri,

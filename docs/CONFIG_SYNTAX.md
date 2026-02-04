@@ -72,11 +72,12 @@ op_log_path: /data/oplog.tsv.zst  # s3dlio operation log path (optional, v0.8.1+
 # Prepare stage (optional)
 prepare:
   ensure_objects:
-    - base_uri: "gs://bucket/data/"
+    - base_uri: "gs://bucket/data/"  # Optional (v0.8.23+) - omit in isolated mode with use_multi_endpoint
       count: 1000
       min_size: 1048576
       max_size: 1048576
       fill: random
+      use_multi_endpoint: false      # Optional (v0.8.22+) - load balance across endpoints
   cleanup: true  # Remove prepared objects after test
 
 # Workload operations

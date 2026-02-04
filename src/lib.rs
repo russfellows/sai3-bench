@@ -16,6 +16,9 @@ pub mod cpu_monitor;
 pub mod data_gen_pool; // Thread-local data generator pool for 50+ GB/s performance (v0.8.20+)
 pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)
+
+#[cfg(test)]
+mod config_tests; // Unit tests for config module (base_uri handling, etc.)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod multiprocess; // Multi-process scaling for parallel I/O (v0.7.3+)

@@ -236,6 +236,64 @@ The controller will use agents from the config file when `--agents` is not speci
 If the agent cert doesn't include the default DNS
 name the controller uses, add --agent-domain.
 
+## Distributed Configuration Validation (v0.8.23+)
+
+The controller performs pre-flight validation of distributed configurations to catch common misconfigurations before execution:
+
+### Common Error: base_uri in Isolated Mode
+
+**The Problem**: When using `tree_creation_mode: isolated` with `shared_filesystem: false` and `use_multi_endpoint: true`, specifying `base_uri` causes listing failures because agents try to list from storage they're not configured to access.
+
+**❌ WRONG** (causes h2 protocol errors):
+```yaml
+distributed:
+  shared_filesystem: false      # Per-agent storage
+  tree_creation_mode: isolated  # Each agent creates separate tree
+  agents:
+    - address: "node1:7761"
+      multi_endpoint:
+        endpoints: ["file:///mnt/vast1/"]
+    - address: "node2:7761"
+      multi_endpoint:
+        endpoints: ["file:///mnt/vast5/"]
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///mnt/vast1/"  # ❌ BUG - only node1 can access this!
+      use_multi_endpoint: true
+```
+
+**✅ CORRECT** (each agent uses its own endpoints):
+```yaml
+prepare:
+  ensure_objects:
+    - # No base_uri - each agent uses first multi_endpoint for listing
+      use_multi_endpoint: true
+      count: 1000
+```
+
+### Shared Filesystem Configuration
+
+When `shared_filesystem: true`, `base_uri` is allowed because all agents access the same underlying storage:
+
+```yaml
+distributed:
+  shared_filesystem: true       # All agents access same data
+  tree_creation_mode: concurrent
+  agents:
+    - address: "node1:7761"
+      multi_endpoint:
+        endpoints: ["file:///mnt/shared/"]  # Different mount, same storage
+    - address: "node2:7761"
+      multi_endpoint:
+        endpoints: ["file:///mnt/shared/"]
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///mnt/shared/test/"  # ✅ OK - all agents can access
+      use_multi_endpoint: true
+```
+
 # 2 Data Generation Methods
 
 ## Fill Patterns

@@ -23,6 +23,7 @@
 
 pub mod filesystem;
 pub mod object_storage;
+pub mod distributed; // Distributed configuration validation (v0.8.23+)
 
 use std::fmt;
 
