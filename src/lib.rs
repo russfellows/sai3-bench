@@ -16,12 +16,16 @@ pub mod cpu_monitor;
 pub mod data_gen_pool; // Thread-local data generator pool for 50+ GB/s performance (v0.8.20+)
 pub mod directory_tree; // Directory structure generation (width/depth model)
 pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)
+
+#[cfg(test)]
+mod config_tests; // Unit tests for config module (base_uri handling, etc.)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod multiprocess; // Multi-process scaling for parallel I/O (v0.7.3+)
 pub mod multiruntime; // Multi-runtime scaling with separate tokio runtimes (v0.7.3+)
 pub mod oplog_merge; // Op-log merging for multi-worker execution (v0.7.3+)
 pub mod perf_log; // Performance log for time-series metrics (v0.8.15+)
+pub mod preflight; // Pre-flight validation for filesystem and object storage (v0.8.23+)
 pub mod prepare; // Prepare phase: object pre-population and directory trees (v0.7.2+)
 pub mod rate_controller; // I/O rate control (v0.7.1+)
 pub mod replay; // Legacy in-memory replay (v0.4.0)

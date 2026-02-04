@@ -534,6 +534,8 @@ pub mod control_message {
         Abort = 2,
         /// Acknowledge receipt of agent message
         Acknowledge = 3,
+        /// v0.8.23: Run pre-flight validation
+        Preflight = 4,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -546,6 +548,7 @@ pub mod control_message {
                 Self::Start => "START",
                 Self::Abort => "ABORT",
                 Self::Acknowledge => "ACKNOWLEDGE",
+                Self::Preflight => "PREFLIGHT",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -555,8 +558,123 @@ pub mod control_message {
                 "START" => Some(Self::Start),
                 "ABORT" => Some(Self::Abort),
                 "ACKNOWLEDGE" => Some(Self::Acknowledge),
+                "PREFLIGHT" => Some(Self::Preflight),
                 _ => None,
             }
+        }
+    }
+}
+/// v0.8.23: Pre-flight validation request/response
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PreFlightRequest {
+    /// Configuration to validate (same as START would receive)
+    #[prost(string, tag = "1")]
+    pub config_yaml: ::prost::alloc::string::String,
+    /// Agent identifier for logging
+    #[prost(string, tag = "2")]
+    pub agent_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PreFlightResponse {
+    /// true if no errors (warnings OK)
+    #[prost(bool, tag = "1")]
+    pub passed: bool,
+    #[prost(message, repeated, tag = "2")]
+    pub results: ::prost::alloc::vec::Vec<ValidationResult>,
+    #[prost(int32, tag = "3")]
+    pub error_count: i32,
+    #[prost(int32, tag = "4")]
+    pub warning_count: i32,
+    #[prost(int32, tag = "5")]
+    pub info_count: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ValidationResult {
+    #[prost(enumeration = "ResultLevel", tag = "1")]
+    pub level: i32,
+    #[prost(enumeration = "ErrorType", tag = "2")]
+    pub error_type: i32,
+    #[prost(string, tag = "3")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub suggestion: ::prost::alloc::string::String,
+    /// Optional technical details (uid/gid, etc)
+    #[prost(string, tag = "5")]
+    pub details: ::prost::alloc::string::String,
+    /// "stat", "list", "read", "write", "delete", etc.
+    #[prost(string, tag = "6")]
+    pub test_phase: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ResultLevel {
+    Success = 0,
+    Info = 1,
+    Warning = 2,
+    Error = 3,
+}
+impl ResultLevel {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Success => "RESULT_LEVEL_SUCCESS",
+            Self::Info => "RESULT_LEVEL_INFO",
+            Self::Warning => "RESULT_LEVEL_WARNING",
+            Self::Error => "RESULT_LEVEL_ERROR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RESULT_LEVEL_SUCCESS" => Some(Self::Success),
+            "RESULT_LEVEL_INFO" => Some(Self::Info),
+            "RESULT_LEVEL_WARNING" => Some(Self::Warning),
+            "RESULT_LEVEL_ERROR" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ErrorType {
+    Unknown = 0,
+    Authentication = 1,
+    Permission = 2,
+    Network = 3,
+    Configuration = 4,
+    Resource = 5,
+    System = 6,
+}
+impl ErrorType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "ERROR_TYPE_UNKNOWN",
+            Self::Authentication => "ERROR_TYPE_AUTHENTICATION",
+            Self::Permission => "ERROR_TYPE_PERMISSION",
+            Self::Network => "ERROR_TYPE_NETWORK",
+            Self::Configuration => "ERROR_TYPE_CONFIGURATION",
+            Self::Resource => "ERROR_TYPE_RESOURCE",
+            Self::System => "ERROR_TYPE_SYSTEM",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ERROR_TYPE_UNKNOWN" => Some(Self::Unknown),
+            "ERROR_TYPE_AUTHENTICATION" => Some(Self::Authentication),
+            "ERROR_TYPE_PERMISSION" => Some(Self::Permission),
+            "ERROR_TYPE_NETWORK" => Some(Self::Network),
+            "ERROR_TYPE_CONFIGURATION" => Some(Self::Configuration),
+            "ERROR_TYPE_RESOURCE" => Some(Self::Resource),
+            "ERROR_TYPE_SYSTEM" => Some(Self::System),
+            _ => None,
         }
     }
 }
@@ -803,6 +921,33 @@ pub mod agent_client {
                 .insert(GrpcMethod::new("iobench.Agent", "ExecuteWorkload"));
             self.inner.streaming(req, path, codec).await
         }
+        /// v0.8.23: Pre-flight validation before workload execution
+        /// Agent validates filesystem/object storage access and returns detailed errors
+        /// Controller aggregates results and aborts if any agent fails validation
+        pub async fn pre_flight_validation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PreFlightRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PreFlightResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/PreFlightValidation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "PreFlightValidation"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -868,6 +1013,16 @@ pub mod agent_server {
             request: tonic::Request<tonic::Streaming<super::ControlMessage>>,
         ) -> std::result::Result<
             tonic::Response<Self::ExecuteWorkloadStream>,
+            tonic::Status,
+        >;
+        /// v0.8.23: Pre-flight validation before workload execution
+        /// Agent validates filesystem/object storage access and returns detailed errors
+        /// Controller aggregates results and aborts if any agent fails validation
+        async fn pre_flight_validation(
+            &self,
+            request: tonic::Request<super::PreFlightRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PreFlightResponse>,
             tonic::Status,
         >;
     }
@@ -1251,6 +1406,49 @@ pub mod agent_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/PreFlightValidation" => {
+                    #[allow(non_camel_case_types)]
+                    struct PreFlightValidationSvc<T: Agent>(pub Arc<T>);
+                    impl<T: Agent> tonic::server::UnaryService<super::PreFlightRequest>
+                    for PreFlightValidationSvc<T> {
+                        type Response = super::PreFlightResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PreFlightRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::pre_flight_validation(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PreFlightValidationSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

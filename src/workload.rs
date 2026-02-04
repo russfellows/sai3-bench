@@ -307,6 +307,7 @@ pub fn create_store_from_config(
 /// v0.8.23: Returns Arc<MultiEndpointStore> which can be:
 /// - Cloned and coerced to Arc<dyn ObjectStore> for operations (Arc coercion)
 /// - Used directly for stats collection via get_all_stats()
+///
 /// Both share the SAME underlying instance, so stats are correctly tracked.
 pub fn create_multi_endpoint_store(
     multi_ep_config: &crate::config::MultiEndpointConfig,
@@ -2829,12 +2830,14 @@ mod error_handling_tests {
     
     #[test]
     fn test_retry_config_from_error_handling_config() {
-        let mut error_cfg = crate::config::ErrorHandlingConfig::default();
-        error_cfg.max_retries = 5;
-        error_cfg.initial_retry_delay_ms = 200;
-        error_cfg.max_retry_delay_ms = 10000;
-        error_cfg.retry_backoff_multiplier = 3.0;
-        error_cfg.retry_jitter_factor = 0.5;
+        let error_cfg = crate::config::ErrorHandlingConfig {
+            max_retries: 5,
+            initial_retry_delay_ms: 200,
+            max_retry_delay_ms: 10000,
+            retry_backoff_multiplier: 3.0,
+            retry_jitter_factor: 0.5,
+            ..Default::default()
+        };
         
         let retry_config = RetryConfig::from(&error_cfg);
         
@@ -3093,8 +3096,10 @@ mod error_handling_tests {
     
     #[test]
     fn test_error_tracker_abort_threshold() {
-        let mut config = crate::config::ErrorHandlingConfig::default();
-        config.max_total_errors = 5;  // Low threshold for testing
+        let config = crate::config::ErrorHandlingConfig {
+            max_total_errors: 5,  // Low threshold for testing
+            ..Default::default()
+        };
         let tracker = ErrorTracker::new(config);
         
         // Record 4 errors - should not abort
@@ -3126,8 +3131,10 @@ mod error_handling_tests {
     
     #[test]
     fn test_error_tracker_time_window_clears() {
-        let mut config = crate::config::ErrorHandlingConfig::default();
-        config.error_rate_window = 0.01;  // 10ms window for fast test
+        let config = crate::config::ErrorHandlingConfig {
+            error_rate_window: 0.01,  // 10ms window for fast test
+            ..Default::default()
+        };
         let tracker = ErrorTracker::new(config);
         
         // Record error
@@ -3150,9 +3157,11 @@ mod error_handling_tests {
     
     #[test]
     fn test_error_rate_recovers_after_time() {
-        let mut config = crate::config::ErrorHandlingConfig::default();
-        config.error_rate_window = 0.05;  // 50ms window
-        config.error_rate_threshold = 10.0;  // 10 errors/sec to trigger backoff
+        let config = crate::config::ErrorHandlingConfig {
+            error_rate_window: 0.05,  // 50ms window
+            error_rate_threshold: 10.0,  // 10 errors/sec to trigger backoff
+            ..Default::default()
+        };
         let tracker = ErrorTracker::new(config);
         
         // Rapid errors to trigger backoff state

@@ -20,7 +20,7 @@ async fn test_single_agent_prepare() {
     let config = PrepareConfig {
         prepare_strategy: PrepareStrategy::Sequential,
         ensure_objects: vec![EnsureSpec {
-            base_uri: base_uri.clone(),
+            base_uri: Some(base_uri.clone()),
             count: 10,  // Just 10 objects
             min_size: None,
             max_size: None,

@@ -1,14 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.22-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.23-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-277%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-323%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-**🚀 NEW (v0.8.22)**: Multi-endpoint load balancing with per-agent static endpoint mapping for shared storage systems with multiple endpoints (NFS, S3, or object storage).
+**🚀 NEW (v0.8.23)**: Pre-flight distributed configuration validation prevents common misconfigurations (base_uri with isolated mode) before execution.
 
-**🚀 NEW (v0.8.21)**: Zero-copy API migration with s3dlio v0.9.36 and enhanced data generation via `fill_controlled_data()` (86-163 GB/s, 20-50x faster).
+**🚀 NEW (v0.8.22)**: Multi-endpoint load balancing with per-agent static endpoint mapping for shared storage systems with multiple endpoints (NFS, S3, or object storage).
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
@@ -17,14 +17,15 @@ A comprehensive storage performance testing tool supporting multiple backends th
 1. **Universal Storage Testing**: Unified interface across 5 storage protocols (file://, direct://, s3://, az://, gs://)
 2. **Directory Tree Workloads**: Configurable hierarchical structures for realistic shared filesystem testing
 3. **Filesystem Operations**: Full support for nested paths and directory operations across all backends
-4. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
-5. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay
-6. **Robust Distributed Execution**: Bidirectional streaming with sub-millisecond agent synchronization (v0.8.5+)
-7. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
-8. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
-9. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
-10. **Performance Logging**: Time-series perf-log with 31 columns including mean/p50/p90/p99 latencies, CPU metrics, and warmup filtering (v0.8.17+)
-11. **Results Analysis Tool**: Excel spreadsheet generation consolidating multiple test results (sai3-analyze, v0.8.17+)
+4. **Pre-flight Validation**: Detect configuration errors before execution (filesystem access, distributed config mismatches)
+5. **Workload Replay**: Capture production traffic and replay with microsecond fidelity (1→1, 1→N, N→1 remapping)
+6. **Op-Log Management**: Sort, validate, and merge operation logs for analysis and replay
+7. **Robust Distributed Execution**: Bidirectional streaming with sub-millisecond agent synchronization (v0.8.5+)
+8. **Production-Grade Metrics**: HDR histograms with size-bucketed analysis and aggregate summaries
+9. **Realistic Data Patterns**: Lognormal size distributions, configurable deduplication and compression
+10. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
+11. **Performance Logging**: Time-series perf-log with 31 columns including mean/p50/p90/p99 latencies, CPU metrics, and warmup filtering (v0.8.17+)
+12. **Results Analysis Tool**: Excel spreadsheet generation consolidating multiple test results (sai3-analyze, v0.8.17+)
 
 ## 🎯 Supported Storage Backends
 

@@ -41,8 +41,8 @@ pub async fn list_existing_objects(
     
     // Get base URI from config
     let base_uri = config.ensure_objects.first()
-        .map(|spec| spec.base_uri.as_str())
-        .ok_or_else(|| anyhow!("ensure_objects must have at least one entry"))?;
+        .and_then(|spec| spec.get_base_uri(None).ok())
+        .ok_or_else(|| anyhow!("ensure_objects must have at least one entry with valid base_uri"))?;
     
     // Check if we're in directory tree mode
     let is_tree_mode = config.directory_structure.is_some();
@@ -50,11 +50,11 @@ pub async fn list_existing_objects(
         info!("Directory tree mode detected - will list recursively");
     }
     
-    let store = create_store_for_uri(base_uri)?;
+    let store = create_store_for_uri(&base_uri)?;
     
     // List all existing objects
     let list_base = if base_uri.ends_with('/') {
-        base_uri.to_string()
+        base_uri.clone()
     } else {
         format!("{}/", base_uri)
     };

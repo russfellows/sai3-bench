@@ -6,6 +6,54 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.23] - 2026-02-03
+
+### Added
+
+- **Distributed configuration pre-flight validation** (prevents common misconfigurations)
+  - New `src/preflight/distributed.rs` validation module (315 lines, 4 comprehensive tests)
+  - Detects `base_uri` specified in isolated mode with per-agent storage (the h2 protocol error bug)
+  - Validates `shared_filesystem` semantics: warns if agents lack `multi_endpoint` in shared mode
+  - Integrated into controller workflow - runs before agent pre-flight validation
+  - Provides actionable error messages with configuration fix recommendations
+  
+- **EnsureSpec.base_uri made optional for isolated mode**
+  - `base_uri` field now `Option<String>` (was `String`)
+  - When `None` with `use_multi_endpoint: true`, each agent uses its first endpoint for listing
+  - Enables correct distributed listing in isolated mode without base_uri conflicts
+  - New `get_base_uri()` helper method for transparent fallback logic
+  
+- **Comprehensive test coverage for base_uri handling**
+  - 10 unit tests in `src/config_tests.rs` covering all base_uri edge cases
+  - 4 validation tests in `src/preflight/distributed.rs` for configuration scenarios
+  - Fixed existing integration tests (3 files) to wrap base_uri in `Some()`
+  - Real integration tests prove buggy config is blocked, fixed config passes
+
+### Changed
+
+- **Validation logic respects shared_filesystem semantics**
+  - `shared_filesystem: true` - All agents access same storage (multi_endpoint optional)
+  - `shared_filesystem: false` - Per-agent isolated storage (base_uri in isolated mode is error)
+  - No assumptions about network topology or endpoint accessibility
+  - Supports all valid deployment patterns: shared NFS, independent disks, mixed scenarios
+
+### Fixed
+
+- **h2 protocol errors in distributed isolated mode** (THE BUG)
+  - Root cause: `base_uri` specified when agents have different `multi_endpoint` configurations
+  - Listing phase used `base_uri` instead of each agent's first endpoint
+  - Pre-flight now blocks this misconfiguration before runtime with clear fix recommendation
+  - Example error: "1 agents cannot access 'file:///mnt/vast1/benchmark/'"
+
+### Testing
+
+- **323 tests passing** (was 312)
+  - 121 lib tests (10 new config tests, 1 integration test fix)
+  - 202 integration tests (3 new distributed validation tests)
+  - Validated with real agents: buggy config blocked, fixed config runs successfully
+
+---
+
 ## [0.8.22] - 2026-01-29
 
 ### Added

@@ -544,7 +544,12 @@ pub struct PrepareConfig {
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
     /// When use_multi_endpoint=true, this provides the path component only (after the endpoint)
-    pub base_uri: String,
+    /// 
+    /// **Optional in Isolated Mode**: When tree_creation_mode=isolated and use_multi_endpoint=true,
+    /// base_uri can be omitted. In this case, each agent will use the first URI from its
+    /// multi_endpoint configuration for prepare/listing operations.
+    #[serde(default)]
+    pub base_uri: Option<String>,
     
     /// Use multi-endpoint configuration for object creation (v0.8.22+)
     /// When true, objects are distributed across all configured endpoints
@@ -584,6 +589,36 @@ pub struct EnsureSpec {
 }
 
 impl EnsureSpec {
+    /// Get the effective base_uri for this agent
+    /// 
+    /// In isolated mode with multi_endpoint, if base_uri is None, this will use the first
+    /// URI from the provided multi_endpoint_uris (the agent's own endpoints).
+    /// 
+    /// # Arguments
+    /// * `multi_endpoint_uris` - Optional list of URIs from agent's multi_endpoint config
+    /// 
+    /// # Returns
+    /// Ok(uri) if a valid base_uri can be determined, Err otherwise
+    pub fn get_base_uri(&self, multi_endpoint_uris: Option<&[String]>) -> anyhow::Result<String> {
+        if let Some(ref uri) = self.base_uri {
+            // Explicit base_uri provided
+            Ok(uri.clone())
+        } else if self.use_multi_endpoint {
+            // No base_uri, but use_multi_endpoint=true - use first endpoint
+            if let Some(uris) = multi_endpoint_uris {
+                if let Some(first) = uris.first() {
+                    Ok(first.clone())
+                } else {
+                    anyhow::bail!("use_multi_endpoint=true with no base_uri, but multi_endpoint list is empty")
+                }
+            } else {
+                anyhow::bail!("use_multi_endpoint=true with no base_uri, but no multi_endpoint configuration provided")
+            }
+        } else {
+            anyhow::bail!("base_uri is required when use_multi_endpoint=false")
+        }
+    }
+    
     /// Get the size specification, converting legacy min/max_size if needed
     pub fn get_size_spec(&self) -> SizeSpec {
         use crate::size_generator::{SizeDistribution, DistributionType, DistributionParams};
@@ -793,13 +828,16 @@ impl Config {
                 // We need to insert the prefix at the same location where we modified the target
                 if let (Some(ref new_target), Some(ref orig_target)) = (&self.target, &original_target) {
                     for ensure_spec in &mut prepare.ensure_objects {
-                        // If base_uri starts with the original target, replace it with the new target
-                        if ensure_spec.base_uri.starts_with(orig_target) {
-                            let relative_path = &ensure_spec.base_uri[orig_target.len()..];
-                            ensure_spec.base_uri = format!("{}{}", new_target, relative_path);
-                        } else {
-                            // Otherwise, just append the prefix (shouldn't happen in normal configs)
-                            ensure_spec.base_uri = join_uri_path(&ensure_spec.base_uri, prefix)?;
+                        // If base_uri is None, skip modification (it will use first multi_endpoint)
+                        if let Some(ref base_uri_str) = ensure_spec.base_uri {
+                            // If base_uri starts with the original target, replace it with the new target
+                            if base_uri_str.starts_with(orig_target) {
+                                let relative_path = &base_uri_str[orig_target.len()..];
+                                ensure_spec.base_uri = Some(format!("{}{}", new_target, relative_path));
+                            } else {
+                                // Otherwise, just append the prefix (shouldn't happen in normal configs)
+                                ensure_spec.base_uri = Some(join_uri_path(base_uri_str, prefix)?);
+                            }
                         }
                     }
                 }

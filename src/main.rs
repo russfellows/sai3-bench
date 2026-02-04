@@ -1119,6 +1119,64 @@ fn run_workload(
     
     let rt = RtBuilder::new_multi_thread().enable_all().build()?;
     
+    // v0.8.23: Pre-flight validation for filesystem targets (standalone mode)
+    if let Some(ref target) = config.target {
+        if target.starts_with("file://") || target.starts_with("direct://") {
+            use sai3_bench::preflight::filesystem;
+            use std::path::PathBuf;
+            
+            // Extract filesystem path
+            let fs_path = if let Some(stripped) = target.strip_prefix("file://") {
+                stripped
+            } else if let Some(stripped) = target.strip_prefix("direct://") {
+                stripped
+            } else {
+                target.as_str()
+            };
+            
+            let path = PathBuf::from(fs_path);
+            
+            let preflight_header = "\n🔍 Pre-flight Validation\n━━━━━━━━━━━━━━━━━━━━━━";
+            println!("{}", preflight_header);
+            results_dir.write_console(preflight_header)?;
+            
+            // Run filesystem validation
+            let check_write = config.prepare.is_some(); // Only check write if prepare phase exists
+            let validation_result = rt.block_on(filesystem::validate_filesystem(
+                &path,
+                check_write,
+                Some(1024 * 1024 * 1024),  // 1 GB required space
+            ))?;
+            
+            // Display results using shared display function
+            let (passed, error_count, warning_count) = 
+                sai3_bench::preflight::display_validation_results(&validation_result.results, None);
+            
+            let separator = "━━━━━━━━━━━━━━━━━━━━━━";
+            println!("{}", separator);
+            results_dir.write_console(separator)?;
+            
+            // Check for errors
+            if !passed {
+                let error_summary = format!("❌ Pre-flight validation FAILED\n   {} errors, {} warnings\n\nFix the above errors before running the workload.",
+                    error_count,
+                    warning_count
+                );
+                println!("{}", error_summary);
+                results_dir.write_console(&error_summary)?;
+                bail!("Pre-flight validation failed with {} errors", error_count);
+            } else {
+                let info_count = validation_result.results.len() - error_count - warning_count;
+                let success_msg = format!("✅ Pre-flight validation passed\n   {} warnings, {} info messages",
+                    warning_count,
+                    info_count
+                );
+                println!("{}", success_msg);
+                results_dir.write_console(&success_msg)?;
+            }
+        }
+    }
+    
     // Verify-only mode: check that prepared objects exist and are accessible
     if verify {
         if let Some(ref prepare_config) = config.prepare {
@@ -1345,13 +1403,13 @@ fn run_workload(
             info!("Recreating directory tree structure for cleanup...");
             let base_uri = prepare_config.ensure_objects.first()
                 .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry"))?
-                .base_uri.as_str();
+                .get_base_uri(None)?;
             
             Some(sai3_bench::prepare::create_tree_manifest_only(
                 prepare_config, 
                 0,  // agent_id
                 1,  // num_agents
-                base_uri
+                &base_uri
             )?)
         } else {
             None
@@ -1360,17 +1418,20 @@ fn run_workload(
         // Reconstruct object list (same logic as prepare, but we mark all as created=true)
         let mut objects_to_cleanup = Vec::new();
         for spec in &prepare_config.ensure_objects {
-            let prefix = spec.base_uri.trim_end_matches('/');
+            // Get effective base_uri for this spec
+            let base_uri = spec.get_base_uri(None)?;
+            
+            let prefix = base_uri.trim_end_matches('/');
             let prefix_name = prefix.rsplit('/').next().unwrap_or("prepared");
             
             if let Some(ref manifest) = tree_manifest_for_cleanup {
                 // Tree mode: enumerate all file paths
                 for file_idx in 0..manifest.total_files {
                     if let Some(relative_path) = manifest.get_file_path(file_idx) {
-                        let uri = if spec.base_uri.ends_with('/') {
-                            format!("{}{}", spec.base_uri, relative_path)
+                        let uri = if base_uri.ends_with('/') {
+                            format!("{}{}", base_uri, relative_path)
                         } else {
-                            format!("{}/{}", spec.base_uri, relative_path)
+                            format!("{}/{}", base_uri, relative_path)
                         };
                         objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
                             uri,
@@ -1383,10 +1444,10 @@ fn run_workload(
                 // Flat mode: enumerate numbered files
                 for idx in 0..spec.count {
                     let key = format!("{}-{:08}.dat", prefix_name, idx);
-                    let uri = if spec.base_uri.ends_with('/') {
-                        format!("{}{}", spec.base_uri, key)
+                    let uri = if base_uri.ends_with('/') {
+                        format!("{}{}", base_uri, key)
                     } else {
-                        format!("{}/{}", spec.base_uri, key)
+                        format!("{}/{}", base_uri, key)
                     };
                     objects_to_cleanup.push(sai3_bench::prepare::PreparedObject {
                         uri,

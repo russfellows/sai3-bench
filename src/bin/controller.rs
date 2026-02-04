@@ -33,7 +33,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest};
 
 /// v0.7.13: Controller's view of agent states
 /// 
@@ -1084,6 +1084,114 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
+/// Run pre-flight validation on all agents
+/// 
+/// Returns Ok(()) if all agents pass validation (errors=0)
+/// Returns Err if any agent reports errors
+async fn run_preflight_validation(
+    agent_clients: &mut [(String, AgentClient<Channel>)],
+    config_yaml: &str,
+) -> Result<()> {
+    info!("Running pre-flight validation on {} agents", agent_clients.len());
+    println!("\n🔍 Pre-flight Validation");
+    println!("━━━━━━━━━━━━━━━━━━━━━━");
+    
+    let mut all_passed = true;
+    let mut total_errors = 0;
+    let mut total_warnings = 0;
+    
+    for (agent_id, client) in agent_clients.iter_mut() {
+        // Send pre-flight request
+        let request = PreFlightRequest {
+            config_yaml: config_yaml.to_string(),
+            agent_id: agent_id.clone(),
+        };
+        
+        match client.pre_flight_validation(request).await {
+            Ok(response) => {
+                let result = response.into_inner();
+                
+                // Display agent results
+                let status_icon = if result.passed { "✅" } else { "❌" };
+                println!("\n{} Agent: {}", status_icon, agent_id);
+                
+                if result.error_count > 0 || result.warning_count > 0 || result.info_count > 0 {
+                    // Convert proto results to internal ValidationResult for shared display
+                    use sai3_bench::preflight::ValidationResult;
+                    
+                    let validation_results: Vec<ValidationResult> = result.results.iter().map(|vr| {
+                        let level = match pb::iobench::ResultLevel::try_from(vr.level) {
+                            Ok(pb::iobench::ResultLevel::Success) => sai3_bench::preflight::ResultLevel::Success,
+                            Ok(pb::iobench::ResultLevel::Info) => sai3_bench::preflight::ResultLevel::Info,
+                            Ok(pb::iobench::ResultLevel::Warning) => sai3_bench::preflight::ResultLevel::Warning,
+                            Ok(pb::iobench::ResultLevel::Error) => sai3_bench::preflight::ResultLevel::Error,
+                            _ => sai3_bench::preflight::ResultLevel::Error,
+                        };
+                        
+                        let error_type = match pb::iobench::ErrorType::try_from(vr.error_type) {
+                            Ok(pb::iobench::ErrorType::Authentication) => Some(sai3_bench::preflight::ErrorType::Authentication),
+                            Ok(pb::iobench::ErrorType::Permission) => Some(sai3_bench::preflight::ErrorType::Permission),
+                            Ok(pb::iobench::ErrorType::Network) => Some(sai3_bench::preflight::ErrorType::Network),
+                            Ok(pb::iobench::ErrorType::Configuration) => Some(sai3_bench::preflight::ErrorType::Configuration),
+                            Ok(pb::iobench::ErrorType::Resource) => Some(sai3_bench::preflight::ErrorType::Resource),
+                            Ok(pb::iobench::ErrorType::System) => Some(sai3_bench::preflight::ErrorType::System),
+                            _ => None,
+                        };
+                        
+                        ValidationResult {
+                            level,
+                            error_type,
+                            message: vr.message.clone(),
+                            suggestion: vr.suggestion.clone(),
+                            details: if vr.details.is_empty() { None } else { Some(vr.details.clone()) },
+                            test_phase: vr.test_phase.clone(),
+                        }
+                    }).collect();
+                    
+                    // Use shared display function
+                    let (passed, _errors, _warnings) = 
+                        sai3_bench::preflight::display_validation_results(&validation_results, None);
+                    
+                    // Update totals (use proto counts which are authoritative)
+                    total_errors += result.error_count;
+                    total_warnings += result.warning_count;
+                    if !passed {
+                        all_passed = false;
+                    }
+                } else {
+                    // All passed with no messages
+                    total_errors += result.error_count;
+                    total_warnings += result.warning_count;
+                    if !result.passed {
+                        all_passed = false;
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Pre-flight validation failed for agent {}: {}", agent_id, e);
+                println!("❌ Agent: {} - RPC error: {}", agent_id, e);
+                all_passed = false;
+                total_errors += 1;
+            }
+        }
+    }
+    
+    // Display summary
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━");
+    if all_passed {
+        println!("✅ Pre-flight validation passed ({} agents)", agent_clients.len());
+        if total_warnings > 0 {
+            println!("⚠️  {} warnings detected (non-fatal)", total_warnings);
+        }
+        Ok(())
+    } else {
+        println!("❌ Pre-flight validation FAILED");
+        println!("   {} errors, {} warnings across {} agents", total_errors, total_warnings, agent_clients.len());
+        println!("\nFix the above errors before running the workload.");
+        bail!("Pre-flight validation failed with {} errors", total_errors)
+    }
+}
+
 /// Execute a distributed workload across multiple agents
 #[allow(clippy::too_many_arguments)]
 async fn run_distributed_workload(
@@ -1275,6 +1383,62 @@ async fn run_distributed_workload(
     
     // v0.8.7: Calculate num_agents once outside the loop (avoid borrowing agent_addrs in async tasks)
     let num_agents = agent_addrs.len() as u32;
+    
+    // v0.8.23: PRE-FLIGHT VALIDATION - Connect to all agents and validate before spawning streams
+    info!("Connecting to {} agents for pre-flight validation", agent_addrs.len());
+    let mut agent_clients: Vec<(String, AgentClient<Channel>)> = Vec::new();
+    
+    for (idx, agent_addr) in agent_addrs.iter().enumerate() {
+        let agent_id = ids[idx].clone();
+        debug!("Connecting to agent {} at {}", agent_id, agent_addr);
+        
+        match mk_client(agent_addr, insecure, agent_ca, agent_domain).await {
+            Ok(client) => {
+                agent_clients.push((agent_id.clone(), client));
+                debug!("Connected to agent {} successfully", agent_id);
+            }
+            Err(e) => {
+                error!("Failed to connect to agent {} at {}: {}", agent_id, agent_addr, e);
+                bail!("Failed to connect to agent {}: {}", agent_id, e);
+            }
+        }
+    }
+    
+    // v0.8.23: DISTRIBUTED CONFIG VALIDATION - Check for common configuration errors
+    // Validates base_uri usage with multi-endpoint in isolated mode
+    info!("Validating distributed configuration");
+    match sai3_bench::preflight::distributed::validate_distributed_config(&config) {
+        Ok(validation_results) => {
+            if !validation_results.is_empty() {
+                println!("\n🔍 Distributed Config Validation");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                
+                let (passed, errors, warnings) = 
+                    sai3_bench::preflight::display_validation_results(&validation_results, None);
+                
+                if !passed {
+                    println!("\n❌ Distributed configuration validation FAILED");
+                    println!("   {} errors, {} warnings", errors, warnings);
+                    println!("\nFix the above configuration errors before running the workload.");
+                    bail!("Distributed configuration validation failed with {} errors", errors);
+                } else if warnings > 0 {
+                    println!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
+                    println!();
+                }
+            } else {
+                debug!("Distributed configuration validation passed (no issues detected)");
+            }
+        }
+        Err(e) => {
+            error!("Distributed config validation error: {}", e);
+            bail!("Failed to validate distributed configuration: {}", e);
+        }
+    }
+    
+    // Run pre-flight validation on all connected agents
+    run_preflight_validation(&mut agent_clients, &config_yaml).await?;
+    
+    info!("Pre-flight validation passed - proceeding with workload execution");
     
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
