@@ -33,7 +33,9 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress};
+// Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
+// Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
 // v0.8.25: Barrier synchronization
 use std::time::Instant;
@@ -1202,9 +1204,9 @@ async fn run_preflight_validation(
 // ============================================================================
 
 /// Agent heartbeat tracking for barrier synchronization
+/// Note: agent_id not stored here since it's the HashMap key in BarrierManager
 #[derive(Debug, Clone)]
 struct AgentHeartbeat {
-    agent_id: String,
     last_heartbeat: Instant,
     last_progress: Option<PhaseProgress>,
     missed_count: u32,
@@ -1225,6 +1227,8 @@ enum BarrierStatus {
 struct BarrierManager {
     agents: HashMap<String, AgentHeartbeat>,
     config: PhaseBarrierConfig,
+    /// TODO: Use barrier_start for overall barrier timeout tracking (not yet implemented)
+    #[allow(dead_code)]
     barrier_start: Instant,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
@@ -1235,8 +1239,7 @@ impl BarrierManager {
     fn new(agent_ids: Vec<String>, config: PhaseBarrierConfig) -> Self {
         let mut agents = HashMap::new();
         for id in agent_ids {
-            agents.insert(id.clone(), AgentHeartbeat {
-                agent_id: id,
+            agents.insert(id, AgentHeartbeat {
                 last_heartbeat: Instant::now(),
                 last_progress: None,
                 missed_count: 0,

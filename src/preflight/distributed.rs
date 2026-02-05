@@ -6,7 +6,7 @@
 //! - Tree creation mode conflicts
 
 use super::{ValidationResult, ResultLevel, ErrorType};
-use crate::config::{Config, TreeCreationMode, BarrierSyncConfig};
+use crate::config::{Config, TreeCreationMode};
 use anyhow::Result;
 
 /// Validate distributed configuration for common issues

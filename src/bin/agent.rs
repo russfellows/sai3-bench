@@ -143,6 +143,9 @@ enum WorkloadState {
     Aborting,          // Emergency shutdown in progress
     
     // Legacy states for backward compatibility (will be phased out)
+    // Note: Ready is pattern-matched but not constructed in production code (only in tests)
+    // This is intentional - used in transition rules for backward compat but new code uses barrier-aware states
+    #[allow(dead_code)]
     Ready,             // Old: Validated, waiting for coordinated start
     Running,           // Old: Workload executing (maps to Executing)
 }
@@ -199,7 +202,7 @@ impl AgentState {
             | (Ready, Idle)                     // Old: Abort during coordinated start
             | (Running, Idle)                   // Old: Workload completed successfully
             | (Running, Failed)                 // Old: Workload error
-            | (Running, Aborting)               // Old: Abort signal during execution
+            // Note: (Running, Aborting) removed - already covered by (_, Aborting) above
             
             // No-op transitions for race condition safety
             | (Idle, Idle)

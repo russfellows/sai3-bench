@@ -1075,6 +1075,13 @@ pub struct DistributedConfig {
     /// Disabled by default for backward compatibility
     #[serde(default)]
     pub barrier_sync: BarrierSyncConfig,
+    
+    /// v0.8.26: YAML-driven stage orchestration (optional)
+    /// Explicit stage ordering with flexible completion criteria
+    /// If not specified, generates default stages: [preflight, prepare, execute, cleanup]
+    /// Stages are sorted by 'order' field, not YAML position
+    #[serde(default)]
+    pub stages: Option<Vec<StageConfig>>,
 }
 
 /// Individual agent configuration
@@ -1513,6 +1520,119 @@ pub struct PhaseBarrierConfig {
     pub query_retries: u32,
 }
 
+/// Completion criteria for stage execution (how stage knows it's done)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionCriteria {
+    /// Complete after specified duration (time-based)
+    /// Used by: execute stages, custom stages with fixed runtime
+    Duration,
+    
+    /// Complete when all tasks finished (task-based)
+    /// Used by: prepare (objects created), cleanup (objects deleted)
+    TasksDone,
+    
+    /// Complete when script exits (script-based)
+    /// Used by: custom stages running external tools
+    ScriptExit,
+    
+    /// Complete when validation checks pass (validation-based)
+    /// Used by: preflight/validation stages
+    ValidationPassed,
+    
+    /// Complete when either duration OR tasks finish (hybrid)
+    /// Whichever criterion met first
+    /// Used by: stages with both time limit and task count
+    DurationOrTasks,
+}
+
+impl Default for CompletionCriteria {
+    fn default() -> Self {
+        CompletionCriteria::Duration
+    }
+}
+
+/// Stage-specific configuration based on stage type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StageSpecificConfig {
+    /// Execute stage configuration (read/write workload)
+    Execute {
+        /// Duration to run workload (required for execute stages)
+        #[serde(with = "humantime_serde")]
+        duration: std::time::Duration,
+    },
+    
+    /// Prepare stage configuration (object creation)
+    Prepare {
+        /// Expected number of objects to create (optional, for progress tracking)
+        #[serde(default)]
+        expected_objects: Option<usize>,
+    },
+    
+    /// Cleanup stage configuration (object deletion)
+    Cleanup {
+        /// Expected number of objects to delete (optional, for progress tracking)
+        #[serde(default)]
+        expected_objects: Option<usize>,
+    },
+    
+    /// Custom stage configuration (user-defined script/command)
+    Custom {
+        /// Command to execute
+        command: String,
+        
+        /// Optional arguments to command
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    
+    /// Hybrid stage with both duration and task limits
+    Hybrid {
+        /// Maximum duration (optional)
+        #[serde(default, with = "humantime_serde_opt")]
+        max_duration: Option<std::time::Duration>,
+        
+        /// Expected number of tasks (optional)
+        #[serde(default)]
+        expected_tasks: Option<usize>,
+    },
+}
+
+/// Stage configuration for YAML-driven stage orchestration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageConfig {
+    /// Stage name (e.g., "preflight", "prepare", "epoch-1", "cleanup")
+    pub name: String,
+    
+    /// Explicit execution order (1, 2, 3, etc.)
+    /// Stages sorted by this field, not YAML position
+    pub order: usize,
+    
+    /// Completion criteria (how to determine stage is done)
+    #[serde(default)]
+    pub completion: CompletionCriteria,
+    
+    /// Barrier synchronization for this stage (optional)
+    /// If not specified, uses barrier_sync.enabled from DistributedConfig
+    #[serde(default)]
+    pub barrier: Option<PhaseBarrierConfig>,
+    
+    /// Maximum time to wait for stage completion before timeout (seconds)
+    /// Default: no timeout (wait indefinitely)
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    
+    /// Whether this stage is optional (can be skipped on failure)
+    /// Default: false (all stages required)
+    #[serde(default)]
+    pub optional: bool,
+    
+    /// Stage-specific configuration (flattened into struct)
+    #[serde(flatten)]
+    pub config: StageSpecificConfig,
+}
+
 /// Top-level barrier synchronization configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BarrierSyncConfig {
@@ -1593,6 +1713,144 @@ impl BarrierSyncConfig {
 // ============================================================================
 // End Barrier Synchronization Configuration
 // ============================================================================
+
+impl DistributedConfig {
+    /// Get sorted stages (by order field), generating defaults if not specified
+    /// 
+    /// Default stages (backward compatibility):
+    /// 1. preflight (validation_passed)
+    /// 2. prepare (tasks_done)
+    /// 3. execute (duration)
+    /// 4. cleanup (tasks_done)
+    pub fn get_sorted_stages(&self, default_duration: std::time::Duration) -> Result<Vec<StageConfig>, String> {
+        let stages = if let Some(ref stages) = self.stages {
+            // Validate user-provided stages
+            self.validate_stages(stages)?;
+            
+            // Sort by order field
+            let mut sorted = stages.clone();
+            sorted.sort_by_key(|s| s.order);
+            sorted
+        } else {
+            // Generate default stages for backward compatibility
+            self.generate_default_stages(default_duration)
+        };
+        
+        Ok(stages)
+    }
+    
+    /// Validate stage configuration
+    fn validate_stages(&self, stages: &[StageConfig]) -> Result<(), String> {
+        if stages.is_empty() {
+            return Err("stages list cannot be empty".to_string());
+        }
+        
+        // Check for unique stage names
+        let mut names = std::collections::HashSet::new();
+        for stage in stages {
+            if !names.insert(&stage.name) {
+                return Err(format!("duplicate stage name: {}", stage.name));
+            }
+        }
+        
+        // Check for unique order values (no duplicates)
+        let mut orders = std::collections::HashSet::new();
+        for stage in stages {
+            if !orders.insert(stage.order) {
+                return Err(format!("duplicate stage order: {}", stage.order));
+            }
+        }
+        
+        // Warn about gaps in ordering (not an error, but suspicious)
+        let mut sorted_orders: Vec<_> = orders.iter().copied().collect();
+        sorted_orders.sort();
+        for window in sorted_orders.windows(2) {
+            if window[1] - window[0] > 1 {
+                eprintln!("Warning: gap in stage ordering: {} -> {} (missing {})", 
+                    window[0], window[1], window[0] + 1);
+            }
+        }
+        
+        // Validate completion criteria matches stage type
+        for stage in stages {
+            match &stage.config {
+                StageSpecificConfig::Execute { duration: _ } => {
+                    if !matches!(stage.completion, CompletionCriteria::Duration | CompletionCriteria::DurationOrTasks) {
+                        return Err(format!("Execute stage '{}' should use Duration or DurationOrTasks completion", stage.name));
+                    }
+                }
+                StageSpecificConfig::Prepare { .. } | StageSpecificConfig::Cleanup { .. } => {
+                    if !matches!(stage.completion, CompletionCriteria::TasksDone | CompletionCriteria::DurationOrTasks) {
+                        return Err(format!("Prepare/Cleanup stage '{}' should use TasksDone or DurationOrTasks completion", stage.name));
+                    }
+                }
+                StageSpecificConfig::Custom { .. } => {
+                    if !matches!(stage.completion, CompletionCriteria::ScriptExit | CompletionCriteria::DurationOrTasks) {
+                        return Err(format!("Custom stage '{}' should use ScriptExit or DurationOrTasks completion", stage.name));
+                    }
+                }
+                StageSpecificConfig::Hybrid { .. } => {
+                    if !matches!(stage.completion, CompletionCriteria::DurationOrTasks) {
+                        return Err(format!("Hybrid stage '{}' must use DurationOrTasks completion", stage.name));
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate default stages for backward compatibility
+    fn generate_default_stages(&self, default_duration: std::time::Duration) -> Vec<StageConfig> {
+        vec![
+            StageConfig {
+                name: "preflight".to_string(),
+                order: 1,
+                completion: CompletionCriteria::ValidationPassed,
+                barrier: self.barrier_sync.validation.clone(),
+                timeout_secs: Some(300), // 5 minutes for validation
+                optional: false,
+                config: StageSpecificConfig::Hybrid {
+                    max_duration: Some(std::time::Duration::from_secs(300)),
+                    expected_tasks: None,
+                },
+            },
+            StageConfig {
+                name: "prepare".to_string(),
+                order: 2,
+                completion: CompletionCriteria::TasksDone,
+                barrier: self.barrier_sync.prepare.clone(),
+                timeout_secs: None, // No timeout for prepare (takes as long as needed)
+                optional: false,
+                config: StageSpecificConfig::Prepare {
+                    expected_objects: None,
+                },
+            },
+            StageConfig {
+                name: "execute".to_string(),
+                order: 3,
+                completion: CompletionCriteria::Duration,
+                barrier: self.barrier_sync.execute.clone(),
+                timeout_secs: None, // No timeout for execute (duration is part of config)
+                optional: false,
+                config: StageSpecificConfig::Execute {
+                    duration: default_duration,
+                },
+            },
+            StageConfig {
+                name: "cleanup".to_string(),
+                order: 4,
+                completion: CompletionCriteria::TasksDone,
+                barrier: self.barrier_sync.cleanup.clone(),
+                timeout_secs: Some(3600), // 1 hour timeout for cleanup
+                optional: true, // Cleanup can fail without aborting test
+                config: StageSpecificConfig::Cleanup {
+                    expected_objects: None,
+                },
+            },
+        ]
+    }
+}
 
 /// Multi-process scaling configuration (v0.7.3+)
 /// Controls how many processes to spawn per endpoint for parallel execution
