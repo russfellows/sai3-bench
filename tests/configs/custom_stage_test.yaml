@@ -64,9 +64,12 @@ distributed:
       completion: tasks_done
       expected_objects: 50
 
+# Prepare config - provides cleanup_mode for CLEANUP stage
+# Note: prepare.cleanup field is IGNORED when using stages
+#       (cleanup controlled by presence of CLEANUP stage, not boolean)
 prepare:
   enabled: true
-  cleanup_mode: tolerant
+  cleanup_mode: tolerant  # Used by CLEANUP stage (strict/tolerant/besteffort)
 
 workload:
   - op: put

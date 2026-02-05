@@ -73,10 +73,12 @@ distributed:
       completion: tasks_done
       expected_objects: 300
 
-# Prepare config (used by prepare/cleanup stages)
+# Prepare config - provides cleanup_mode for CLEANUP stages
+# Note: prepare.cleanup field is IGNORED when using stages
+#       (cleanup controlled by presence of CLEANUP stage, not boolean)
 prepare:
   enabled: true
-  cleanup_mode: tolerant
+  cleanup_mode: tolerant  # Used by CLEANUP stages (strict/tolerant/besteffort)
 
 # Workload config (overridden by execute stages)
 workload:
