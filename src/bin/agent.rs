@@ -2217,6 +2217,37 @@ impl Agent for AgentSvc {
                                         let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1) as usize;
                                         let shared_storage = agent_state_for_task.get_shared_storage().await.unwrap_or(true);  // v0.8.24: Default to shared for backward compat
                                         
+                                        // Phase 2b: Check if YAML-driven stages are configured
+                                        let stages = agent_state_for_task.get_stages().await;
+                                        
+                                        // If stages exist, use stage-driven execution
+                                        // Otherwise fall back to deprecated hardcoded prepare->execute->cleanup flow
+                                        if let Some(stages_vec) = stages {
+                                            info!("Using YAML-driven stage execution ({} stages)", stages_vec.len());
+                                            
+                                            // Execute stage-driven workflow (NEW)
+                                            let stage_result = execute_stages_workflow(
+                                                stages_vec,
+                                                config_exec.clone(),
+                                                agent_state_for_task.clone(),
+                                                tracker_for_prepare.clone(),
+                                                tx_done_exec.clone(),
+                                                tx_prepare_exec.clone(),
+                                                final_op_log_path.clone(),
+                                                agent_op_log_path_exec.clone(),
+                                                agent_id_exec.clone(),
+                                                agent_index,
+                                                num_agents,
+                                                shared_storage,
+                                            ).await;
+                                            
+                                            // Send result to stats writer
+                                            let _ = tx_done_exec.send(stage_result).await;
+                                            return;  // Exit workload task
+                                        }
+                                        
+                                        info!("Using hardcoded prepare->execute->cleanup flow (DEPRECATED)");
+                                        
                                         // v0.8.7: Detect cleanup-only mode (ONLY checks cleanup flag)
                                         let is_cleanup_only = config_exec.prepare.as_ref()
                                             .map(|p| p.cleanup_only.unwrap_or(false))
@@ -2976,6 +3007,326 @@ impl Agent for AgentSvc {
         
         Ok(Response::new(Box::pin(output_stream)))
     }
+}
+
+// Phase 2b: YAML-driven stage execution workflow
+// Executes stages in order, checking completion criteria and transitioning state
+#[allow(dead_code)]  // Will be used when stages are configured
+async fn execute_stages_workflow(
+    stages: Vec<sai3_bench::config::StageConfig>,
+    mut config: sai3_bench::config::Config,
+    agent_state: AgentState,
+    tracker: Arc<sai3_bench::live_stats::LiveStatsTracker>,
+    _tx_done: tokio::sync::mpsc::Sender<Result<sai3_bench::workload::Summary, String>>,
+    tx_prepare: tokio::sync::mpsc::Sender<sai3_bench::workload::PrepareMetrics>,
+    final_op_log_path: Option<std::path::PathBuf>,
+    agent_op_log_path: Option<std::path::PathBuf>,
+    agent_id: String,
+    agent_index: usize,
+    num_agents: usize,
+    shared_storage: bool,
+) -> Result<sai3_bench::workload::Summary, String> {
+    info!("Starting YAML-driven stage workflow with {} stages", stages.len());
+    
+    // Wire tracker into config
+    config.live_stats_tracker = Some(tracker.clone());
+    
+    // Storage for prepared objects (needed for cleanup stages)
+    let mut prepared_objects: Vec<sai3_bench::prepare::PreparedObject> = Vec::new();
+    let mut tree_manifest = None;  // Type inferred from prepare_objects return
+    
+    // Iterate through stages in order
+    for (stage_index, stage) in stages.iter().enumerate() {
+        info!("=== Stage {}/{}: {} ===", stage_index + 1, stages.len(), stage.name);
+        
+        // Transition to AtStage (ready_for_next=false, executing)
+        let at_stage = WorkloadState::AtStage {
+            stage_index,
+            stage_name: stage.name.clone(),
+            ready_for_next: false,
+        };
+        
+        if let Err(e) = agent_state.transition_to(at_stage, &format!("starting stage {}", stage.name)).await {
+            error!("Failed to transition to AtStage: {}", e);
+            return Err(format!("State transition failed: {}", e));
+        }
+        
+        // Execute stage based on type
+        match &stage.config {
+            sai3_bench::config::StageSpecificConfig::Prepare { .. } => {
+                info!("Executing PREPARE stage: {}", stage.name);
+                
+                // Execute prepare logic (similar to existing prepare phase)
+                if let Some(ref prepare_config) = config.prepare {
+                    use sai3_bench::live_stats::WorkloadStage;
+                    let expected_objects: u64 = prepare_config.ensure_objects.iter().map(|e| e.count).sum();
+                    tracker.set_stage(WorkloadStage::Prepare, expected_objects);
+                    
+                    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+                    use std::collections::HashMap;
+                    let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = 
+                        StdArc::new(StdMutex::new(HashMap::new()));
+                    
+                    match sai3_bench::workload::prepare_objects(
+                        prepare_config,
+                        Some(&config.workload),
+                        Some(tracker.clone()),
+                        config.multi_endpoint.as_ref(),
+                        &prepare_multi_ep_cache,
+                        config.concurrency,
+                        agent_index,
+                        num_agents,
+                        shared_storage,
+                    ).await {
+                        Ok((prepared, manifest, prepare_metrics)) => {
+                            info!("Prepare stage complete: {} objects", prepared.len());
+                            prepared_objects = prepared;
+                            tree_manifest = manifest;
+                            
+                            // Send prepare metrics
+                            let _ = tx_prepare.send(prepare_metrics).await;
+                            tracker.reset_for_workload();
+                        }
+                        Err(e) => {
+                            return Err(format!("Prepare stage '{}' failed: {}", stage.name, e));
+                        }
+                    }
+                } else {
+                    warn!("PREPARE stage '{}' configured but config.prepare is None", stage.name);
+                }
+            }
+            
+            sai3_bench::config::StageSpecificConfig::Execute { duration } => {
+                info!("Executing EXECUTE stage: {} (duration: {:?})", stage.name, duration);
+                
+                // Set stage for progress tracking
+                use sai3_bench::live_stats::WorkloadStage;
+                tracker.set_stage(WorkloadStage::Workload, 0);  // time-based
+                
+                // Setup operation logger if configured
+                if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path.as_ref()) {
+                    let op_log_path = if let Some(parent) = op_log_base.parent() {
+                        let filename = op_log_base.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("oplog.tsv.zst");
+                        let base_name = if filename.ends_with(".tsv.zst") {
+                            filename.strip_suffix(".tsv.zst").unwrap()
+                        } else if filename.ends_with(".tsv") {
+                            filename.strip_suffix(".tsv").unwrap()
+                        } else {
+                            filename
+                        };
+                        parent.join(format!("{}_{}.tsv.zst", base_name, agent_id))
+                    } else {
+                        op_log_base.join(format!("oplog_{}.tsv.zst", agent_id))
+                    };
+                    
+                    info!("Initializing operation logger: {}", op_log_path.display());
+                    if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
+                        error!("Failed to initialize operation logger: {}", e);
+                    }
+                }
+                
+                // Override config.duration with stage duration
+                config.duration = *duration;
+                
+                // Run workload
+                match sai3_bench::workload::run(&config, tree_manifest.clone()).await {
+                    Ok(_summary) => {
+                        info!("Execute stage complete");
+                        
+                        // Finalize oplog
+                        if final_op_log_path.is_some() || agent_op_log_path.is_some() {
+                            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
+                                error!("Failed to finalize operation logger: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("Execute stage '{}' failed: {}", stage.name, e));
+                    }
+                }
+            }
+            
+            sai3_bench::config::StageSpecificConfig::Cleanup { .. } => {
+                info!("Executing CLEANUP stage: {}", stage.name);
+                
+                use sai3_bench::live_stats::WorkloadStage;
+                tracker.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
+                
+                if let Some(ref prepare_config) = config.prepare {
+                    let cleanup_mode = prepare_config.cleanup_mode;
+                    
+                    if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
+                        &prepared_objects,
+                        tree_manifest.as_ref(),
+                        agent_index,
+                        num_agents,
+                        cleanup_mode,
+                        Some(tracker.clone()),
+                    ).await {
+                        return Err(format!("Cleanup stage '{}' failed: {}", stage.name, e));
+                    }
+                    
+                    info!("Cleanup stage complete");
+                } else {
+                    warn!("CLEANUP stage '{}' configured but config.prepare is None", stage.name);
+                }
+            }
+            
+            sai3_bench::config::StageSpecificConfig::Custom { command, args } => {
+                info!("Executing CUSTOM stage: {} (command: {} {:?})", stage.name, command, args);
+                
+                use sai3_bench::live_stats::WorkloadStage;
+                tracker.set_stage(WorkloadStage::Custom, 0);
+                
+                // Execute custom command
+                let output = tokio::process::Command::new(command)
+                    .args(args)
+                    .output()
+                    .await
+                    .map_err(|e| format!("Custom command '{}' failed to execute: {}", command, e))?;
+                
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!(
+                        "Custom command '{}' exited with status {}: {}",
+                        command, output.status, stderr
+                    ));
+                }
+                
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stdout.is_empty() {
+                    info!("Custom command output: {}", stdout.trim());
+                }
+                
+                info!("Custom stage complete");
+            }
+            
+            sai3_bench::config::StageSpecificConfig::Hybrid { max_duration, expected_tasks } => {
+                info!("Executing HYBRID stage: {} (max_duration: {:?}, expected_tasks: {:?})", 
+                      stage.name, max_duration, expected_tasks);
+                
+                // Hybrid stage: prepare (if needed) + execute + cleanup (if needed)
+                // For now, just run execute portion with optional duration override
+                use sai3_bench::live_stats::WorkloadStage;
+                tracker.set_stage(WorkloadStage::Workload, expected_tasks.unwrap_or(0) as u64);
+                
+                // Override duration if specified
+                if let Some(duration) = max_duration {
+                    config.duration = *duration;
+                }
+                
+                // Run workload
+                match sai3_bench::workload::run(&config, tree_manifest.clone()).await {
+                    Ok(_summary) => {
+                        info!("Hybrid stage complete");
+                    }
+                    Err(e) => {
+                        return Err(format!("Hybrid stage '{}' failed: {}", stage.name, e));
+                    }
+                }
+            }
+        }
+        
+        // Check completion criteria
+        match stage.completion {
+            sai3_bench::config::CompletionCriteria::Duration => {
+                // Duration-based stages complete naturally via workload::run() timeout
+                info!("Stage '{}' completed via Duration criteria", stage.name);
+            }
+            sai3_bench::config::CompletionCriteria::TasksDone => {
+                // Task-based stages (prepare/cleanup) complete when all tasks finish
+                let snapshot = tracker.snapshot();
+                let total_ops = snapshot.get_ops + snapshot.put_ops + snapshot.meta_ops;
+                info!("Stage '{}' completed via TasksDone criteria ({} ops)", stage.name, total_ops);
+            }
+            sai3_bench::config::CompletionCriteria::ScriptExit => {
+                // Custom stages complete when script exits (already handled above)
+                info!("Stage '{}' completed via ScriptExit criteria", stage.name);
+            }
+            sai3_bench::config::CompletionCriteria::ValidationPassed => {
+                // Validation stages complete when checks pass
+                // For now, assume validation passed if we got here without error
+                info!("Stage '{}' completed via ValidationPassed criteria", stage.name);
+            }
+            sai3_bench::config::CompletionCriteria::DurationOrTasks => {
+                // Hybrid criterion - whichever completes first
+                let snapshot = tracker.snapshot();
+                let total_ops = snapshot.get_ops + snapshot.put_ops + snapshot.meta_ops;
+                info!("Stage '{}' completed via DurationOrTasks criteria ({} ops, {:?} elapsed)", 
+                      stage.name, total_ops, snapshot.elapsed);
+            }
+        }
+        
+        // Transition to ready_for_next=true (at barrier)
+        let ready_state = WorkloadState::AtStage {
+            stage_index,
+            stage_name: stage.name.clone(),
+            ready_for_next: true,
+        };
+        
+        if let Err(e) = agent_state.transition_to(ready_state, &format!("stage {} complete, at barrier", stage.name)).await {
+            error!("Failed to transition to ready state: {}", e);
+            return Err(format!("State transition failed: {}", e));
+        }
+        
+        info!("Stage {}/{} complete, waiting at barrier", stage_index + 1, stages.len());
+        
+        // TODO: Report barrier ready to controller
+        // TODO: Wait for barrier release before proceeding to next stage
+    }
+    
+    // All stages complete - transition to Completed
+    if let Err(e) = agent_state.transition_to(WorkloadState::Completed, "all stages complete").await {
+        error!("Failed to transition to Completed: {}", e);
+    }
+    
+    info!("All {} stages completed successfully", stages.len());
+    
+    // Generate final summary from tracker
+    let snapshot = tracker.snapshot();
+    Ok(sai3_bench::workload::Summary {
+        wall_seconds: snapshot.elapsed.as_secs_f64(),
+        total_ops: snapshot.get_ops + snapshot.put_ops + snapshot.meta_ops,
+        total_bytes: snapshot.get_bytes + snapshot.put_bytes,
+        p50_us: snapshot.get_p50_us,
+        p95_us: snapshot.get_p95_us,
+        p99_us: snapshot.get_p99_us,
+        get: sai3_bench::workload::OpAgg {
+            ops: snapshot.get_ops,
+            bytes: snapshot.get_bytes,
+            mean_us: snapshot.get_mean_us,
+            p50_us: snapshot.get_p50_us,
+            p95_us: snapshot.get_p95_us,
+            p99_us: snapshot.get_p99_us,
+        },
+        put: sai3_bench::workload::OpAgg {
+            ops: snapshot.put_ops,
+            bytes: snapshot.put_bytes,
+            mean_us: snapshot.put_mean_us,
+            p50_us: snapshot.put_p50_us,
+            p95_us: snapshot.put_p95_us,
+            p99_us: snapshot.put_p99_us,
+        },
+        meta: sai3_bench::workload::OpAgg {
+            ops: snapshot.meta_ops,
+            bytes: 0,
+            mean_us: snapshot.meta_mean_us,
+            p50_us: 0,
+            p95_us: 0,
+            p99_us: 0,
+        },
+        get_bins: Default::default(),
+        put_bins: Default::default(),
+        meta_bins: Default::default(),
+        get_hists: Default::default(),
+        put_hists: Default::default(),
+        meta_hists: Default::default(),
+        total_errors: 0,
+        error_rate: 0.0,
+        endpoint_stats: None,
+    })
 }
 
 /// Convert endpoint stats to proto format (v0.8.22)

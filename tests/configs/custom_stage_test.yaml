@@ -1,0 +1,79 @@
+# Test configuration demonstrating Custom stage
+# Shows: custom shell commands integrated into stage workflow
+
+backend:
+  type: file
+  file:
+    root_path: /tmp/sai3-custom-stage-test
+    use_direct_io: false
+
+objects:
+  count: 50
+  size: 
+    dist: constant
+    bytes: 524288  # 512 KB
+
+distributed:
+  agents:
+    - address: localhost:50051
+      id: agent-1
+  
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: partitioned
+  
+  barrier_sync:
+    enabled: true
+    timeout_seconds: 30
+  
+  stages:
+    # Stage 1: Custom preflight check
+    - name: preflight-check
+      order: 1
+      type: custom
+      command: /bin/sh
+      args: ["-c", "echo 'Preflight check: disk space OK' && df -h /tmp | tail -1"]
+      completion: script_exit
+    
+    # Stage 2: Prepare objects
+    - name: prepare
+      order: 2
+      type: prepare
+      completion: tasks_done
+      expected_objects: 50
+    
+    # Stage 3: Execute workload
+    - name: execute
+      order: 3
+      type: execute
+      duration: 15s
+      completion: duration
+    
+    # Stage 4: Custom validation
+    - name: validate-results
+      order: 4
+      type: custom
+      command: /bin/sh
+      args: ["-c", "echo 'Validation: count files' && ls -1 /tmp/sai3-custom-stage-test | wc -l"]
+      completion: script_exit
+    
+    # Stage 5: Cleanup
+    - name: cleanup
+      order: 5
+      type: cleanup
+      completion: tasks_done
+      expected_objects: 50
+
+prepare:
+  enabled: true
+  cleanup_mode: tolerant
+
+workload:
+  - op: put
+    path: "data/"
+    object_size: 524288  # 512 KB
+    weight: 1
+
+concurrency: 2
+
+duration: 5s  # Overridden by execute stage
