@@ -1388,20 +1388,31 @@ impl BarrierManager {
         
         match self.config.barrier_type {
             BarrierType::AllOrNothing => {
-                if ready_count == alive_count {
-                    BarrierStatus::Ready
-                } else if failed_count > 0 {
+                // Check for failures FIRST - any failure means abort
+                if failed_count > 0 {
                     // Any failure in AllOrNothing mode = abort
                     BarrierStatus::Failed
+                } else if ready_count == alive_count {
+                    // All agents alive and ready
+                    BarrierStatus::Ready
                 } else {
+                    // Waiting for agents to reach barrier
                     BarrierStatus::Waiting
                 }
             }
             
             BarrierType::Majority => {
-                if ready_count > alive_count / 2 {
+                // Check if majority is even possible with current alive count
+                if alive_count <= total_count / 2 {
+                    // Not enough alive agents to ever reach majority
+                    BarrierStatus::Failed
+                } else if ready_count == alive_count && failed_count == 0 {
+                    // All agents ready (no failures)
                     BarrierStatus::Ready
-                } else if alive_count - ready_count < alive_count / 2 {
+                } else if ready_count > total_count / 2 {
+                    // Majority of TOTAL agents ready (some failures but majority achieved)
+                    BarrierStatus::Degraded
+                } else if alive_count - ready_count < (total_count / 2 + 1 - ready_count) {
                     // Not enough agents left to reach majority
                     BarrierStatus::Failed
                 } else {
@@ -1410,12 +1421,17 @@ impl BarrierManager {
             }
             
             BarrierType::BestEffort => {
-                if ready_count == alive_count {
+                if alive_count == 0 {
+                    // All agents dead = failure
+                    BarrierStatus::Failed
+                } else if ready_count == alive_count && failed_count == 0 {
+                    // All agents ready, no failures
                     BarrierStatus::Ready
-                } else if ready_count > 0 && failed_count > 0 {
-                    // Some ready, some failed - proceed with ready ones
+                } else if ready_count > 0 {
+                    // Some ready (possibly with failures) - proceed degraded
                     BarrierStatus::Degraded
                 } else {
+                    // No agents ready yet
                     BarrierStatus::Waiting
                 }
             }
@@ -4538,5 +4554,426 @@ workload:
                       "Agent {} should NOT have all 4 global endpoints!", idx);
         }
     }
-}
 
+    // ============================================================================
+    // BARRIER SYNCHRONIZATION UNIT TESTS (v0.8.25+)
+    // ============================================================================
+    // Comprehensive tests for barrier sync logic, state transitions, error
+    // recovery, retry logic, and different barrier type behaviors.
+    // ============================================================================
+
+    mod barrier_sync_tests {
+        use super::*;
+        use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Import types from outer scope that are defined in controller.rs
+        use crate::{BarrierManager, BarrierStatus};
+        
+        // Import protobuf types (using correct PascalCase names with Phase prefix)
+        use crate::pb::iobench::{PhaseProgress, WorkloadPhase};
+
+        /// Helper: Create a minimal PhaseBarrierConfig for testing
+        fn test_barrier_config(
+            barrier_type: BarrierType,
+            heartbeat_interval: u64,
+            missed_threshold: u32,
+        ) -> PhaseBarrierConfig {
+            PhaseBarrierConfig {
+                barrier_type,
+                heartbeat_interval,
+                missed_threshold,
+                query_timeout: 5,
+                query_retries: 2,
+            }
+        }
+
+    // ============================================================================
+    // BARRIER SYNCHRONIZATION UNIT TESTS (v0.8.25+)
+    // ============================================================================
+    // Comprehensive tests for barrier sync logic, state transitions, error
+    // recovery, retry logic, and different barrier type behaviors.
+    // ============================================================================
+
+    #[cfg(test)]
+    mod barrier_sync_tests {
+        use super::*;
+        use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        /// Helper: Create a minimal PhaseBarrierConfig for testing
+        fn test_barrier_config(
+            barrier_type: BarrierType,
+            heartbeat_interval: u64,
+            missed_threshold: u32,
+        ) -> PhaseBarrierConfig {
+            PhaseBarrierConfig {
+                barrier_type,
+                heartbeat_interval,
+                missed_threshold,
+                query_timeout: 5,
+                query_retries: 2,
+            }
+        }
+
+        /// Helper: Create PhaseProgress for testing (matches actual proto structure)
+        fn make_progress(
+            agent_id: &str,
+            phase: WorkloadPhase,
+            completed: bool,
+        ) -> PhaseProgress {
+            PhaseProgress {
+                agent_id: agent_id.to_string(),
+                current_phase: phase as i32,
+                phase_start_time_ms: 0,
+                heartbeat_time_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                objects_created: 100,
+                objects_total: 1000,
+                current_operation: "testing".to_string(),
+                bytes_written: 1024000,
+                errors_encountered: 0,
+                operations_completed: 50,
+                current_throughput: 100.0,
+                phase_elapsed_ms: 5000,
+                objects_deleted: 0,
+                objects_remaining: 900,
+                is_stuck: false,
+                stuck_reason: String::new(),
+                progress_rate: 20.0,
+                phase_completed: completed,
+                at_barrier: completed, // Agents at barrier when phase complete
+            }
+        }
+
+        #[test]
+        fn test_barrier_manager_creation() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            
+            let manager = BarrierManager::new(agent_ids.clone(), config);
+            
+            // Verify initial state
+            assert_eq!(manager.agents.len(), 2);
+            assert!(manager.agents.contains_key("agent1"));
+            assert!(manager.agents.contains_key("agent2"));
+            assert_eq!(manager.ready_agents.len(), 0);
+            assert_eq!(manager.failed_agents.len(), 0);
+        }
+
+        #[test]
+        fn test_heartbeat_processing() {
+            let agent_ids = vec!["agent1".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            let progress = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
+            
+            // Process heartbeat
+            manager.process_heartbeat("agent1", progress.clone());
+            
+            // Verify heartbeat was recorded
+            let heartbeat = manager.agents.get("agent1").unwrap();
+            assert_eq!(heartbeat.missed_count, 0);
+            assert_eq!(heartbeat.is_alive, true);
+            assert!(heartbeat.last_progress.is_some());
+        }
+
+        #[test]
+        fn test_heartbeat_marks_ready_when_completed() {
+            let agent_ids = vec!["agent1".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Send progress with completed=true
+            let progress = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent1", progress);
+            
+            // Verify agent marked as ready
+            assert!(manager.ready_agents.contains("agent1"));
+        }
+
+        #[test]
+        fn test_check_barrier_all_or_nothing_success() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Both agents report ready
+            let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            let progress2 = make_progress("agent2", WorkloadPhase::PhasePrepareReady, true);
+            
+            manager.process_heartbeat("agent1", progress1);
+            manager.process_heartbeat("agent2", progress2);
+            
+            // Check barrier - should be Ready (all agents ready)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Ready);
+        }
+
+        #[test]
+        fn test_check_barrier_all_or_nothing_waiting() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Only agent1 ready, agent2 still preparing
+            let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent1", progress1);
+            
+            // Check barrier - should be Waiting
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Waiting);
+        }
+
+        #[test]
+        fn test_check_barrier_all_or_nothing_failure() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 1, 2);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Agent1 ready, agent2 failed
+            // Current implementation: ready_count (1) == alive_count (1) → Ready (not Failed!)
+            // This is because check_barrier checks `ready_count == alive_count` before `failed_count > 0`
+            // To get Failed, neither agent should be ready yet
+            let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, false); // Not ready
+            manager.process_heartbeat("agent1", progress1);
+            manager.failed_agents.insert("agent2".to_string());
+            
+            // Check barrier - should be Failed (failed_count > 0 and not all alive agents ready)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Failed);
+        }
+
+        #[test]
+        fn test_check_barrier_majority_success_all() {
+            let agent_ids = vec![
+                "agent1".to_string(),
+                "agent2".to_string(),
+                "agent3".to_string(),
+            ];
+            let config = test_barrier_config(BarrierType::Majority, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // All 3 agents ready (> 50%)
+            let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
+            let progress2 = make_progress("agent2", WorkloadPhase::PhaseExecuteReady, true);
+            let progress3 = make_progress("agent3", WorkloadPhase::PhaseExecuteReady, true);
+            
+            manager.process_heartbeat("agent1", progress1);
+            manager.process_heartbeat("agent2", progress2);
+            manager.process_heartbeat("agent3", progress3);
+            
+            // Check barrier - should be Ready (all agents)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Ready);
+        }
+
+        #[test]
+        fn test_check_barrier_majority_degraded() {
+            let agent_ids = vec![
+                "agent1".to_string(),
+                "agent2".to_string(),
+                "agent3".to_string(),
+            ];
+            let config = test_barrier_config(BarrierType::Majority, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // 2 out of 3 agents ready (majority), 1 failed
+            let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
+            let progress2 = make_progress("agent2", WorkloadPhase::PhaseExecuteReady, true);
+            
+            manager.process_heartbeat("agent1", progress1);
+            manager.process_heartbeat("agent2", progress2);
+            manager.failed_agents.insert("agent3".to_string());
+            
+            // Check barrier - should be Degraded (majority achieved but not all)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Degraded);
+        }
+
+        #[test]
+        fn test_check_barrier_majority_failure() {
+            let agent_ids = vec![
+                "agent1".to_string(),
+                "agent2".to_string(),
+                "agent3".to_string(),
+            ];
+            let config = test_barrier_config(BarrierType::Majority, 1, 2);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Only 1 out of 3 ready (not majority), 2 failed
+            let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
+            manager.process_heartbeat("agent1", progress1);
+            manager.failed_agents.insert("agent2".to_string());
+            manager.failed_agents.insert("agent3".to_string());
+            
+            // Check barrier - should be Failed (majority not achieved)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Failed);
+        }
+
+        #[test]
+        fn test_check_barrier_best_effort_success() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::BestEffort, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Both agents ready
+            let progress1 = make_progress("agent1", WorkloadPhase::PhaseCleanupReady, true);
+            let progress2 = make_progress("agent2", WorkloadPhase::PhaseCleanupReady, true);
+            
+            manager.process_heartbeat("agent1", progress1);
+            manager.process_heartbeat("agent2", progress2);
+            
+            // Check barrier - should be Ready
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Ready);
+        }
+
+        #[test]
+        fn test_check_barrier_best_effort_degraded() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::BestEffort, 1, 2);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // One agent ready, one failed
+            let progress1 = make_progress("agent1", WorkloadPhase::PhaseCleanupReady, true);
+            manager.process_heartbeat("agent1", progress1);
+            manager.failed_agents.insert("agent2".to_string());
+            
+            // Check barrier - should be Degraded (BestEffort continues with any alive agent)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Degraded);
+        }
+
+        #[test]
+        fn test_check_barrier_best_effort_all_dead_failure() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::BestEffort, 1, 2);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // All agents failed
+            manager.failed_agents.insert("agent1".to_string());
+            manager.failed_agents.insert("agent2".to_string());
+            
+            // Check barrier - should be Failed (no agents alive)
+            let status = manager.check_barrier();
+            assert_eq!(status, BarrierStatus::Failed);
+        }
+
+        #[test]
+        fn test_barrier_status_equality() {
+            assert_eq!(BarrierStatus::Ready, BarrierStatus::Ready);
+            assert_eq!(BarrierStatus::Waiting, BarrierStatus::Waiting);
+            assert_eq!(BarrierStatus::Degraded, BarrierStatus::Degraded);
+            assert_eq!(BarrierStatus::Failed, BarrierStatus::Failed);
+            
+            assert_ne!(BarrierStatus::Ready, BarrierStatus::Waiting);
+            assert_ne!(BarrierStatus::Degraded, BarrierStatus::Failed);
+        }
+
+        #[test]
+        fn test_phase_progress_creation() {
+            let progress = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
+            
+            assert_eq!(progress.agent_id, "agent1");
+            assert_eq!(progress.current_phase, WorkloadPhase::PhasePreparing as i32);
+            assert_eq!(progress.phase_completed, false);
+            assert_eq!(progress.at_barrier, false);
+            assert_eq!(progress.objects_created, 100);
+            assert_eq!(progress.operations_completed, 50);
+        }
+
+        #[test]
+        fn test_multiple_heartbeat_updates() {
+            let agent_ids = vec!["agent1".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Send multiple heartbeats with progress
+            let progress1 = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
+            manager.process_heartbeat("agent1", progress1);
+            assert_eq!(manager.ready_agents.len(), 0); // Not ready yet
+            
+            let progress2 = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
+            manager.process_heartbeat("agent1", progress2);
+            assert_eq!(manager.ready_agents.len(), 0); // Still not ready
+            
+            let progress3 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent1", progress3);
+            assert_eq!(manager.ready_agents.len(), 1); // Now ready!
+            
+            // Verify agent is in ready set
+            assert!(manager.ready_agents.contains("agent1"));
+        }
+
+        #[test]
+        fn test_barrier_config_defaults() {
+            // Verify config values are set correctly
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            
+            assert_eq!(config.heartbeat_interval, 5);
+            assert_eq!(config.missed_threshold, 3);
+            assert_eq!(config.query_timeout, 5);
+            assert_eq!(config.query_retries, 2);
+        }
+
+        #[test]
+        fn test_workload_phase_enum_values() {
+            // Verify WorkloadPhase enum values are sequential (with Phase prefix)
+            assert_eq!(WorkloadPhase::PhaseIdle as i32, 0);
+            assert_eq!(WorkloadPhase::PhaseValidating as i32, 1);
+            assert_eq!(WorkloadPhase::PhasePrepareReady as i32, 2);
+            assert_eq!(WorkloadPhase::PhasePreparing as i32, 3);
+            assert_eq!(WorkloadPhase::PhaseExecuteReady as i32, 4);
+            assert_eq!(WorkloadPhase::PhaseExecuting as i32, 5);
+            assert_eq!(WorkloadPhase::PhaseCleanupReady as i32, 6);
+            assert_eq!(WorkloadPhase::PhaseCleaning as i32, 7);
+            assert_eq!(WorkloadPhase::PhaseCompleted as i32, 8);
+            assert_eq!(WorkloadPhase::PhaseFailed as i32, 9);
+            assert_eq!(WorkloadPhase::PhaseAborting as i32, 10);
+        }
+
+        #[test]
+        fn test_ready_agents_persist_across_heartbeats() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Agent1 reaches barrier
+            let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent1", progress1);
+            assert!(manager.ready_agents.contains("agent1"));
+            
+            // Agent1 sends another heartbeat (still at barrier)
+            let progress1_again = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent1", progress1_again);
+            assert!(manager.ready_agents.contains("agent1")); // Still ready
+            
+            // Agent2 now ready
+            let progress2 = make_progress("agent2", WorkloadPhase::PhasePrepareReady, true);
+            manager.process_heartbeat("agent2", progress2);
+            
+            // Both should be ready
+            assert_eq!(manager.ready_agents.len(), 2);
+            assert_eq!(manager.check_barrier(), BarrierStatus::Ready);
+        }
+
+        #[test]
+        fn test_barrier_type_configurations() {
+            // Test that each barrier type is configured correctly
+            let config_all = test_barrier_config(BarrierType::AllOrNothing, 10, 5);
+            assert!(matches!(config_all.barrier_type, BarrierType::AllOrNothing));
+            
+            let config_maj = test_barrier_config(BarrierType::Majority, 15, 4);
+            assert!(matches!(config_maj.barrier_type, BarrierType::Majority));
+            
+            let config_best = test_barrier_config(BarrierType::BestEffort, 20, 3);
+            assert!(matches!(config_best.barrier_type, BarrierType::BestEffort));
+        }
+    }
+}
+}
