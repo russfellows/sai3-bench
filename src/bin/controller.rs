@@ -1232,6 +1232,23 @@ struct BarrierManager {
     barrier_start: Instant,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
+    /// v0.8.26: Per-barrier tracking for named barriers (stage_X, etc.)
+    barrier_agents: HashMap<String, BarrierState>,
+}
+
+/// v0.8.26: State tracking for a specific named barrier
+#[derive(Debug, Default)]
+struct BarrierState {
+    ready_agents: HashMap<String, u32>,  // agent_id -> barrier_sequence
+    released: bool,
+}
+
+/// v0.8.26: Information about a barrier ready for release
+#[derive(Debug)]
+struct BarrierReleaseInfo {
+    barrier_name: String,
+    barrier_sequence: u32,
+    ready_agents: Vec<String>,
 }
 
 impl BarrierManager {
@@ -1254,6 +1271,7 @@ impl BarrierManager {
             barrier_start: Instant::now(),
             ready_agents: HashSet::new(),
             failed_agents: HashSet::new(),
+            barrier_agents: HashMap::new(),  // v0.8.26: Per-barrier tracking
         }
     }
     
@@ -1531,6 +1549,80 @@ impl BarrierManager {
             }
         }
     }
+    
+    /// v0.8.26: Mark agent as ready at a specific named barrier
+    fn agent_at_barrier(&mut self, agent_id: &str, barrier_name: &str, barrier_sequence: u32) {
+        let barrier_state = self.barrier_agents
+            .entry(barrier_name.to_string())
+            .or_default();
+        
+        // Only update if this is a newer sequence number or agent not yet tracked
+        let should_update = match barrier_state.ready_agents.get(agent_id) {
+            Some(&existing_seq) => barrier_sequence > existing_seq,
+            None => true,
+        };
+        
+        if should_update {
+            barrier_state.ready_agents.insert(agent_id.to_string(), barrier_sequence);
+            debug!("Barrier '{}': agent {} ready (sequence {}), total {}/{} ready",
+                   barrier_name, agent_id, barrier_sequence,
+                   barrier_state.ready_agents.len(), self.agents.len());
+        }
+    }
+    
+    /// v0.8.26: Check if a barrier can be released based on barrier policy
+    /// Returns release info if barrier is ready, None otherwise
+    fn check_barrier_ready(&self, barrier_name: &str) -> Option<BarrierReleaseInfo> {
+        let barrier_state = self.barrier_agents.get(barrier_name)?;
+        
+        // Don't release already-released barriers
+        if barrier_state.released {
+            return None;
+        }
+        
+        let ready_count = barrier_state.ready_agents.len();
+        let total_count = self.agents.len();
+        let failed_count = self.failed_agents.len();
+        let alive_count = total_count - failed_count;
+        
+        let can_release = match self.config.barrier_type {
+            BarrierType::AllOrNothing => {
+                // All alive agents must be ready
+                failed_count == 0 && ready_count == alive_count
+            }
+            BarrierType::Majority => {
+                // More than half of total agents must be ready
+                ready_count > total_count / 2
+            }
+            BarrierType::BestEffort => {
+                // All alive agents ready (proceed with whatever we have)
+                ready_count == alive_count && alive_count > 0
+            }
+        };
+        
+        if can_release {
+            // Find the minimum barrier sequence among ready agents
+            let min_sequence = barrier_state.ready_agents.values().copied().min().unwrap_or(0);
+            
+            let ready_agents: Vec<String> = barrier_state.ready_agents.keys().cloned().collect();
+            
+            Some(BarrierReleaseInfo {
+                barrier_name: barrier_name.to_string(),
+                barrier_sequence: min_sequence,
+                ready_agents,
+            })
+        } else {
+            None
+        }
+    }
+    
+    /// v0.8.26: Clear a barrier after release (prevent re-release)
+    fn clear_barrier(&mut self, barrier_name: &str) {
+        if let Some(barrier_state) = self.barrier_agents.get_mut(barrier_name) {
+            barrier_state.released = true;
+            info!("Barrier '{}' cleared (will not release again)", barrier_name);
+        }
+    }
 }
 
 // ============================================================================
@@ -1726,6 +1818,10 @@ async fn run_distributed_workload(
     //   - Guarantees: tracker.touch() happens immediately, agents never timeout due to slow processing
     let (tx_stats, mut rx_stats) = tokio::sync::mpsc::unbounded_channel::<LiveStats>();
     
+    // v0.8.26: Broadcast channel for sending control messages (like RELEASE_BARRIER) to all agents
+    // Each agent task subscribes and filters for its agent_id
+    let (tx_control_broadcast, _rx_control_broadcast) = tokio::sync::broadcast::channel::<ControlMessage>(64);
+    
     // v0.8.7: Calculate num_agents once outside the loop (avoid borrowing agent_addrs in async tasks)
     let num_agents = agent_addrs.len() as u32;
     
@@ -1845,6 +1941,8 @@ async fn run_distributed_workload(
         let domain = agent_domain.to_string();
         let shared = is_shared_storage;
         let tx = tx_stats.clone();  // v0.7.6: Clone sender for this task
+        let mut rx_control_broadcast = tx_control_broadcast.subscribe();  // v0.8.26: For barrier release
+        let agent_id_for_task = agent_id.clone();  // v0.8.26: For filtering broadcast messages
 
         let handle = tokio::spawn(async move {
             debug!("Connecting to agent at {}", addr);
@@ -1879,6 +1977,8 @@ async fn run_distributed_workload(
                 ack_sequence: 0,
                 agent_index: idx as u32,  // v0.8.7: For distributed cleanup
                 num_agents,               // v0.8.7: For distributed cleanup
+                barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                barrier_sequence: 0,
             };
             
             if let Err(e) = tx_control.send(config_msg).await {
@@ -1946,6 +2046,8 @@ async fn run_distributed_workload(
                 ack_sequence: 0,
                 agent_index: idx as u32,  // v0.8.7: Redundant but consistent
                 num_agents,               // v0.8.7: Redundant but consistent
+                barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                barrier_sequence: 0,
             };
             
             if let Err(e) = tx_control.send(start_msg).await {
@@ -1956,16 +2058,59 @@ async fn run_distributed_workload(
             
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
+            let tx_control_for_loop = tx_control.clone();  // v0.8.26: Clone for use in loop
             let stream_result: Result<(), anyhow::Error> = async {
-                while let Some(stats_result) = stream.message().await? {
-                    stats_count += 1;
-                    debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
-                           stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
-                           stats_result.get_bytes + stats_result.put_bytes);
-                    // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
-                    if let Err(e) = tx.send(stats_result) {
-                        error!("Failed to forward stats from agent {}: {}", addr, e);
-                        break;
+                loop {
+                    tokio::select! {
+                        // Receive stats from agent stream
+                        msg_result = stream.message() => {
+                            match msg_result {
+                                Ok(Some(stats_result)) => {
+                                    stats_count += 1;
+                                    debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
+                                           stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
+                                           stats_result.get_bytes + stats_result.put_bytes);
+                                    // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
+                                    if let Err(e) = tx.send(stats_result) {
+                                        error!("Failed to forward stats from agent {}: {}", addr, e);
+                                        break;
+                                    }
+                                }
+                                Ok(None) => {
+                                    // Stream ended normally
+                                    debug!("Agent {} stream ended normally", addr);
+                                    break;
+                                }
+                                Err(e) => {
+                                    return Err(anyhow::anyhow!("Stream error: {}", e));
+                                }
+                            }
+                        }
+                        
+                        // v0.8.26: Receive control messages from broadcast (e.g., RELEASE_BARRIER)
+                        control_result = rx_control_broadcast.recv() => {
+                            match control_result {
+                                Ok(control_msg) => {
+                                    // Check if this message is for us or broadcast to all
+                                    if control_msg.agent_id.is_empty() || control_msg.agent_id == agent_id_for_task {
+                                        debug!("Agent {} forwarding control message: command={}", 
+                                               agent_id_for_task, control_msg.command);
+                                        if let Err(e) = tx_control_for_loop.send(control_msg).await {
+                                            warn!("Failed to forward control message to agent {}: {}", 
+                                                  agent_id_for_task, e);
+                                        }
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!("Agent {} broadcast receiver lagged by {} messages", 
+                                          agent_id_for_task, n);
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    debug!("Broadcast channel closed for agent {}", agent_id_for_task);
+                                    // Don't break - just stop listening for broadcasts
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -2000,6 +2145,10 @@ async fn run_distributed_workload(
                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                     // v0.8.14: Concurrency (0 for error messages)
                     concurrency: 0,
+                    // v0.8.26: Barrier coordination
+                    at_barrier: false,
+                    barrier_name: String::new(),
+                    barrier_sequence: 0,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
@@ -2436,9 +2585,53 @@ async fn run_distributed_workload(
                                     stats.stage_progress_current as f64 / stats.stage_elapsed_s
                                 } else { 0.0 },
                                 phase_completed: stats.completed,
-                                at_barrier: false,  // Will be set by BarrierManager when agent reaches barrier
+                                at_barrier: stats.at_barrier,  // v0.8.26: Use barrier status from agent
                             };
                             bm.process_heartbeat(&stats.agent_id, phase_progress);
+                            
+                            // v0.8.26: Check if agent is at barrier and track for barrier release
+                            if stats.at_barrier && !stats.barrier_name.is_empty() {
+                                debug!("Agent {} at barrier '{}' (sequence {})",
+                                       stats.agent_id, stats.barrier_name, stats.barrier_sequence);
+                                
+                                // Mark agent as ready for this specific barrier
+                                bm.agent_at_barrier(
+                                    &stats.agent_id,
+                                    &stats.barrier_name,
+                                    stats.barrier_sequence
+                                );
+                                
+                                // Check if barrier can be released
+                                if let Some(barrier_info) = bm.check_barrier_ready(&stats.barrier_name) {
+                                    info!("Barrier '{}' satisfied with {} agents ready - sending RELEASE_BARRIER",
+                                          stats.barrier_name, barrier_info.ready_agents.len());
+                                    
+                                    // Send RELEASE_BARRIER to all agents via broadcast
+                                    // Each agent task filters for messages matching its agent_id
+                                    for agent_id in &barrier_info.ready_agents {
+                                        let release_msg = pb::iobench::ControlMessage {
+                                            command: pb::iobench::control_message::Command::ReleaseBarrier as i32,
+                                            config_yaml: String::new(),
+                                            ack_sequence: 0,
+                                            agent_id: agent_id.clone(),  // Specific agent
+                                            path_prefix: String::new(),
+                                            shared_storage: false,
+                                            start_timestamp_ns: 0,
+                                            agent_index: 0,
+                                            num_agents: 0,
+                                            barrier_name: barrier_info.barrier_name.clone(),
+                                            barrier_sequence: barrier_info.barrier_sequence,
+                                        };
+                                        // Use broadcast - all agent tasks receive, but only matching one forwards
+                                        if let Err(e) = tx_control_broadcast.send(release_msg) {
+                                            warn!("Failed to broadcast RELEASE_BARRIER for agent {}: {}", agent_id, e);
+                                        }
+                                    }
+                                    
+                                    // Clear the barrier after releasing
+                                    bm.clear_barrier(&stats.barrier_name);
+                                }
+                            }
                         }
                         
                         // v0.8.2: Agent recovery from Disconnected state

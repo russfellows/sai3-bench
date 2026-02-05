@@ -21,6 +21,7 @@ use pb::iobench::{
     Empty, LiveStats, OpSummary, PingReply, PreFlightRequest, PreFlightResponse,
     RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary,
     ControlMessage, ValidationResult, ResultLevel, ErrorType,
+    BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse,
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -185,6 +186,20 @@ impl Agent for MockAgent {
         &self,
         _request: tonic::Request<tonic::Streaming<ControlMessage>>,
     ) -> Result<tonic::Response<Self::ExecuteWorkloadStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented in test"))
+    }
+
+    async fn report_barrier_ready(
+        &self,
+        _request: tonic::Request<BarrierRequest>,
+    ) -> Result<tonic::Response<BarrierResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented in test"))
+    }
+
+    async fn query_agent_status(
+        &self,
+        _request: tonic::Request<AgentQueryRequest>,
+    ) -> Result<tonic::Response<AgentQueryResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("not implemented in test"))
     }
 }

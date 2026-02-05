@@ -37,6 +37,7 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
             dir_mask: "test.d%d_w%d.dir".to_string(),
         }),
         skip_verification: false,  // Need to LIST to determine which objects to create
+        force_overwrite: false,    // v0.8.26: Add missing field
         post_prepare_delay: 0,
         cleanup: true,
         cleanup_mode: CleanupMode::Tolerant,
@@ -79,7 +80,6 @@ async fn test_distributed_prepare_no_overlap() {
         4,
         0,
         num_agents,
-            true,  // shared_storage
         true,  // shared_storage: agents coordinate
     ).await.unwrap();
     
@@ -93,7 +93,6 @@ async fn test_distributed_prepare_no_overlap() {
         4,
         1,
         num_agents,
-            true,  // shared_storage
         true,  // shared_storage: agents coordinate
     ).await.unwrap();
     
@@ -135,7 +134,6 @@ async fn test_distributed_prepare_complete_coverage() {
             4,
             agent_id,
             num_agents,
-            true,  // shared_storage
             true,  // shared_storage: agents coordinate to avoid overlap
         ).await.unwrap();
         

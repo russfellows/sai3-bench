@@ -128,6 +128,8 @@ struct AgentState {
     shared_storage: Arc<Mutex<Option<bool>>>,
     /// v0.8.26: YAML-driven stage sequence (optional - uses hardcoded states if None)
     stages: Arc<Mutex<Option<Vec<sai3_bench::config::StageConfig>>>>,
+    /// v0.8.26: Barrier release channel - sends (barrier_name, barrier_sequence) when RELEASE_BARRIER received
+    barrier_release_tx: broadcast::Sender<(String, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +176,7 @@ enum WorkloadState {
 impl AgentState {
     fn new(agent_op_log_path: Option<std::path::PathBuf>) -> Self {
         let (abort_tx, _) = broadcast::channel(16);
+        let (barrier_release_tx, _) = broadcast::channel(16);  // v0.8.26: Barrier release notifications
         Self {
             abort_tx,
             state: Arc::new(Mutex::new(WorkloadState::Idle)),
@@ -188,6 +191,7 @@ impl AgentState {
             completion_sent: Arc::new(Mutex::new(false)),
             shared_storage: Arc::new(Mutex::new(None)),
             stages: Arc::new(Mutex::new(None)),
+            barrier_release_tx,
         }
     }
     
@@ -395,6 +399,17 @@ impl AgentState {
     
     async fn get_stages(&self) -> Option<Vec<sai3_bench::config::StageConfig>> {
         self.stages.lock().await.clone()
+    }
+    
+    /// v0.8.26: Subscribe to barrier release notifications
+    fn subscribe_barrier_release(&self) -> broadcast::Receiver<(String, u32)> {
+        self.barrier_release_tx.subscribe()
+    }
+    
+    /// v0.8.26: Notify that a barrier has been released by controller
+    fn notify_barrier_release(&self, barrier_name: String, barrier_sequence: u32) {
+        // Note: send() can fail if no receivers, but that's OK (agent may not be at barrier)
+        let _ = self.barrier_release_tx.send((barrier_name, barrier_sequence));
     }
 }
 
@@ -1452,6 +1467,10 @@ impl Agent for AgentSvc {
                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                     // v0.8.14: Concurrency (not known yet - will be sent with RUNNING messages)
                     concurrency: 0,
+                    // v0.8.26: Barrier coordination
+                    at_barrier: false,
+                    barrier_name: String::new(),
+                    barrier_sequence: 0,
                 };
                 sequence += 1;
                 
@@ -1613,6 +1632,10 @@ impl Agent for AgentSvc {
                                                 stage_elapsed_s: snapshot.stage_elapsed_s,
                                                 // v0.8.14: Concurrency from snapshot
                                                 concurrency: snapshot.concurrency,
+                                                // v0.8.26: Barrier coordination
+                                                at_barrier: false,
+                                                barrier_name: String::new(),
+                                                barrier_sequence: 0,
                                             };
                                             
                                             if tx_stats.send(running_msg).await.is_err() {
@@ -1679,6 +1702,10 @@ impl Agent for AgentSvc {
                                         stage_elapsed_s: snapshot.stage_elapsed_s,
                                         // v0.8.14: Concurrency from snapshot
                                         concurrency: snapshot.concurrency,
+                                        // v0.8.26: Barrier coordination
+                                        at_barrier: false,
+                                        barrier_name: String::new(),
+                                        barrier_sequence: 0,
                                     };
                                     
                                     if tx_stats.send(completed_msg).await.is_err() {
@@ -1731,6 +1758,10 @@ impl Agent for AgentSvc {
                                         current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                         // v0.8.14: Concurrency (0 for error messages)
                                         concurrency: 0,
+                                        // v0.8.26: Barrier coordination
+                                        at_barrier: false,
+                                        barrier_name: String::new(),
+                                        barrier_sequence: 0,
                                     };
                                     
                                     if tx_stats.send(error_msg).await.is_err() {
@@ -1898,6 +1929,10 @@ impl Agent for AgentSvc {
                                 stage_elapsed_s: snapshot.stage_elapsed_s,
                                 // v0.8.14: Concurrency from snapshot
                                 concurrency: snapshot.concurrency,
+                                // v0.8.26: Barrier coordination
+                                at_barrier: false,
+                                barrier_name: String::new(),
+                                barrier_sequence: 0,
                             };
                             sequence += 1;
                             
@@ -1989,6 +2024,10 @@ impl Agent for AgentSvc {
                                             current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                             // v0.8.14: Concurrency (0 for ack messages)
                                             concurrency: 0,
+                                            // v0.8.26: Barrier coordination
+                                            at_barrier: false,
+                                            barrier_name: String::new(),
+                                            barrier_sequence: 0,
                                         };
                                         
                                         if let Err(e) = tx_stats_for_control.send(ack_msg).await {
@@ -2202,6 +2241,7 @@ impl Agent for AgentSvc {
                                     let agent_id_exec = agent_id.clone();
                                     let tx_done_exec = tx_done.clone();
                                     let tx_prepare_exec = tx_prepare.clone();
+                                    let tx_stats_exec = tx_stats_for_control.clone();  // v0.8.26: For barrier coordination
                                     let agent_op_log_path_exec = agent_op_log_path_reader.clone();
                                     let tracker_for_prepare = tracker.clone();
                                     let agent_state_for_task = agent_state_reader.clone();
@@ -2233,6 +2273,7 @@ impl Agent for AgentSvc {
                                                 tracker_for_prepare.clone(),
                                                 tx_done_exec.clone(),
                                                 tx_prepare_exec.clone(),
+                                                tx_stats_exec.clone(),  // v0.8.26: For barrier coordination
                                                 final_op_log_path.clone(),
                                                 agent_op_log_path_exec.clone(),
                                                 agent_id_exec.clone(),
@@ -2669,6 +2710,10 @@ impl Agent for AgentSvc {
                                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                     // v0.8.14: Concurrency (0 for aborted messages)
                                     concurrency: 0,
+                                    // v0.8.26: Barrier coordination
+                                    at_barrier: false,
+                                    barrier_name: String::new(),
+                                    barrier_sequence: 0,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
@@ -2795,6 +2840,10 @@ impl Agent for AgentSvc {
                                     sequence: 0,
                                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                     concurrency: 0,
+                                    // v0.8.26: Barrier coordination
+                                    at_barrier: false,
+                                    barrier_name: String::new(),
+                                    barrier_sequence: 0,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(preflight_msg).await {
@@ -2808,6 +2857,19 @@ impl Agent for AgentSvc {
                             Ok(Command::Acknowledge) => {
                                 debug!("Control reader: Received ACK for sequence {}", control_msg.ack_sequence);
                                 // Controller acknowledged our message - could use this for reliability
+                            }
+                            Ok(Command::ReleaseBarrier) => {
+                                // v0.8.26: Controller releases barrier - agent may proceed to next stage
+                                info!(
+                                    "Control reader: Received RELEASE_BARRIER for '{}' (sequence {})",
+                                    control_msg.barrier_name,
+                                    control_msg.barrier_sequence
+                                );
+                                // Notify the stage execution loop that this barrier is released
+                                agent_state_reader.notify_barrier_release(
+                                    control_msg.barrier_name.clone(),
+                                    control_msg.barrier_sequence,
+                                );
                             }
                             Err(e) => {
                                 warn!("Control reader: Unknown command: {}", e);
@@ -2851,6 +2913,10 @@ impl Agent for AgentSvc {
                                 current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                                 // v0.8.14: Concurrency (0 for error messages)
                                 concurrency: 0,
+                                // v0.8.26: Barrier coordination
+                                at_barrier: false,
+                                barrier_name: String::new(),
+                                barrier_sequence: 0,
                             };
                             
                             let _ = tx_stats_for_control.send(error_msg).await;
@@ -2913,6 +2979,10 @@ impl Agent for AgentSvc {
                         current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                         // v0.8.14: Concurrency (0 for timeout messages)
                         concurrency: 0,
+                        // v0.8.26: Barrier coordination
+                        at_barrier: false,
+                        barrier_name: String::new(),
+                        barrier_sequence: 0,
                     };
                     
                     let _ = tx_stats_for_control.send(timeout_msg).await;
@@ -3021,6 +3091,7 @@ async fn execute_stages_workflow(
     tracker: Arc<sai3_bench::live_stats::LiveStatsTracker>,
     _tx_done: tokio::sync::mpsc::Sender<Result<sai3_bench::workload::Summary, String>>,
     tx_prepare: tokio::sync::mpsc::Sender<sai3_bench::workload::PrepareMetrics>,
+    tx_stats: tokio::sync::mpsc::Sender<LiveStats>,  // v0.8.26: For barrier coordination
     final_op_log_path: Option<std::path::PathBuf>,
     agent_op_log_path: Option<std::path::PathBuf>,
     agent_id: String,
@@ -3275,20 +3346,106 @@ async fn execute_stages_workflow(
         
         info!("Stage {}/{} complete, waiting at barrier", stage_index + 1, stages.len());
         
-        // CRITICAL TODO (Phase 3): Implement barrier coordination
-        // Current limitation: Agents do NOT wait - they proceed immediately to next stage
-        // This means fast agents will race ahead of slow agents (no synchronization)
-        // 
-        // Required implementation:
-        // 1. Send barrier ready notification to controller via control channel
-        // 2. Block here waiting for controller's barrier release signal
-        // 3. Controller must track which agents are ready at which barrier
-        // 4. Controller must implement barrier policy (AllOrNothing/Majority/BestEffort)
-        // 5. Controller sends RELEASE command when barrier criteria met
-        // 
-        // For now, stages execute sequentially per-agent but without cross-agent coordination
-        // This works for single-agent testing but NOT for true distributed execution
-        warn!("BARRIER COORDINATION NOT IMPLEMENTED - agents will not synchronize at stage boundaries");
+        // v0.8.26: Barrier coordination implementation
+        // Phase 3: Wait for controller to release barrier before proceeding to next stage
+        let barrier_name = format!("stage_{}", stage.name);
+        let mut barrier_sequence = 0u32;
+        let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configurable
+        let max_barrier_retries = 5;
+        
+        // Subscribe to barrier release notifications
+        let mut barrier_rx = agent_state.subscribe_barrier_release();
+        
+        // Barrier waiting loop with timeout and retry
+        let mut barrier_released = false;
+        for retry in 0..=max_barrier_retries {
+            if retry > 0 {
+                warn!("Barrier retry {}/{} for '{}' (sequence {})", 
+                      retry, max_barrier_retries, barrier_name, barrier_sequence);
+            }
+            
+            // Send barrier-ready notification to controller via LiveStats
+            let snapshot = tracker.snapshot();
+            let barrier_stats = LiveStats {
+                agent_id: agent_id.clone(),
+                timestamp_s: snapshot.elapsed.as_secs_f64(),
+                elapsed_s: snapshot.elapsed.as_secs_f64(),
+                status: 2,  // RUNNING
+                at_barrier: true,
+                barrier_name: barrier_name.clone(),
+                barrier_sequence,
+                // Include current stats
+                get_ops: snapshot.get_ops,
+                get_bytes: snapshot.get_bytes,
+                put_ops: snapshot.put_ops,
+                put_bytes: snapshot.put_bytes,
+                meta_ops: snapshot.meta_ops,
+                // Fill remaining fields from tracker
+                ..Default::default()
+            };
+            
+            if let Err(e) = tx_stats.send(barrier_stats).await {
+                warn!("Failed to send barrier notification: {} - controller may have disconnected", e);
+                // Don't fail immediately - controller might reconnect
+            }
+            
+            debug!("Sent barrier notification for '{}' (sequence {}), waiting for release...",
+                   barrier_name, barrier_sequence);
+            
+            // Wait for barrier release with timeout
+            let wait_result = tokio::time::timeout(barrier_timeout, async {
+                loop {
+                    match barrier_rx.recv().await {
+                        Ok((name, seq)) => {
+                            // Check if this release matches our barrier
+                            if name == barrier_name && seq >= barrier_sequence {
+                                return Ok(());
+                            }
+                            // Received release for different barrier - keep waiting
+                            debug!("Received barrier release for '{}' seq {} (waiting for '{}' seq {})",
+                                   name, seq, barrier_name, barrier_sequence);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Barrier receiver lagged by {} messages", n);
+                            // Continue waiting
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err("Barrier channel closed - agent shutting down");
+                        }
+                    }
+                }
+            }).await;
+            
+            match wait_result {
+                Ok(Ok(())) => {
+                    info!("Barrier '{}' released (sequence {}), proceeding to next stage",
+                          barrier_name, barrier_sequence);
+                    barrier_released = true;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    warn!("Barrier wait error: {}", e);
+                    // Channel closed - likely shutting down
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - increment sequence and retry
+                    barrier_sequence += 1;
+                    warn!("Barrier '{}' timeout ({}s), incrementing to sequence {}",
+                          barrier_name, barrier_timeout.as_secs(), barrier_sequence);
+                }
+            }
+        }
+        
+        if !barrier_released {
+            // All retries exhausted - this is a critical failure
+            error!("Barrier '{}' not released after {} retries - aborting workload",
+                   barrier_name, max_barrier_retries);
+            return Err(format!(
+                "Barrier coordination failed: '{}' not released after {}s x {} retries. Controller may be unresponsive.",
+                barrier_name, barrier_timeout.as_secs(), max_barrier_retries
+            ));
+        }
     }
     
     // All stages complete - transition to Completed
@@ -3931,17 +4088,18 @@ mod tests {
         
         // Invalid transitions that should return false
         assert!(!AgentState::can_transition(&Idle, &Running));      // Must go through Ready
-        assert!(!AgentState::can_transition(&Idle, &Aborting));     // Can't abort from Idle
         assert!(!AgentState::can_transition(&Ready, &Failed));      // Ready should go to Running or Idle
-        assert!(!AgentState::can_transition(&Ready, &Aborting));    // Can't abort from Ready
         assert!(!AgentState::can_transition(&Failed, &Running));    // Can't run from Failed
         assert!(!AgentState::can_transition(&Failed, &Ready));      // Can't ready from Failed
         assert!(!AgentState::can_transition(&Aborting, &Running));  // Can't resume from Aborting
         assert!(!AgentState::can_transition(&Aborting, &Failed));   // Aborting goes to Idle only
+        
+        // Note: (_, Aborting) wildcard allows abort from ANY state (intentional for distributed abort)
+        // So Idle->Aborting and Ready->Aborting are now VALID transitions
     }
     
     #[test]
-    fn test_can_transition_all_same_state_except_running_ready_aborting() {
+    fn test_can_transition_all_same_state_except_running_ready() {
         use WorkloadState::*;
         
         // These same-state transitions are explicitly allowed as no-ops
@@ -3952,7 +4110,9 @@ mod tests {
         // (but transition_to() handles them as no-ops anyway)
         assert!(!AgentState::can_transition(&Running, &Running));
         assert!(!AgentState::can_transition(&Ready, &Ready));
-        assert!(!AgentState::can_transition(&Aborting, &Aborting));
+        
+        // Note: Aborting->Aborting is now valid via (_, Aborting) wildcard
+        assert!(AgentState::can_transition(&Aborting, &Aborting));
     }
     
     // ============================================================================

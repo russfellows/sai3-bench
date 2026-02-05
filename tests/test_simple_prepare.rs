@@ -31,7 +31,8 @@ async fn test_single_agent_prepare() {
             use_multi_endpoint: false,
         }],
         directory_structure: None,  // No directory structure - flat files
-        skip_verification: false,  // Enable LIST to test distributed prepare
+        skip_verification: false,
+        force_overwrite: false,  // Enable LIST to test distributed prepare
         post_prepare_delay: 0,
         cleanup: false,
         cleanup_mode: CleanupMode::Tolerant,

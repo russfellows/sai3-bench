@@ -364,6 +364,18 @@ pub struct LiveStats {
     /// META p99 latency (microseconds)
     #[prost(double, tag = "42")]
     pub meta_p99_us: f64,
+    /// v0.8.26: Barrier synchronization fields
+    /// Agent sets these when waiting at a stage barrier
+    ///
+    /// Agent reached barrier, waiting for release
+    #[prost(bool, tag = "43")]
+    pub at_barrier: bool,
+    /// Barrier identifier (e.g., "stage-1-prepare")
+    #[prost(string, tag = "44")]
+    pub barrier_name: ::prost::alloc::string::String,
+    /// Monotonic counter for ordering
+    #[prost(uint32, tag = "45")]
+    pub barrier_sequence: u32,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {
@@ -510,6 +522,15 @@ pub struct ControlMessage {
     pub agent_index: u32,
     #[prost(uint32, tag = "9")]
     pub num_agents: u32,
+    /// v0.8.26: Barrier release coordination
+    /// For RELEASE_BARRIER command: which barrier is being released
+    ///
+    /// e.g., "stage-3-execute" or "prepare"
+    #[prost(string, tag = "10")]
+    pub barrier_name: ::prost::alloc::string::String,
+    /// Monotonic counter for ordering
+    #[prost(uint32, tag = "11")]
+    pub barrier_sequence: u32,
 }
 /// Nested message and enum types in `ControlMessage`.
 pub mod control_message {
@@ -536,6 +557,8 @@ pub mod control_message {
         Acknowledge = 3,
         /// v0.8.23: Run pre-flight validation
         Preflight = 4,
+        /// v0.8.26: Release agents waiting at barrier
+        ReleaseBarrier = 5,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -549,6 +572,7 @@ pub mod control_message {
                 Self::Abort => "ABORT",
                 Self::Acknowledge => "ACKNOWLEDGE",
                 Self::Preflight => "PREFLIGHT",
+                Self::ReleaseBarrier => "RELEASE_BARRIER",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -559,6 +583,7 @@ pub mod control_message {
                 "ABORT" => Some(Self::Abort),
                 "ACKNOWLEDGE" => Some(Self::Acknowledge),
                 "PREFLIGHT" => Some(Self::Preflight),
+                "RELEASE_BARRIER" => Some(Self::ReleaseBarrier),
                 _ => None,
             }
         }

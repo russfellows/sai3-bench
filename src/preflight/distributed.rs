@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use crate::config::{
         Config, DistributedConfig, AgentConfig, MultiEndpointConfig, PrepareConfig, EnsureSpec,
-        FillPattern, TreeCreationMode, PathSelectionStrategy,
+        FillPattern, TreeCreationMode, PathSelectionStrategy, BarrierSyncConfig,
     };
 
     /// Helper to create a minimal Config for testing
@@ -195,6 +195,7 @@ mod tests {
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -254,6 +255,7 @@ mod tests {
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -308,6 +310,7 @@ mod tests {
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -371,6 +374,7 @@ mod tests {
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {

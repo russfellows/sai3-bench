@@ -59,6 +59,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Sequential,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -136,6 +137,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -218,6 +220,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -357,6 +360,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -413,6 +417,7 @@ async fn test_files_created_correctly() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -481,6 +486,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         directory_structure: None,  // No directory tree - test file ordering
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -574,12 +580,13 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Sequential,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     // Test with different concurrency values to verify parameter is accepted
     for concurrency in [1, 16, 32, 64, 128] {
         let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, concurrency, 0).await?;
+        let (objects, _, metrics) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, concurrency, 0, true).await?;
         
         // Verify objects were created
         assert_eq!(objects.len(), 5, "Should create 5 objects with concurrency={}", concurrency);
@@ -613,6 +620,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
         directory_structure: None,
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
+        force_overwrite: false,
     };
     
     // Clean up previous files

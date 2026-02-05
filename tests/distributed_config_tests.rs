@@ -890,7 +890,7 @@ workload:
 
 #[test]
 fn test_serialize_deserialize_round_trip() -> Result<()> {
-    use sai3_bench::config::{DistributedConfig, TreeCreationMode, PathSelectionStrategy, AgentConfig};
+    use sai3_bench::config::{DistributedConfig, TreeCreationMode, PathSelectionStrategy, AgentConfig, BarrierSyncConfig};
     
     let original_dist = DistributedConfig {
         agents: vec![
@@ -914,6 +914,8 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         tree_creation_mode: TreeCreationMode::Concurrent,
         path_selection: PathSelectionStrategy::Partitioned,
         partition_overlap: 0.3,
+        barrier_sync: BarrierSyncConfig::default(),
+        stages: None,
     };
     
     // Serialize to YAML

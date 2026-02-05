@@ -230,6 +230,12 @@ message LiveStats {
   double meta_p50_us = 40;               // META p50 latency (microseconds)
   double meta_p90_us = 41;               // META p90 latency (microseconds)
   double meta_p99_us = 42;               // META p99 latency (microseconds)
+  
+  // v0.8.26: Barrier synchronization fields
+  // Agent sets these when waiting at a stage barrier
+  bool at_barrier = 43;                  // Agent reached barrier, waiting for release
+  string barrier_name = 44;              // Barrier identifier (e.g., "stage-1-prepare")
+  uint32 barrier_sequence = 45;          // Monotonic counter for ordering
 }
 
 service Agent {
@@ -271,6 +277,7 @@ message ControlMessage {
     ABORT = 2;          // Cancel workload immediately
     ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
     PREFLIGHT = 4;      // v0.8.23: Run pre-flight validation
+    RELEASE_BARRIER = 5; // v0.8.26: Release agents waiting at barrier
   }
   Command command = 1;
   
@@ -290,6 +297,11 @@ message ControlMessage {
   // Used for deterministic object distribution: file_idx % num_agents == agent_index
   uint32 agent_index = 8;
   uint32 num_agents = 9;
+  
+  // v0.8.26: Barrier release coordination
+  // For RELEASE_BARRIER command: which barrier is being released
+  string barrier_name = 10;      // e.g., "stage-3-execute" or "prepare"
+  uint32 barrier_sequence = 11;  // Monotonic counter for ordering
 }
 
 // v0.8.23: Pre-flight validation request/response
