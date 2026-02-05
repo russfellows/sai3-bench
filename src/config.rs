@@ -1597,6 +1597,14 @@ pub enum StageSpecificConfig {
         #[serde(default)]
         expected_tasks: Option<usize>,
     },
+    
+    /// Validation stage (pre-flight checks, no workload execution)
+    /// Completes immediately - validation happens at RPC level before stages run
+    Validation {
+        /// Optional timeout for validation (default: 300s)
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// Stage configuration for YAML-driven stage orchestration
@@ -1794,6 +1802,11 @@ impl DistributedConfig {
                         return Err(format!("Hybrid stage '{}' must use DurationOrTasks completion", stage.name));
                     }
                 }
+                StageSpecificConfig::Validation { .. } => {
+                    if !matches!(stage.completion, CompletionCriteria::ValidationPassed) {
+                        return Err(format!("Validation stage '{}' should use ValidationPassed completion", stage.name));
+                    }
+                }
             }
         }
         
@@ -1810,9 +1823,8 @@ impl DistributedConfig {
                 barrier: self.barrier_sync.validation.clone(),
                 timeout_secs: Some(300), // 5 minutes for validation
                 optional: false,
-                config: StageSpecificConfig::Hybrid {
-                    max_duration: Some(std::time::Duration::from_secs(300)),
-                    expected_tasks: None,
+                config: StageSpecificConfig::Validation {
+                    timeout_secs: Some(300),
                 },
             },
             StageConfig {

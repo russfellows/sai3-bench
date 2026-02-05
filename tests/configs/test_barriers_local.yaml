@@ -1,0 +1,71 @@
+# Local test config for barrier synchronization
+# Uses /mnt/scratch with per-agent directories
+#
+# Prerequisites:
+#   mkdir -p /mnt/scratch/agent1-test /mnt/scratch/agent2-test
+#   ./scripts/start_local_agents.sh 2
+#
+# Run:
+#   ./target/release/sai3bench-ctl --config tests/configs/test_barriers_local.yaml
+
+concurrency: 4
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+  
+  ensure_objects:
+    - use_multi_endpoint: true  # Required for isolated mode with per-agent paths
+      count: 100
+      fill: random
+      size: 1MiB
+  
+  cleanup: true
+
+warmup_period: 0s
+duration: 10s
+
+workload:
+  - weight: 100
+    op: get
+    path: "*"
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: exclusive
+  
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+      target_override: "file:///mnt/scratch/agent1-test/"
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/scratch/agent1-test/"
+    - address: "localhost:7762"
+      id: "agent-2"
+      target_override: "file:///mnt/scratch/agent2-test/"
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/scratch/agent2-test/"
+  
+  # ENABLE BARRIER SYNCHRONIZATION
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 5
+    default_missed_threshold: 3
+    default_query_timeout: 5
+    default_query_retries: 1
+    
+    # Override prepare phase to use all_or_nothing (strict synchronization)
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 5
+      missed_threshold: 2
+    
+    # Override execute phase to use majority (tolerate 1 failure out of 2)
+    execute:
+      type: majority
+      heartbeat_interval: 5
+      missed_threshold: 2

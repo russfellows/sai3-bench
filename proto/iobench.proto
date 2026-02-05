@@ -319,6 +319,7 @@ message ControlMessage {
     ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
     PREFLIGHT = 4;      // v0.8.23: Run pre-flight validation
     RELEASE_BARRIER = 5; // v0.8.26: Release agents waiting at barrier
+    GOODBYE = 6;        // v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
   }
   Command command = 1;
   

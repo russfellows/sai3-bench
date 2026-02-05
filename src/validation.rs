@@ -171,6 +171,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             crate::config::StageSpecificConfig::Cleanup { .. } => "CLEANUP",
                             crate::config::StageSpecificConfig::Custom { .. } => "CUSTOM",
                             crate::config::StageSpecificConfig::Hybrid { .. } => "HYBRID",
+                            crate::config::StageSpecificConfig::Validation { .. } => "VALIDATION",
                         };
                         
                         let completion = match stage.completion {
@@ -209,6 +210,11 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                 }
                                 if let Some(tasks) = expected_tasks {
                                     println!("│   Tasks:      {}", tasks);
+                                }
+                            }
+                            crate::config::StageSpecificConfig::Validation { timeout_secs } => {
+                                if let Some(timeout) = timeout_secs {
+                                    println!("│   Timeout:    {}s", timeout);
                                 }
                             }
                         }

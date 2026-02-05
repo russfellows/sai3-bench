@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
-// Import BUCKET_LABELS from constants module
+// Import BUCKET_LABELS and NUM_BUCKETS from constants module
 use sai3_bench::constants::{BUCKET_LABELS, CONTROLLER_PERF_LOG_INTERVAL_MS, CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS};
 // v0.8.15: Performance logging
 use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
@@ -1904,20 +1904,34 @@ async fn run_distributed_workload(
         debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}", 
                idx + 1, agent_id, path_prefix, effective_prefix, agent_addr, is_shared_storage);
         
-        // v0.8.22: Apply per-agent multi_endpoint override if specified
+        // v0.8.22: Apply per-agent multi_endpoint and target overrides if specified
         // This allows static endpoint mapping: each agent uses specific subset of endpoints
         let agent_specific_config = if let Some(ref distributed) = config.distributed {
             if idx < distributed.agents.len() {
-                if let Some(ref agent_multi_ep) = distributed.agents[idx].multi_endpoint {
-                    // Agent has multi_endpoint override - replace global config
+                let agent_cfg = &distributed.agents[idx];
+                let has_multi_ep = agent_cfg.multi_endpoint.is_some();
+                let has_target = agent_cfg.target_override.is_some();
+                
+                if has_multi_ep || has_target {
+                    // Agent has overrides - apply them to config
                     let mut modified_config = config.clone();
-                    modified_config.multi_endpoint = Some(agent_multi_ep.clone());
+                    
+                    // Apply target_override to config.target (v0.8.27+)
+                    if let Some(ref target) = agent_cfg.target_override {
+                        modified_config.target = Some(target.clone());
+                        debug!("Agent {}: Using target_override: {}", agent_id, target);
+                    }
+                    
+                    // Apply multi_endpoint override
+                    if let Some(ref agent_multi_ep) = agent_cfg.multi_endpoint {
+                        modified_config.multi_endpoint = Some(agent_multi_ep.clone());
+                    }
                     
                     // Serialize modified config to YAML
                     match serde_yaml::to_string(&modified_config) {
                         Ok(yaml) => {
-                            debug!("Agent {}: Using per-agent multi_endpoint override ({} endpoints)", 
-                                   agent_id, agent_multi_ep.endpoints.len());
+                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={})", 
+                                   agent_id, has_multi_ep, has_target);
                             yaml
                         }
                         Err(e) => {
@@ -2095,9 +2109,16 @@ async fn run_distributed_workload(
                                     if control_msg.agent_id.is_empty() || control_msg.agent_id == agent_id_for_task {
                                         debug!("Agent {} forwarding control message: command={}", 
                                                agent_id_for_task, control_msg.command);
-                                        if let Err(e) = tx_control_for_loop.send(control_msg).await {
+                                        if let Err(e) = tx_control_for_loop.send(control_msg.clone()).await {
                                             warn!("Failed to forward control message to agent {}: {}", 
                                                   agent_id_for_task, e);
+                                        }
+                                        
+                                        // v0.8.29: If this is GOODBYE, break out of loop after forwarding
+                                        // The agent will close the stream, and we should exit gracefully
+                                        if control_msg.command == pb::iobench::control_message::Command::Goodbye as i32 {
+                                            debug!("Agent {} received GOODBYE - exiting stream loop", agent_id_for_task);
+                                            break;
                                         }
                                     }
                                 }
@@ -2442,8 +2463,8 @@ async fn run_distributed_workload(
     let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
     
     // v0.8.27: Collect per-stage summaries for immediate TSV writing
-    // Key: (stage_index, stage_name), Value: (agents_reported, expected_agents, summaries)
-    let mut stage_summaries: std::collections::HashMap<(u32, String), Vec<StageSummary>> = std::collections::HashMap::new();
+    // Key: (stage_index, stage_name), Value: Vec of (agent_id, summary)
+    let mut stage_summaries: std::collections::HashMap<(u32, String), Vec<(String, StageSummary)>> = std::collections::HashMap::new();
     let mut stages_written: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
     let expected_agents = agent_addrs.len();
     
@@ -2647,10 +2668,10 @@ async fn run_distributed_workload(
                                       stats.agent_id, stage_sum.stage_index, stage_sum.stage_name,
                                       stage_sum.get_ops, stage_sum.put_ops, stage_sum.meta_ops);
                                 
-                                // Collect summaries for this stage
+                                // Collect summaries for this stage (with agent_id for proper attribution)
                                 stage_summaries.entry(stage_key.clone())
                                     .or_insert_with(Vec::new)
-                                    .push(stage_sum);
+                                    .push((stats.agent_id.clone(), stage_sum));
                                 
                                 // Check if all agents have reported for this stage
                                 if let Some(summaries) = stage_summaries.get(&stage_key) {
@@ -3184,33 +3205,64 @@ async fn run_distributed_workload(
         }
     }
     
+    // v0.8.29: Send GOODBYE to all agents before disconnecting
+    // This allows agents to close the gRPC stream gracefully without h2 protocol errors
+    info!("Sending GOODBYE to all agents for graceful disconnect");
+    let goodbye_msg = pb::iobench::ControlMessage {
+        command: pb::iobench::control_message::Command::Goodbye as i32,
+        config_yaml: String::new(),
+        ack_sequence: 0,
+        agent_id: String::new(),  // Empty = broadcast to all agents
+        path_prefix: String::new(),
+        shared_storage: false,
+        start_timestamp_ns: 0,
+        agent_index: 0,
+        num_agents: 0,
+        barrier_name: String::new(),
+        barrier_sequence: 0,
+    };
+    // Broadcast to all agents - each agent task receives and forwards
+    if let Err(e) = tx_control_broadcast.send(goodbye_msg) {
+        debug!("Failed to broadcast GOODBYE (agents may have already disconnected): {}", e);
+    }
+    // Give agents a moment to process GOODBYE and close streams gracefully
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    
     // v0.8.25: Wait for execute barrier if enabled
-    if let Some(ref mut bm) = barrier_manager {
-        if let Some(ref distributed_config) = config.distributed {
-            eprintln!("\n🔄 Workload execution complete - synchronizing agents at barrier...");
-            progress_bar.suspend(|| {
-                eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("execute").barrier_type);
-            });
-            
-            match bm.wait_for_barrier("execute", &agent_clients_map).await {
-                Ok(BarrierStatus::Ready) => {
-                    eprintln!("✅ All agents synchronized at execute barrier\n");
-                }
-                Ok(BarrierStatus::Degraded) => {
-                    eprintln!("⚠️  Execute barrier degraded (some agents failed, continuing)\n");
-                }
-                Ok(BarrierStatus::Failed) => {
-                    error!("❌ Execute barrier failed (insufficient agents ready)");
-                    abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                    anyhow::bail!("Execute barrier failed - aborting workload");
-                }
-                Ok(BarrierStatus::Waiting) => {
-                    warn!("⏳ Execute barrier still waiting (unexpected state)");
-                }
-                Err(e) => {
-                    error!("❌ Execute barrier error: {}", e);
-                    abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                    anyhow::bail!("Execute barrier error: {}", e);
+    // v0.8.28: Skip legacy barrier wait when using YAML-driven stages
+    // (stage barriers are already handled during the main loop)
+    let using_yaml_stages = config.distributed.as_ref()
+        .map(|d| d.barrier_sync.enabled)
+        .unwrap_or(false);
+    
+    if !using_yaml_stages {
+        if let Some(ref mut bm) = barrier_manager {
+            if let Some(ref distributed_config) = config.distributed {
+                eprintln!("\n🔄 Workload execution complete - synchronizing agents at barrier...");
+                progress_bar.suspend(|| {
+                    eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("execute").barrier_type);
+                });
+                
+                match bm.wait_for_barrier("execute", &agent_clients_map).await {
+                    Ok(BarrierStatus::Ready) => {
+                        eprintln!("✅ All agents synchronized at execute barrier\n");
+                    }
+                    Ok(BarrierStatus::Degraded) => {
+                        eprintln!("⚠️  Execute barrier degraded (some agents failed, continuing)\n");
+                    }
+                    Ok(BarrierStatus::Failed) => {
+                        error!("❌ Execute barrier failed (insufficient agents ready)");
+                        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                        anyhow::bail!("Execute barrier failed - aborting workload");
+                    }
+                    Ok(BarrierStatus::Waiting) => {
+                        warn!("⏳ Execute barrier still waiting (unexpected state)");
+                    }
+                    Err(e) => {
+                        error!("❌ Execute barrier error: {}", e);
+                        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                        anyhow::bail!("Execute barrier error: {}", e);
+                    }
                 }
             }
         }
@@ -3272,7 +3324,8 @@ async fn run_distributed_workload(
     println!();
     
     // v0.7.5: Write per-agent results and create consolidated TSV with histogram aggregation
-    if !agent_summaries.is_empty() {
+    // v0.8.29: Skip legacy results.tsv when using YAML stages (per-stage files are written instead)
+    if !agent_summaries.is_empty() && !using_yaml_stages {
         info!("Writing results for {} agents", agent_summaries.len());
         
         // Write per-agent results to agents/{agent-id}/ subdirectory
@@ -3316,13 +3369,16 @@ async fn run_distributed_workload(
         if let Err(e) = print_distributed_results(&agent_summaries, &mut results_dir) {
             error!("Failed to print distributed results: {}", e);
         }
+    } else if using_yaml_stages {
+        info!("Using YAML-driven stages - per-stage TSV files written, skipping legacy results.tsv");
     } else {
         warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
         warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
     }
     
     // v0.7.9: Write per-agent prepare results and create consolidated prepare TSV
-    if !prepare_summaries.is_empty() {
+    // v0.8.29: Skip legacy prepare_results.tsv when using YAML stages
+    if !prepare_summaries.is_empty() && !using_yaml_stages {
         info!("Writing prepare results for {} agents", prepare_summaries.len());
         
         // Write per-agent prepare results to agents/{agent-id}/ subdirectory
@@ -4068,18 +4124,25 @@ fn create_consolidated_prepare_tsv(
 /// Called immediately when all agents report for a stage, ensuring
 /// data is persisted before proceeding to the next stage. This prevents
 /// data loss if a later stage fails.
+///
+/// v0.8.28: Now writes per-bucket rows matching legacy results.tsv format
+/// with size_bucket, bucket_idx, avg_bytes, max_us, etc.
 fn write_stage_summary_tsv(
     path: &std::path::Path,
-    summaries: &[StageSummary],
+    summaries_with_agent: &[(String, StageSummary)],
 ) -> anyhow::Result<()> {
     use hdrhistogram::Histogram;
     use hdrhistogram::serialization::Deserializer;
     use std::fs::File;
     use std::io::Write;
+    use sai3_bench::constants::NUM_BUCKETS;
     
-    if summaries.is_empty() {
+    if summaries_with_agent.is_empty() {
         anyhow::bail!("No stage summaries to write");
     }
+    
+    // Extract just the summaries for aggregate calculations
+    let summaries: Vec<&StageSummary> = summaries_with_agent.iter().map(|(_, s)| s).collect();
     
     let stage_name = &summaries[0].stage_name;
     let stage_type = &summaries[0].stage_type;
@@ -4089,128 +4152,141 @@ fn write_stage_summary_tsv(
           stage_index, stage_name, stage_type, summaries.len());
     
     // Aggregate stats from all agents
-    let total_get_ops: u64 = summaries.iter().map(|s| s.get_ops).sum();
-    let total_get_bytes: u64 = summaries.iter().map(|s| s.get_bytes).sum();
-    let total_put_ops: u64 = summaries.iter().map(|s| s.put_ops).sum();
-    let total_put_bytes: u64 = summaries.iter().map(|s| s.put_bytes).sum();
-    let total_meta_ops: u64 = summaries.iter().map(|s| s.meta_ops).sum();
-    let total_errors: u64 = summaries.iter().map(|s| s.errors).sum();
     let max_wall_seconds = summaries.iter()
         .map(|s| s.wall_seconds)
         .fold(0.0f64, f64::max);
     
-    // Merge histograms for accurate percentile calculation
+    // Define histogram parameters (must match agent configuration)
     const MIN: u64 = 1;
     const MAX: u64 = 3_600_000_000;
     const SIGFIG: u8 = 3;
     
-    let mut get_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
-    let mut put_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
-    let mut meta_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
+    // v0.8.28: Create per-bucket histogram accumulators (9 per op type)
+    let mut get_accumulators = Vec::new();
+    let mut put_accumulators = Vec::new();
+    let mut meta_accumulators = Vec::new();
     
+    for _ in 0..NUM_BUCKETS {
+        get_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+        put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+        meta_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
+    }
+    
+    // Deserialize per-bucket histograms from all agents
     let mut deserializer = Deserializer::new();
     
-    for summary in summaries {
-        // Deserialize and merge GET histogram
+    for summary in &summaries {
+        // Deserialize GET histograms (9 buckets per agent)
         if !summary.histogram_get.is_empty() {
             let mut cursor = std::io::Cursor::new(&summary.histogram_get);
-            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
-                let _ = get_hist.add(hist);
+            for acc in get_accumulators.iter_mut() {
+                if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                    let _ = acc.add(hist);
+                }
             }
         }
         
-        // Deserialize and merge PUT histogram
+        // Deserialize PUT histograms (9 buckets per agent)
         if !summary.histogram_put.is_empty() {
             let mut cursor = std::io::Cursor::new(&summary.histogram_put);
-            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
-                let _ = put_hist.add(hist);
+            for acc in put_accumulators.iter_mut() {
+                if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                    let _ = acc.add(hist);
+                }
             }
         }
         
-        // Deserialize and merge META histogram
+        // Deserialize META histograms (9 buckets per agent)
         if !summary.histogram_meta.is_empty() {
             let mut cursor = std::io::Cursor::new(&summary.histogram_meta);
-            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
-                let _ = meta_hist.add(hist);
+            for acc in meta_accumulators.iter_mut() {
+                if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                    let _ = acc.add(hist);
+                }
             }
         }
     }
     
-    // Calculate percentiles from merged histograms
-    let get_mean = if !get_hist.is_empty() { get_hist.mean() as u64 } else { 0 };
-    let get_p50 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.50) } else { 0 };
-    let get_p90 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.90) } else { 0 };
-    let get_p95 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.95) } else { 0 };
-    let get_p99 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.99) } else { 0 };
+    // Merge size bins from all agents
+    let mut get_bins_list = Vec::new();
+    let mut put_bins_list = Vec::new();
+    let mut meta_bins_list = Vec::new();
     
-    let put_mean = if !put_hist.is_empty() { put_hist.mean() as u64 } else { 0 };
-    let put_p50 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.50) } else { 0 };
-    let put_p90 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.90) } else { 0 };
-    let put_p95 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.95) } else { 0 };
-    let put_p99 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.99) } else { 0 };
+    for summary in &summaries {
+        if let Some(ref bins) = summary.get_bins {
+            get_bins_list.push(proto_to_size_bins(bins));
+        }
+        if let Some(ref bins) = summary.put_bins {
+            put_bins_list.push(proto_to_size_bins(bins));
+        }
+        if let Some(ref bins) = summary.meta_bins {
+            meta_bins_list.push(proto_to_size_bins(bins));
+        }
+    }
     
-    let meta_mean = if !meta_hist.is_empty() { meta_hist.mean() as u64 } else { 0 };
-    let meta_p50 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.50) } else { 0 };
-    let meta_p90 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.90) } else { 0 };
-    let meta_p95 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.95) } else { 0 };
-    let meta_p99 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.99) } else { 0 };
+    let merged_get_bins = merge_size_bins(&get_bins_list);
+    let merged_put_bins = merge_size_bins(&put_bins_list);
+    let merged_meta_bins = merge_size_bins(&meta_bins_list);
     
-    // Calculate throughput
-    let get_iops = if max_wall_seconds > 0.0 { total_get_ops as f64 / max_wall_seconds } else { 0.0 };
-    let put_iops = if max_wall_seconds > 0.0 { total_put_ops as f64 / max_wall_seconds } else { 0.0 };
-    let meta_iops = if max_wall_seconds > 0.0 { total_meta_ops as f64 / max_wall_seconds } else { 0.0 };
-    let get_mbps = if max_wall_seconds > 0.0 { total_get_bytes as f64 / max_wall_seconds / 1048576.0 } else { 0.0 };
-    let put_mbps = if max_wall_seconds > 0.0 { total_put_bytes as f64 / max_wall_seconds / 1048576.0 } else { 0.0 };
+    // Calculate totals from merged bins
+    let total_get_ops: u64 = merged_get_bins.by_bucket.values().map(|(ops, _)| ops).sum();
+    let total_get_bytes: u64 = merged_get_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
+    let total_put_ops: u64 = merged_put_bins.by_bucket.values().map(|(ops, _)| ops).sum();
+    let total_put_bytes: u64 = merged_put_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
+    let total_meta_ops: u64 = merged_meta_bins.by_bucket.values().map(|(ops, _)| ops).sum();
+    let total_meta_bytes: u64 = merged_meta_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
+    let _total_errors: u64 = summaries.iter().map(|s| s.errors).sum();
     
-    // Write TSV file
+    // Write TSV file with legacy per-bucket format
     let file = File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
     
-    // Header
+    // Header comment
     writeln!(writer, "# Stage {} Results: {} ({})", stage_index + 1, stage_name, stage_type)?;
     writeln!(writer, "# Agents: {}", summaries.len())?;
     writeln!(writer, "# Duration: {:.2}s", max_wall_seconds)?;
     writeln!(writer)?;
-    writeln!(writer, "op_type\tops\tbytes\tiops\tmb/s\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\terrors")?;
     
-    // GET row
-    writeln!(writer, "GET\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}",
-             total_get_ops, total_get_bytes, get_iops, get_mbps,
-             get_mean, get_p50, get_p90, get_p95, get_p99, 0)?;
+    // Per-bucket format header (matching legacy results.tsv)
+    writeln!(writer, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
     
-    // PUT row
-    writeln!(writer, "PUT\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}",
-             total_put_ops, total_put_bytes, put_iops, put_mbps,
-             put_mean, put_p50, put_p90, put_p95, put_p99, 0)?;
+    // Collect all rows for sorting by bucket_idx
+    let mut rows: Vec<(usize, String)> = Vec::new();
     
-    // META row
-    writeln!(writer, "META\t{}\t0\t{:.1}\t0.00\t{}\t{}\t{}\t{}\t{}\t{}",
-             total_meta_ops, meta_iops,
-             meta_mean, meta_p50, meta_p90, meta_p95, meta_p99, 0)?;
+    // Per-bucket rows for each operation type
+    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, &merged_get_bins, max_wall_seconds)?;
+    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, &merged_put_bins, max_wall_seconds)?;
+    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, &merged_meta_bins, max_wall_seconds)?;
     
-    // TOTAL row
-    let total_ops = total_get_ops + total_put_ops + total_meta_ops;
-    let total_bytes = total_get_bytes + total_put_bytes;
-    let total_iops = get_iops + put_iops + meta_iops;
-    let total_mbps = get_mbps + put_mbps;
-    writeln!(writer, "TOTAL\t{}\t{}\t{:.1}\t{:.2}\t-\t-\t-\t-\t-\t{}",
-             total_ops, total_bytes, total_iops, total_mbps, total_errors)?;
+    // Aggregate "ALL" rows (bucket_idx 97/98/99 for sorting after per-bucket rows)
+    collect_aggregate_row(&mut rows, "META", 97, &meta_accumulators, total_meta_ops, total_meta_bytes, max_wall_seconds)?;
+    collect_aggregate_row(&mut rows, "GET", 98, &get_accumulators, total_get_ops, total_get_bytes, max_wall_seconds)?;
+    collect_aggregate_row(&mut rows, "PUT", 99, &put_accumulators, total_put_ops, total_put_bytes, max_wall_seconds)?;
     
-    // Per-agent breakdown
+    // Sort by bucket_idx and write
+    rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
+    for (_, row) in rows {
+        writeln!(writer, "{}", row)?;
+    }
+    
+    // Per-agent breakdown (after the main data)
     writeln!(writer)?;
     writeln!(writer, "# Per-Agent Details")?;
-    writeln!(writer, "agent_id\tget_ops\tget_bytes\tput_ops\tput_bytes\tmeta_ops\tduration_s")?;
-    for summary in summaries {
-        // Find agent_id from the enclosing LiveStats - for now use placeholder
-        // TODO: Store agent_id in StageSummary proto
-        writeln!(writer, "agent\t{}\t{}\t{}\t{}\t{}\t{:.2}",
+    writeln!(writer, "agent_id\tget_ops\tget_bytes\tput_ops\tput_bytes\tmeta_ops\tduration_s\terrors")?;
+    for (agent_id, summary) in summaries_with_agent {
+        writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}",
+                 agent_id,
                  summary.get_ops, summary.get_bytes,
                  summary.put_ops, summary.put_bytes,
-                 summary.meta_ops, summary.wall_seconds)?;
+                 summary.meta_ops, summary.wall_seconds,
+                 summary.errors)?;
     }
     
     writer.flush()?;
-    info!("Wrote stage results to: {}", path.display());
+    info!("Wrote stage results to: {} ({} ops, {:.2} MB)",
+          path.display(),
+          total_get_ops + total_put_ops + total_meta_ops,
+          (total_get_bytes + total_put_bytes) as f64 / 1_048_576.0);
     
     Ok(())
 }

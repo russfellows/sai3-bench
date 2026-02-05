@@ -875,10 +875,16 @@ async fn prepare_sequential(
             // Issue #40: skip_verification config option
             // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
             // v0.7.9: Parse filenames to extract indices for gap-filling
-            let (existing_count, existing_indices) = if config.skip_verification {
-                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+            // v0.8.29: Track whether an actual LIST was performed (for accurate log messages)
+            let mut did_list = false;
+            let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist", spec.count);
                 (spec.count, HashSet::new())  // Assume all files exist, no gaps
+            } else if config.force_overwrite {
+                info!("  🔨 force_overwrite enabled - creating all {} objects", spec.count);
+                (0, HashSet::new())  // Assume no files exist, create everything
             } else if tree_manifest.is_some() {
+                did_list = true;
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     shared_store.as_ref().as_ref(),
@@ -900,6 +906,7 @@ async fn prepare_sequential(
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", list_pattern);
+                did_list = true;
                 
                 // Use streaming list for flat mode too
                 let listing_result = list_existing_objects_distributed(
@@ -915,7 +922,10 @@ async fn prepare_sequential(
                 (listing_result.file_count, listing_result.indices)
             };
             
-            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
+            // v0.8.29: Only say "Found" when an actual LIST was done
+            if did_list {
+                info!("  ✓ Listed {} existing {} objects (need {})", existing_count, prefix, spec.count);
+            }
             
             // 2. Calculate how many to create
             let to_create = if existing_count >= spec.count {
@@ -1390,7 +1400,7 @@ async fn prepare_parallel(
                 ""
             };
             
-            info!("Checking{}: {} at {}", pool_desc, spec.count, base_uri);
+            info!("Preparing{}: {} objects at {}", pool_desc, spec.count, base_uri);
             
             // v0.8.22: Multi-endpoint support for prepare phase
             // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
@@ -1429,13 +1439,16 @@ async fn prepare_parallel(
             // v0.8.24: force_overwrite overrides skip_verification to recreate all files
             // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
             // v0.7.9: Parse filenames to extract indices for gap-filling
+            // v0.8.29: Track whether an actual LIST was performed (for accurate log messages)
+            let mut did_list = false;
             let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
-                info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
+                info!("  ⚡ skip_verification enabled - assuming all {} objects exist", spec.count);
                 (spec.count, HashSet::new())  // Assume all files exist, no gaps
             } else if config.force_overwrite {
-                info!("  🔨 force_overwrite enabled - will recreate all {} objects (skipping LIST)", spec.count);
+                info!("  🔨 force_overwrite enabled - creating all {} objects", spec.count);
                 (0, HashSet::new())  // Assume no files exist, create everything
             } else if tree_manifest.is_some() {
+                did_list = true;
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     store.as_ref(),
@@ -1457,6 +1470,7 @@ async fn prepare_parallel(
                 };
                 
                 info!("  [Flat file mode] Listing with pattern: {}", pattern);
+                did_list = true;
                 
                 // Use streaming list for flat mode too
                 let listing_result = list_existing_objects_distributed(
@@ -1472,7 +1486,10 @@ async fn prepare_parallel(
                 (listing_result.file_count, listing_result.indices)
             };
             
-            info!("  ✓ Found {} existing {} objects (need {})", existing_count, prefix, spec.count);
+            // v0.8.29: Only say "Found" when an actual LIST was done
+            if did_list {
+                info!("  ✓ Listed {} existing {} objects (need {})", existing_count, prefix, spec.count);
+            }
             
             // Store existing count and indices for this pool
             let pool_key = (base_uri.clone(), prefix.to_string());

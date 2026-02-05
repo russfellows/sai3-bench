@@ -619,6 +619,8 @@ pub mod control_message {
         Preflight = 4,
         /// v0.8.26: Release agents waiting at barrier
         ReleaseBarrier = 5,
+        /// v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
+        Goodbye = 6,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -633,6 +635,7 @@ pub mod control_message {
                 Self::Acknowledge => "ACKNOWLEDGE",
                 Self::Preflight => "PREFLIGHT",
                 Self::ReleaseBarrier => "RELEASE_BARRIER",
+                Self::Goodbye => "GOODBYE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -644,6 +647,7 @@ pub mod control_message {
                 "ACKNOWLEDGE" => Some(Self::Acknowledge),
                 "PREFLIGHT" => Some(Self::Preflight),
                 "RELEASE_BARRIER" => Some(Self::ReleaseBarrier),
+                "GOODBYE" => Some(Self::Goodbye),
                 _ => None,
             }
         }

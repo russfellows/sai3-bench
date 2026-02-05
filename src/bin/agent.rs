@@ -137,39 +137,50 @@ enum WorkloadState {
     Idle,              // Ready to accept new workload
     
     // YAML-driven stage execution (v0.8.26+)
-    // Replaces hardcoded states below when config.distributed.stages is specified
+    // This is now the ONLY execution model - hardcoded states have been removed
     AtStage {
         stage_index: usize,       // Index in stages array (0-based)
         stage_name: String,       // Stage name from config (e.g., "preflight", "epoch-1")
         ready_for_next: bool,     // true = at barrier, waiting to proceed; false = executing stage
     },
     
+    /* v0.8.29: LEGACY STATES REMOVED - All code must use YAML-driven AtStage
     // Legacy hardcoded states (DEPRECATED - use AtStage for new code)
     // These remain for backward compatibility when config.distributed.stages is None
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     Validating,        // Pre-flight checks running
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     PrepareReady,      // Validation passed, waiting for prepare barrier
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     Preparing,         // Creating/cleaning objects
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     ExecuteReady,      // Prepare complete, waiting for execute barrier
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     Executing,         // Running I/O workload
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     CleanupReady,      // Execution complete, waiting for cleanup barrier
     #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
+    #[allow(dead_code)]  // Reserved for backward compatibility
     Cleaning,          // Removing objects
+    */
     
     Completed,         // All phases done successfully
     Failed,            // Error occurred (backward compat - no error message)
     Aborting,          // Emergency shutdown in progress
     
+    /* v0.8.29: EVEN OLDER LEGACY STATES REMOVED
     // Even older legacy states for backward compatibility (will be phased out)
     // Note: Ready is pattern-matched but not constructed in production code (only in tests)
     #[allow(dead_code)]
     Ready,             // Old: Validated, waiting for coordinated start
     Running,           // Old: Workload executing (maps to Executing)
+    */
 }
 
 
@@ -210,11 +221,30 @@ impl AgentState {
             (AtStage { stage_index: i1, ready_for_next: true, .. }, 
              AtStage { stage_index: i2, ready_for_next: false, .. }) if *i2 == i1 + 1 => return true,
             
-            // Start first stage from Idle
+            // v0.8.28: Validated state (pseudo-stage 0) -> execute first real stage (also index 0)
+            // This handles: "validated" ready -> "preflight" executing (both at index 0)
+            (AtStage { stage_index: 0, ready_for_next: true, stage_name }, 
+             AtStage { stage_index: 0, ready_for_next: false, .. }) if stage_name == "validated" => return true,
+            
+            // Start first stage from Idle (executing mode)
             (Idle, AtStage { stage_index: 0, ready_for_next: false, .. }) => return true,
+            
+            // v0.8.28: Validation complete - ready for first stage barrier
+            // This is used when START handler validates config and sets ready state
+            (Idle, AtStage { stage_index: 0, ready_for_next: true, .. }) => return true,
+            
+            // =========================================================================
+            // LEGACY TRANSITION COMMENTED OUT - v0.8.29 Preparing state removed
+            // =========================================================================
+            // Bridge from old barrier flow to new YAML-driven stages (v0.8.26)
+            // When using stages with barrier_sync, we go Idle→Validating→PrepareReady→Preparing→AtStage
+            // (Preparing, AtStage { stage_index: 0, ready_for_next: false, .. }) => return true,
             
             // Complete final stage -> Completed
             (AtStage { ready_for_next: true, .. }, Completed) => return true,
+            
+            // v0.8.28: Cleanup after disconnect at barrier -> Idle
+            (AtStage { ready_for_next: true, .. }, Idle) => return true,
             
             // Stage error -> Failed
             (AtStage { .. }, Failed) => return true,
@@ -222,9 +252,22 @@ impl AgentState {
             // Abort from any stage
             (AtStage { .. }, Aborting) => return true,
             
-            _ => {}  // Fall through to old state checks
+            // Terminal state transitions
+            (Completed, Idle) => return true,  // Reset for next workload
+            (Failed, Idle) => return true,     // Error recovery
+            
+            // Abort from any state
+            (_, Aborting) => return true,
+            (Aborting, Idle) => return true,   // Cleanup complete after abort
+            
+            // No-op: Idle → Idle for safety
+            (Idle, Idle) => return true,
+            (Failed, Failed) => return true,
+            
+            _ => return false,  // All other transitions invalid
         }
         
+        /* v0.8.29: ALL LEGACY TRANSITIONS REMOVED - Use YAML-driven stages only
         matches!(
             (from, to),
             // Deprecated v0.8.25 barrier sync flow (still supported for backward compat)
@@ -260,6 +303,7 @@ impl AgentState {
             | (Idle, Idle)
             | (Failed, Failed)
         )
+        */
     }
     
     /// Transition to new state with validation and logging
@@ -304,6 +348,8 @@ impl AgentState {
     }
     
     /// Subscribe to abort signals
+    /// TODO: Wire into execute_stages_workflow for proper abort handling
+    #[allow(dead_code)]  // Reserved for abort handling in YAML stage workflow
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
     }
@@ -442,6 +488,32 @@ fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> O
                 .map(std::path::PathBuf::from) {
                 // Return first filesystem endpoint found
                 return Some(path);
+            }
+        }
+    }
+    
+    // Check prepare.ensure_objects[].base_uri (v0.8.26+)
+    if let Some(ref prepare) = config.prepare {
+        for ensure in &prepare.ensure_objects {
+            if let Some(ref base_uri) = ensure.base_uri {
+                if let Some(path) = base_uri.strip_prefix("file://")
+                    .or_else(|| base_uri.strip_prefix("direct://"))
+                    .map(std::path::PathBuf::from) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    
+    // Check distributed.agents[].target_override (v0.8.26+)
+    if let Some(ref distributed) = config.distributed {
+        for agent in &distributed.agents {
+            if let Some(ref target) = agent.target_override {
+                if let Some(fs_path) = target.strip_prefix("file://")
+                    .or_else(|| target.strip_prefix("direct://"))
+                    .map(std::path::PathBuf::from) {
+                    return Some(fs_path);
+                }
             }
         }
     }
@@ -615,6 +687,7 @@ impl Agent for AgentSvc {
                     )
                 }
             },
+            /* v0.8.29: LEGACY STATES REMOVED - These match arms are no longer valid
             WorkloadState::Validating => (
                 WorkloadPhase::PhaseValidating,
                 "Running pre-flight validation".to_string()
@@ -643,6 +716,7 @@ impl Agent for AgentSvc {
                 WorkloadPhase::PhaseCleaning,
                 "Cleaning up objects".to_string()
             ),
+            */
             WorkloadState::Completed => (
                 WorkloadPhase::PhaseCompleted,
                 "All phases completed successfully".to_string()
@@ -656,6 +730,7 @@ impl Agent for AgentSvc {
                 WorkloadPhase::PhaseAborting,
                 "Aborting workload".to_string()
             ),
+            /* v0.8.29: LEGACY STATES REMOVED
             // Legacy states
             WorkloadState::Ready => (
                 WorkloadPhase::PhasePrepareReady,
@@ -665,6 +740,7 @@ impl Agent for AgentSvc {
                 WorkloadPhase::PhaseExecuting,
                 "Running workload (legacy state)".to_string()
             ),
+            */
         };
         
         // Get progress from LiveStatsTracker if available
@@ -701,9 +777,10 @@ impl Agent for AgentSvc {
                 stuck_reason: String::new(),
                 progress_rate: 0.0, // TODO: Calculate from recent progress
                 phase_completed: matches!(current_state, WorkloadState::Completed),
+                // v0.8.29: Detect barrier state from AtStage { ready_for_next: true }
                 at_barrier: matches!(
                     current_state,
-                    WorkloadState::PrepareReady | WorkloadState::ExecuteReady | WorkloadState::CleanupReady
+                    WorkloadState::AtStage { ready_for_next: true, .. }
                 ),
             }),
             is_alive: true,
@@ -1252,10 +1329,8 @@ impl Agent for AgentSvc {
     async fn abort_workload(&self, _req: Request<Empty>) -> Result<Response<Empty>, Status> {
         let current_state = self.state.get_state().await;
         
-        #[allow(deprecated)]  // Still support deprecated states
+        // v0.8.29: Only AtStage is a valid running state now (legacy states removed)
         match current_state {
-            WorkloadState::Running | WorkloadState::Ready | WorkloadState::Executing | 
-            WorkloadState::Preparing | WorkloadState::Cleaning |
             WorkloadState::AtStage { .. } => {  // Can abort from any stage
                 warn!("⚠️  Abort workload requested - sending cancellation signal");
                 
@@ -1288,7 +1363,8 @@ impl Agent for AgentSvc {
                     // Second attempt: retry after 10 more seconds if still in wrong state
                     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     let retry_state = state_for_reset.get_state().await;
-                    if retry_state == WorkloadState::Aborting || retry_state == WorkloadState::Running {
+                    // v0.8.29: Check for Aborting or any AtStage (legacy Running removed)
+                    if retry_state == WorkloadState::Aborting || matches!(retry_state, WorkloadState::AtStage { .. }) {
                         warn!("⚠️  Agent stuck in {:?} state after 15s - forcing reset to Idle", retry_state);
                         // Force transition (may violate state machine, but recovery needed)
                         state_for_reset.set_state(WorkloadState::Idle).await;
@@ -1428,11 +1504,16 @@ impl Agent for AgentSvc {
             tokio::spawn(async move {
                 let mut sequence: i64 = 0;
                 
-                // Wait for START command validation to complete (signaled by transition to PrepareReady)
+                // Wait for START command validation to complete
+                // v0.8.29: Accept AtStage with ready_for_next: true as READY signal (replaces deprecated PrepareReady)
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     let state = agent_state.get_state().await;
-                    if state == WorkloadState::PrepareReady {
+                    let is_validated = match &state {
+                        WorkloadState::AtStage { ready_for_next, .. } => *ready_for_next,
+                        _ => false,
+                    };
+                    if is_validated {
                         break;
                     } else if state == WorkloadState::Failed || state == WorkloadState::Idle {
                         // Validation failed or agent reset - exit early
@@ -1481,20 +1562,36 @@ impl Agent for AgentSvc {
                 }
                 info!("Stats writer: Sent READY message with timestamp {} ns", agent_timestamp_ns);
                 
-                // Wait for workload to start (transition to Running)
+                // Wait for workload to start (transition to Running or AtStage with ready_for_next: false)
                 // Block here - do NOT send any more messages until workload starts
+                // v0.8.28: Add timeout to prevent indefinite waits
+                // v0.8.29: Distinguish AtStage { ready_for_next: true } (waiting) from { ready_for_next: false } (running)
+                const MAX_WAIT_SECS: u32 = 60;  // Timeout after 60 seconds
+                let mut wait_count: u32 = 0;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    wait_count += 1;
+                    
                     let state = agent_state.get_state().await;
-                    if state == WorkloadState::Running {
-                        info!("Stats writer: Workload started, beginning stats transmission");
+                    // v0.8.29: AtStage with ready_for_next: false means actively executing
+                    // AtStage { ready_for_next: true } means waiting at barrier, not yet running
+                    let is_running = matches!(&state, WorkloadState::AtStage { ready_for_next: false, .. });
+                    if is_running {
+                        info!("Stats writer: Workload started (state: {:?}), beginning stats transmission", state);
                         break;
                     } else if state == WorkloadState::Failed || state == WorkloadState::Idle || state == WorkloadState::Aborting {
                         // Workload cancelled or failed before starting
                         info!("Stats writer: Workload cancelled or failed, exiting (state: {:?})", state);
                         return;
+                    } else if wait_count >= MAX_WAIT_SECS {
+                        error!("Stats writer: Timeout waiting for workload to start ({} seconds). Current state: {:?}",
+                               MAX_WAIT_SECS, state);
+                        return;
+                    } else if wait_count % 10 == 0 {
+                        // Log every 10 seconds while waiting
+                        warn!("Stats writer: Still waiting for workload to start ({}s, state: {:?})",
+                              wait_count, state);
                     }
-                    // Still in READY state - keep waiting silently
                 }
                 
                 // Get LiveStatsTracker from state (set during workload spawn)
@@ -1990,12 +2087,20 @@ impl Agent for AgentSvc {
             );
             timeout_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
+            let mut loop_iteration = 0u64;
             loop {
+                loop_iteration += 1;
+                if loop_iteration % 100 == 0 {
+                    debug!("Control reader: loop iteration {} - waiting for messages", loop_iteration);
+                }
                 tokio::select! {
                     // Receive control messages from controller
                     control_msg_result = control_stream.next() => {
+                        debug!("Control reader: Received message from control_stream (iteration {})", loop_iteration);
                         match control_msg_result {
                             Some(Ok(control_msg)) => {
+                                debug!("Control reader: Got command={} barrier_name='{}' barrier_seq={}",
+                                       control_msg.command, control_msg.barrier_name, control_msg.barrier_sequence);
                                 last_message_time = tokio::time::Instant::now();
                                 
                                 match Command::try_from(control_msg.command) {
@@ -2051,14 +2156,8 @@ impl Agent for AgentSvc {
                                 
                                 if current_state == WorkloadState::Idle {
                                     // First START: Validate config and send READY
+                                    // v0.8.29: No longer use deprecated Validating state - validation is synchronous
                                     info!("Control reader: Received initial START command - validating config");
-                                    
-                                    // Transition to Validating state
-                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Validating, "starting validation").await {
-                                        error!("Control reader: Failed to transition to Validating: {}", e);
-                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
-                                        return;
-                                    }
                                     
                                     // Extract config from START message
                                     let config_yaml = control_msg.config_yaml;
@@ -2132,6 +2231,7 @@ impl Agent for AgentSvc {
                                                                 sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
                                                                 sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
                                                                 sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
+                                                                sai3_bench::config::StageSpecificConfig::Validation { .. } => "validation",
                                                             }
                                                         );
                                                     }
@@ -2157,19 +2257,26 @@ impl Agent for AgentSvc {
                                     // Store stages in AgentState for use during execution
                                     agent_state_reader.set_stages(stages).await;
                                     
-                                    // Transition to PrepareReady (validation passed, waiting for prepare barrier)
-                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::PrepareReady, "validation passed").await {
-                                        error!("Control reader: Failed to transition to PrepareReady: {}", e);
+                                    // v0.8.29: Transition to AtStage { ready_for_next: true } to signal READY
+                                    // This replaces deprecated PrepareReady state
+                                    let ready_state = WorkloadState::AtStage {
+                                        stage_index: 0,
+                                        stage_name: "validated".to_string(),
+                                        ready_for_next: true,  // Signals "READY" to stats writer
+                                    };
+                                    if let Err(e) = agent_state_reader.transition_to(ready_state, "validation passed").await {
+                                        error!("Control reader: Failed to transition to validated state: {}", e);
                                         let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
                                         return;
                                     }
                                     
-                                    info!("Control reader: Config validated, agent at prepare barrier - waiting for coordinated START");
+                                    info!("Control reader: Config validated - waiting for coordinated START");
                                     
                                     // Stats writer will send READY message with agent_timestamp_ns
                                     // Controller will calculate clock offset and send second START with start_timestamp_ns
                                     
-                                } else if current_state == WorkloadState::PrepareReady && start_timestamp_ns != 0 {
+                                // v0.8.29: Check for AtStage { ready_for_next: true } instead of deprecated PrepareReady
+                                } else if matches!(current_state, WorkloadState::AtStage { ready_for_next: true, .. }) && start_timestamp_ns != 0 {
                                     // Second START: Coordinated start with timestamp (controller released prepare barrier)
                                     info!("Control reader: Received coordinated START (timestamp: {} ns)", start_timestamp_ns);
                                     
@@ -2195,12 +2302,8 @@ impl Agent for AgentSvc {
                                               (-wait_ns) / 1_000_000);
                                     }
                                     
-                                    // Transition to Preparing (will execute prepare phase first)
-                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Preparing, "coordinated start").await {
-                                        error!("Control reader: Failed to transition to Preparing: {}", e);
-                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
-                                        return;
-                                    }
+                                    // v0.8.29: No transition to deprecated Preparing state
+                                    // The spawned workflow will immediately set its own AtStage state
                                     
                                     // Retrieve stored config from Phase 1 validation
                                     let config_yaml = match agent_state_reader.get_config_yaml().await {
@@ -2253,8 +2356,6 @@ impl Agent for AgentSvc {
                                     let agent_state_for_task = agent_state_reader.clone();
                                     
                                     tokio::spawn(async move {
-                                        // Subscribe to abort signals for this workload
-                                        let mut abort_rx_task = agent_state_for_task.subscribe_abort();
                                         // Wire tracker into config for live stats collection
                                         config_exec.live_stats_tracker = Some(tracker_for_prepare.clone());
                                         
@@ -2293,377 +2394,10 @@ impl Agent for AgentSvc {
                                             return;  // Exit workload task
                                         }
                                         
-                                        info!("Using hardcoded prepare->execute->cleanup flow (DEPRECATED)");
+                                        // YAML stages MUST be configured - error if we reach here
+                                        error!("No stages configured - check yaml config");
+                                        let _ = tx_done_exec.send(Err("No stages configured. Enable barrier_sync to use YAML stages.".to_string())).await;
                                         
-                                        // v0.8.7: Detect cleanup-only mode (ONLY checks cleanup flag)
-                                        let is_cleanup_only = config_exec.prepare.as_ref()
-                                            .map(|p| p.cleanup_only.unwrap_or(false))
-                                            .unwrap_or(false);
-                                        
-                                        // v0.8.11: CRITICAL FIX - Wrap ALL execution in tokio::select! for proper abort handling
-                                        // This ensures the workload task stops immediately when controller disconnects or sends ABORT
-                                        tokio::select! {
-                                            // Abort path: Controller disconnected or sent ABORT command
-                                            _ = abort_rx_task.recv() => {
-                                                warn!("Workload task received abort signal - stopping immediately");
-                                                // Finalize oplog if initialized
-                                                if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                                    if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                        error!("Failed to finalize operation logger during abort: {}", e);
-                                                    }
-                                                }
-                                                let _ = tx_done_exec.send(Err("Aborted by controller".to_string())).await;
-                                            }
-                                            
-                                            // Execution path: Run prepare, workload, and cleanup
-                                            result = async {
-                                        // Execute prepare phase or generate cleanup list
-                                        let (prepared_objects, tree_manifest) = if is_cleanup_only {
-                                            // Cleanup-only mode: Generate list of objects to clean up
-                                            if let Some(ref prepare_config) = config_exec.prepare {
-                                                if prepare_config.skip_verification {
-                                                    // Generate from config without listing
-                                                    info!("Cleanup-only mode (skip_verification=true): Generating object list from config");
-                                                    match sai3_bench::workload::generate_cleanup_objects(prepare_config, agent_index, num_agents) {
-                                                        Ok(objects) => {
-                                                            info!("Generated {} objects for cleanup", objects.len());
-                                                            (objects, None)
-                                                        }
-                                                        Err(e) => {
-                                                            return Err(anyhow::anyhow!("Failed to generate cleanup objects: {}", e));
-                                                        }
-                                                    }
-                                                } else {
-                                                    // List existing objects WITHOUT creating any (use new list_existing_objects function)
-                                                    info!("Cleanup-only mode (skip_verification=false): Listing existing objects only");
-                                                    if num_agents > 1 {
-                                                        warn!("Note: In shared storage mode with {} agents, each will list ALL objects then filter to their subset.", num_agents);
-                                                        warn!("For large datasets (>10k files), strongly recommend skip_verification=true to avoid listing overhead.");
-                                                    }
-                                                    
-                                                    match sai3_bench::cleanup::list_existing_objects(prepare_config, agent_index, num_agents).await {
-                                                        Ok((prepared, manifest)) => {
-                                                            info!("Found {} existing objects to cleanup", prepared.len());
-                                                            (prepared, manifest)
-                                                        }
-                                                        Err(e) => {
-                                                            return Err(anyhow::anyhow!("Failed to list objects: {}", e));
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                (Vec::new(), None)
-                                            }
-                                        } else if let Some(ref prepare_config) = config_exec.prepare {
-                                            // v0.8.9: Set stage to PREPARE for progress display
-                                            {
-                                                use sai3_bench::live_stats::WorkloadStage;
-                                                let expected_objects: u64 = prepare_config.ensure_objects.iter().map(|e| e.count).sum();
-                                                tracker_for_prepare.set_stage(WorkloadStage::Prepare, expected_objects);
-                                            }
-                                            
-                                            // v0.8.22: Create multi-endpoint cache for prepare phase statistics
-                                            use std::sync::{Arc, Mutex};
-                                            use std::collections::HashMap;
-                                            let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
-                                            
-                                            match sai3_bench::workload::prepare_objects(
-                                                prepare_config, 
-                                                Some(&config_exec.workload), 
-                                                Some(tracker_for_prepare.clone()), 
-                                                config_exec.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
-                                                &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
-                                                config_exec.concurrency, 
-                                                agent_index, 
-                                                num_agents,
-                                                shared_storage  // v0.8.24: Only filter by agent_id in shared storage mode
-                                            ).await {
-                                                Ok((prepared, manifest, prepare_metrics)) => {
-                                                    info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
-                                                    
-                                                    // Send prepare metrics to stats writer
-                                                    let _ = tx_prepare_exec.send(prepare_metrics).await;
-                                                    
-                                                    // Reset stats counters before workload
-                                                    tracker_for_prepare.reset_for_workload();
-                                                    
-                                                    // v0.8.25: Transition to ExecuteReady (prepare done, at barrier)
-                                                    if let Err(e) = agent_state_for_task.transition_to(WorkloadState::ExecuteReady, "prepare complete").await {
-                                                        error!("Failed to transition to ExecuteReady: {}", e);
-                                                        return Err(anyhow::anyhow!("State transition failed: {}", e));
-                                                    }
-                                                    
-                                                    // CRITICAL TODO (Phase 3): Implement barrier coordination
-                                                    // Current limitation: Agents do NOT wait at ExecuteReady barrier
-                                                    // See execute_stages_workflow() for full implementation requirements
-                                                    warn!("BARRIER COORDINATION NOT IMPLEMENTED - proceeding without synchronization");
-                                                    
-                                                    // v0.8.25: Transition to Executing (starting execution phase)
-                                                    if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Executing, "starting execution").await {
-                                                        error!("Failed to transition to Executing: {}", e);
-                                                        return Err(anyhow::anyhow!("State transition failed: {}", e));
-                                                    }
-                                                    
-                                                    if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
-                                                        tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
-                                                    }
-                                                    (prepared, manifest)  // Store prepared objects for cleanup
-                                                }
-                                                Err(e) => {
-                                                    return Err(anyhow::anyhow!("Prepare phase failed: {}", e));
-                                                }
-                                            }
-                                        } else {
-                                            (Vec::new(), None)
-                                        };
-                                        
-                                        // Setup operation logger if configured
-                                        if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path_exec.as_ref()) {
-                                            let op_log_path = if let Some(parent) = op_log_base.parent() {
-                                                let filename = op_log_base.file_name()
-                                                    .and_then(|f| f.to_str())
-                                                    .unwrap_or("oplog.tsv.zst");
-                                                let base_name = if filename.ends_with(".tsv.zst") {
-                                                    filename.strip_suffix(".tsv.zst").unwrap()
-                                                } else if filename.ends_with(".tsv") {
-                                                    filename.strip_suffix(".tsv").unwrap()
-                                                } else {
-                                                    filename
-                                                };
-                                                let extension = if filename.ends_with(".tsv.zst") {
-                                                    ".tsv.zst"
-                                                } else if filename.ends_with(".tsv") {
-                                                    ".tsv"
-                                                } else {
-                                                    ""
-                                                };
-                                                parent.join(format!("{}-{}{}", base_name, agent_id_exec, extension))
-                                            } else {
-                                                let filename = op_log_base.file_name()
-                                                    .and_then(|f| f.to_str())
-                                                    .unwrap_or("oplog.tsv.zst");
-                                                std::path::PathBuf::from(format!("{}-{}", filename, agent_id_exec))
-                                            };
-                                            
-                                            info!("Initializing s3dlio operation logger: {}", op_log_path.display());
-                                            if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
-                                                error!("Failed to initialize operation logger: {}", e);
-                                                return Err(anyhow::anyhow!("Failed to initialize oplog: {}", e));
-                                            }
-                                            
-                                            // v0.8.6: Set client_id for this agent
-                                            if let Err(e) = s3dlio::set_client_id(&agent_id_exec) {
-                                                warn!("Failed to set client_id for oplog: {} (continuing anyway)", e);
-                                            } else {
-                                                info!("Set operation logger client_id: {}", agent_id_exec);
-                                            }
-                                            
-                                            // v0.8.6: Set clock offset for synchronized timestamps across agents
-                                            // Controller sends start_timestamp_ns as absolute Unix epoch time
-                                            // Calculate offset: agent_local_time - controller_reference_time
-                                            // This aligns all agent timestamps to controller's reference clock
-                                            let agent_local_time_ns = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_nanos() as i64;
-                                            
-                                            // Clock offset = (agent_time - controller_time)
-                                            // s3dlio will subtract this offset from all logged timestamps
-                                            // Result: all agents log timestamps relative to controller's reference time
-                                            let clock_offset_ns = agent_local_time_ns - start_timestamp_ns;
-                                            
-                                            if let Err(e) = s3dlio::set_clock_offset(clock_offset_ns) {
-                                                warn!("Failed to set clock offset for oplog: {} (continuing anyway)", e);
-                                            } else {
-                                                info!("Set clock offset: {} ms (agent {} ms ahead of controller)", 
-                                                      clock_offset_ns / 1_000_000, 
-                                                      clock_offset_ns / 1_000_000);
-                                            }
-                                        }
-                                        
-                                        // Execute workload OR cleanup (cleanup-only mode runs cleanup as the workload)
-                                        let result = if is_cleanup_only {
-                                            info!("Cleanup-only mode: Running cleanup as workload");
-                                            
-                                            // Get tracker for stats reporting
-                                            let tracker = agent_state_for_task.get_tracker().await;
-                                            let start_time = std::time::Instant::now();
-                                            
-                                            // Run cleanup with stats tracking
-                                            let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
-                                            let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
-                                            let cleanup_mode = config_exec.prepare.as_ref()
-                                                .map(|p| p.cleanup_mode)
-                                                .unwrap_or(sai3_bench::config::CleanupMode::Tolerant);
-                                            
-                                            // v0.8.9: Set stage to CLEANUP for proper progress display
-                                            if let Some(ref t) = tracker {
-                                                use sai3_bench::live_stats::WorkloadStage;
-                                                t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
-                                            }
-                                            
-                                            match sai3_bench::cleanup::cleanup_prepared_objects(
-                                                &prepared_objects,
-                                                tree_manifest.as_ref(),
-                                                agent_index as usize,
-                                                num_agents as usize,
-                                                cleanup_mode,
-                                                tracker.clone(),
-                                            ).await {
-                                                Ok(_) => {
-                                                    info!("Cleanup completed successfully");
-                                                    
-                                                    // Generate summary from tracker stats
-                                                    if let Some(t) = tracker {
-                                                        let snapshot = t.snapshot();
-                                                        let elapsed = start_time.elapsed().as_secs_f64();
-                                                        
-                                                        Ok(sai3_bench::workload::Summary {
-                                                            wall_seconds: elapsed,
-                                                            total_ops: snapshot.meta_ops,
-                                                            total_bytes: 0,  // DELETE operations don't transfer bytes
-                                                            p50_us: 0,  // Only have mean for meta
-                                                            p95_us: 0,
-                                                            p99_us: 0,
-                                                            get: Default::default(),
-                                                            put: Default::default(),
-                                                            meta: sai3_bench::workload::OpAgg {
-                                                                ops: snapshot.meta_ops,
-                                                                bytes: 0,
-                                                                mean_us: snapshot.meta_mean_us,
-                                                                p50_us: 0,
-                                                                p95_us: 0,
-                                                                p99_us: 0,
-                                                            },
-                                                            get_bins: Default::default(),
-                                                            put_bins: Default::default(),
-                                                            meta_bins: Default::default(),
-                                                            get_hists: Default::default(),
-                                                            put_hists: Default::default(),
-                                                            meta_hists: Default::default(),  // Would need histogram export method
-                                                            total_errors: 0,
-                                                            error_rate: 0.0,
-                                                            endpoint_stats: None,
-                                                        })
-                                                    } else {
-                                                        // No tracker - return empty summary
-                                                        Ok(sai3_bench::workload::Summary {
-                                                            wall_seconds: start_time.elapsed().as_secs_f64(),
-                                                            total_ops: 0,
-                                                            total_bytes: 0,
-                                                            p50_us: 0,
-                                                            p95_us: 0,
-                                                            p99_us: 0,
-                                                            get: Default::default(),
-                                                            put: Default::default(),
-                                                            meta: Default::default(),
-                                                            get_bins: Default::default(),
-                                                            put_bins: Default::default(),
-                                                            meta_bins: Default::default(),
-                                                            get_hists: Default::default(),
-                                                            put_hists: Default::default(),
-                                                            meta_hists: Default::default(),
-                                                            total_errors: 0,
-                                                            error_rate: 0.0,
-                                                            endpoint_stats: None,
-                                                        })
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    error!("Cleanup failed: {}", e);
-                                                    Err(e)
-                                                }
-                                            }
-                                        } else {
-                                            // v0.8.9: Set stage to WORKLOAD for proper progress display
-                                            if let Some(ref t) = config_exec.live_stats_tracker {
-                                                use sai3_bench::live_stats::WorkloadStage;
-                                                t.set_stage(WorkloadStage::Workload, 0);  // 0 = time-based
-                                            }
-                                            
-                                            sai3_bench::workload::run(&config_exec, tree_manifest.clone()).await
-                                        };
-                                        
-                                        // v0.8.7: Execute cleanup phase if configured (skip in cleanup-only mode)
-                                        // Note: This is INSIDE the tokio::select! so it will be aborted properly
-                                        if let Ok(ref _summary) = result {
-                                            if !is_cleanup_only {
-                                                if let Some(ref prepare_config) = config_exec.prepare {
-                                                    if prepare_config.cleanup {
-                                                        // v0.8.25: Transition to CleanupReady (execution done, at barrier)
-                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::CleanupReady, "execution complete").await {
-                                                            error!("Failed to transition to CleanupReady: {}", e);
-                                                        }
-                                                        
-                                                        // TODO: Report barrier ready to controller
-                                                        // For now, immediately proceed (barrier implementation incomplete)
-                                                        
-                                                        // v0.8.25: Transition to Cleaning (starting cleanup phase)
-                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Cleaning, "starting cleanup").await {
-                                                            error!("Failed to transition to Cleaning: {}", e);
-                                                        }
-                                                        
-                                                        let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
-                                                        let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
-                                                        let cleanup_mode = prepare_config.cleanup_mode;
-                                                        
-                                                        info!("Starting cleanup phase (agent {}/{}, mode: {:?})", 
-                                                              agent_index, num_agents, cleanup_mode);
-                                                        
-                                                        // Get tracker for live stats reporting during cleanup
-                                                        let tracker = agent_state_for_task.get_tracker().await;
-                                                        
-                                                        // v0.8.9: Set stage to CLEANUP for proper progress display
-                                                        if let Some(ref t) = tracker {
-                                                            use sai3_bench::live_stats::WorkloadStage;
-                                                            t.set_stage(WorkloadStage::Cleanup, prepared_objects.len() as u64);
-                                                        }
-                                                        
-                                                        if let Err(e) = sai3_bench::cleanup::cleanup_prepared_objects(
-                                                            &prepared_objects,
-                                                            tree_manifest.as_ref(),
-                                                            agent_index as usize,
-                                                            num_agents as usize,
-                                                            cleanup_mode,
-                                                            tracker,
-                                                        ).await {
-                                                            error!("Cleanup phase failed for agent {}: {}", agent_id_exec, e);
-                                                        } else {
-                                                            info!("Cleanup phase completed for agent {}", agent_id_exec);
-                                                        }
-                                                        
-                                                        // v0.8.25: Transition to Completed (all phases done)
-                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Completed, "all phases complete").await {
-                                                            error!("Failed to transition to Completed: {}", e);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Finalize oplog before returning result
-                                        if final_op_log_path.is_some() || agent_op_log_path_exec.is_some() {
-                                            info!("Finalizing s3dlio operation logger");
-                                            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                                error!("Failed to finalize operation logger: {}", e);
-                                            }
-                                        }
-                                        
-                                        result
-                                            } => {
-                                                // Execution completed (success or failure) - send result
-                                                match result {
-                                                    Ok(summary) => {
-                                                        info!("Workload completed successfully for agent {}", agent_id_exec);
-                                                        let _ = tx_done_exec.send(Ok(summary)).await;
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Workload execution failed for agent {}: {}", agent_id_exec, e);
-                                                        let _ = tx_done_exec.send(Err(e.to_string())).await;
-                                                    }
-                                                }
-                                            }
-                                        }
                                     });
                                     
                                     info!("Control reader: Workload task spawned after coordinated start");
@@ -2879,6 +2613,18 @@ impl Agent for AgentSvc {
                                     control_msg.barrier_sequence,
                                 );
                             }
+                            Ok(Command::Goodbye) => {
+                                // v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
+                                info!("Control reader: Received GOODBYE - controller is disconnecting gracefully");
+                                
+                                // Transition to Idle state (ready for new connection)
+                                if let Err(e) = agent_state_reader.transition_to(WorkloadState::Idle, "graceful disconnect from controller").await {
+                                    debug!("Control reader: Already in Idle state or transition failed: {}", e);
+                                }
+                                
+                                // Break out of control reader loop - stream will close cleanly
+                                break;
+                            }
                             Err(e) => {
                                 warn!("Control reader: Unknown command: {}", e);
                             }
@@ -2946,12 +2692,14 @@ impl Agent for AgentSvc {
                 let current_state = agent_state_reader.get_state().await;
                 let elapsed = last_message_time.elapsed();
                 
-                // Only READY state has a timeout - waiting too long for coordinated START
+                // v0.8.29: READY state is now AtStage { stage_name: "validated", ready_for_next: true }
+                // Only this state has a timeout - waiting too long for coordinated START
                 // IDLE state: No timeout (agent waits forever for controller)
-                // RUNNING state: No timeout (workload controls its own duration)
-                let timeout_exceeded = match current_state {
-                    WorkloadState::Ready => elapsed.as_secs() > AGENT_READY_TIMEOUT_SECS,
-                    _ => false,  // IDLE, RUNNING, etc. have no timeout
+                // AtStage { ready_for_next: false }: No timeout (actively executing stage)
+                let timeout_exceeded = match &current_state {
+                    WorkloadState::AtStage { stage_name, ready_for_next: true, .. } 
+                        if stage_name == "validated" => elapsed.as_secs() > AGENT_READY_TIMEOUT_SECS,
+                    _ => false,  // All other states have no timeout
                 };
                 
                 if timeout_exceeded {
@@ -3012,29 +2760,61 @@ impl Agent for AgentSvc {
             
             // Check if workload completed successfully vs abnormal disconnect
             let current_state = agent_state_reader.get_state().await;
-            let completion_sent = agent_state_reader.is_completion_sent().await;
+            // v0.8.29: completion_sent was used for legacy Running state race condition check
+            // Kept for future reference if needed for AtStage races
+            let _completion_sent = agent_state_reader.is_completion_sent().await;
             
             match current_state {
                 WorkloadState::Idle => {
                     // Workload already completed - this is normal controller disconnect after receiving results
                     info!("Control reader: Normal disconnect (workload completed, agent idle)");
                 }
-                WorkloadState::Running if completion_sent => {
-                    // v0.8.14: COMPLETED message was sent but state hasn't transitioned yet
-                    // This is a race condition between stats writer and control reader - NOT abnormal
-                    info!("Control reader: Normal disconnect (completion sent, state transition pending)");
-                    // Don't send abort - let stats writer complete its transition
-                }
-                WorkloadState::Ready | WorkloadState::Running | WorkloadState::Aborting => {
-                    // Abnormal disconnect during workload - send abort and transition to Failed
-                    warn!("Control reader: Abnormal disconnect during {:?} state", current_state);
-                    agent_state_reader.send_abort();
-                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during workload").await;
-                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after abnormal disconnect").await;
+                // ==========================================================================
+                // LEGACY STATES COMMENTED OUT - v0.8.29 YAML-driven stages only
+                // ==========================================================================
+                // WorkloadState::Running if completion_sent => {
+                //     // v0.8.14: COMPLETED message was sent but state hasn't transitioned yet
+                //     // This is a race condition between stats writer and control reader - NOT abnormal
+                //     info!("Control reader: Normal disconnect (completion sent, state transition pending)");
+                //     // Don't send abort - let stats writer complete its transition
+                // }
+                // WorkloadState::Ready | WorkloadState::Running | WorkloadState::Aborting => {
+                //     // Abnormal disconnect during workload - send abort and transition to Failed
+                //     warn!("Control reader: Abnormal disconnect during {:?} state", current_state);
+                //     agent_state_reader.send_abort();
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during workload").await;
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after abnormal disconnect").await;
+                // }
+                WorkloadState::Aborting => {
+                    // Aborting is still valid - disconnect during abort
+                    warn!("Control reader: Disconnect during abort");
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "disconnect during abort").await;
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after abort disconnect").await;
                 }
                 WorkloadState::Failed => {
                     // Already failed - just log
                     info!("Control reader: Disconnect after failure (expected)");
+                }
+                
+                WorkloadState::Completed => {
+                    // v0.8.28: Normal disconnect - workload completed successfully
+                    info!("Control reader: Normal disconnect (workload completed)");
+                }
+                
+                // v0.8.28: AtStage with ready_for_next=true means we're waiting at a barrier
+                // If final stage completed (cleanup), this is a normal disconnect
+                WorkloadState::AtStage { ready_for_next: true, ref stage_name, .. } => {
+                    info!("Control reader: Disconnect while at barrier '{}' (normal if final stage)", stage_name);
+                    // Transition to Idle for cleanup (no abort needed - we're at a barrier, not executing)
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "disconnect at barrier").await;
+                }
+                
+                // v0.8.28: AtStage with ready_for_next=false means actively executing a stage
+                WorkloadState::AtStage { ready_for_next: false, ref stage_name, .. } => {
+                    warn!("Control reader: Abnormal disconnect during stage '{}'", stage_name);
+                    agent_state_reader.send_abort();
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during stage").await;
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after stage disconnect").await;
                 }
                 
                 // ============================================================================
@@ -3072,14 +2852,15 @@ impl Agent for AgentSvc {
                 // For now, treat all unknown states as potentially active workload states that need abort.
                 // This ensures we don't leave agents in bad states if the state machine evolves.
                 // ============================================================================
-                _ => {
-                    warn!("Control reader: Disconnect in unhandled state {:?} - treating as abnormal", current_state);
-                    
-                    // Conservative approach: assume state is active and needs abort/cleanup
-                    agent_state_reader.send_abort();
-                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected in unknown state").await;
-                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
-                }
+                // v0.8.29: Catch-all now unreachable - all WorkloadState variants are exhaustively handled
+                // _ => {
+                //     warn!("Control reader: Disconnect in unhandled state {:?} - treating as abnormal", current_state);
+                //     
+                //     // Conservative approach: assume state is active and needs abort/cleanup
+                //     agent_state_reader.send_abort();
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected in unknown state").await;
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
+                // }
             }
         });
         
@@ -3141,8 +2922,18 @@ async fn execute_stages_workflow(
             sai3_bench::config::StageSpecificConfig::Cleanup { .. } => sai3_bench::live_stats::WorkloadStage::Cleanup,
             sai3_bench::config::StageSpecificConfig::Custom { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
             sai3_bench::config::StageSpecificConfig::Hybrid { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
+            sai3_bench::config::StageSpecificConfig::Validation { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
         };
         tracker.reset_for_stage(&stage.name, live_stage);
+        
+        // v0.8.28: Capture per-bucket histogram data from stage execution
+        // This is used to create per-size-bucket rows in the TSV output (matching legacy format)
+        let mut stage_get_hists: Option<sai3_bench::metrics::OpHists> = None;
+        let mut stage_put_hists: Option<sai3_bench::metrics::OpHists> = None;
+        let mut stage_meta_hists: Option<sai3_bench::metrics::OpHists> = None;
+        let mut stage_get_bins: Option<sai3_bench::workload::SizeBins> = None;
+        let mut stage_put_bins: Option<sai3_bench::workload::SizeBins> = None;
+        let mut stage_meta_bins: Option<sai3_bench::workload::SizeBins> = None;
         
         // Execute stage based on type
         match &stage.config {
@@ -3176,9 +2967,16 @@ async fn execute_stages_workflow(
                             prepared_objects = prepared;
                             tree_manifest = manifest;
                             
-                            // Send prepare metrics
+                            // v0.8.28: Capture per-bucket histogram data for stage summary
+                            // PREPARE only has PUT ops (object creation)
+                            stage_put_hists = Some(prepare_metrics.put_hists.clone());
+                            stage_put_bins = Some(prepare_metrics.put_bins.clone());
+                            
+                            // Send prepare metrics via channel (for legacy flow compatibility)
                             let _ = tx_prepare.send(prepare_metrics).await;
-                            tracker.reset_for_workload();
+                            // NOTE: Do NOT reset tracker here - stats must persist until
+                            // stage summary is computed at barrier. reset_for_stage() at
+                            // the start of the NEXT stage will clear stats.
                         }
                         Err(e) => {
                             return Err(format!("Prepare stage '{}' failed: {}", stage.name, e));
@@ -3225,8 +3023,17 @@ async fn execute_stages_workflow(
                 
                 // Run workload
                 match sai3_bench::workload::run(&config, tree_manifest.clone()).await {
-                    Ok(_summary) => {
+                    Ok(summary) => {
                         info!("Execute stage complete");
+                        
+                        // v0.8.28: Capture per-bucket histogram data for stage summary
+                        // EXECUTE has GET, PUT, and META ops
+                        stage_get_hists = Some(summary.get_hists.clone());
+                        stage_put_hists = Some(summary.put_hists.clone());
+                        stage_meta_hists = Some(summary.meta_hists.clone());
+                        stage_get_bins = Some(summary.get_bins.clone());
+                        stage_put_bins = Some(summary.put_bins.clone());
+                        stage_meta_bins = Some(summary.meta_bins.clone());
                         
                         // Finalize oplog
                         if final_op_log_path.is_some() || agent_op_log_path.is_some() {
@@ -3320,6 +3127,15 @@ async fn execute_stages_workflow(
                     }
                 }
             }
+            
+            sai3_bench::config::StageSpecificConfig::Validation { timeout_secs } => {
+                info!("Executing VALIDATION stage: {} (timeout: {:?}s)", stage.name, timeout_secs);
+                
+                // Validation stage completes immediately - actual validation happened
+                // at RPC level (pre-flight checks) before YAML stages execute
+                // This stage exists for barrier synchronization purposes
+                info!("Validation stage complete (pre-flight checks already passed)");
+            }
         }
         
         // Check completion criteria
@@ -3375,14 +3191,58 @@ async fn execute_stages_workflow(
             sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
             sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
             sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
+            sai3_bench::config::StageSpecificConfig::Validation { .. } => "validation",
         };
         
-        // Serialize histograms for this stage
-        let (hist_get, hist_put, hist_meta) = tracker.serialize_histograms()
-            .unwrap_or_else(|e| {
-                warn!("Failed to serialize stage histograms: {}", e);
-                (Vec::new(), Vec::new(), Vec::new())
-            });
+        // v0.8.28: Serialize per-bucket histograms for accurate aggregation
+        // This matches the legacy format with 9 size buckets per operation type
+        let serialize_ophists = |ophists: &sai3_bench::metrics::OpHists| -> Vec<u8> {
+            use hdrhistogram::serialization::{Serializer, V2Serializer};
+            let mut serializer = V2Serializer::new();
+            let mut bytes = Vec::new();
+            for bucket_hist in ophists.buckets.iter() {
+                let hist = bucket_hist.lock().unwrap();
+                if let Err(e) = serializer.serialize(&*hist, &mut bytes) {
+                    warn!("Failed to serialize histogram bucket: {}", e);
+                }
+            }
+            bytes
+        };
+        
+        // Convert SizeBins to proto SizeBins
+        let convert_size_bins = |bins: &sai3_bench::workload::SizeBins| -> crate::pb::iobench::SizeBins {
+            use crate::pb::iobench::{SizeBins as ProtoSizeBins, SizeBucketData};
+            let mut buckets = Vec::new();
+            for (idx, (ops, bytes)) in &bins.by_bucket {
+                buckets.push(SizeBucketData {
+                    bucket_idx: *idx as u32,
+                    ops: *ops,
+                    bytes: *bytes,
+                });
+            }
+            ProtoSizeBins { buckets }
+        };
+        
+        // Serialize histograms - prefer captured per-bucket data, fall back to tracker
+        let (hist_get, hist_put, hist_meta) = if stage_get_hists.is_some() || stage_put_hists.is_some() {
+            // Use captured per-bucket histograms from Summary/PrepareMetrics
+            let get = stage_get_hists.as_ref().map(serialize_ophists).unwrap_or_default();
+            let put = stage_put_hists.as_ref().map(serialize_ophists).unwrap_or_default();
+            let meta = stage_meta_hists.as_ref().map(serialize_ophists).unwrap_or_default();
+            (get, put, meta)
+        } else {
+            // Fall back to tracker's single histograms (for stages without Summary)
+            tracker.serialize_histograms()
+                .unwrap_or_else(|e| {
+                    warn!("Failed to serialize stage histograms: {}", e);
+                    (Vec::new(), Vec::new(), Vec::new())
+                })
+        };
+        
+        // Convert captured size bins to proto format
+        let proto_get_bins = stage_get_bins.as_ref().map(convert_size_bins);
+        let proto_put_bins = stage_put_bins.as_ref().map(convert_size_bins);
+        let proto_meta_bins = stage_meta_bins.as_ref().map(convert_size_bins);
         
         let stage_summary = StageSummary {
             stage_index: stage_index as u32,
@@ -3422,10 +3282,10 @@ async fn execute_stages_workflow(
             histogram_get: hist_get,
             histogram_put: hist_put,
             histogram_meta: hist_meta,
-            // TODO: Implement per-bucket size tracking for stages
-            get_bins: None,
-            put_bins: None,
-            meta_bins: None,
+            // v0.8.28: Per-bucket size tracking (ops and bytes per size bucket)
+            get_bins: proto_get_bins,
+            put_bins: proto_put_bins,
+            meta_bins: proto_meta_bins,
             endpoint_stats: Vec::new(),  // TODO: Capture per-stage endpoint stats
         };
         
