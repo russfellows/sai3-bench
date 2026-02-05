@@ -390,6 +390,70 @@ impl LiveStatsTracker {
             concurrency: self.concurrency,
         }
     }
+    
+    /// Serialize histograms for per-stage summary (v0.8.27)
+    ///
+    /// Returns (get_histogram_bytes, put_histogram_bytes, meta_histogram_bytes)
+    /// for inclusion in StageSummary proto message.
+    /// Uses V2 serialization format compatible with HDR histogram deserializer.
+    pub fn serialize_histograms(&self) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+        use hdrhistogram::serialization::{Serializer, V2Serializer};
+        
+        let mut serializer = V2Serializer::new();
+        
+        let get_bytes = {
+            let hist = self.get_hist.lock();
+            let mut buf = Vec::new();
+            serializer.serialize(&*hist, &mut buf)
+                .map_err(|e| format!("Failed to serialize GET histogram: {}", e))?;
+            buf
+        };
+        
+        let put_bytes = {
+            let hist = self.put_hist.lock();
+            let mut buf = Vec::new();
+            serializer.serialize(&*hist, &mut buf)
+                .map_err(|e| format!("Failed to serialize PUT histogram: {}", e))?;
+            buf
+        };
+        
+        let meta_bytes = {
+            let hist = self.meta_hist.lock();
+            let mut buf = Vec::new();
+            serializer.serialize(&*hist, &mut buf)
+                .map_err(|e| format!("Failed to serialize META histogram: {}", e))?;
+            buf
+        };
+        
+        Ok((get_bytes, put_bytes, meta_bytes))
+    }
+    
+    /// Reset stats for a new stage (v0.8.27)
+    ///
+    /// Unlike reset_for_workload(), this resets all counters AND resets
+    /// the stage start time for accurate per-stage elapsed time tracking.
+    pub fn reset_for_stage(&self, stage_name: &str, stage: WorkloadStage) {
+        // Reset operation counters
+        self.get_ops.store(0, Ordering::Relaxed);
+        self.get_bytes.store(0, Ordering::Relaxed);
+        self.put_ops.store(0, Ordering::Relaxed);
+        self.put_bytes.store(0, Ordering::Relaxed);
+        self.meta_ops.store(0, Ordering::Relaxed);
+        
+        // Clear histograms
+        self.get_hist.lock().clear();
+        self.put_hist.lock().clear();
+        self.meta_hist.lock().clear();
+        
+        // Reset progress tracking
+        self.stage_progress_current.store(0, Ordering::Relaxed);
+        self.stage_progress_total.store(0, Ordering::Relaxed);
+        
+        // Reset stage tracking
+        self.current_stage.store(stage as u64, Ordering::Relaxed);
+        *self.stage_name.lock() = stage_name.to_string();
+        *self.stage_start_time.lock() = std::time::Instant::now();
+    }
 }
 
 impl Default for LiveStatsTracker {
@@ -571,5 +635,198 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         let snapshot = tracker.snapshot();
         assert!(snapshot.stage_elapsed_s >= 0.05);
+    }
+
+    #[test]
+    fn test_reset_for_stage() {
+        // v0.8.27: Verify reset_for_stage clears all counters and sets new stage
+        let tracker = LiveStatsTracker::new();
+        
+        // Record some operations
+        tracker.record_get(1024, Duration::from_micros(100));
+        tracker.record_get(2048, Duration::from_micros(200));
+        tracker.record_put(512, Duration::from_micros(150));
+        tracker.record_meta(Duration::from_micros(50));
+        // set_stage first, then set_prepare_progress (order matters - set_stage resets created to 0)
+        tracker.set_stage(WorkloadStage::Prepare, 100);
+        tracker.set_prepare_progress(5, 10);
+        
+        // Verify stats are populated
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.get_ops, 2);
+        assert_eq!(snapshot.get_bytes, 3072);
+        assert_eq!(snapshot.put_ops, 1);
+        assert_eq!(snapshot.put_bytes, 512);
+        assert_eq!(snapshot.meta_ops, 1);
+        assert_eq!(snapshot.prepare_objects_created, 5);
+        
+        // Reset for new stage
+        tracker.reset_for_stage("workload", WorkloadStage::Workload);
+        
+        // Verify all counters are reset
+        let snapshot_after = tracker.snapshot();
+        assert_eq!(snapshot_after.get_ops, 0, "GET ops should be reset");
+        assert_eq!(snapshot_after.get_bytes, 0, "GET bytes should be reset");
+        assert_eq!(snapshot_after.put_ops, 0, "PUT ops should be reset");
+        assert_eq!(snapshot_after.put_bytes, 0, "PUT bytes should be reset");
+        assert_eq!(snapshot_after.meta_ops, 0, "META ops should be reset");
+        
+        // Verify histograms are cleared (check latencies are 0)
+        assert_eq!(snapshot_after.get_mean_us, 0, "GET latency should be reset");
+        assert_eq!(snapshot_after.put_mean_us, 0, "PUT latency should be reset");
+        assert_eq!(snapshot_after.meta_mean_us, 0, "META latency should be reset");
+        
+        // Verify stage was changed
+        assert_eq!(snapshot_after.current_stage, WorkloadStage::Workload);
+        assert_eq!(snapshot_after.stage_name, "workload");
+        
+        // Record new operations and verify counters work correctly
+        tracker.record_get(2000, Duration::from_micros(300));
+        let snapshot_new = tracker.snapshot();
+        assert_eq!(snapshot_new.get_ops, 1, "New operations should be recorded");
+        assert_eq!(snapshot_new.get_bytes, 2000);
+    }
+
+    #[test]
+    fn test_reset_for_stage_preserves_elapsed_base() {
+        // v0.8.27: Verify reset_for_stage resets stage elapsed time correctly
+        let tracker = LiveStatsTracker::new();
+        tracker.set_stage(WorkloadStage::Prepare, 10);
+        
+        // Wait to accumulate elapsed time
+        std::thread::sleep(Duration::from_millis(50));
+        
+        let snapshot_before = tracker.snapshot();
+        assert!(snapshot_before.stage_elapsed_s >= 0.04, "Should have accumulated time");
+        
+        // Reset for new stage
+        tracker.reset_for_stage("workload", WorkloadStage::Workload);
+        
+        // Stage elapsed should be reset to near-zero
+        let snapshot_after = tracker.snapshot();
+        assert!(
+            snapshot_after.stage_elapsed_s < 0.05,
+            "Stage elapsed should be reset, got {}",
+            snapshot_after.stage_elapsed_s
+        );
+    }
+
+    #[test]
+    fn test_serialize_histograms_empty() {
+        // v0.8.27: Verify serialize_histograms works with empty histograms
+        let tracker = LiveStatsTracker::new();
+        
+        // Serialize empty histograms
+        let (get_bytes, put_bytes, meta_bytes) = tracker.serialize_histograms()
+            .expect("Should serialize empty histograms");
+        
+        // Empty histograms should still produce valid (but small) serialized data
+        // HdrHistogram serialization includes header even for empty, usually ~40 bytes
+        assert!(get_bytes.len() > 0, "GET histogram should have header");
+        assert!(put_bytes.len() > 0, "PUT histogram should have header");
+        assert!(meta_bytes.len() > 0, "META histogram should have header");
+    }
+
+    #[test]
+    fn test_serialize_histograms_with_data() {
+        // v0.8.27: Verify serialize_histograms captures recorded latencies
+        use hdrhistogram::serialization::Deserializer;
+        
+        let tracker = LiveStatsTracker::new();
+        
+        // Record operations with known latencies
+        tracker.record_get(1024, Duration::from_micros(100));
+        tracker.record_get(1024, Duration::from_micros(200));
+        tracker.record_get(1024, Duration::from_micros(300));
+        tracker.record_put(512, Duration::from_micros(500));
+        tracker.record_meta(Duration::from_micros(50));
+        
+        // Serialize histograms
+        let (get_bytes, put_bytes, meta_bytes) = tracker.serialize_histograms()
+            .expect("Should serialize histograms");
+        
+        // Verify serialization produced non-empty bytes
+        assert!(!get_bytes.is_empty(), "GET histogram should have data");
+        assert!(!put_bytes.is_empty(), "PUT histogram should have data");
+        assert!(!meta_bytes.is_empty(), "META histogram should have data");
+        
+        // Verify deserialized histogram contains expected data
+        let mut deserializer = Deserializer::new();
+        let mut cursor = std::io::Cursor::new(&get_bytes);
+        let get_hist: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+            .expect("Should deserialize GET histogram");
+        
+        // Verify histogram properties
+        assert_eq!(get_hist.len(), 3, "GET histogram should have 3 samples");
+        assert!(get_hist.mean() >= 100.0 && get_hist.mean() <= 300.0, 
+                "GET mean should be reasonable, got {}", get_hist.mean());
+    }
+
+    #[test]
+    fn test_serialize_histograms_roundtrip() {
+        // v0.8.27: Verify serialize/deserialize roundtrip preserves percentiles
+        use hdrhistogram::serialization::Deserializer;
+        
+        let tracker = LiveStatsTracker::new();
+        
+        // Record known distribution of latencies
+        for i in 0..100 {
+            tracker.record_get(1024, Duration::from_micros(i as u64 * 10 + 50));
+        }
+        
+        // Serialize and deserialize
+        let (get_bytes, _, _) = tracker.serialize_histograms()
+            .expect("Should serialize histograms");
+        
+        let mut deserializer = Deserializer::new();
+        let mut cursor = std::io::Cursor::new(&get_bytes);
+        let hist: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+            .expect("Should deserialize");
+        
+        // Verify count preserved
+        assert_eq!(hist.len(), 100, "Should have 100 samples");
+        
+        // Verify percentiles are approximately preserved (within histogram precision)
+        let p50 = hist.value_at_quantile(0.50);
+        let p99 = hist.value_at_quantile(0.99);
+        
+        // p50 should be around 500 (50 + 50*10)
+        assert!(p50 >= 400 && p50 <= 600, "p50 should be around 500, got {}", p50);
+        // p99 should be around 1040 (50 + 99*10)
+        assert!(p99 >= 900 && p99 <= 1100, "p99 should be around 1040, got {}", p99);
+    }
+
+    #[test]
+    fn test_reset_clears_histograms() {
+        // v0.8.27: Verify reset_for_stage actually clears histograms
+        use hdrhistogram::serialization::Deserializer;
+        
+        let tracker = LiveStatsTracker::new();
+        
+        // Record operations
+        for _ in 0..50 {
+            tracker.record_get(1024, Duration::from_micros(100));
+        }
+        
+        // Verify histogram has data
+        let (get_bytes_before, _, _) = tracker.serialize_histograms()
+            .expect("Should serialize before reset");
+        let mut deserializer = Deserializer::new();
+        let mut cursor = std::io::Cursor::new(&get_bytes_before);
+        let hist_before: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+            .expect("Should deserialize");
+        assert_eq!(hist_before.len(), 50, "Should have 50 samples before reset");
+        
+        // Reset
+        tracker.reset_for_stage("cleanup", WorkloadStage::Cleanup);
+        
+        // Serialize again - should be empty histogram
+        let (get_bytes_after, _, _) = tracker.serialize_histograms()
+            .expect("Should serialize after reset");
+        
+        let mut cursor = std::io::Cursor::new(&get_bytes_after);
+        let hist_after: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+            .expect("Should deserialize after reset");
+        assert_eq!(hist_after.len(), 0, "Histogram should be empty after reset");
     }
 }

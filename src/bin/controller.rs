@@ -33,7 +33,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary};
 // Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
 // Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
@@ -2149,6 +2149,7 @@ async fn run_distributed_workload(
                     at_barrier: false,
                     barrier_name: String::new(),
                     barrier_sequence: 0,
+                    stage_summary: None,
                 };
                 let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
@@ -2440,6 +2441,12 @@ async fn run_distributed_workload(
     // v0.7.9: Collect prepare summaries for persistence  
     let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
     
+    // v0.8.27: Collect per-stage summaries for immediate TSV writing
+    // Key: (stage_index, stage_name), Value: (agents_reported, expected_agents, summaries)
+    let mut stage_summaries: std::collections::HashMap<(u32, String), Vec<StageSummary>> = std::collections::HashMap::new();
+    let mut stages_written: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
+    let expected_agents = agent_addrs.len();
+    
     // v0.8.19: Performance logging is always enabled with 1-second interval
     // - Aggregate perf_log.tsv in results directory root
     // - Per-agent perf_log.tsv in agents/{agent-id}/ subdirectories
@@ -2535,7 +2542,7 @@ async fn run_distributed_workload(
         tokio::select! {
             stats_opt = rx_stats.recv() => {
                 match stats_opt {
-                    Some(stats) => {
+                    Some(mut stats) => {
                         // v0.7.13: Update tracker for this agent
                         let tracker = agent_trackers
                             .entry(stats.agent_id.clone())
@@ -2630,6 +2637,41 @@ async fn run_distributed_workload(
                                     
                                     // Clear the barrier after releasing
                                     bm.clear_barrier(&stats.barrier_name);
+                                }
+                            }
+                            
+                            // v0.8.27: Collect stage summary if present
+                            if let Some(stage_sum) = stats.stage_summary.take() {
+                                let stage_key = (stage_sum.stage_index, stage_sum.stage_name.clone());
+                                info!("Received stage summary from agent '{}' for stage {}: '{}' ({} GET, {} PUT, {} META ops)",
+                                      stats.agent_id, stage_sum.stage_index, stage_sum.stage_name,
+                                      stage_sum.get_ops, stage_sum.put_ops, stage_sum.meta_ops);
+                                
+                                // Collect summaries for this stage
+                                stage_summaries.entry(stage_key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(stage_sum);
+                                
+                                // Check if all agents have reported for this stage
+                                if let Some(summaries) = stage_summaries.get(&stage_key) {
+                                    if summaries.len() >= expected_agents && !stages_written.contains(&stage_key) {
+                                        info!("All {} agents reported for stage {} '{}' - writing TSV immediately",
+                                              expected_agents, stage_key.0, stage_key.1);
+                                        
+                                        // Write per-stage TSV
+                                        let stage_tsv_name = format!("{:02}_{}_results.tsv", stage_key.0 + 1, stage_key.1);
+                                        let stage_tsv_path = results_dir.path().join(&stage_tsv_name);
+                                        
+                                        match write_stage_summary_tsv(&stage_tsv_path, summaries) {
+                                            Ok(_) => {
+                                                info!("✓ Stage results written: {}", stage_tsv_name);
+                                                stages_written.insert(stage_key.clone());
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to write stage TSV '{}': {}", stage_tsv_name, e);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4021,6 +4063,158 @@ fn create_consolidated_prepare_tsv(
     Ok(())
 }
 
+/// Write per-stage summary TSV with aggregated metrics (v0.8.27)
+///
+/// Called immediately when all agents report for a stage, ensuring
+/// data is persisted before proceeding to the next stage. This prevents
+/// data loss if a later stage fails.
+fn write_stage_summary_tsv(
+    path: &std::path::Path,
+    summaries: &[StageSummary],
+) -> anyhow::Result<()> {
+    use hdrhistogram::Histogram;
+    use hdrhistogram::serialization::Deserializer;
+    use std::fs::File;
+    use std::io::Write;
+    
+    if summaries.is_empty() {
+        anyhow::bail!("No stage summaries to write");
+    }
+    
+    let stage_name = &summaries[0].stage_name;
+    let stage_type = &summaries[0].stage_type;
+    let stage_index = summaries[0].stage_index;
+    
+    info!("Writing stage {} '{}' ({}) TSV with {} agent summaries",
+          stage_index, stage_name, stage_type, summaries.len());
+    
+    // Aggregate stats from all agents
+    let total_get_ops: u64 = summaries.iter().map(|s| s.get_ops).sum();
+    let total_get_bytes: u64 = summaries.iter().map(|s| s.get_bytes).sum();
+    let total_put_ops: u64 = summaries.iter().map(|s| s.put_ops).sum();
+    let total_put_bytes: u64 = summaries.iter().map(|s| s.put_bytes).sum();
+    let total_meta_ops: u64 = summaries.iter().map(|s| s.meta_ops).sum();
+    let total_errors: u64 = summaries.iter().map(|s| s.errors).sum();
+    let max_wall_seconds = summaries.iter()
+        .map(|s| s.wall_seconds)
+        .fold(0.0f64, f64::max);
+    
+    // Merge histograms for accurate percentile calculation
+    const MIN: u64 = 1;
+    const MAX: u64 = 3_600_000_000;
+    const SIGFIG: u8 = 3;
+    
+    let mut get_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
+    let mut put_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
+    let mut meta_hist = Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
+    
+    let mut deserializer = Deserializer::new();
+    
+    for summary in summaries {
+        // Deserialize and merge GET histogram
+        if !summary.histogram_get.is_empty() {
+            let mut cursor = std::io::Cursor::new(&summary.histogram_get);
+            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                let _ = get_hist.add(hist);
+            }
+        }
+        
+        // Deserialize and merge PUT histogram
+        if !summary.histogram_put.is_empty() {
+            let mut cursor = std::io::Cursor::new(&summary.histogram_put);
+            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                let _ = put_hist.add(hist);
+            }
+        }
+        
+        // Deserialize and merge META histogram
+        if !summary.histogram_meta.is_empty() {
+            let mut cursor = std::io::Cursor::new(&summary.histogram_meta);
+            if let Ok(hist) = deserializer.deserialize::<u64, _>(&mut cursor) {
+                let _ = meta_hist.add(hist);
+            }
+        }
+    }
+    
+    // Calculate percentiles from merged histograms
+    let get_mean = if !get_hist.is_empty() { get_hist.mean() as u64 } else { 0 };
+    let get_p50 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.50) } else { 0 };
+    let get_p90 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.90) } else { 0 };
+    let get_p95 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.95) } else { 0 };
+    let get_p99 = if !get_hist.is_empty() { get_hist.value_at_quantile(0.99) } else { 0 };
+    
+    let put_mean = if !put_hist.is_empty() { put_hist.mean() as u64 } else { 0 };
+    let put_p50 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.50) } else { 0 };
+    let put_p90 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.90) } else { 0 };
+    let put_p95 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.95) } else { 0 };
+    let put_p99 = if !put_hist.is_empty() { put_hist.value_at_quantile(0.99) } else { 0 };
+    
+    let meta_mean = if !meta_hist.is_empty() { meta_hist.mean() as u64 } else { 0 };
+    let meta_p50 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.50) } else { 0 };
+    let meta_p90 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.90) } else { 0 };
+    let meta_p95 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.95) } else { 0 };
+    let meta_p99 = if !meta_hist.is_empty() { meta_hist.value_at_quantile(0.99) } else { 0 };
+    
+    // Calculate throughput
+    let get_iops = if max_wall_seconds > 0.0 { total_get_ops as f64 / max_wall_seconds } else { 0.0 };
+    let put_iops = if max_wall_seconds > 0.0 { total_put_ops as f64 / max_wall_seconds } else { 0.0 };
+    let meta_iops = if max_wall_seconds > 0.0 { total_meta_ops as f64 / max_wall_seconds } else { 0.0 };
+    let get_mbps = if max_wall_seconds > 0.0 { total_get_bytes as f64 / max_wall_seconds / 1048576.0 } else { 0.0 };
+    let put_mbps = if max_wall_seconds > 0.0 { total_put_bytes as f64 / max_wall_seconds / 1048576.0 } else { 0.0 };
+    
+    // Write TSV file
+    let file = File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    
+    // Header
+    writeln!(writer, "# Stage {} Results: {} ({})", stage_index + 1, stage_name, stage_type)?;
+    writeln!(writer, "# Agents: {}", summaries.len())?;
+    writeln!(writer, "# Duration: {:.2}s", max_wall_seconds)?;
+    writeln!(writer)?;
+    writeln!(writer, "op_type\tops\tbytes\tiops\tmb/s\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\terrors")?;
+    
+    // GET row
+    writeln!(writer, "GET\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}",
+             total_get_ops, total_get_bytes, get_iops, get_mbps,
+             get_mean, get_p50, get_p90, get_p95, get_p99, 0)?;
+    
+    // PUT row
+    writeln!(writer, "PUT\t{}\t{}\t{:.1}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}",
+             total_put_ops, total_put_bytes, put_iops, put_mbps,
+             put_mean, put_p50, put_p90, put_p95, put_p99, 0)?;
+    
+    // META row
+    writeln!(writer, "META\t{}\t0\t{:.1}\t0.00\t{}\t{}\t{}\t{}\t{}\t{}",
+             total_meta_ops, meta_iops,
+             meta_mean, meta_p50, meta_p90, meta_p95, meta_p99, 0)?;
+    
+    // TOTAL row
+    let total_ops = total_get_ops + total_put_ops + total_meta_ops;
+    let total_bytes = total_get_bytes + total_put_bytes;
+    let total_iops = get_iops + put_iops + meta_iops;
+    let total_mbps = get_mbps + put_mbps;
+    writeln!(writer, "TOTAL\t{}\t{}\t{:.1}\t{:.2}\t-\t-\t-\t-\t-\t{}",
+             total_ops, total_bytes, total_iops, total_mbps, total_errors)?;
+    
+    // Per-agent breakdown
+    writeln!(writer)?;
+    writeln!(writer, "# Per-Agent Details")?;
+    writeln!(writer, "agent_id\tget_ops\tget_bytes\tput_ops\tput_bytes\tmeta_ops\tduration_s")?;
+    for summary in summaries {
+        // Find agent_id from the enclosing LiveStats - for now use placeholder
+        // TODO: Store agent_id in StageSummary proto
+        writeln!(writer, "agent\t{}\t{}\t{}\t{}\t{}\t{:.2}",
+                 summary.get_ops, summary.get_bytes,
+                 summary.put_ops, summary.put_bytes,
+                 summary.meta_ops, summary.wall_seconds)?;
+    }
+    
+    writer.flush()?;
+    info!("Wrote stage results to: {}", path.display());
+    
+    Ok(())
+}
+
 /// Create consolidated results.tsv from agent histograms (v0.6.4)
 /// Uses HDR histogram merging for mathematically accurate percentile aggregation
 fn create_consolidated_tsv(
@@ -4751,51 +4945,17 @@ workload:
         }
     }
 
-    // ============================================================================
-    // BARRIER SYNCHRONIZATION UNIT TESTS (v0.8.25+)
-    // ============================================================================
     // Comprehensive tests for barrier sync logic, state transitions, error
     // recovery, retry logic, and different barrier type behaviors.
     // ============================================================================
 
     mod barrier_sync_tests {
-        use super::*;
         use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        // Import types from outer scope that are defined in controller.rs
-        use crate::{BarrierManager, BarrierStatus};
         
-        // Import protobuf types (using correct PascalCase names with Phase prefix)
+        // Import types from controller.rs crate root
+        use crate::{BarrierManager, BarrierStatus};
         use crate::pb::iobench::{PhaseProgress, WorkloadPhase};
-
-        /// Helper: Create a minimal PhaseBarrierConfig for testing
-        fn test_barrier_config(
-            barrier_type: BarrierType,
-            heartbeat_interval: u64,
-            missed_threshold: u32,
-        ) -> PhaseBarrierConfig {
-            PhaseBarrierConfig {
-                barrier_type,
-                heartbeat_interval,
-                missed_threshold,
-                query_timeout: 5,
-                query_retries: 2,
-            }
-        }
-
-    // ============================================================================
-    // BARRIER SYNCHRONIZATION UNIT TESTS (v0.8.25+)
-    // ============================================================================
-    // Comprehensive tests for barrier sync logic, state transitions, error
-    // recovery, retry logic, and different barrier type behaviors.
-    // ============================================================================
-
-    #[cfg(test)]
-    mod barrier_sync_tests {
-        use super::*;
-        use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
-        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
         /// Helper: Create a minimal PhaseBarrierConfig for testing
         fn test_barrier_config(
@@ -5170,6 +5330,208 @@ workload:
             let config_best = test_barrier_config(BarrierType::BestEffort, 20, 3);
             assert!(matches!(config_best.barrier_type, BarrierType::BestEffort));
         }
+
+        // ====================================================================
+        // v0.8.26 Per-Barrier Tracking Tests
+        // ====================================================================
+
+        #[test]
+        fn test_agent_at_barrier_basic() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Agent1 arrives at barrier "prepare_complete"
+            manager.agent_at_barrier("agent1", "prepare_complete", 1);
+            
+            // Verify barrier state exists
+            assert!(manager.barrier_agents.contains_key("prepare_complete"));
+            let state = manager.barrier_agents.get("prepare_complete").unwrap();
+            assert_eq!(state.ready_agents.len(), 1);
+            assert!(state.ready_agents.contains_key("agent1"));
+            assert_eq!(*state.ready_agents.get("agent1").unwrap(), 1);
+        }
+
+        #[test]
+        fn test_agent_at_barrier_multiple_agents() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string(), "agent3".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // All agents arrive at barrier
+            manager.agent_at_barrier("agent1", "execute_ready", 1);
+            manager.agent_at_barrier("agent2", "execute_ready", 1);
+            manager.agent_at_barrier("agent3", "execute_ready", 1);
+            
+            let state = manager.barrier_agents.get("execute_ready").unwrap();
+            assert_eq!(state.ready_agents.len(), 3);
+            assert!(!state.released);
+        }
+
+        #[test]
+        fn test_agent_at_barrier_sequence_update() {
+            let agent_ids = vec!["agent1".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Agent arrives at barrier with sequence 1
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 1);
+            
+            // Agent sends updated heartbeat with sequence 5
+            manager.agent_at_barrier("agent1", "barrier", 5);
+            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+            
+            // Older sequence should NOT update
+            manager.agent_at_barrier("agent1", "barrier", 3);
+            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+        }
+
+        #[test]
+        fn test_check_barrier_ready_all_or_nothing_success() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Both agents at barrier
+            manager.agent_at_barrier("agent1", "cleanup_ready", 1);
+            manager.agent_at_barrier("agent2", "cleanup_ready", 1);
+            
+            // Should be ready to release
+            let release_info = manager.check_barrier_ready("cleanup_ready");
+            assert!(release_info.is_some());
+            
+            let info = release_info.unwrap();
+            assert_eq!(info.barrier_name, "cleanup_ready");
+            assert_eq!(info.barrier_sequence, 1);
+            assert_eq!(info.ready_agents.len(), 2);
+        }
+
+        #[test]
+        fn test_check_barrier_ready_all_or_nothing_not_ready() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Only one agent at barrier
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            
+            // Should NOT be ready (waiting for agent2)
+            let release_info = manager.check_barrier_ready("barrier");
+            assert!(release_info.is_none());
+        }
+
+        #[test]
+        fn test_check_barrier_ready_all_or_nothing_with_failure() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // One agent ready, one failed
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.failed_agents.insert("agent2".to_string());
+            
+            // Should NOT be ready (AllOrNothing requires no failures)
+            let release_info = manager.check_barrier_ready("barrier");
+            assert!(release_info.is_none());
+        }
+
+        #[test]
+        fn test_check_barrier_ready_majority_success() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string(), "agent3".to_string()];
+            let config = test_barrier_config(BarrierType::Majority, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // 2 of 3 agents ready (majority)
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent2", "barrier", 2);
+            
+            // Should be ready (2 > 3/2)
+            let release_info = manager.check_barrier_ready("barrier");
+            assert!(release_info.is_some());
+            
+            let info = release_info.unwrap();
+            assert_eq!(info.barrier_sequence, 1);  // minimum sequence
+        }
+
+        #[test]  
+        fn test_check_barrier_ready_best_effort_success() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::BestEffort, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // One agent failed, one ready at barrier
+            manager.failed_agents.insert("agent2".to_string());
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            
+            // Should be ready (all alive agents ready)
+            let release_info = manager.check_barrier_ready("barrier");
+            assert!(release_info.is_some());
+        }
+
+        #[test]
+        fn test_clear_barrier_prevents_re_release() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Both agents at barrier
+            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent2", "barrier", 1);
+            
+            // First check should succeed
+            assert!(manager.check_barrier_ready("barrier").is_some());
+            
+            // Clear the barrier
+            manager.clear_barrier("barrier");
+            
+            // Second check should return None (already released)
+            assert!(manager.check_barrier_ready("barrier").is_none());
+            
+            // Verify released flag is set
+            assert!(manager.barrier_agents.get("barrier").unwrap().released);
+        }
+
+        #[test]
+        fn test_multiple_barriers_independent() {
+            let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let mut manager = BarrierManager::new(agent_ids, config);
+            
+            // Agents at different barriers
+            manager.agent_at_barrier("agent1", "prepare_ready", 1);
+            manager.agent_at_barrier("agent2", "prepare_ready", 1);
+            manager.agent_at_barrier("agent1", "execute_ready", 2);
+            // agent2 NOT at execute_ready yet
+            
+            // prepare_ready should be ready
+            assert!(manager.check_barrier_ready("prepare_ready").is_some());
+            
+            // execute_ready should NOT be ready
+            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            
+            // Clear prepare_ready
+            manager.clear_barrier("prepare_ready");
+            
+            // execute_ready should still NOT be ready (independent)
+            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            
+            // agent2 arrives at execute_ready
+            manager.agent_at_barrier("agent2", "execute_ready", 2);
+            
+            // Now execute_ready should be ready
+            assert!(manager.check_barrier_ready("execute_ready").is_some());
+        }
+
+        #[test]
+        fn test_check_barrier_ready_nonexistent() {
+            let agent_ids = vec!["agent1".to_string()];
+            let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
+            let manager = BarrierManager::new(agent_ids, config);
+            
+            // Query for a barrier no agent has reached
+            let release_info = manager.check_barrier_ready("nonexistent");
+            assert!(release_info.is_none());
+        }
     }
-}
 }

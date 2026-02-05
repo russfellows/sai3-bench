@@ -134,6 +134,42 @@ message PrepareSummary {
   repeated EndpointStatsSnapshot endpoint_stats = 12;
 }
 
+// v0.8.27: Per-stage summary for incremental results collection
+// Sent when a stage completes, before waiting at barrier
+// Ensures data is not lost if later stages fail
+message StageSummary {
+  uint32 stage_index = 1;              // 0-based stage index
+  string stage_name = 2;               // Stage name from config (e.g., "prepare", "workload")
+  string stage_type = 3;               // Stage type: "prepare", "workload", "cleanup", "custom"
+  double wall_seconds = 4;             // Duration of this stage
+  
+  // Operation counts for this stage
+  uint64 get_ops = 5;
+  uint64 get_bytes = 6;
+  uint64 put_ops = 7;
+  uint64 put_bytes = 8;
+  uint64 meta_ops = 9;
+  uint64 errors = 10;
+  
+  // Per-operation aggregates
+  OpAggregateMetrics get = 11;
+  OpAggregateMetrics put = 12;
+  OpAggregateMetrics meta = 13;
+  
+  // HDR histogram data for accurate aggregation across agents
+  bytes histogram_get = 14;
+  bytes histogram_put = 15;
+  bytes histogram_meta = 16;
+  
+  // Per-bucket byte counts for accurate avg_bytes calculation
+  SizeBins get_bins = 17;
+  SizeBins put_bins = 18;
+  SizeBins meta_bins = 19;
+  
+  // Per-endpoint statistics
+  repeated EndpointStatsSnapshot endpoint_stats = 20;
+}
+
 // v0.7.5: Live performance statistics for distributed execution
 // Sent every 1 second during workload execution for real-time visibility
 message LiveStats {
@@ -236,6 +272,11 @@ message LiveStats {
   bool at_barrier = 43;                  // Agent reached barrier, waiting for release
   string barrier_name = 44;              // Barrier identifier (e.g., "stage-1-prepare")
   uint32 barrier_sequence = 45;          // Monotonic counter for ordering
+  
+  // v0.8.27: Per-stage summary for incremental results collection
+  // Populated when a stage completes (before barrier wait)
+  // Controller writes TSV immediately to avoid data loss
+  StageSummary stage_summary = 46;
 }
 
 service Agent {

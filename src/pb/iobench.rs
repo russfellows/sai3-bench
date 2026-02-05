@@ -231,6 +231,61 @@ pub struct PrepareSummary {
     #[prost(message, repeated, tag = "12")]
     pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
 }
+/// v0.8.27: Per-stage summary for incremental results collection
+/// Sent when a stage completes, before waiting at barrier
+/// Ensures data is not lost if later stages fail
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StageSummary {
+    /// 0-based stage index
+    #[prost(uint32, tag = "1")]
+    pub stage_index: u32,
+    /// Stage name from config (e.g., "prepare", "workload")
+    #[prost(string, tag = "2")]
+    pub stage_name: ::prost::alloc::string::String,
+    /// Stage type: "prepare", "workload", "cleanup", "custom"
+    #[prost(string, tag = "3")]
+    pub stage_type: ::prost::alloc::string::String,
+    /// Duration of this stage
+    #[prost(double, tag = "4")]
+    pub wall_seconds: f64,
+    /// Operation counts for this stage
+    #[prost(uint64, tag = "5")]
+    pub get_ops: u64,
+    #[prost(uint64, tag = "6")]
+    pub get_bytes: u64,
+    #[prost(uint64, tag = "7")]
+    pub put_ops: u64,
+    #[prost(uint64, tag = "8")]
+    pub put_bytes: u64,
+    #[prost(uint64, tag = "9")]
+    pub meta_ops: u64,
+    #[prost(uint64, tag = "10")]
+    pub errors: u64,
+    /// Per-operation aggregates
+    #[prost(message, optional, tag = "11")]
+    pub get: ::core::option::Option<OpAggregateMetrics>,
+    #[prost(message, optional, tag = "12")]
+    pub put: ::core::option::Option<OpAggregateMetrics>,
+    #[prost(message, optional, tag = "13")]
+    pub meta: ::core::option::Option<OpAggregateMetrics>,
+    /// HDR histogram data for accurate aggregation across agents
+    #[prost(bytes = "vec", tag = "14")]
+    pub histogram_get: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    pub histogram_put: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "16")]
+    pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
+    /// Per-bucket byte counts for accurate avg_bytes calculation
+    #[prost(message, optional, tag = "17")]
+    pub get_bins: ::core::option::Option<SizeBins>,
+    #[prost(message, optional, tag = "18")]
+    pub put_bins: ::core::option::Option<SizeBins>,
+    #[prost(message, optional, tag = "19")]
+    pub meta_bins: ::core::option::Option<SizeBins>,
+    /// Per-endpoint statistics
+    #[prost(message, repeated, tag = "20")]
+    pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
+}
 /// v0.7.5: Live performance statistics for distributed execution
 /// Sent every 1 second during workload execution for real-time visibility
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -376,6 +431,11 @@ pub struct LiveStats {
     /// Monotonic counter for ordering
     #[prost(uint32, tag = "45")]
     pub barrier_sequence: u32,
+    /// v0.8.27: Per-stage summary for incremental results collection
+    /// Populated when a stage completes (before barrier wait)
+    /// Controller writes TSV immediately to avoid data loss
+    #[prost(message, optional, tag = "46")]
+    pub stage_summary: ::core::option::Option<StageSummary>,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {

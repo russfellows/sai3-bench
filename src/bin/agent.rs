@@ -29,7 +29,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase, StageSummary};
 
 /// Helper function to get current timestamp with optional simulated clock skew.
 /// 
@@ -1471,6 +1471,7 @@ impl Agent for AgentSvc {
                     at_barrier: false,
                     barrier_name: String::new(),
                     barrier_sequence: 0,
+                    stage_summary: None,
                 };
                 sequence += 1;
                 
@@ -1636,6 +1637,7 @@ impl Agent for AgentSvc {
                                                 at_barrier: false,
                                                 barrier_name: String::new(),
                                                 barrier_sequence: 0,
+                                                stage_summary: None,
                                             };
                                             
                                             if tx_stats.send(running_msg).await.is_err() {
@@ -1706,6 +1708,7 @@ impl Agent for AgentSvc {
                                         at_barrier: false,
                                         barrier_name: String::new(),
                                         barrier_sequence: 0,
+                                        stage_summary: None,
                                     };
                                     
                                     if tx_stats.send(completed_msg).await.is_err() {
@@ -1762,6 +1765,7 @@ impl Agent for AgentSvc {
                                         at_barrier: false,
                                         barrier_name: String::new(),
                                         barrier_sequence: 0,
+                                        stage_summary: None,
                                     };
                                     
                                     if tx_stats.send(error_msg).await.is_err() {
@@ -1933,6 +1937,7 @@ impl Agent for AgentSvc {
                                 at_barrier: false,
                                 barrier_name: String::new(),
                                 barrier_sequence: 0,
+                                stage_summary: None,
                             };
                             sequence += 1;
                             
@@ -2028,6 +2033,7 @@ impl Agent for AgentSvc {
                                             at_barrier: false,
                                             barrier_name: String::new(),
                                             barrier_sequence: 0,
+                                            stage_summary: None,
                                         };
                                         
                                         if let Err(e) = tx_stats_for_control.send(ack_msg).await {
@@ -2714,6 +2720,7 @@ impl Agent for AgentSvc {
                                     at_barrier: false,
                                     barrier_name: String::new(),
                                     barrier_sequence: 0,
+                                    stage_summary: None,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(aborted_msg).await {
@@ -2844,6 +2851,7 @@ impl Agent for AgentSvc {
                                     at_barrier: false,
                                     barrier_name: String::new(),
                                     barrier_sequence: 0,
+                                    stage_summary: None,
                                 };
                                 
                                 if let Err(e) = tx_stats_for_control.send(preflight_msg).await {
@@ -2917,6 +2925,7 @@ impl Agent for AgentSvc {
                                 at_barrier: false,
                                 barrier_name: String::new(),
                                 barrier_sequence: 0,
+                                stage_summary: None,
                             };
                             
                             let _ = tx_stats_for_control.send(error_msg).await;
@@ -2983,6 +2992,7 @@ impl Agent for AgentSvc {
                         at_barrier: false,
                         barrier_name: String::new(),
                         barrier_sequence: 0,
+                        stage_summary: None,
                     };
                     
                     let _ = tx_stats_for_control.send(timeout_msg).await;
@@ -3123,6 +3133,16 @@ async fn execute_stages_workflow(
             error!("Failed to transition to AtStage: {}", e);
             return Err(format!("State transition failed: {}", e));
         }
+        
+        // v0.8.27: Reset stats for this stage to get accurate per-stage metrics
+        let live_stage = match &stage.config {
+            sai3_bench::config::StageSpecificConfig::Prepare { .. } => sai3_bench::live_stats::WorkloadStage::Prepare,
+            sai3_bench::config::StageSpecificConfig::Execute { .. } => sai3_bench::live_stats::WorkloadStage::Workload,
+            sai3_bench::config::StageSpecificConfig::Cleanup { .. } => sai3_bench::live_stats::WorkloadStage::Cleanup,
+            sai3_bench::config::StageSpecificConfig::Custom { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
+            sai3_bench::config::StageSpecificConfig::Hybrid { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
+        };
+        tracker.reset_for_stage(&stage.name, live_stage);
         
         // Execute stage based on type
         match &stage.config {
@@ -3346,6 +3366,73 @@ async fn execute_stages_workflow(
         
         info!("Stage {}/{} complete, waiting at barrier", stage_index + 1, stages.len());
         
+        // v0.8.27: Compute stage summary before barrier wait
+        // This ensures stats are captured and sent immediately, preventing data loss
+        let stage_snapshot = tracker.snapshot();
+        let stage_type = match &stage.config {
+            sai3_bench::config::StageSpecificConfig::Prepare { .. } => "prepare",
+            sai3_bench::config::StageSpecificConfig::Execute { .. } => "execute",
+            sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
+            sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
+            sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
+        };
+        
+        // Serialize histograms for this stage
+        let (hist_get, hist_put, hist_meta) = tracker.serialize_histograms()
+            .unwrap_or_else(|e| {
+                warn!("Failed to serialize stage histograms: {}", e);
+                (Vec::new(), Vec::new(), Vec::new())
+            });
+        
+        let stage_summary = StageSummary {
+            stage_index: stage_index as u32,
+            stage_name: stage.name.clone(),
+            stage_type: stage_type.to_string(),
+            wall_seconds: stage_snapshot.stage_elapsed_s,
+            get_ops: stage_snapshot.get_ops,
+            get_bytes: stage_snapshot.get_bytes,
+            put_ops: stage_snapshot.put_ops,
+            put_bytes: stage_snapshot.put_bytes,
+            meta_ops: stage_snapshot.meta_ops,
+            errors: 0,  // TODO: Track errors per stage
+            get: Some(OpAggregateMetrics {
+                bytes: stage_snapshot.get_bytes,
+                ops: stage_snapshot.get_ops,
+                mean_us: stage_snapshot.get_mean_us,
+                p50_us: stage_snapshot.get_p50_us,
+                p95_us: stage_snapshot.get_p95_us,
+                p99_us: stage_snapshot.get_p99_us,
+            }),
+            put: Some(OpAggregateMetrics {
+                bytes: stage_snapshot.put_bytes,
+                ops: stage_snapshot.put_ops,
+                mean_us: stage_snapshot.put_mean_us,
+                p50_us: stage_snapshot.put_p50_us,
+                p95_us: stage_snapshot.put_p95_us,
+                p99_us: stage_snapshot.put_p99_us,
+            }),
+            meta: Some(OpAggregateMetrics {
+                bytes: 0,  // META has no bytes
+                ops: stage_snapshot.meta_ops,
+                mean_us: stage_snapshot.meta_mean_us,
+                p50_us: stage_snapshot.meta_p50_us,
+                p95_us: stage_snapshot.meta_p95_us,
+                p99_us: stage_snapshot.meta_p99_us,
+            }),
+            histogram_get: hist_get,
+            histogram_put: hist_put,
+            histogram_meta: hist_meta,
+            // TODO: Implement per-bucket size tracking for stages
+            get_bins: None,
+            put_bins: None,
+            meta_bins: None,
+            endpoint_stats: Vec::new(),  // TODO: Capture per-stage endpoint stats
+        };
+        
+        info!("Stage '{}' summary: {} GET ops, {} PUT ops, {} META ops in {:.2}s",
+              stage.name, stage_snapshot.get_ops, stage_snapshot.put_ops, 
+              stage_snapshot.meta_ops, stage_snapshot.stage_elapsed_s);
+        
         // v0.8.26: Barrier coordination implementation
         // Phase 3: Wait for controller to release barrier before proceeding to next stage
         let barrier_name = format!("stage_{}", stage.name);
@@ -3365,6 +3452,7 @@ async fn execute_stages_workflow(
             }
             
             // Send barrier-ready notification to controller via LiveStats
+            // Include stage_summary only on first send (not retries) to avoid duplicate processing
             let snapshot = tracker.snapshot();
             let barrier_stats = LiveStats {
                 agent_id: agent_id.clone(),
@@ -3380,6 +3468,8 @@ async fn execute_stages_workflow(
                 put_ops: snapshot.put_ops,
                 put_bytes: snapshot.put_bytes,
                 meta_ops: snapshot.meta_ops,
+                // v0.8.27: Include stage summary on first barrier notification
+                stage_summary: if retry == 0 { Some(stage_summary.clone()) } else { None },
                 // Fill remaining fields from tracker
                 ..Default::default()
             };
