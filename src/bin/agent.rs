@@ -387,6 +387,15 @@ impl AgentState {
     async fn get_shared_storage(&self) -> Option<bool> {
         *self.shared_storage.lock().await
     }
+    
+    async fn set_stages(&self, stages: Option<Vec<sai3_bench::config::StageConfig>>) {
+        let mut stages_lock = self.stages.lock().await;
+        *stages_lock = stages;
+    }
+    
+    async fn get_stages(&self) -> Option<Vec<sai3_bench::config::StageConfig>> {
+        self.stages.lock().await.clone()
+    }
 }
 
 struct AgentSvc {
@@ -2058,6 +2067,50 @@ impl Agent for AgentSvc {
                                         let _ = tx_done.send(Err(format!("Config validation failed: {}", e))).await;
                                         return;
                                     }
+                                    
+                                    // Phase 2b: Parse YAML-driven stages if configured
+                                    // If stages exist, agent will use AtStage state machine
+                                    // If None, agent will use deprecated hardcoded states (backward compat)
+                                    let stages = if let Some(ref distributed_config) = config.distributed {
+                                        // Use config.duration as default_duration for stages (backward compat)
+                                        let default_duration = config.duration;
+                                        
+                                        match distributed_config.get_sorted_stages(default_duration) {
+                                            Ok(stage_vec) => {
+                                                if !stage_vec.is_empty() {
+                                                    info!("Control reader: Parsed {} YAML-driven stages", stage_vec.len());
+                                                    for (i, stage) in stage_vec.iter().enumerate() {
+                                                        info!("  Stage {}: {} ({})", i, stage.name, 
+                                                            match &stage.config {
+                                                                sai3_bench::config::StageSpecificConfig::Execute { .. } => "execute",
+                                                                sai3_bench::config::StageSpecificConfig::Prepare { .. } => "prepare",
+                                                                sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
+                                                                sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
+                                                                sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
+                                                            }
+                                                        );
+                                                    }
+                                                    Some(stage_vec)
+                                                } else {
+                                                    info!("Control reader: No stages configured, using hardcoded state flow");
+                                                    None
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Control reader: Failed to parse stages: {}", e);
+                                                agent_state_reader.set_error(format!("Stage parsing failed: {}", e)).await;
+                                                let _ = agent_state_reader.transition_to(WorkloadState::Failed, "stage parsing failed").await;
+                                                let _ = tx_done.send(Err(format!("Stage parsing failed: {}", e))).await;
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        info!("Control reader: No distributed config, using hardcoded state flow");
+                                        None
+                                    };
+                                    
+                                    // Store stages in AgentState for use during execution
+                                    agent_state_reader.set_stages(stages).await;
                                     
                                     // Transition to PrepareReady (validation passed, waiting for prepare barrier)
                                     if let Err(e) = agent_state_reader.transition_to(WorkloadState::PrepareReady, "validation passed").await {
