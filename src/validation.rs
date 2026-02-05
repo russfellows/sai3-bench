@@ -258,10 +258,17 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     }
     
     // Prepare configuration
+    // Skip this section if using YAML-driven stages (prepare behavior defined in stages)
+    let using_stages = config.distributed.as_ref()
+        .and_then(|d| d.get_sorted_stages(config.duration).ok())
+        .map(|stages| !stages.is_empty())
+        .unwrap_or(false);
+    
     if let Some(ref prepare) = config.prepare {
-        println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
-        println!("│ Objects will be created BEFORE test execution");
-        println!("│");
+        if !using_stages {
+            println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
+            println!("│ Objects will be created BEFORE test execution");
+            println!("│");
         
         // Directory tree structure (if configured)
         if let Some(ref dir_config) = prepare.directory_structure {
@@ -396,6 +403,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
+        } // End of !using_stages check
     }
     
     // Workload operations
