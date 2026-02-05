@@ -1,0 +1,171 @@
+# LARGE-SCALE TEST with Extended Timeouts
+# 4 agents, 16 endpoints, 331k directories, 64M files (~500 TB)
+# 
+# This config includes barrier synchronization with extended timeouts
+# to handle operations that take minutes to hours at extreme scale.
+
+concurrency: 64
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# Prepare phase: Create 500 TB test dataset
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false
+  force_overwrite: true
+
+  # Directory tree: width=24, depth=4 → 331,776 leaf directories
+  # Tree generation takes ~90 seconds
+  directory_structure:
+    width: 24
+    depth: 4
+    files_per_dir: 193
+    distribution: "bottom"
+    dir_mask: "d%d_w%d.dir"
+
+  # 64M files × 8 MB average = ~500 TB
+  ensure_objects:
+    - count: 64032768
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 8MiB
+        std_dev: 1MiB
+        min: 1MiB
+        max: 16MiB
+      use_multi_endpoint: true
+
+  cleanup: false
+
+# Execute workload (0s for prepare-only test)
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+
+duration: 0s  # Prepare-only test
+
+# Distributed configuration with barrier synchronization
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  
+  # CRITICAL: Extended timeouts for large-scale operations
+  barrier_sync:
+    enabled: true
+    
+    # Default timeouts (apply to all phases unless overridden)
+    default_heartbeat_interval: 60   # 60s between heartbeats
+    default_missed_threshold: 5      # 5 missed = 300s total
+    default_query_timeout: 30        # 30s per query
+    default_query_retries: 3         # 3 retries = 90s query time
+    
+    # PREPARE phase: Tree generation can take 90+ seconds
+    # Recommended timeout: 2x theoretical max (90s × 2 = 180s minimum)
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 120        # 2 minutes between heartbeats
+      missed_threshold: 10           # 10 missed = 1200s (20 min) heartbeat timeout
+      query_timeout: 60              # 1 minute per query
+      query_retries: 5               # 5 retries = 300s (5 min) query time
+                                     # Total: 1200s + 300s = 1500s (25 min)
+    
+    # EXECUTE phase: Standard timeouts work fine for I/O workload
+    execute:
+      type: all_or_nothing
+      heartbeat_interval: 30         # 30s between heartbeats
+      missed_threshold: 3            # 3 missed = 90s timeout
+      query_timeout: 10              # 10s per query
+      query_retries: 2               # 2 retries = 20s query time
+                                     # Total: 90s + 20s = 110s
+    
+    # CLEANUP phase: Can take hours for 64M files
+    # Use best_effort to not block on slow agents
+    cleanup:
+      type: best_effort              # Fast agents proceed, slow agents ignored
+      heartbeat_interval: 300        # 5 minutes between heartbeats
+      missed_threshold: 12           # 12 missed = 3600s (60 min) heartbeat timeout
+      query_timeout: 60              # 1 minute per query
+      query_retries: 5               # 5 retries = 300s query time
+                                     # Total: 3600s + 300s = 3900s (65 min)
+  
+  # Agent configuration: 4 agents × 4 endpoints each = 16 total
+  agents:
+    # Agent 1: 172.21.4.10 → Mount points 1-4
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast1/benchmark/"
+          - "file:///mnt/vast2/benchmark/"
+          - "file:///mnt/vast3/benchmark/"
+          - "file:///mnt/vast4/benchmark/"
+        strategy: least_connections
+
+    # Agent 2: 172.21.4.11 → Mount points 5-8
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast5/benchmark/"
+          - "file:///mnt/vast6/benchmark/"
+          - "file:///mnt/vast7/benchmark/"
+          - "file:///mnt/vast8/benchmark/"
+        strategy: least_connections
+
+    # Agent 3: 172.21.4.12 → Mount points 9-12
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast9/benchmark/"
+          - "file:///mnt/vast10/benchmark/"
+          - "file:///mnt/vast11/benchmark/"
+          - "file:///mnt/vast12/benchmark/"
+        strategy: least_connections
+
+    # Agent 4: 172.21.4.13 → Mount points 13-16
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast13/benchmark/"
+          - "file:///mnt/vast14/benchmark/"
+          - "file:///mnt/vast15/benchmark/"
+          - "file:///mnt/vast16/benchmark/"
+        strategy: least_connections
+
+# =============================================================================
+# PERFORMANCE EXPECTATIONS
+# =============================================================================
+#
+# Tree Generation (per agent):
+#   - 331,776 directories ÷ 4 agents = 82,944 dirs/agent
+#   - Expected time: ~22 seconds/agent (with progress updates every 5000 dirs)
+#   - Total time: ~25 seconds (agents run in parallel)
+#
+# Object Creation (per agent):
+#   - 64,032,768 files ÷ 4 agents = 16,008,192 files/agent
+#   - At 1000 creates/sec: ~16,008 seconds = ~4.4 hours/agent
+#   - At 2000 creates/sec: ~8,004 seconds = ~2.2 hours/agent
+#   - Total time: depends on slowest agent (barrier waits for all)
+#
+# Barrier Synchronization:
+#   - All agents must complete tree generation before any proceed to create
+#   - All agents must complete create before any proceed to workload/cleanup
+#   - Extended timeouts prevent false failures on slow hardware
+#
+# Total Expected Duration:
+#   - Tree generation: ~30 seconds (with barriers)
+#   - Object creation: ~2-5 hours (depending on storage speed)
+#   - Total: ~2-5 hours for full prepare phase
+#
+# =============================================================================

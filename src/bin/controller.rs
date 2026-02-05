@@ -777,7 +777,7 @@ async fn abort_all_agents(
         let domain = agent_domain.to_string();
         
         let task = tokio::spawn(async move {
-            match mk_client(&addr, insecure, ca.as_ref(), &domain).await {
+            match mk_client(&addr, insecure, ca.as_ref(), &domain, 30, 10).await {
                 Ok(mut client) => {
                     match client.abort_workload(Empty {}).await {
                         Ok(_) => debug!("Abort signal sent to agent {}", addr),
@@ -802,6 +802,8 @@ async fn mk_client(
     insecure: bool,
     ca_path: Option<&PathBuf>,
     sni_domain: &str,
+    keepalive_interval_secs: u64,
+    keepalive_timeout_secs: u64,
 ) -> Result<AgentClient<Channel>> {
     if insecure {
         // Plain HTTP with robust connection settings
@@ -812,8 +814,9 @@ async fn mk_client(
             // BUG FIX v0.8.3: Add HTTP/2 keepalive to detect dead connections
             // Without keepalive, broken TCP connections can hang for minutes
             // These settings match gRPC best practices for long-lived streams
-            .http2_keep_alive_interval(Duration::from_secs(30))  // Send PING every 30s
-            .keep_alive_timeout(Duration::from_secs(10))         // Wait 10s for PONG
+            // v0.8.27: Made configurable via distributed.grpc_keepalive_* (defaults: 30s/10s)
+            .http2_keep_alive_interval(Duration::from_secs(keepalive_interval_secs))
+            .keep_alive_timeout(Duration::from_secs(keepalive_timeout_secs))
             .keep_alive_while_idle(true)                         // Keep alive even when idle
             .connect()
             .await?;
@@ -837,8 +840,9 @@ async fn mk_client(
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true)
         // BUG FIX v0.8.3: Add HTTP/2 keepalive (same as insecure mode)
-        .http2_keep_alive_interval(Duration::from_secs(30))
-        .keep_alive_timeout(Duration::from_secs(10))
+        // v0.8.27: Made configurable via distributed.grpc_keepalive_* (defaults: 30s/10s)
+        .http2_keep_alive_interval(Duration::from_secs(keepalive_interval_secs))
+        .keep_alive_timeout(Duration::from_secs(keepalive_timeout_secs))
         .keep_alive_while_idle(true)
         .connect()
         .await?;
@@ -935,7 +939,7 @@ async fn main() -> Result<()> {
         
         Commands::Ping => {
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c.ping(Empty {}).await?.into_inner();
@@ -944,7 +948,7 @@ async fn main() -> Result<()> {
         }
         Commands::Get { uri, jobs } => {
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c
@@ -971,7 +975,7 @@ async fn main() -> Result<()> {
             concurrency,
         } => {
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain)
+                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
                     .await
                     .with_context(|| format!("connect to {}", a))?;
                 let r = c
@@ -1717,6 +1721,14 @@ async fn run_distributed_workload(
     } else {
         bail!("Distributed execution requires either --shared-prepare CLI flag or distributed.shared_filesystem in config.\n\nExample config:\n  distributed:\n    shared_filesystem: true  # or false for per-agent storage\n    tree_creation_mode: concurrent\n    path_selection: random");
     };
+    
+    // v0.8.27: Extract gRPC keep-alive settings from config (defaults: 30s interval, 10s timeout)
+    let (keepalive_interval, keepalive_timeout) = if let Some(ref dist) = config.distributed {
+        (dist.grpc_keepalive_interval, dist.grpc_keepalive_timeout)
+    } else {
+        (30, 10)  // Fallback defaults if no distributed config
+    };
+    debug!("gRPC keep-alive: interval={}s, timeout={}s", keepalive_interval, keepalive_timeout);
 
     let header = "=== Distributed Workload ===";
     println!("{}", header);
@@ -1833,7 +1845,7 @@ async fn run_distributed_workload(
         let agent_id = ids[idx].clone();
         debug!("Connecting to agent {} at {}", agent_id, agent_addr);
         
-        match mk_client(agent_addr, insecure, agent_ca, agent_domain).await {
+        match mk_client(agent_addr, insecure, agent_ca, agent_domain, keepalive_interval, keepalive_timeout).await {
             Ok(client) => {
                 agent_clients_vec.push((agent_id.clone(), client));
                 debug!("Connected to agent {} successfully", agent_id);
@@ -1962,7 +1974,7 @@ async fn run_distributed_workload(
             debug!("Connecting to agent at {}", addr);
             
             // Connect to agent
-            let mut client = mk_client(&addr, insecure, ca.as_ref(), &domain)
+            let mut client = mk_client(&addr, insecure, ca.as_ref(), &domain, keepalive_interval, keepalive_timeout)
                 .await
                 .with_context(|| format!("connect to agent {}", addr))?;
 

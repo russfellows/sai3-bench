@@ -435,6 +435,14 @@ pub async fn list_existing_objects_distributed(
                                 let elapsed = start_time.elapsed().as_secs_f64();
                                 let rate = current as f64 / elapsed;
                                 let (total_errs, _) = error_tracker.get_stats();
+                                
+                                // Warn about slow listing that could cause barrier timeouts
+                                if rate < 500.0 && current > 10000 {
+                                    warn!("⚠ Slow listing: {:.0} files/s (expected >500/s). \
+                                         May cause barrier timeout with large directory counts. \
+                                         Consider increasing barrier_sync.prepare.agent_barrier_timeout", rate);
+                                }
+                                
                                 if total_errs > 0 {
                                     debug!("  Progress: {} files ({:.0}/s), {} errors - dir {}/{}", 
                                         current, rate, total_errs, dir_idx + 1, total_dirs);

@@ -3297,7 +3297,12 @@ async fn execute_stages_workflow(
         // Phase 3: Wait for controller to release barrier before proceeding to next stage
         let barrier_name = format!("stage_{}", stage.name);
         let mut barrier_sequence = 0u32;
-        let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configurable
+        
+        // Get configurable barrier timeout from stage config or use default
+        let barrier_timeout_secs = stage.barrier.as_ref()
+            .map(|b| b.agent_barrier_timeout)
+            .unwrap_or(120);  // Default 2 minutes if no barrier config
+        let barrier_timeout = std::time::Duration::from_secs(barrier_timeout_secs);
         let max_barrier_retries = 5;
         
         // Subscribe to barrier release notifications

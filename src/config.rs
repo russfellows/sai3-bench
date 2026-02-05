@@ -1071,6 +1071,17 @@ pub struct DistributedConfig {
     #[serde(default = "default_partition_overlap")]
     pub partition_overlap: f64,
     
+    /// gRPC keep-alive interval in seconds (default: 30)
+    /// How often PING frames are sent to detect dead connections
+    /// For very slow operations (>30s), increase to 60+ to avoid premature disconnects
+    #[serde(default = "default_grpc_keepalive_interval")]
+    pub grpc_keepalive_interval: u64,
+    
+    /// gRPC keep-alive timeout in seconds (default: 10)
+    /// How long to wait for PONG response before declaring connection dead
+    #[serde(default = "default_grpc_keepalive_timeout")]
+    pub grpc_keepalive_timeout: u64,
+    
     /// v0.8.25: Barrier synchronization for phase coordination
     /// Disabled by default for backward compatibility
     #[serde(default)]
@@ -1235,6 +1246,14 @@ fn default_binary_path() -> String {
 
 fn default_partition_overlap() -> f64 {
     crate::constants::DEFAULT_PARTITION_OVERLAP
+}
+
+fn default_grpc_keepalive_interval() -> u64 {
+    30  // 30 seconds - send PING every 30s
+}
+
+fn default_grpc_keepalive_timeout() -> u64 {
+    10  // 10 seconds - wait for PONG
 }
 
 /// Directory tree creation mode for distributed testing
@@ -1518,6 +1537,13 @@ pub struct PhaseBarrierConfig {
     /// Retries for agent query (default: 2)
     #[serde(default = "default_query_retries")]
     pub query_retries: u32,
+    
+    /// Agent-side barrier wait timeout (default: 120s)
+    /// How long each agent waits for controller to release barrier
+    /// Must be > (heartbeat_interval * missed_threshold + query_timeout * query_retries)
+    /// For very large scales (300k+ dirs), use 600s+
+    #[serde(default = "default_agent_barrier_timeout")]
+    pub agent_barrier_timeout: u64,
 }
 
 /// Completion criteria for stage execution (how stage knows it's done)
@@ -1680,6 +1706,7 @@ fn default_heartbeat_interval() -> u64 { 30 }
 fn default_missed_threshold() -> u32 { 3 }
 fn default_query_timeout() -> u64 { 10 }
 fn default_query_retries() -> u32 { 2 }
+fn default_agent_barrier_timeout() -> u64 { 120 }  // 2 minutes default (was hardcoded 30s)
 
 impl Default for BarrierSyncConfig {
     fn default() -> Self {
@@ -1714,6 +1741,7 @@ impl BarrierSyncConfig {
             missed_threshold: self.default_missed_threshold,
             query_timeout: self.default_query_timeout,
             query_retries: self.default_query_retries,
+            agent_barrier_timeout: default_agent_barrier_timeout(),
         })
     }
 }
