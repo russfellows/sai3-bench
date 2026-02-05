@@ -2346,8 +2346,10 @@ impl Agent for AgentSvc {
                                                         return Err(anyhow::anyhow!("State transition failed: {}", e));
                                                     }
                                                     
-                                                    // TODO: Report barrier ready to controller
-                                                    // For now, immediately proceed (barrier implementation incomplete)
+                                                    // CRITICAL TODO (Phase 3): Implement barrier coordination
+                                                    // Current limitation: Agents do NOT wait at ExecuteReady barrier
+                                                    // See execute_stages_workflow() for full implementation requirements
+                                                    warn!("BARRIER COORDINATION NOT IMPLEMENTED - proceeding without synchronization");
                                                     
                                                     // v0.8.25: Transition to Executing (starting execution phase)
                                                     if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Executing, "starting execution").await {
@@ -3273,8 +3275,20 @@ async fn execute_stages_workflow(
         
         info!("Stage {}/{} complete, waiting at barrier", stage_index + 1, stages.len());
         
-        // TODO: Report barrier ready to controller
-        // TODO: Wait for barrier release before proceeding to next stage
+        // CRITICAL TODO (Phase 3): Implement barrier coordination
+        // Current limitation: Agents do NOT wait - they proceed immediately to next stage
+        // This means fast agents will race ahead of slow agents (no synchronization)
+        // 
+        // Required implementation:
+        // 1. Send barrier ready notification to controller via control channel
+        // 2. Block here waiting for controller's barrier release signal
+        // 3. Controller must track which agents are ready at which barrier
+        // 4. Controller must implement barrier policy (AllOrNothing/Majority/BestEffort)
+        // 5. Controller sends RELEASE command when barrier criteria met
+        // 
+        // For now, stages execute sequentially per-agent but without cross-agent coordination
+        // This works for single-agent testing but NOT for true distributed execution
+        warn!("BARRIER COORDINATION NOT IMPLEMENTED - agents will not synchronize at stage boundaries");
     }
     
     // All stages complete - transition to Completed
