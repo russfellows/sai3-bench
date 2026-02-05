@@ -1336,11 +1336,11 @@ impl Agent for AgentSvc {
             tokio::spawn(async move {
                 let mut sequence: i64 = 0;
                 
-                // Wait for START command validation to complete (signaled by transition to Ready)
+                // Wait for START command validation to complete (signaled by transition to PrepareReady)
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     let state = agent_state.get_state().await;
-                    if state == WorkloadState::Ready {
+                    if state == WorkloadState::PrepareReady {
                         break;
                     } else if state == WorkloadState::Failed || state == WorkloadState::Idle {
                         // Validation failed or agent reset - exit early
@@ -1931,6 +1931,13 @@ impl Agent for AgentSvc {
                                     // First START: Validate config and send READY
                                     info!("Control reader: Received initial START command - validating config");
                                     
+                                    // Transition to Validating state
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Validating, "starting validation").await {
+                                        error!("Control reader: Failed to transition to Validating: {}", e);
+                                        let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
+                                        return;
+                                    }
+                                    
                                     // Extract config from START message
                                     let config_yaml = control_msg.config_yaml;
                                     let agent_id = control_msg.agent_id;
@@ -1984,20 +1991,20 @@ impl Agent for AgentSvc {
                                         return;
                                     }
                                     
-                                    // Transition to Ready (validation passed)
-                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Ready, "validation passed").await {
-                                        error!("Control reader: Failed to transition to Ready: {}", e);
+                                    // Transition to PrepareReady (validation passed, waiting for prepare barrier)
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::PrepareReady, "validation passed").await {
+                                        error!("Control reader: Failed to transition to PrepareReady: {}", e);
                                         let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
                                         return;
                                     }
                                     
-                                    info!("Control reader: Config validated, agent ready - waiting for coordinated START");
+                                    info!("Control reader: Config validated, agent at prepare barrier - waiting for coordinated START");
                                     
                                     // Stats writer will send READY message with agent_timestamp_ns
                                     // Controller will calculate clock offset and send second START with start_timestamp_ns
                                     
-                                } else if current_state == WorkloadState::Ready && start_timestamp_ns != 0 {
-                                    // Second START: Coordinated start with timestamp
+                                } else if current_state == WorkloadState::PrepareReady && start_timestamp_ns != 0 {
+                                    // Second START: Coordinated start with timestamp (controller released prepare barrier)
                                     info!("Control reader: Received coordinated START (timestamp: {} ns)", start_timestamp_ns);
                                     
                                     // Calculate wait duration until coordinated start time
@@ -2022,9 +2029,9 @@ impl Agent for AgentSvc {
                                               (-wait_ns) / 1_000_000);
                                     }
                                     
-                                    // Transition to Running
-                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Running, "coordinated start").await {
-                                        error!("Control reader: Failed to transition to Running: {}", e);
+                                    // Transition to Preparing (will execute prepare phase first)
+                                    if let Err(e) = agent_state_reader.transition_to(WorkloadState::Preparing, "coordinated start").await {
+                                        error!("Control reader: Failed to transition to Preparing: {}", e);
                                         let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
                                         return;
                                     }
@@ -2180,6 +2187,21 @@ impl Agent for AgentSvc {
                                                     
                                                     // Reset stats counters before workload
                                                     tracker_for_prepare.reset_for_workload();
+                                                    
+                                                    // v0.8.25: Transition to ExecuteReady (prepare done, at barrier)
+                                                    if let Err(e) = agent_state_for_task.transition_to(WorkloadState::ExecuteReady, "prepare complete").await {
+                                                        error!("Failed to transition to ExecuteReady: {}", e);
+                                                        return Err(anyhow::anyhow!("State transition failed: {}", e));
+                                                    }
+                                                    
+                                                    // TODO: Report barrier ready to controller
+                                                    // For now, immediately proceed (barrier implementation incomplete)
+                                                    
+                                                    // v0.8.25: Transition to Executing (starting execution phase)
+                                                    if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Executing, "starting execution").await {
+                                                        error!("Failed to transition to Executing: {}", e);
+                                                        return Err(anyhow::anyhow!("State transition failed: {}", e));
+                                                    }
                                                     
                                                     if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                                                         tokio::time::sleep(tokio::time::Duration::from_secs(prepare_config.post_prepare_delay)).await;
@@ -2367,6 +2389,19 @@ impl Agent for AgentSvc {
                                             if !is_cleanup_only {
                                                 if let Some(ref prepare_config) = config_exec.prepare {
                                                     if prepare_config.cleanup {
+                                                        // v0.8.25: Transition to CleanupReady (execution done, at barrier)
+                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::CleanupReady, "execution complete").await {
+                                                            error!("Failed to transition to CleanupReady: {}", e);
+                                                        }
+                                                        
+                                                        // TODO: Report barrier ready to controller
+                                                        // For now, immediately proceed (barrier implementation incomplete)
+                                                        
+                                                        // v0.8.25: Transition to Cleaning (starting cleanup phase)
+                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Cleaning, "starting cleanup").await {
+                                                            error!("Failed to transition to Cleaning: {}", e);
+                                                        }
+                                                        
                                                         let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0);
                                                         let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1);
                                                         let cleanup_mode = prepare_config.cleanup_mode;
@@ -2394,6 +2429,11 @@ impl Agent for AgentSvc {
                                                             error!("Cleanup phase failed for agent {}: {}", agent_id_exec, e);
                                                         } else {
                                                             info!("Cleanup phase completed for agent {}", agent_id_exec);
+                                                        }
+                                                        
+                                                        // v0.8.25: Transition to Completed (all phases done)
+                                                        if let Err(e) = agent_state_for_task.transition_to(WorkloadState::Completed, "all phases complete").await {
+                                                            error!("Failed to transition to Completed: {}", e);
                                                         }
                                                     }
                                                 }
