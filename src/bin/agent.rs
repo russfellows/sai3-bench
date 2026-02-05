@@ -126,25 +126,45 @@ struct AgentState {
     completion_sent: Arc<Mutex<bool>>,
     /// v0.8.24: Shared storage flag for distributed prepare (true=shared, false=isolated)
     shared_storage: Arc<Mutex<Option<bool>>>,
+    /// v0.8.26: YAML-driven stage sequence (optional - uses hardcoded states if None)
+    stages: Arc<Mutex<Option<Vec<sai3_bench::config::StageConfig>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum WorkloadState {
     Idle,              // Ready to accept new workload
+    
+    // YAML-driven stage execution (v0.8.26+)
+    // Replaces hardcoded states below when config.distributed.stages is specified
+    AtStage {
+        stage_index: usize,       // Index in stages array (0-based)
+        stage_name: String,       // Stage name from config (e.g., "preflight", "epoch-1")
+        ready_for_next: bool,     // true = at barrier, waiting to proceed; false = executing stage
+    },
+    
+    // Legacy hardcoded states (DEPRECATED - use AtStage for new code)
+    // These remain for backward compatibility when config.distributed.stages is None
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     Validating,        // Pre-flight checks running
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     PrepareReady,      // Validation passed, waiting for prepare barrier
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     Preparing,         // Creating/cleaning objects
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     ExecuteReady,      // Prepare complete, waiting for execute barrier
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     Executing,         // Running I/O workload
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     CleanupReady,      // Execution complete, waiting for cleanup barrier
+    #[deprecated(note = "Use AtStage with YAML-driven stages instead")]
     Cleaning,          // Removing objects
+    
     Completed,         // All phases done successfully
     Failed,            // Error occurred (backward compat - no error message)
     Aborting,          // Emergency shutdown in progress
     
-    // Legacy states for backward compatibility (will be phased out)
+    // Even older legacy states for backward compatibility (will be phased out)
     // Note: Ready is pattern-matched but not constructed in production code (only in tests)
-    // This is intentional - used in transition rules for backward compat but new code uses barrier-aware states
     #[allow(dead_code)]
     Ready,             // Old: Validated, waiting for coordinated start
     Running,           // Old: Workload executing (maps to Executing)
@@ -167,15 +187,43 @@ impl AgentState {
             num_agents: Arc::new(Mutex::new(None)),
             completion_sent: Arc::new(Mutex::new(false)),
             shared_storage: Arc::new(Mutex::new(None)),
+            stages: Arc::new(Mutex::new(None)),
         }
     }
     
     /// Validate state transition before applying
+    #[allow(deprecated)]  // We still support deprecated states for backward compat
     fn can_transition(from: &WorkloadState, to: &WorkloadState) -> bool {
         use WorkloadState::*;
+        
+        // AtStage transitions (v0.8.26+ YAML-driven stages)
+        match (from, to) {
+            // Stage execution: not ready -> ready (at barrier)
+            (AtStage { stage_index: i1, ready_for_next: false, .. }, 
+             AtStage { stage_index: i2, ready_for_next: true, .. }) if i1 == i2 => return true,
+            
+            // Stage transition: ready at stage N -> executing stage N+1
+            (AtStage { stage_index: i1, ready_for_next: true, .. }, 
+             AtStage { stage_index: i2, ready_for_next: false, .. }) if *i2 == i1 + 1 => return true,
+            
+            // Start first stage from Idle
+            (Idle, AtStage { stage_index: 0, ready_for_next: false, .. }) => return true,
+            
+            // Complete final stage -> Completed
+            (AtStage { ready_for_next: true, .. }, Completed) => return true,
+            
+            // Stage error -> Failed
+            (AtStage { .. }, Failed) => return true,
+            
+            // Abort from any stage
+            (AtStage { .. }, Aborting) => return true,
+            
+            _ => {}  // Fall through to old state checks
+        }
+        
         matches!(
             (from, to),
-            // New v0.8.25 barrier sync flow
+            // Deprecated v0.8.25 barrier sync flow (still supported for backward compat)
             (Idle, Validating)                  // Pre-flight validation starts
             | (Validating, PrepareReady)        // Validation passed, ready for prepare
             | (Validating, Failed)              // Validation failed
@@ -195,7 +243,7 @@ impl AgentState {
             | (_, Aborting)
             | (Aborting, Idle)                  // Cleanup complete
             
-            // Legacy backward-compatible flow (when barrier_sync.enabled=false)
+            // Even older legacy backward-compatible flow (when barrier_sync.enabled=false)
             | (Idle, Ready)                     // Old: RPC arrives, validation passes
             | (Idle, Failed)                    // Old: RPC arrives, validation fails
             | (Ready, Running)                  // Old: Start time reached, spawn workload
@@ -523,11 +571,26 @@ impl Agent for AgentSvc {
         let agent_id = self.state.get_agent_id().await.unwrap_or_else(|| request.agent_id.clone());
         
         // Map WorkloadState to WorkloadPhase for reporting
+        #[allow(deprecated)]  // Still support deprecated states
         let (current_phase, status_message) = match current_state {
             WorkloadState::Idle => (
                 WorkloadPhase::PhaseIdle,
                 "Agent is idle and ready to accept workload".to_string()
             ),
+            // AtStage: Map based on ready_for_next flag and stage name
+            WorkloadState::AtStage { ref stage_name, ready_for_next, .. } => {
+                if ready_for_next {
+                    (
+                        WorkloadPhase::PhasePrepareReady,  // Generic "ready" phase (waiting at barrier)
+                        format!("Stage '{}' complete, waiting at barrier", stage_name)
+                    )
+                } else {
+                    (
+                        WorkloadPhase::PhaseExecuting,     // Generic "executing" phase
+                        format!("Executing stage '{}'", stage_name)
+                    )
+                }
+            },
             WorkloadState::Validating => (
                 WorkloadPhase::PhaseValidating,
                 "Running pre-flight validation".to_string()
@@ -1165,9 +1228,11 @@ impl Agent for AgentSvc {
     async fn abort_workload(&self, _req: Request<Empty>) -> Result<Response<Empty>, Status> {
         let current_state = self.state.get_state().await;
         
+        #[allow(deprecated)]  // Still support deprecated states
         match current_state {
             WorkloadState::Running | WorkloadState::Ready | WorkloadState::Executing | 
-            WorkloadState::Preparing | WorkloadState::Cleaning => {
+            WorkloadState::Preparing | WorkloadState::Cleaning |
+            WorkloadState::AtStage { .. } => {  // Can abort from any stage
                 warn!("⚠️  Abort workload requested - sending cancellation signal");
                 
                 // v0.7.13: Transition to Aborting state
