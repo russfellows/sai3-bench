@@ -1712,7 +1712,7 @@ async fn run_distributed_workload(
     
     // v0.8.23: PRE-FLIGHT VALIDATION - Connect to all agents and validate before spawning streams
     info!("Connecting to {} agents for pre-flight validation", agent_addrs.len());
-    let mut agent_clients: Vec<(String, AgentClient<Channel>)> = Vec::new();
+    let mut agent_clients_vec: Vec<(String, AgentClient<Channel>)> = Vec::new();
     
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
@@ -1720,7 +1720,7 @@ async fn run_distributed_workload(
         
         match mk_client(agent_addr, insecure, agent_ca, agent_domain).await {
             Ok(client) => {
-                agent_clients.push((agent_id.clone(), client));
+                agent_clients_vec.push((agent_id.clone(), client));
                 debug!("Connected to agent {} successfully", agent_id);
             }
             Err(e) => {
@@ -1729,6 +1729,13 @@ async fn run_distributed_workload(
             }
         }
     }
+    
+    // v0.8.25: Convert to HashMap for barrier manager AND keep for preflight (need mutable reference)
+    let mut agent_clients = agent_clients_vec;
+    let agent_clients_map: HashMap<String, AgentClient<Channel>> = agent_clients
+        .iter()
+        .map(|(id, client)| (id.clone(), client.clone()))
+        .collect();
     
     // v0.8.23: DISTRIBUTED CONFIG VALIDATION - Check for common configuration errors
     // Validates base_uri usage with multi-endpoint in isolated mode
@@ -2197,12 +2204,14 @@ async fn run_distributed_workload(
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
     // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
-    // TODO: Complete integration in next phase (requires client pool)
     let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
         if distributed_config.barrier_sync.enabled {
             let agent_ids: Vec<String> = agent_addrs.iter().cloned().collect();
+            // Use default phase config (prepare) for initialization
+            // Specific phase configs will be used in wait_for_barrier() calls
             let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
-            eprintln!("🔄 Barrier synchronization enabled");
+            eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
+                     default_config.heartbeat_interval, default_config.missed_threshold);
             Some(BarrierManager::new(agent_ids, default_config))
         } else {
             None
@@ -2371,9 +2380,7 @@ async fn run_distributed_workload(
                         let current_stage = WorkloadStage::try_from(stats.current_stage)
                             .unwrap_or(WorkloadStage::StageUnknown);
                         
-                        // v0.8.25: Process stats as heartbeat for barrier manager (disabled until client pool available)
-                        // TODO: Uncomment when implementing full barrier integration
-                        /*
+                        // v0.8.25: Process stats as heartbeat for barrier manager
                         if let Some(ref mut bm) = barrier_manager {
                             let phase_progress = pb::iobench::PhaseProgress {
                                 agent_id: stats.agent_id.clone(),
@@ -2383,7 +2390,7 @@ async fn run_distributed_workload(
                                     WorkloadStage::StageCleanup => pb::iobench::WorkloadPhase::PhaseCleaning as i32,
                                     _ => pb::iobench::WorkloadPhase::PhaseIdle as i32,
                                 },
-                                phase_start_time_ms: 0,
+                                phase_start_time_ms: 0,  // Not tracked in LiveStats
                                 heartbeat_time_ms: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -2392,7 +2399,7 @@ async fn run_distributed_workload(
                                 objects_total: stats.prepare_objects_total,
                                 current_operation: stats.stage_name.clone(),
                                 bytes_written: stats.put_bytes,
-                                errors_encountered: 0,
+                                errors_encountered: 0,  // Not tracked in LiveStats
                                 operations_completed: stats.get_ops + stats.put_ops + stats.meta_ops,
                                 current_throughput: if stats.elapsed_s > 0.0 {
                                     (stats.get_ops + stats.put_ops) as f64 / stats.elapsed_s
@@ -2404,17 +2411,16 @@ async fn run_distributed_workload(
                                 objects_remaining: if current_stage == WorkloadStage::StageCleanup {
                                     stats.stage_progress_total.saturating_sub(stats.stage_progress_current)
                                 } else { 0 },
-                                is_stuck: false,
+                                is_stuck: false,  // TODO: Add stuck detection based on progress rate
                                 stuck_reason: String::new(),
                                 progress_rate: if stats.stage_elapsed_s > 0.0 {
                                     stats.stage_progress_current as f64 / stats.stage_elapsed_s
                                 } else { 0.0 },
                                 phase_completed: stats.completed,
-                                at_barrier: false,
+                                at_barrier: false,  // Will be set by BarrierManager when agent reaches barrier
                             };
                             bm.process_heartbeat(&stats.agent_id, phase_progress);
                         }
-                        */
                         
                         // v0.8.2: Agent recovery from Disconnected state
                         // BUG FIX: Previously agents stayed Disconnected even after sending messages
@@ -2559,17 +2565,36 @@ async fn run_distributed_workload(
                             max_prepare_total = 0;
                             
                             // v0.8.25: Wait for prepare barrier if enabled
-                            // TODO: Uncomment when client pool is available
-                            // if let Some(ref mut bm) = barrier_manager {
-                            //     eprintln!("\n🔄 Prepare phase complete - waiting for all agents at barrier...");
-                            //     match bm.wait_for_barrier("prepare", &agent_clients).await {
-                            //         Ok(BarrierStatus::Ready) => eprintln!("✅ All agents synchronized"),
-                            //         Ok(BarrierStatus::Degraded) => eprintln!("⚠️  Barrier degraded"),
-                            //         Ok(BarrierStatus::Failed) => anyhow::bail!("Barrier failed"),
-                            //         Ok(BarrierStatus::Waiting) => warn!("Still waiting"),
-                            //         Err(e) => anyhow::bail!("Barrier error: {}", e),
-                            //     }
-                            // }
+                            if let Some(ref mut bm) = barrier_manager {
+                                if let Some(ref distributed_config) = config.distributed {
+                                    eprintln!("\n🔄 Prepare phase complete - synchronizing agents at barrier...");
+                                    progress_bar.suspend(|| {
+                                        eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("prepare").barrier_type);
+                                    });
+                                    
+                                    match bm.wait_for_barrier("prepare", &agent_clients_map).await {
+                                        Ok(BarrierStatus::Ready) => {
+                                            eprintln!("✅ All agents synchronized at prepare barrier\n");
+                                        }
+                                        Ok(BarrierStatus::Degraded) => {
+                                            eprintln!("⚠️  Prepare barrier degraded (some agents failed, continuing)\n");
+                                        }
+                                        Ok(BarrierStatus::Failed) => {
+                                            error!("❌ Prepare barrier failed (insufficient agents ready)");
+                                            abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                                            anyhow::bail!("Prepare barrier failed - aborting workload");
+                                        }
+                                        Ok(BarrierStatus::Waiting) => {
+                                            warn!("⏳ Prepare barrier still waiting (unexpected state)");
+                                        }
+                                        Err(e) => {
+                                            error!("❌ Prepare barrier error: {}", e);
+                                            abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                                            anyhow::bail!("Prepare barrier error: {}", e);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         
                         // v0.8.13: Check for ERROR status FIRST, regardless of completed flag
@@ -2906,17 +2931,36 @@ async fn run_distributed_workload(
     }
     
     // v0.8.25: Wait for execute barrier if enabled
-    // TODO: Uncomment when client pool is available
-    // if let Some(ref mut bm) = barrier_manager {
-    //     eprintln!("\n🔄 Workload execution complete - waiting for all agents at barrier...");
-    //     match bm.wait_for_barrier("execute", &agent_clients).await {
-    //         Ok(BarrierStatus::Ready) => eprintln!("✅ All agents synchronized"),
-    //         Ok(BarrierStatus::Degraded) => eprintln!("⚠️  Barrier degraded"),
-    //         Ok(BarrierStatus::Failed) => anyhow::bail!("Barrier failed"),
-    //         Ok(BarrierStatus::Waiting) => warn!("Still waiting"),
-    //         Err(e) => anyhow::bail!("Barrier error: {}", e),
-    //     }
-    // }
+    if let Some(ref mut bm) = barrier_manager {
+        if let Some(ref distributed_config) = config.distributed {
+            eprintln!("\n🔄 Workload execution complete - synchronizing agents at barrier...");
+            progress_bar.suspend(|| {
+                eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("execute").barrier_type);
+            });
+            
+            match bm.wait_for_barrier("execute", &agent_clients_map).await {
+                Ok(BarrierStatus::Ready) => {
+                    eprintln!("✅ All agents synchronized at execute barrier\n");
+                }
+                Ok(BarrierStatus::Degraded) => {
+                    eprintln!("⚠️  Execute barrier degraded (some agents failed, continuing)\n");
+                }
+                Ok(BarrierStatus::Failed) => {
+                    error!("❌ Execute barrier failed (insufficient agents ready)");
+                    abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                    anyhow::bail!("Execute barrier failed - aborting workload");
+                }
+                Ok(BarrierStatus::Waiting) => {
+                    warn!("⏳ Execute barrier still waiting (unexpected state)");
+                }
+                Err(e) => {
+                    error!("❌ Execute barrier error: {}", e);
+                    abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                    anyhow::bail!("Execute barrier error: {}", e);
+                }
+            }
+        }
+    }
     
     // Final aggregation
     let final_stats = aggregator.aggregate();

@@ -1,0 +1,54 @@
+# Test config for barrier synchronization
+concurrency: 8
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: false
+  
+  ensure_objects:
+    - base_uri: "file:///tmp/sai3-test/"
+      count: 20
+      fill: random
+      size: 1KiB
+  
+  cleanup: true
+
+warmup_period: 0s
+duration: 5s
+
+workload:
+  - weight: 100
+    op: get
+    path: "*"
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: exclusive
+  
+  agents:
+    - address: "localhost:7761"
+      id: "agent-1"
+    - address: "localhost:7762"
+      id: "agent-2"
+  
+  # ENABLE BARRIER SYNCHRONIZATION
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 5
+    default_missed_threshold: 3
+    default_query_timeout: 5
+    default_query_retries: 1
+    
+    # Override prepare phase to use all_or_nothing (strict synchronization)
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 5
+      missed_threshold: 2
+    
+    # Override execute phase to use majority (tolerate 1 failure out of 2)
+    execute:
+      type: majority
+      heartbeat_interval: 5
+      missed_threshold: 2
