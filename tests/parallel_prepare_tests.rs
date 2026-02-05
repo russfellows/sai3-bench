@@ -62,7 +62,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true).await?;
     
     // Should have created 30 objects total
     assert_eq!(objects.len(), 30, "Should create 30 objects");
@@ -139,7 +139,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 64, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 64, 0, true).await?;
     
     // Should have created 60 objects total
     assert_eq!(objects.len(), 60, "Should create 60 objects");
@@ -221,7 +221,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 8, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 8, 0, true).await?;
     
     // Count sizes
     let mut size_counts = HashMap::new();
@@ -360,7 +360,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0, true).await?;
     
     assert_eq!(objects.len(), 20, "Should create 20 objects total");
     
@@ -416,7 +416,7 @@ async fn test_files_created_correctly() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 24, 0, true).await?;
     
     // Verify files exist on disk with correct sizes
     for obj in &objects {
@@ -484,7 +484,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 48, 0).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 48, 0, true).await?;
     
     // Should have created 90 objects total
     assert_eq!(objects.len(), 90, "Should create 90 objects");
@@ -621,7 +621,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
     
     // Test parallel strategy with high concurrency
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, None, &multi_ep_cache, 1, 64, 0).await?;
+    let (objects, _, metrics) = prepare_objects(&parallel_config, None, None, None, &multi_ep_cache, 1, 64, 0, true).await?;
     assert_eq!(objects.len(), 5, "Parallel strategy should create 5 objects with concurrency=64");
     assert_eq!(metrics.objects_created, 5, "Metrics should show 5 objects created");
     

@@ -532,6 +532,14 @@ pub struct PrepareConfig {
     #[serde(default)]
     pub skip_verification: bool,
     
+    /// Force overwrite all files regardless of existence (v0.8.24+)
+    /// When true, creates all files even if skip_verification=true
+    /// Use this to regenerate all data, overwriting partial/corrupted datasets
+    /// Recommended: skip_verification=true + force_overwrite=true for fastest full recreation
+    /// Default: false
+    #[serde(default)]
+    pub force_overwrite: bool,
+    
     /// Cleanup error handling mode (v0.8.7+)
     /// Controls how cleanup handles objects that are already deleted or missing
     /// Default: tolerant (allows resuming interrupted cleanup operations)
@@ -1062,6 +1070,11 @@ pub struct DistributedConfig {
     /// Only used when path_selection is "partitioned" or "weighted"
     #[serde(default = "default_partition_overlap")]
     pub partition_overlap: f64,
+    
+    /// v0.8.25: Barrier synchronization for phase coordination
+    /// Disabled by default for backward compatibility
+    #[serde(default)]
+    pub barrier_sync: BarrierSyncConfig,
 }
 
 /// Individual agent configuration
@@ -1454,6 +1467,132 @@ fn default_replay_drain_timeout() -> std::time::Duration {
 fn default_replay_max_concurrent() -> usize {
     crate::constants::DEFAULT_REPLAY_MAX_CONCURRENT
 }
+
+// ============================================================================
+// v0.8.25: Barrier Synchronization Configuration
+// ============================================================================
+
+/// Barrier type determines strictness of synchronization
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarrierType {
+    /// All agents must reach barrier (hard requirement)
+    /// Missing agents cause entire workload to abort
+    AllOrNothing,
+    
+    /// Majority (>50%) must reach barrier
+    /// Stragglers are marked failed and excluded from next phase
+    Majority,
+    
+    /// Best effort - proceed when liveness check fails on stragglers
+    /// Stragglers continue independently (out of sync OK)
+    BestEffort,
+}
+
+/// Per-phase barrier configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseBarrierConfig {
+    /// Barrier type for this phase
+    #[serde(rename = "type")]
+    pub barrier_type: BarrierType,
+    
+    /// How often agents report progress (default: 30s)
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval: u64,
+    
+    /// How many missed heartbeats before query (default: 3 = 90s with 30s interval)
+    #[serde(default = "default_missed_threshold")]
+    pub missed_threshold: u32,
+    
+    /// Timeout for explicit agent query (default: 10s)
+    #[serde(default = "default_query_timeout")]
+    pub query_timeout: u64,
+    
+    /// Retries for agent query (default: 2)
+    #[serde(default = "default_query_retries")]
+    pub query_retries: u32,
+}
+
+/// Top-level barrier synchronization configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BarrierSyncConfig {
+    /// Enable barrier synchronization (default: false for backward compat)
+    #[serde(default)]
+    pub enabled: bool,
+    
+    /// Default heartbeat settings (apply to all phases unless overridden)
+    #[serde(default = "default_heartbeat_interval")]
+    pub default_heartbeat_interval: u64,
+    
+    #[serde(default = "default_missed_threshold")]
+    pub default_missed_threshold: u32,
+    
+    #[serde(default = "default_query_timeout")]
+    pub default_query_timeout: u64,
+    
+    #[serde(default = "default_query_retries")]
+    pub default_query_retries: u32,
+    
+    /// Per-phase configuration
+    #[serde(default)]
+    pub validation: Option<PhaseBarrierConfig>,
+    
+    #[serde(default)]
+    pub prepare: Option<PhaseBarrierConfig>,
+    
+    #[serde(default)]
+    pub execute: Option<PhaseBarrierConfig>,
+    
+    #[serde(default)]
+    pub cleanup: Option<PhaseBarrierConfig>,
+}
+
+// Default values for barrier configuration
+fn default_heartbeat_interval() -> u64 { 30 }
+fn default_missed_threshold() -> u32 { 3 }
+fn default_query_timeout() -> u64 { 10 }
+fn default_query_retries() -> u32 { 2 }
+
+impl Default for BarrierSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_heartbeat_interval: default_heartbeat_interval(),
+            default_missed_threshold: default_missed_threshold(),
+            default_query_timeout: default_query_timeout(),
+            default_query_retries: default_query_retries(),
+            validation: None,
+            prepare: None,
+            execute: None,
+            cleanup: None,
+        }
+    }
+}
+
+impl BarrierSyncConfig {
+    /// Get effective configuration for a phase (uses defaults if not overridden)
+    pub fn get_phase_config(&self, phase: &str) -> PhaseBarrierConfig {
+        let config = match phase {
+            "validation" => self.validation.as_ref(),
+            "prepare" => self.prepare.as_ref(),
+            "execute" => self.execute.as_ref(),
+            "cleanup" => self.cleanup.as_ref(),
+            _ => None,
+        };
+        
+        config.cloned().unwrap_or_else(|| PhaseBarrierConfig {
+            barrier_type: BarrierType::AllOrNothing,
+            heartbeat_interval: self.default_heartbeat_interval,
+            missed_threshold: self.default_missed_threshold,
+            query_timeout: self.default_query_timeout,
+            query_retries: self.default_query_retries,
+        })
+    }
+}
+
+// ============================================================================
+// End Barrier Synchronization Configuration
+// ============================================================================
 
 /// Multi-process scaling configuration (v0.7.3+)
 /// Controls how many processes to spawn per endpoint for parallel execution

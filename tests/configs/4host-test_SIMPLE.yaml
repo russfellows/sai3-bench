@@ -1,0 +1,92 @@
+# SIMPLE TEST: 576 directories, ~111k files, ~889 GB
+# Use this FIRST to validate the fixes work
+concurrency: 64
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false
+  force_overwrite: true
+
+  # SIMPLE: width=24, depth=2 → 576 leaf dirs
+  # 576 dirs × 193 files = 111,168 files × 8MB = ~889 GB
+  directory_structure:
+    width: 24
+    depth: 2                     # REDUCED from 4 → tree generation ~1-2 seconds
+    files_per_dir: 193
+    distribution: "bottom"
+    dir_mask: "d%d_w%d.dir"
+
+  ensure_objects:
+    - count: 111168              # 576 leaf dirs × 193 files
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 8MiB
+        std_dev: 1MiB
+        min: 1MiB
+        max: 16MiB
+      use_multi_endpoint: true
+
+  cleanup: false
+
+# Dummy workload (duration: 0s = prepare only)
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+
+duration: 0s
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast1/benchmark/"
+          - "file:///mnt/vast2/benchmark/"
+          - "file:///mnt/vast3/benchmark/"
+          - "file:///mnt/vast4/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast5/benchmark/"
+          - "file:///mnt/vast6/benchmark/"
+          - "file:///mnt/vast7/benchmark/"
+          - "file:///mnt/vast8/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast9/benchmark/"
+          - "file:///mnt/vast10/benchmark/"
+          - "file:///mnt/vast11/benchmark/"
+          - "file:///mnt/vast12/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast13/benchmark/"
+          - "file:///mnt/vast14/benchmark/"
+          - "file:///mnt/vast15/benchmark/"
+          - "file:///mnt/vast16/benchmark/"
+        strategy: least_connections

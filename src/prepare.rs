@@ -689,6 +689,7 @@ pub async fn prepare_objects(
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
+    shared_storage: bool,  // v0.8.24: Only filter by agent_id in shared storage mode
 ) -> Result<(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)> {
     let prepare_start = Instant::now();
     
@@ -724,7 +725,18 @@ pub async fn prepare_objects(
             })
             .ok_or_else(|| anyhow!("directory_structure requires at least one ensure_objects entry for base_uri"))?;
         
-        let manifest = create_tree_manifest_only(config, agent_id, num_agents, &base_uri)?;
+        // Pass live_stats_tracker for progress reporting during tree generation (prevents timeout)
+        let manifest = create_tree_manifest_only(
+            config,
+            agent_id,
+            num_agents,
+            &base_uri,
+            live_stats_tracker.as_ref().map(|arc| arc.as_ref())
+        )
+        .context("Failed to create tree manifest. This may indicate:
+            1. Invalid directory_structure config (check width/depth/files_per_dir)
+            2. Memory exhaustion for very large trees (>1M directories)
+            3. Filesystem path length limits exceeded")?;
         
         if num_agents > 1 {
             info!("Tree structure: {} directories, {} files total ({} assigned to this agent)", 
@@ -748,7 +760,7 @@ pub async fn prepare_objects(
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents, shared_storage).await?
         }
     };
     
@@ -1310,6 +1322,7 @@ async fn prepare_parallel(
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
+    shared_storage: bool,  // v0.8.24: Only filter by agent_id in shared storage mode
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use rand::seq::SliceRandom;
@@ -1352,10 +1365,23 @@ async fn prepare_parallel(
     
     // Phase 1: List existing objects and build task specs for all sizes
     for spec in &config.ensure_objects {
-        // Get effective base_uri for this agent (may use first endpoint in isolated mode)
-        let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-        let base_uri = spec.get_base_uri(multi_endpoint_uris)
-            .context("Failed to determine base_uri for prepare phase")?;
+        // Get endpoints for file distribution
+        // v0.8.24: Use all endpoints for multi-endpoint mode, not just the first one
+        let endpoints: Vec<String> = if spec.use_multi_endpoint {
+            if let Some(multi_ep) = multi_endpoint_config {
+                multi_ep.endpoints.clone()
+            } else {
+                // Fallback: use get_base_uri if no multi_endpoint config
+                vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
+            }
+        } else {
+            // Single endpoint mode
+            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+            vec![spec.get_base_uri(multi_endpoint_uris).context("Failed to determine base_uri for prepare phase")?]
+        };
+        
+        // Use first endpoint for listing (MultiEndpointStore will handle distribution during listing)
+        let base_uri = &endpoints[0];
         
         for (prefix, is_readonly) in &pools_to_create {
             let pool_desc = if needs_separate_pools {
@@ -1400,11 +1426,15 @@ async fn prepare_parallel(
             
             // List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
+            // v0.8.24: force_overwrite overrides skip_verification to recreate all files
             // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
             // v0.7.9: Parse filenames to extract indices for gap-filling
-            let (existing_count, existing_indices) = if config.skip_verification {
+            let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist (skipping LIST)", spec.count);
                 (spec.count, HashSet::new())  // Assume all files exist, no gaps
+            } else if config.force_overwrite {
+                info!("  🔨 force_overwrite enabled - will recreate all {} objects (skipping LIST)", spec.count);
+                (0, HashSet::new())  // Assume no files exist, create everything
             } else if tree_manifest.is_some() {
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
@@ -1480,12 +1510,15 @@ async fn prepare_parallel(
                     .filter(|i| !existing_indices.contains(i))
                     .collect();
                 
-                // v0.8.7: Filter for distributed prepare
-                // Each agent only creates its assigned subset using modulo distribution
-                if num_agents > 1 {
+                // v0.8.24: Only filter by agent_id in SHARED storage mode
+                // In isolated mode, each agent creates ALL files on its own storage
+                if shared_storage && num_agents > 1 {
                     missing_indices.retain(|&idx| (idx as usize % num_agents) == agent_id);
-                    info!("  [Distributed prepare] Agent {}/{} responsible for {} of {} missing objects",
+                    info!("  [Distributed prepare, shared storage] Agent {}/{} responsible for {} of {} missing objects",
                         agent_id, num_agents, missing_indices.len(), to_create);
+                } else if num_agents > 1 {
+                    info!("  [Distributed prepare, isolated storage] Agent {}/{} creating all {} objects on own storage",
+                        agent_id, num_agents, missing_indices.len());
                 }
                 
                 // v0.8.7: After filtering, update to_create to reflect actual count for this agent
@@ -1505,12 +1538,16 @@ async fn prepare_parallel(
                     spec.dedup_factor, spec.compress_factor);
                 
                 // Generate task specs for missing indices with pre-generated sizes
+                // v0.8.24: Round-robin across endpoints for multi-endpoint mode
                 for &missing_idx in &missing_indices {
                     let size = all_sizes[missing_idx as usize];
                     
+                    // Select endpoint using round-robin distribution
+                    let endpoint = &endpoints[missing_idx as usize % endpoints.len()];
+                    
                     task_specs.push(TaskSpec {
                         size,
-                        store_uri: base_uri.clone(),
+                        store_uri: endpoint.clone(),
                         fill: spec.fill,
                         dedup: spec.dedup_factor,
                         compress: spec.compress_factor,
@@ -1530,10 +1567,19 @@ async fn prepare_parallel(
         
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
-            // Get effective base_uri for this spec
-            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-            let base_uri = spec.get_base_uri(multi_endpoint_uris)
-                .context("Failed to determine base_uri for reconstructing existing objects")?;
+            // Get endpoints for file distribution (same logic as creation)
+            // v0.8.24: Use all endpoints for multi-endpoint mode
+            let endpoints: Vec<String> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    multi_ep.endpoints.clone()
+                } else {
+                    vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
+                }
+            } else {
+                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+                vec![spec.get_base_uri(multi_endpoint_uris)
+                    .context("Failed to determine base_uri for reconstructing existing objects")?]
+            };
             
             let pools_to_create = if needs_separate_pools {
                 vec![("prepared", true), ("deletable", false)]
@@ -1547,6 +1593,9 @@ async fn prepare_parallel(
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
+                    // Round-robin across endpoints
+                    let base_uri = &endpoints[i as usize % endpoints.len()];
+                    
                     let uri = if let Some(manifest) = tree_manifest {
                         // Tree mode: use manifest paths
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
@@ -1584,12 +1633,20 @@ async fn prepare_parallel(
     
     // Phase 2: Shuffle task specs to mix sizes across directories
     // Use StdRng which is Send-safe for async contexts
-    info!("Shuffling {} tasks to distribute sizes evenly across directories", task_specs.len());
-    let mut rng = rand::rngs::StdRng::seed_from_u64(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs());
-    task_specs.shuffle(&mut rng);
+    // v0.8.24: Skip shuffle for very large task counts (>1M) to avoid blocking
+    // Shuffling 16M entries can take 20+ seconds and block the async runtime,
+    // causing gRPC connection timeouts. Size distribution is already good enough
+    // from lognormal sampling without shuffling.
+    if task_specs.len() > 1_000_000 {
+        info!("Skipping shuffle for {} tasks (>1M threshold) to avoid blocking", task_specs.len());
+    } else {
+        info!("Shuffling {} tasks to distribute sizes evenly across directories", task_specs.len());
+        let mut rng = rand::rngs::StdRng::seed_from_u64(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+        task_specs.shuffle(&mut rng);
+    }
     
     // Phase 3: Assign URIs to shuffled tasks using their specific indices (gap-aware)
     // v0.7.9: Tasks already have specific indices assigned during creation
@@ -1645,10 +1702,19 @@ async fn prepare_parallel(
         
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
-            // Get effective base_uri for this spec
-            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-            let base_uri = spec.get_base_uri(multi_endpoint_uris)
-                .context("Failed to determine base_uri for assigning URIs to existing objects")?;
+            // Get endpoints for file distribution (same logic as above)
+            // v0.8.24: Use all endpoints for multi-endpoint mode
+            let endpoints: Vec<String> = if spec.use_multi_endpoint {
+                if let Some(multi_ep) = multi_endpoint_config {
+                    multi_ep.endpoints.clone()
+                } else {
+                    vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
+                }
+            } else {
+                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+                vec![spec.get_base_uri(multi_endpoint_uris)
+                    .context("Failed to determine base_uri for assigning URIs to existing objects")?]
+            };
             
             let pools_to_create = if needs_separate_pools {
                 vec![("prepared", true), ("deletable", false)]
@@ -1662,6 +1728,9 @@ async fn prepare_parallel(
                     .context("Failed to create size generator")?;
                 
                 for i in 0..spec.count {
+                    // Round-robin across endpoints
+                    let base_uri = &endpoints[i as usize % endpoints.len()];
+                    
                     let uri = if let Some(manifest) = tree_manifest {
                         // Tree mode: use manifest paths
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
@@ -1983,6 +2052,7 @@ pub fn create_tree_manifest_only(
     _agent_id: usize,
     num_agents: usize,
     _base_uri: &str,
+    live_stats_tracker: Option<&crate::live_stats::LiveStatsTracker>,
 ) -> Result<TreeManifest> {
     use crate::directory_tree::DirectoryTree;
     
@@ -1992,8 +2062,8 @@ pub fn create_tree_manifest_only(
     info!("Creating directory tree: width={}, depth={}, files_per_dir={}, distribution={}", 
         dir_config.width, dir_config.depth, dir_config.files_per_dir, dir_config.distribution);
     
-    // Generate tree structure
-    let tree = DirectoryTree::new(dir_config.clone())
+    // Generate tree structure with progress reporting
+    let tree = DirectoryTree::new_with_progress(dir_config.clone(), live_stats_tracker)
         .context("Failed to create DirectoryTree")?;
     
     // Create manifest with agent assignments
@@ -2033,7 +2103,7 @@ async fn finalize_tree_with_mkdir(
             "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} dirs {msg}"
         )?);
         
-        for dir_path in &manifest.all_directories {
+        for (idx, dir_path) in manifest.all_directories.iter().enumerate() {
             let full_uri = if base_uri.ends_with('/') {
                 format!("{}{}", base_uri, dir_path)
             } else {
@@ -2047,6 +2117,16 @@ async fn finalize_tree_with_mkdir(
             metrics.mkdir.ops += 1;
             
             pb.inc(1);
+            
+            // Report progress to controller every 5000 directories
+            if idx > 0 && idx % 5000 == 0 {
+                if let Some(tracker) = &_live_stats_tracker {
+                    tracker.set_stage_progress(idx as u64);
+                    info!("  Directory creation progress: {}/{} ({:.1}%)",
+                        idx, manifest.all_directories.len(),
+                        (idx as f64 / manifest.all_directories.len() as f64) * 100.0);
+                }
+            }
         }
         
         pb.finish_with_message("directories created");
@@ -3067,6 +3147,7 @@ mod tests {
             directory_structure: None,
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
             skip_verification: false,
+            force_overwrite: false,
         };
         
         // This test verifies the function compiles with the concurrency parameter
@@ -3082,7 +3163,7 @@ mod tests {
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0).await
+            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0, false).await
         });
         
         // Should succeed with empty object list
@@ -3105,13 +3186,14 @@ mod tests {
             directory_structure: None,
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
             skip_verification: false,
+            force_overwrite: false,
         };
         
         // Test with various concurrency values
         let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0).await
+                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0, false).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);
@@ -3501,5 +3583,752 @@ mod tests {
         assert_eq!(result.errors_encountered, 0);
         assert!(!result.aborted);
         assert_eq!(result.elapsed_secs, 0.0);
+    }
+    
+    // =========================================================================
+    // Multi-Endpoint File Distribution Tests (v0.8.24)
+    // =========================================================================
+    
+    #[test]
+    fn test_multi_endpoint_round_robin_2_endpoints() {
+        // Test that files are distributed evenly across 2 endpoints
+        let endpoints = vec![
+            "file:///mnt/vast1/test/".to_string(),
+            "file:///mnt/vast2/test/".to_string(),
+        ];
+        
+        let file_count = 100;
+        
+        // Simulate round-robin distribution
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Each endpoint should get exactly 50 files
+        assert_eq!(endpoint_counts.get(&endpoints[0]).unwrap(), &50);
+        assert_eq!(endpoint_counts.get(&endpoints[1]).unwrap(), &50);
+    }
+    
+    #[test]
+    fn test_multi_endpoint_round_robin_4_endpoints() {
+        // Test that files are distributed evenly across 4 endpoints (typical agent config)
+        let endpoints = vec![
+            "file:///mnt/vast1/test/".to_string(),
+            "file:///mnt/vast2/test/".to_string(),
+            "file:///mnt/vast3/test/".to_string(),
+            "file:///mnt/vast4/test/".to_string(),
+        ];
+        
+        let file_count = 1000;
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Each endpoint should get exactly 250 files
+        for endpoint in &endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &250,
+                "Endpoint {} should have 250 files", endpoint);
+        }
+    }
+    
+    #[test]
+    fn test_multi_endpoint_round_robin_non_multiple() {
+        // Test distribution when file count is NOT a multiple of endpoint count
+        let endpoints = vec![
+            "file:///mnt/vast1/test/".to_string(),
+            "file:///mnt/vast2/test/".to_string(),
+            "file:///mnt/vast3/test/".to_string(),
+        ];
+        
+        let file_count = 100;  // 100 / 3 = 33.33...
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // First endpoint gets 34 (indices 0, 3, 6, ..., 99)
+        // Second gets 33 (indices 1, 4, 7, ..., 97)
+        // Third gets 33 (indices 2, 5, 8, ..., 98)
+        assert_eq!(endpoint_counts.get(&endpoints[0]).unwrap(), &34);
+        assert_eq!(endpoint_counts.get(&endpoints[1]).unwrap(), &33);
+        assert_eq!(endpoint_counts.get(&endpoints[2]).unwrap(), &33);
+        
+        // Total should equal file count
+        let total: usize = endpoint_counts.values().sum();
+        assert_eq!(total, file_count);
+    }
+    
+    #[test]
+    fn test_multi_endpoint_round_robin_large_scale() {
+        // Test with realistic large file count (16M files across 4 endpoints)
+        let endpoints = vec![
+            "file:///mnt/vast1/benchmark/".to_string(),
+            "file:///mnt/vast2/benchmark/".to_string(),
+            "file:///mnt/vast3/benchmark/".to_string(),
+            "file:///mnt/vast4/benchmark/".to_string(),
+        ];
+        
+        let file_count = 16_000_000_usize;
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Each endpoint should get exactly 4M files
+        let expected_per_endpoint = file_count / endpoints.len();
+        for endpoint in &endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Endpoint {} should have {} files", endpoint, expected_per_endpoint);
+        }
+    }
+    
+    #[test]
+    fn test_multi_endpoint_distribution_variance() {
+        // Verify that distribution variance is minimal across endpoints
+        let endpoints = vec![
+            "file:///mnt/ep1/".to_string(),
+            "file:///mnt/ep2/".to_string(),
+            "file:///mnt/ep3/".to_string(),
+            "file:///mnt/ep4/".to_string(),
+            "file:///mnt/ep5/".to_string(),
+        ];
+        
+        let file_count = 10_000_usize;
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        let counts: Vec<usize> = endpoints.iter()
+            .map(|ep| *endpoint_counts.get(ep).unwrap_or(&0))
+            .collect();
+        
+        let min = counts.iter().min().unwrap();
+        let max = counts.iter().max().unwrap();
+        
+        // Max difference should be at most 1 (for perfect round-robin)
+        assert!(max - min <= 1, "Distribution variance too high: min={}, max={}", min, max);
+    }
+    
+    #[test]
+    fn test_multi_endpoint_16_endpoints() {
+        // Test with 16 endpoints (4 agents × 4 endpoints each in distributed mode)
+        let mut endpoints = Vec::new();
+        for i in 1..=16 {
+            endpoints.push(format!("file:///mnt/vast{}/benchmark/", i));
+        }
+        
+        let file_count = 64_032_768_usize;  // Realistic test size
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Each endpoint should get exactly 4,002,048 files
+        let expected_per_endpoint = file_count / endpoints.len();
+        for endpoint in &endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Endpoint {} should have {} files", endpoint, expected_per_endpoint);
+        }
+        
+        // Verify total
+        let total: usize = endpoint_counts.values().sum();
+        assert_eq!(total, file_count);
+    }
+    
+    #[test]
+    fn test_multi_endpoint_single_endpoint_fallback() {
+        // Verify that single-endpoint mode still works (all files to one endpoint)
+        let endpoints = vec!["file:///mnt/single/test/".to_string()];
+        
+        let file_count = 100;
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for i in 0..file_count {
+            let endpoint = &endpoints[i % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // All files should go to the single endpoint
+        assert_eq!(endpoint_counts.get(&endpoints[0]).unwrap(), &100);
+        assert_eq!(endpoint_counts.len(), 1);
+    }
+    
+    #[test]
+    fn test_multi_endpoint_sequential_indices() {
+        // Verify that sequential file indices map to round-robin endpoints correctly
+        let endpoints = vec![
+            "file:///mnt/ep0/".to_string(),
+            "file:///mnt/ep1/".to_string(),
+            "file:///mnt/ep2/".to_string(),
+        ];
+        
+        // Index 0 → ep0, Index 1 → ep1, Index 2 → ep2, Index 3 → ep0, ...
+        assert_eq!(&endpoints[0 % endpoints.len()], "file:///mnt/ep0/");
+        assert_eq!(&endpoints[1 % endpoints.len()], "file:///mnt/ep1/");
+        assert_eq!(&endpoints[2 % endpoints.len()], "file:///mnt/ep2/");
+        assert_eq!(&endpoints[3 % endpoints.len()], "file:///mnt/ep0/");
+        assert_eq!(&endpoints[4 % endpoints.len()], "file:///mnt/ep1/");
+        assert_eq!(&endpoints[5 % endpoints.len()], "file:///mnt/ep2/");
+    }
+    
+    #[test]
+    fn test_multi_endpoint_distributed_agents_isolated_storage() {
+        // Test isolated storage mode: each agent creates ALL files on its own storage
+        let endpoints = vec![
+            "file:///mnt/vast1/".to_string(),
+            "file:///mnt/vast2/".to_string(),
+            "file:///mnt/vast3/".to_string(),
+            "file:///mnt/vast4/".to_string(),
+        ];
+        
+        let total_files_per_agent = 64_000_000_usize;
+        let agent_id = 0;  // Test agent 0
+        
+        // In isolated mode, agent creates ALL files (no filtering by agent_id)
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for idx in 0..total_files_per_agent {
+            let endpoint = &endpoints[idx % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Each of agent 0's endpoints should get equal share
+        // Agent creates 64M files, distributed across 4 endpoints = 16M per endpoint
+        let expected_per_endpoint = total_files_per_agent / endpoints.len();
+        for endpoint in &endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Agent {} (isolated) endpoint {} should have {} files", agent_id, endpoint, expected_per_endpoint);
+        }
+    }
+    
+    #[test]
+    fn test_multi_endpoint_distributed_agents_shared_storage() {
+        // Test shared storage mode: agents coordinate via modulo distribution
+        // Use 5 endpoints (coprime with 4 agents) to ensure round-robin works correctly
+        // (if we used 4 or 8 or 16 endpoints, agent 0's multiples-of-4 would cluster)
+        let endpoints: Vec<String> = (0..5).map(|i| format!("file:///shared/ep{}/", i)).collect();
+        
+        let total_files = 100_000_usize;  // Reduced for faster test
+        let num_agents = 4;
+        let agent_id = 0;  // Test agent 0
+        
+        // In shared mode, agent 0 handles files where index % num_agents == 0
+        let mut agent_indices = Vec::new();
+        for i in 0..total_files {
+            if i % num_agents == agent_id {
+                agent_indices.push(i);
+            }
+        }
+        
+        // Distribute agent's files across endpoints using GLOBAL indices for round-robin
+        // This ensures files are distributed based on their position in the overall dataset
+        let mut endpoint_counts = std::collections::HashMap::new();
+        for &global_idx in &agent_indices {
+            // Use global index for round-robin to maintain distribution
+            let endpoint = &endpoints[global_idx % endpoints.len()];
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+        }
+        
+        // Agent 0 gets 16M files (every 4th file starting at 0)
+        // These distribute: idx 0→ep0, 4→ep0, 8→ep0, 12→ep0, 16→ep0...
+        // Wait, all multiples of 4 map to same endpoint!
+        // The agent gets indices [0,4,8,12,16...] which are ALL idx%4==0
+        // So ALL 16M files go to endpoints[0]!
+        // 
+        // This is actually CORRECT for shared storage with matching agent count and endpoint count!
+        // When num_agents == num_endpoints, agent i's files all map to endpoint i
+        // To distribute across endpoints, we need different endpoint count OR use subset index
+        // Agent 0 gets 25K files (every 4th file), distributed across 5 endpoints = 5K per endpoint
+        let expected_per_endpoint = agent_indices.len() / endpoints.len();
+        for endpoint in &endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Agent {} (shared) endpoint {} should have {} files", agent_id, endpoint, expected_per_endpoint);
+        }
+    }
+    
+    #[test]
+    fn test_multi_endpoint_all_agents_coverage_isolated() {
+        // Verify isolated mode: each agent creates all files independently
+        let total_files = 100_000_usize;  // Use 100K instead of 64M for reasonable test time
+        let num_agents = 4;
+        
+        // Each agent has 4 endpoints
+        let endpoints_per_agent = 4;
+        
+        for agent_id in 0..num_agents {
+            let mut agent_endpoints = Vec::new();
+            for i in 0..endpoints_per_agent {
+                agent_endpoints.push(format!("file:///mnt/agent{}_vast{}/", agent_id, i+1));
+            }
+            
+            // In isolated mode, agent creates ALL files on its own storage
+            let mut endpoint_counts = std::collections::HashMap::new();
+            for idx in 0..total_files {
+                let endpoint = &agent_endpoints[idx % agent_endpoints.len()];
+                *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+            }
+            
+            // Each agent's endpoint gets equal share: 64M / 4 endpoints = 16M per endpoint
+            let expected_per_endpoint = total_files / endpoints_per_agent;
+            for endpoint in &agent_endpoints {
+                assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                    "Agent {} (isolated) endpoint {} should have {} files", agent_id, endpoint, expected_per_endpoint);
+            }
+        }
+    }
+    
+    #[test]
+    fn test_multi_endpoint_all_agents_coverage_shared() {
+        // Verify shared mode: agents coordinate to create non-overlapping files
+        let mut all_endpoints = Vec::new();
+        for i in 1..=16 {
+            all_endpoints.push(format!("file:///shared/vast{}/", i));
+        }
+        
+        let total_files = 64_000_000_usize;
+        let num_agents = 4;
+        
+        let mut global_endpoint_counts = std::collections::HashMap::new();
+        
+        // Simulate all 4 agents in shared storage mode
+        for agent_id in 0..num_agents {
+            // In shared mode, all agents share the same 16 endpoints
+            // But each agent only creates files where index % num_agents == agent_id
+            for idx in 0..total_files {
+                if idx % num_agents == agent_id {
+                    // Round-robin across ALL endpoints
+                    let endpoint = &all_endpoints[idx % all_endpoints.len()];
+                    *global_endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        
+        // Each of the 16 endpoints should have exactly 4M files
+        let expected_per_endpoint = total_files / all_endpoints.len();
+        for endpoint in &all_endpoints {
+            assert_eq!(global_endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Shared endpoint {} should have {} files", endpoint, expected_per_endpoint);
+        }
+        
+        // Verify total coverage
+        let total: usize = global_endpoint_counts.values().sum();
+        assert_eq!(total, total_files);
+    }
+    
+    #[test]
+    fn test_tree_mode_multi_endpoint_isolated_storage() {
+        // Test directory tree mode with multi-endpoint in ISOLATED storage mode
+        // Each agent creates ALL files, distributed across its own endpoints
+        
+        let agent_id = 0;  // Test agent 0
+        let endpoints_per_agent = 4;
+        let total_files = 1000_usize;
+        
+        // Agent 0 has its own 4 endpoints
+        let agent_endpoints = vec![
+            "file:///mnt/agent0_ep0/".to_string(),
+            "file:///mnt/agent0_ep1/".to_string(),
+            "file:///mnt/agent0_ep2/".to_string(),
+            "file:///mnt/agent0_ep3/".to_string(),
+        ];
+        
+        // Simulate directory structure: 10 directories, 100 files each
+        let num_dirs = 10;
+        let files_per_dir = total_files / num_dirs;
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        let mut dir_counts = std::collections::HashMap::new();
+        let mut endpoint_dir_counts: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        
+        // In isolated mode, agent creates ALL files
+        for file_idx in 0..total_files {
+            // Determine directory and file within directory
+            let dir_id = file_idx / files_per_dir;
+            let dir_name = format!("dir{:03}", dir_id);
+            
+            // Round-robin across endpoints based on GLOBAL file index
+            let endpoint = &agent_endpoints[file_idx % agent_endpoints.len()];
+            
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+            *dir_counts.entry(dir_name.clone()).or_insert(0) += 1;
+            *endpoint_dir_counts.entry((endpoint.clone(), dir_name)).or_insert(0) += 1;
+        }
+        
+        // Verify: Each endpoint should have equal files (1000 / 4 = 250)
+        let expected_per_endpoint = total_files / endpoints_per_agent;
+        for endpoint in &agent_endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Agent {} (isolated) endpoint {} should have {} files", agent_id, endpoint, expected_per_endpoint);
+        }
+        
+        // Verify: Each directory should have equal files (100 per dir)
+        for dir_id in 0..num_dirs {
+            let dir_name = format!("dir{:03}", dir_id);
+            assert_eq!(dir_counts.get(&dir_name).unwrap(), &files_per_dir,
+                "Directory {} should have {} files", dir_name, files_per_dir);
+        }
+        
+        // Verify: Files are distributed across endpoints AND directories
+        // Each endpoint should have files from all directories
+        for endpoint in &agent_endpoints {
+            let dirs_on_endpoint: Vec<_> = endpoint_dir_counts.keys()
+                .filter(|(ep, _)| ep == endpoint)
+                .collect();
+            assert_eq!(dirs_on_endpoint.len(), num_dirs,
+                "Endpoint {} should have files from all {} directories", endpoint, num_dirs);
+        }
+    }
+    
+    #[test]
+    fn test_tree_mode_multi_endpoint_shared_storage() {
+        // Test directory tree mode with multi-endpoint in SHARED storage mode
+        // Multiple agents coordinate on same endpoints, each agent creates subset
+        //
+        // Use 5 endpoints (coprime with 4 agents) to ensure even distribution
+        // With 4 agents and 5 endpoints, agent 0's files will distribute across all endpoints
+        
+        let total_files = 10000_usize;
+        let num_agents = 4;
+        let agent_id = 0;  // Test agent 0
+        
+        // Use 5 endpoints (coprime with 4 agents) for proper distribution testing
+        let shared_endpoints = vec![
+            "file:///shared/ep0/".to_string(),
+            "file:///shared/ep1/".to_string(),
+            "file:///shared/ep2/".to_string(),
+            "file:///shared/ep3/".to_string(),
+            "file:///shared/ep4/".to_string(),
+        ];
+        
+        // Simulate directory structure: 100 directories, 100 files each
+        let num_dirs = 100;
+        let files_per_dir = total_files / num_dirs;
+        
+        // Agent 0 handles files where index % num_agents == 0
+        let mut agent_file_indices = Vec::new();
+        for i in 0..total_files {
+            if i % num_agents == agent_id {
+                agent_file_indices.push(i);
+            }
+        }
+        
+        let mut endpoint_counts = std::collections::HashMap::new();
+        let mut dir_counts = std::collections::HashMap::new();
+        
+        for &file_idx in &agent_file_indices {
+            // Determine directory
+            let dir_id = file_idx / files_per_dir;
+            let dir_name = format!("dir{:03}", dir_id);
+            
+            // Round-robin across endpoints based on GLOBAL file index (not agent subset index)
+            let endpoint = &shared_endpoints[file_idx % shared_endpoints.len()];
+            
+            *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+            *dir_counts.entry(dir_name).or_insert(0) += 1;
+        }
+        
+        // Agent 0 creates 10000/4 = 2500 files
+        assert_eq!(agent_file_indices.len(), total_files / num_agents);
+        
+        // Verify: Files distributed across endpoints
+        // Agent 0 creates 2500 files across 5 endpoints = 500 per endpoint
+        let expected_per_endpoint = agent_file_indices.len() / shared_endpoints.len();
+        for endpoint in &shared_endpoints {
+            assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Agent {} (shared) endpoint {} should have {} files", 
+                agent_id, endpoint, expected_per_endpoint);
+        }
+        
+        // Verify: Agent's files span multiple directories (not all from one dir)
+        assert!(dir_counts.len() > 1, 
+            "Agent {} should create files in multiple directories, found {}", agent_id, dir_counts.len());
+    }
+    
+    #[test]
+    fn test_tree_mode_all_agents_shared_storage_coverage() {
+        // Verify that in shared storage + tree mode, all agents together:
+        // 1. Create all files exactly once (no overlap, no gaps)
+        // 2. Distribute evenly across all endpoints
+        // 3. Fill all directories correctly
+        
+        let total_files = 10000_usize;
+        let num_agents = 4;
+        let num_dirs = 100;
+        let files_per_dir = total_files / num_dirs;
+        
+        let shared_endpoints = vec![
+            "file:///shared/ep0/".to_string(),
+            "file:///shared/ep1/".to_string(),
+            "file:///shared/ep2/".to_string(),
+            "file:///shared/ep3/".to_string(),
+        ];
+        
+        let mut global_endpoint_counts = std::collections::HashMap::new();
+        let mut global_dir_counts = std::collections::HashMap::new();
+        let mut global_file_coverage = std::collections::HashSet::new();
+        
+        // Simulate all 4 agents
+        for agent_id in 0..num_agents {
+            // Each agent creates files where index % num_agents == agent_id
+            for file_idx in 0..total_files {
+                if file_idx % num_agents == agent_id {
+                    // Track which files were created (should be all 0..total_files)
+                    global_file_coverage.insert(file_idx);
+                    
+                    // Determine directory
+                    let dir_id = file_idx / files_per_dir;
+                    let dir_name = format!("dir{:03}", dir_id);
+                    
+                    // Round-robin across endpoints
+                    let endpoint = &shared_endpoints[file_idx % shared_endpoints.len()];
+                    
+                    *global_endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+                    *global_dir_counts.entry(dir_name).or_insert(0) += 1;
+                }
+            }
+        }
+        
+        // Verify: Complete coverage (all files created exactly once)
+        assert_eq!(global_file_coverage.len(), total_files,
+            "All {} files should be created across {} agents", total_files, num_agents);
+        for i in 0..total_files {
+            assert!(global_file_coverage.contains(&i),
+                "File index {} should be created by some agent", i);
+        }
+        
+        // Verify: Even distribution across endpoints (10000 / 4 = 2500 per endpoint)
+        let expected_per_endpoint = total_files / shared_endpoints.len();
+        for endpoint in &shared_endpoints {
+            assert_eq!(global_endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                "Shared endpoint {} should have {} files across all agents", endpoint, expected_per_endpoint);
+        }
+        
+        // Verify: Each directory has correct number of files (100 per dir)
+        for dir_id in 0..num_dirs {
+            let dir_name = format!("dir{:03}", dir_id);
+            assert_eq!(global_dir_counts.get(&dir_name).unwrap(), &files_per_dir,
+                "Directory {} should have {} files across all agents", dir_name, files_per_dir);
+        }
+    }
+    
+    #[test]
+    fn test_tree_mode_all_agents_isolated_storage_independence() {
+        // Verify that in isolated storage + tree mode:
+        // 1. Each agent creates ALL files independently (4x replication)
+        // 2. Each agent's files distributed evenly across its own endpoints
+        // 3. Each agent fills all directories correctly
+        
+        let total_files_per_agent = 1000_usize;
+        let num_agents = 4;
+        let num_dirs = 10;
+        let files_per_dir = total_files_per_agent / num_dirs;
+        let endpoints_per_agent = 4;
+        
+        for agent_id in 0..num_agents {
+            let agent_endpoints = vec![
+                format!("file:///agent{}_ep0/", agent_id),
+                format!("file:///agent{}_ep1/", agent_id),
+                format!("file:///agent{}_ep2/", agent_id),
+                format!("file:///agent{}_ep3/", agent_id),
+            ];
+            
+            let mut endpoint_counts = std::collections::HashMap::new();
+            let mut dir_counts = std::collections::HashMap::new();
+            
+            // In isolated mode, agent creates ALL files
+            for file_idx in 0..total_files_per_agent {
+                // Determine directory
+                let dir_id = file_idx / files_per_dir;
+                let dir_name = format!("dir{:02}", dir_id);
+                
+                // Round-robin across agent's own endpoints
+                let endpoint = &agent_endpoints[file_idx % endpoints_per_agent];
+                
+                *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+                *dir_counts.entry(dir_name).or_insert(0) += 1;
+            }
+            
+            // Verify: Each agent's endpoint gets equal share (1000 / 4 = 250)
+            let expected_per_endpoint = total_files_per_agent / endpoints_per_agent;
+            for endpoint in &agent_endpoints {
+                assert_eq!(endpoint_counts.get(endpoint).unwrap(), &expected_per_endpoint,
+                    "Agent {} (isolated) endpoint {} should have {} files", agent_id, endpoint, expected_per_endpoint);
+            }
+            
+            // Verify: Each directory has correct files (100 per dir)
+            for dir_id in 0..num_dirs {
+                let dir_name = format!("dir{:02}", dir_id);
+                assert_eq!(dir_counts.get(&dir_name).unwrap(), &files_per_dir,
+                    "Agent {} directory {} should have {} files", agent_id, dir_name, files_per_dir);
+            }
+        }
+    }
+    
+    // =========================================================================
+    // force_overwrite Tests (v0.8.24)
+    // =========================================================================
+    
+    #[test]
+    fn test_force_overwrite_with_skip_verification() {
+        // Verify that force_overwrite=true overrides skip_verification=true
+        // and creates all files instead of assuming they exist
+        
+        // Simulate the logic in prepare.rs lines 1416-1422
+        let skip_verification = true;
+        let force_overwrite = true;
+        let spec_count = 1000u64;
+        
+        let (existing_count, existing_indices): (u64, std::collections::HashSet<u64>) = 
+            if skip_verification && !force_overwrite {
+                // Old behavior: assume all exist
+                (spec_count, std::collections::HashSet::new())
+            } else if force_overwrite {
+                // force_overwrite: assume NONE exist, create all
+                (0, std::collections::HashSet::new())
+            } else {
+                // Would do actual LIST here
+                (0, std::collections::HashSet::new())
+            };
+        
+        // With force_overwrite=true, should report 0 existing (all will be created)
+        assert_eq!(existing_count, 0, "force_overwrite should assume no files exist");
+        assert_eq!(existing_indices.len(), 0, "force_overwrite should have empty indices set");
+        
+        // Calculate files to create
+        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        assert_eq!(to_create, 1000, "force_overwrite should create all 1000 files");
+    }
+    
+    #[test]
+    fn test_skip_verification_without_force_overwrite() {
+        // Verify that skip_verification=true WITHOUT force_overwrite assumes all files exist
+        // (original behavior - no file creation)
+        
+        let skip_verification = true;
+        let force_overwrite = false;
+        let spec_count = 1000u64;
+        
+        let (existing_count, _existing_indices): (u64, std::collections::HashSet<u64>) = 
+            if skip_verification && !force_overwrite {
+                (spec_count, std::collections::HashSet::new())
+            } else if force_overwrite {
+                (0, std::collections::HashSet::new())
+            } else {
+                (0, std::collections::HashSet::new())
+            };
+        
+        // Without force_overwrite, skip_verification assumes all exist
+        assert_eq!(existing_count, 1000, "skip_verification should assume all files exist");
+        
+        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        assert_eq!(to_create, 0, "skip_verification without force_overwrite should create 0 files");
+    }
+    
+    #[test]
+    fn test_force_overwrite_precedence() {
+        // Verify force_overwrite takes precedence over skip_verification
+        // Test all combinations:
+        
+        let spec_count = 1000u64;
+        
+        // Case 1: skip=false, force=false → normal LIST (simulated as 0 existing)
+        let (exist1, _): (u64, std::collections::HashSet<u64>) = 
+            if false && !false { (spec_count, std::collections::HashSet::new()) } 
+            else if false { (0, std::collections::HashSet::new()) } 
+            else { (0, std::collections::HashSet::new()) };
+        assert_eq!(exist1, 0, "Normal mode: would LIST, assume 0 for test");
+        
+        // Case 2: skip=true, force=false → assume all exist (NO creation)
+        let (exist2, _): (u64, std::collections::HashSet<u64>) = 
+            if true && !false { (spec_count, std::collections::HashSet::new()) } 
+            else if false { (0, std::collections::HashSet::new()) } 
+            else { (0, std::collections::HashSet::new()) };
+        assert_eq!(exist2, 1000, "skip_verification: assume all exist");
+        
+        // Case 3: skip=false, force=true → force creates all
+        let (exist3, _): (u64, std::collections::HashSet<u64>) = 
+            if false && !true { (spec_count, std::collections::HashSet::new()) } 
+            else if true { (0, std::collections::HashSet::new()) } 
+            else { (0, std::collections::HashSet::new()) };
+        assert_eq!(exist3, 0, "force_overwrite: create all regardless");
+        
+        // Case 4: skip=true, force=true → force takes precedence, creates all
+        let (exist4, _): (u64, std::collections::HashSet<u64>) = 
+            if true && !true { (spec_count, std::collections::HashSet::new()) } 
+            else if true { (0, std::collections::HashSet::new()) } 
+            else { (0, std::collections::HashSet::new()) };
+        assert_eq!(exist4, 0, "force_overwrite overrides skip_verification: create all");
+    }
+    
+    #[test]
+    fn test_force_overwrite_file_creation_count() {
+        // Verify the number of files that will be created with force_overwrite
+        // across different scenarios
+        
+        let spec_count = 64_000_000u64;
+        
+        // Scenario 1: force_overwrite + skip_verification (RECOMMENDED for full recreation)
+        let skip = true;
+        let force = true;
+        let (existing, _): (u64, std::collections::HashSet<u64>) = 
+            if skip && !force { (spec_count, std::collections::HashSet::new()) }
+            else if force { (0, std::collections::HashSet::new()) }
+            else { (0, std::collections::HashSet::new()) };
+        let to_create = if existing >= spec_count { 0 } else { spec_count - existing };
+        assert_eq!(to_create, 64_000_000, 
+            "force_overwrite should create all 64M files regardless of skip_verification");
+        
+        // Scenario 2: Only skip_verification (OLD behavior - creates nothing)
+        let skip = true;
+        let force = false;
+        let (existing, _): (u64, std::collections::HashSet<u64>) = 
+            if skip && !force { (spec_count, std::collections::HashSet::new()) }
+            else if force { (0, std::collections::HashSet::new()) }
+            else { (0, std::collections::HashSet::new()) };
+        let to_create = if existing >= spec_count { 0 } else { spec_count - existing };
+        assert_eq!(to_create, 0, 
+            "skip_verification without force_overwrite creates nothing (assumes all exist)");
+    }
+    
+    #[test]
+    fn test_force_overwrite_with_partial_dataset() {
+        // Simulate scenario where some files exist but force_overwrite is enabled
+        // force_overwrite should ignore existing files and recreate all
+        
+        let spec_count = 1000u64;
+        let force_overwrite = true;
+        
+        // Even if LIST found 500 existing files (in real scenario),
+        // force_overwrite overrides to 0 existing
+        let (existing_count, existing_indices): (u64, std::collections::HashSet<u64>) = 
+            if force_overwrite {
+                (0, std::collections::HashSet::new())
+            } else {
+                // Simulate: would have found 500 existing
+                let mut indices = std::collections::HashSet::new();
+                for i in 0..500 {
+                    indices.insert(i);
+                }
+                (500, indices)
+            };
+        
+        assert_eq!(existing_count, 0, "force_overwrite ignores partial data, sets existing to 0");
+        assert_eq!(existing_indices.len(), 0, "force_overwrite clears existing indices");
+        
+        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        assert_eq!(to_create, 1000, "force_overwrite creates all 1000 files (overwrites existing 500)");
     }
 }

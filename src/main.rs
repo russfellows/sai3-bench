@@ -1220,6 +1220,7 @@ fn run_workload(
                 config.concurrency,
                 0,  // agent_id (standalone mode)
                 1,  // num_agents (standalone mode)
+                true,  // shared_storage (N/A in standalone, but use true for backward compat)
             ))?;
             
             let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
@@ -1409,7 +1410,8 @@ fn run_workload(
                 prepare_config, 
                 0,  // agent_id
                 1,  // num_agents
-                &base_uri
+                &base_uri,
+                None  // No live_stats_tracker in cleanup-only mode
             )?)
         } else {
             None

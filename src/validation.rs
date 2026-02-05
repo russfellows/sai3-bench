@@ -219,11 +219,22 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 continue;
             }
             
-            let base_uri = spec.get_base_uri(None)
-                .unwrap_or_else(|_| String::from("<not configured>"));
+            // Determine URI display based on configuration mode
+            let uri_display = if spec.base_uri.is_none() && spec.use_multi_endpoint {
+                // In distributed mode with multi_endpoint, each agent uses its own endpoints
+                if config.distributed.is_some() {
+                    String::from("Per-agent multi-endpoint (see agent configs)")
+                } else {
+                    // Standalone mode with multi_endpoint
+                    String::from("Multi-endpoint load balancing (see above)")
+                }
+            } else {
+                spec.get_base_uri(None)
+                    .unwrap_or_else(|_| String::from("<not configured>"))
+            };
             
             println!("│ Flat Objects Section {}:", idx + 1);
-            println!("│   URI:              {}", base_uri);
+            println!("│   URI:              {}", uri_display);
             println!("│   Count:            {} objects", spec.count);
             
             // Display size information

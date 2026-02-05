@@ -213,6 +213,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -270,6 +271,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -322,6 +324,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -383,6 +386,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );

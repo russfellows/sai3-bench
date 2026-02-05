@@ -1,0 +1,20 @@
+# Test config to validate size string parsing (KB/MB/GB vs KiB/MiB/GiB)
+concurrency: 4
+duration: 0s
+
+prepare:
+  ensure_objects:
+    - count: 100
+      fill: zero
+      size_distribution:
+        type: lognormal
+        mean: 8MB           # 8,000,000 bytes (decimal)
+        std_dev: 1MB        # 1,000,000 bytes (decimal)
+        min: 1MB            # 1,000,000 bytes  (decimal)
+        max: 16MB           # 16,000,000 bytes (decimal)
+  cleanup: true
+
+workload:
+  - op: get
+    path: "*"
+    weight: 100

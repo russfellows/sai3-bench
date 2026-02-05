@@ -79,6 +79,8 @@ async fn test_distributed_prepare_no_overlap() {
         4,
         0,
         num_agents,
+            true,  // shared_storage
+        true,  // shared_storage: agents coordinate
     ).await.unwrap();
     
     // Agent 1 prepares
@@ -91,6 +93,8 @@ async fn test_distributed_prepare_no_overlap() {
         4,
         1,
         num_agents,
+            true,  // shared_storage
+        true,  // shared_storage: agents coordinate
     ).await.unwrap();
     
     let indices0: HashSet<usize> = extract_indices(&prepared0).into_iter().collect();
@@ -131,6 +135,8 @@ async fn test_distributed_prepare_complete_coverage() {
             4,
             agent_id,
             num_agents,
+            true,  // shared_storage
+            true,  // shared_storage: agents coordinate to avoid overlap
         ).await.unwrap();
         
         let indices: HashSet<usize> = extract_indices(&prepared).into_iter().collect();
@@ -176,6 +182,7 @@ async fn test_distributed_prepare_modulo_distribution() {
             4,
             agent_id,
             num_agents,
+            true,  // shared_storage
         ).await.unwrap();
         
         agent_indices.insert(agent_id, extract_indices(&prepared));
@@ -233,6 +240,7 @@ async fn test_distributed_prepare_balanced() {
             4,
             agent_id,
             num_agents,
+            true,  // shared_storage
         ).await.unwrap();
         
         counts.push(prepared.len());
@@ -270,6 +278,7 @@ async fn test_standalone_mode() {
         4,
         0,  // agent_id
         1,  // num_agents (standalone)
+        true,  // shared_storage (N/A for standalone)
     ).await.unwrap();
     
     assert_eq!(prepared.len(), total_files as usize,

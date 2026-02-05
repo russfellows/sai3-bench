@@ -33,7 +33,12 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase};
+
+// v0.8.25: Barrier synchronization
+use std::time::Instant;
+use std::collections::HashSet;
+use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
 
 /// v0.7.13: Controller's view of agent states
 /// 
@@ -1192,6 +1197,327 @@ async fn run_preflight_validation(
     }
 }
 
+// ============================================================================
+// v0.8.25: Barrier Synchronization Manager
+// ============================================================================
+
+/// Agent heartbeat tracking for barrier synchronization
+#[derive(Debug, Clone)]
+struct AgentHeartbeat {
+    agent_id: String,
+    last_heartbeat: Instant,
+    last_progress: Option<PhaseProgress>,
+    missed_count: u32,
+    is_alive: bool,
+    query_in_progress: bool,
+}
+
+/// Barrier status result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarrierStatus {
+    Ready,     // All required agents at barrier
+    Waiting,   // Still waiting for agents
+    Degraded,  // Some failed, proceeding with survivors
+    Failed,    // Insufficient agents ready
+}
+
+/// Barrier manager coordinates phase transitions across distributed agents
+struct BarrierManager {
+    agents: HashMap<String, AgentHeartbeat>,
+    config: PhaseBarrierConfig,
+    barrier_start: Instant,
+    ready_agents: HashSet<String>,
+    failed_agents: HashSet<String>,
+}
+
+impl BarrierManager {
+    /// Create new barrier manager for a specific phase
+    fn new(agent_ids: Vec<String>, config: PhaseBarrierConfig) -> Self {
+        let mut agents = HashMap::new();
+        for id in agent_ids {
+            agents.insert(id.clone(), AgentHeartbeat {
+                agent_id: id,
+                last_heartbeat: Instant::now(),
+                last_progress: None,
+                missed_count: 0,
+                is_alive: true,
+                query_in_progress: false,
+            });
+        }
+        
+        Self {
+            agents,
+            config,
+            barrier_start: Instant::now(),
+            ready_agents: HashSet::new(),
+            failed_agents: HashSet::new(),
+        }
+    }
+    
+    /// Process heartbeat from agent
+    fn process_heartbeat(&mut self, agent_id: &str, progress: PhaseProgress) {
+        if let Some(hb) = self.agents.get_mut(agent_id) {
+            hb.last_heartbeat = Instant::now();
+            hb.last_progress = Some(progress.clone());
+            hb.missed_count = 0;  // Reset missed counter
+            hb.is_alive = true;
+            hb.query_in_progress = false;
+            
+            // Check if agent reached barrier (phase completed)
+            if progress.phase_completed || progress.at_barrier {
+                self.ready_agents.insert(agent_id.to_string());
+            }
+        }
+    }
+    
+    /// Check for agents with missed heartbeats and query them
+    async fn check_liveness(&mut self, client_pool: &HashMap<String, AgentClient<Channel>>) {
+        let now = Instant::now();
+        let heartbeat_interval = Duration::from_secs(self.config.heartbeat_interval);
+        
+        // First pass: identify agents to query (avoid borrow checker issues)
+        let mut agents_to_query = Vec::new();
+        
+        for (agent_id, hb) in self.agents.iter_mut() {
+            // Skip agents already marked as failed
+            if self.failed_agents.contains(agent_id) {
+                continue;
+            }
+            
+            // Skip if heartbeat is recent
+            if now.duration_since(hb.last_heartbeat) < heartbeat_interval {
+                continue;
+            }
+            
+            // Increment missed count
+            hb.missed_count += 1;
+            
+            // If threshold exceeded and no query in progress, mark for querying
+            if hb.missed_count >= self.config.missed_threshold && !hb.query_in_progress {
+                warn!(
+                    "Agent {} missed {} heartbeats ({}s), querying status...",
+                    agent_id,
+                    hb.missed_count,
+                    now.duration_since(hb.last_heartbeat).as_secs()
+                );
+                
+                hb.query_in_progress = true;
+                agents_to_query.push(agent_id.clone());
+            }
+        }
+        
+        // Second pass: query agents (can now call &self methods)
+        for agent_id in agents_to_query {
+            match self.query_agent_with_retry(&agent_id, client_pool).await {
+                Ok(response) => {
+                    info!("✅ Agent {} responded to query: {}", agent_id, response.status_message);
+                    if let Some(progress) = response.current_progress {
+                        self.process_heartbeat(&agent_id, progress);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "❌ Agent {} failed to respond after {} retries: {}",
+                        agent_id, self.config.query_retries, e
+                    );
+                    if let Some(hb) = self.agents.get_mut(&agent_id) {
+                        hb.is_alive = false;
+                        hb.query_in_progress = false;
+                    }
+                    self.failed_agents.insert(agent_id);
+                }
+            }
+        }
+    }
+    
+    /// Query agent with exponential backoff retry
+    async fn query_agent_with_retry(
+        &self,
+        agent_id: &str,
+        client_pool: &HashMap<String, AgentClient<Channel>>,
+    ) -> Result<AgentQueryResponse> {
+        let client = client_pool.get(agent_id)
+            .ok_or_else(|| anyhow!("No client for agent {}", agent_id))?;
+        
+        let mut retries = 0;
+        let mut backoff_ms = 1000;  // Start with 1s
+        
+        loop {
+            let request = AgentQueryRequest {
+                agent_id: agent_id.to_string(),
+                reason: "missed_heartbeats".to_string(),
+            };
+            
+            match tokio::time::timeout(
+                Duration::from_secs(self.config.query_timeout),
+                client.clone().query_agent_status(request)
+            ).await {
+                Ok(Ok(response)) => return Ok(response.into_inner()),
+                Ok(Err(e)) => {
+                    if retries >= self.config.query_retries {
+                        return Err(anyhow!("Query failed after {} retries: {}", retries, e));
+                    }
+                    warn!(
+                        "Query attempt {} failed for {}: {}, retrying in {}ms",
+                        retries + 1, agent_id, e, backoff_ms
+                    );
+                }
+                Err(_) => {
+                    if retries >= self.config.query_retries {
+                        return Err(anyhow!("Query timeout after {} retries", retries));
+                    }
+                    warn!(
+                        "Query attempt {} timeout for {}, retrying in {}ms",
+                        retries + 1, agent_id, backoff_ms
+                    );
+                }
+            }
+            
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            retries += 1;
+            backoff_ms = (backoff_ms * 2).min(10_000);  // Cap at 10s
+        }
+    }
+    
+    /// Check if barrier is satisfied (all/majority/best-effort)
+    fn check_barrier(&self) -> BarrierStatus {
+        let ready_count = self.ready_agents.len();
+        let total_count = self.agents.len();
+        let failed_count = self.failed_agents.len();
+        let alive_count = total_count - failed_count;
+        
+        match self.config.barrier_type {
+            BarrierType::AllOrNothing => {
+                if ready_count == alive_count {
+                    BarrierStatus::Ready
+                } else if failed_count > 0 {
+                    // Any failure in AllOrNothing mode = abort
+                    BarrierStatus::Failed
+                } else {
+                    BarrierStatus::Waiting
+                }
+            }
+            
+            BarrierType::Majority => {
+                if ready_count > alive_count / 2 {
+                    BarrierStatus::Ready
+                } else if alive_count - ready_count < alive_count / 2 {
+                    // Not enough agents left to reach majority
+                    BarrierStatus::Failed
+                } else {
+                    BarrierStatus::Waiting
+                }
+            }
+            
+            BarrierType::BestEffort => {
+                if ready_count == alive_count {
+                    BarrierStatus::Ready
+                } else if ready_count > 0 && failed_count > 0 {
+                    // Some ready, some failed - proceed with ready ones
+                    BarrierStatus::Degraded
+                } else {
+                    BarrierStatus::Waiting
+                }
+            }
+        }
+    }
+    
+    /// Wait for barrier with heartbeat-based liveness checking
+    async fn wait_for_barrier(
+        &mut self,
+        phase_name: &str,
+        client_pool: &HashMap<String, AgentClient<Channel>>,
+    ) -> Result<BarrierStatus> {
+        let start = Instant::now();
+        let mut last_liveness_check = Instant::now();
+        let liveness_check_interval = Duration::from_secs(
+            self.config.heartbeat_interval.max(10)
+        );
+        
+        loop {
+            // Check barrier status
+            let status = self.check_barrier();
+            
+            match status {
+                BarrierStatus::Ready => {
+                    info!(
+                        "✅ Barrier '{}' ready: all {} agents synchronized (elapsed: {:?})",
+                        phase_name,
+                        self.ready_agents.len(),
+                        start.elapsed()
+                    );
+                    return Ok(status);
+                }
+                
+                BarrierStatus::Degraded => {
+                    warn!(
+                        "⚠️  Barrier '{}' degraded: {}/{} agents ready, {} failed (elapsed: {:?})",
+                        phase_name,
+                        self.ready_agents.len(),
+                        self.agents.len(),
+                        self.failed_agents.len(),
+                        start.elapsed()
+                    );
+                    return Ok(status);
+                }
+                
+                BarrierStatus::Failed => {
+                    error!(
+                        "❌ Barrier '{}' failed: only {}/{} agents ready, {} failed",
+                        phase_name,
+                        self.ready_agents.len(),
+                        self.agents.len(),
+                        self.failed_agents.len()
+                    );
+                    return Err(anyhow!("Barrier failed - insufficient agents"));
+                }
+                
+                BarrierStatus::Waiting => {
+                    // Check liveness periodically
+                    if last_liveness_check.elapsed() >= liveness_check_interval {
+                        self.check_liveness(client_pool).await;
+                        last_liveness_check = Instant::now();
+                    }
+                    
+                    // Poll every 100ms
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    
+                    // Log progress every 10 seconds
+                    if start.elapsed().as_secs() % 10 == 0 && start.elapsed().as_millis() % 10000 < 100 {
+                        let waiting: Vec<_> = self.agents.keys()
+                            .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
+                            .map(|s| {
+                                let hb = &self.agents[s];
+                                let prog = hb.last_progress.as_ref()
+                                    .map(|p| p.operations_completed)
+                                    .unwrap_or(0);
+                                format!(
+                                    "{} ({}s ago, {} ops)",
+                                    s,
+                                    Instant::now().duration_since(hb.last_heartbeat).as_secs(),
+                                    prog
+                                )
+                            })
+                            .collect();
+                        
+                        info!(
+                            "Barrier '{}': {}/{} ready, waiting for: {}",
+                            phase_name,
+                            self.ready_agents.len(),
+                            self.agents.len() - self.failed_agents.len(),
+                            waiting.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// End Barrier Synchronization Manager
+// ============================================================================
+
 /// Execute a distributed workload across multiple agents
 #[allow(clippy::too_many_arguments)]
 async fn run_distributed_workload(
@@ -1870,6 +2196,21 @@ async fn run_distributed_workload(
     let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
+    // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
+    // TODO: Complete integration in next phase (requires client pool)
+    let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
+        if distributed_config.barrier_sync.enabled {
+            let agent_ids: Vec<String> = agent_addrs.iter().cloned().collect();
+            let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
+            eprintln!("🔄 Barrier synchronization enabled");
+            Some(BarrierManager::new(agent_ids, default_config))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
     // v0.7.13: Show countdown to coordinated start (suspend progress bar during countdown)
     if total_delay_secs > 0 {
         progress_bar.suspend(|| {
@@ -2026,6 +2367,55 @@ async fn run_distributed_workload(
                         tracker.touch();  // Update last seen timestamp
                         tracker.latest_stats = Some(stats.clone());
                         
+                        // v0.8.9: Compute current_stage early for state transitions
+                        let current_stage = WorkloadStage::try_from(stats.current_stage)
+                            .unwrap_or(WorkloadStage::StageUnknown);
+                        
+                        // v0.8.25: Process stats as heartbeat for barrier manager (disabled until client pool available)
+                        // TODO: Uncomment when implementing full barrier integration
+                        /*
+                        if let Some(ref mut bm) = barrier_manager {
+                            let phase_progress = pb::iobench::PhaseProgress {
+                                agent_id: stats.agent_id.clone(),
+                                current_phase: match current_stage {
+                                    WorkloadStage::StagePrepare => pb::iobench::WorkloadPhase::PhasePreparing as i32,
+                                    WorkloadStage::StageWorkload => pb::iobench::WorkloadPhase::PhaseExecuting as i32,
+                                    WorkloadStage::StageCleanup => pb::iobench::WorkloadPhase::PhaseCleaning as i32,
+                                    _ => pb::iobench::WorkloadPhase::PhaseIdle as i32,
+                                },
+                                phase_start_time_ms: 0,
+                                heartbeat_time_ms: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                objects_created: stats.prepare_objects_created,
+                                objects_total: stats.prepare_objects_total,
+                                current_operation: stats.stage_name.clone(),
+                                bytes_written: stats.put_bytes,
+                                errors_encountered: 0,
+                                operations_completed: stats.get_ops + stats.put_ops + stats.meta_ops,
+                                current_throughput: if stats.elapsed_s > 0.0 {
+                                    (stats.get_ops + stats.put_ops) as f64 / stats.elapsed_s
+                                } else { 0.0 },
+                                phase_elapsed_ms: (stats.stage_elapsed_s * 1000.0) as u64,
+                                objects_deleted: if current_stage == WorkloadStage::StageCleanup {
+                                    stats.stage_progress_current
+                                } else { 0 },
+                                objects_remaining: if current_stage == WorkloadStage::StageCleanup {
+                                    stats.stage_progress_total.saturating_sub(stats.stage_progress_current)
+                                } else { 0 },
+                                is_stuck: false,
+                                stuck_reason: String::new(),
+                                progress_rate: if stats.stage_elapsed_s > 0.0 {
+                                    stats.stage_progress_current as f64 / stats.stage_elapsed_s
+                                } else { 0.0 },
+                                phase_completed: stats.completed,
+                                at_barrier: false,
+                            };
+                            bm.process_heartbeat(&stats.agent_id, phase_progress);
+                        }
+                        */
+                        
                         // v0.8.2: Agent recovery from Disconnected state
                         // BUG FIX: Previously agents stayed Disconnected even after sending messages
                         // 
@@ -2074,11 +2464,7 @@ async fn run_distributed_workload(
                             }
                         }
                         
-                        // v0.8.9: Use current_stage enum for flexible multi-stage support
-                        // Replaces in_prepare_phase bool for cleaner stage transitions
-                        let current_stage = WorkloadStage::try_from(stats.current_stage)
-                            .unwrap_or(WorkloadStage::StageUnknown);
-                        
+                        // v0.8.9: current_stage already computed above for barrier tracking
                         // v0.8.4: Use high-water marks during prepare phase to prevent backwards movement
                         // (delayed packets should never decrease the displayed counter)
                         if current_stage == WorkloadStage::StagePrepare {
@@ -2171,6 +2557,19 @@ async fn run_distributed_workload(
                             // v0.8.4: Reset prepare counters when transitioning to workload phase
                             max_prepare_created = 0;
                             max_prepare_total = 0;
+                            
+                            // v0.8.25: Wait for prepare barrier if enabled
+                            // TODO: Uncomment when client pool is available
+                            // if let Some(ref mut bm) = barrier_manager {
+                            //     eprintln!("\n🔄 Prepare phase complete - waiting for all agents at barrier...");
+                            //     match bm.wait_for_barrier("prepare", &agent_clients).await {
+                            //         Ok(BarrierStatus::Ready) => eprintln!("✅ All agents synchronized"),
+                            //         Ok(BarrierStatus::Degraded) => eprintln!("⚠️  Barrier degraded"),
+                            //         Ok(BarrierStatus::Failed) => anyhow::bail!("Barrier failed"),
+                            //         Ok(BarrierStatus::Waiting) => warn!("Still waiting"),
+                            //         Err(e) => anyhow::bail!("Barrier error: {}", e),
+                            //     }
+                            // }
                         }
                         
                         // v0.8.13: Check for ERROR status FIRST, regardless of completed flag
@@ -2505,6 +2904,19 @@ async fn run_distributed_workload(
             }
         }
     }
+    
+    // v0.8.25: Wait for execute barrier if enabled
+    // TODO: Uncomment when client pool is available
+    // if let Some(ref mut bm) = barrier_manager {
+    //     eprintln!("\n🔄 Workload execution complete - waiting for all agents at barrier...");
+    //     match bm.wait_for_barrier("execute", &agent_clients).await {
+    //         Ok(BarrierStatus::Ready) => eprintln!("✅ All agents synchronized"),
+    //         Ok(BarrierStatus::Degraded) => eprintln!("⚠️  Barrier degraded"),
+    //         Ok(BarrierStatus::Failed) => anyhow::bail!("Barrier failed"),
+    //         Ok(BarrierStatus::Waiting) => warn!("Still waiting"),
+    //         Err(e) => anyhow::bail!("Barrier error: {}", e),
+    //     }
+    // }
     
     // Final aggregation
     let final_stats = aggregator.aggregate();

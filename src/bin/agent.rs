@@ -29,7 +29,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase};
 
 /// Helper function to get current timestamp with optional simulated clock skew.
 /// 
@@ -124,16 +124,29 @@ struct AgentState {
     num_agents: Arc<Mutex<Option<u32>>>,
     /// v0.8.14: Flag to track when COMPLETED message has been sent (fixes race with control reader)
     completion_sent: Arc<Mutex<bool>>,
+    /// v0.8.24: Shared storage flag for distributed prepare (true=shared, false=isolated)
+    shared_storage: Arc<Mutex<Option<bool>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum WorkloadState {
-    Idle,      // Ready to accept new workload
-    Ready,     // Validated, waiting for coordinated start (0-60s)
-    Running,   // Workload executing (includes prepare phase)
-    Failed,    // Validation or workload error (auto-resets to Idle)
-    Aborting,  // Abort requested, cleaning up (5-15s timeout)
+    Idle,              // Ready to accept new workload
+    Validating,        // Pre-flight checks running
+    PrepareReady,      // Validation passed, waiting for prepare barrier
+    Preparing,         // Creating/cleaning objects
+    ExecuteReady,      // Prepare complete, waiting for execute barrier
+    Executing,         // Running I/O workload
+    CleanupReady,      // Execution complete, waiting for cleanup barrier
+    Cleaning,          // Removing objects
+    Completed,         // All phases done successfully
+    Failed,            // Error occurred (backward compat - no error message)
+    Aborting,          // Emergency shutdown in progress
+    
+    // Legacy states for backward compatibility (will be phased out)
+    Ready,             // Old: Validated, waiting for coordinated start
+    Running,           // Old: Workload executing (maps to Executing)
 }
+
 
 impl AgentState {
     fn new(agent_op_log_path: Option<std::path::PathBuf>) -> Self {
@@ -150,26 +163,47 @@ impl AgentState {
             agent_index: Arc::new(Mutex::new(None)),
             num_agents: Arc::new(Mutex::new(None)),
             completion_sent: Arc::new(Mutex::new(false)),
+            shared_storage: Arc::new(Mutex::new(None)),
         }
     }
     
-    /// Validate state transition before applying (5-state model)
+    /// Validate state transition before applying
     fn can_transition(from: &WorkloadState, to: &WorkloadState) -> bool {
         use WorkloadState::*;
         matches!(
             (from, to),
-            // Normal flow
-            (Idle, Ready)           // RPC arrives, validation passes
-            | (Idle, Failed)        // RPC arrives, validation fails
-            | (Idle, Idle)          // v0.8.14: No-op for race condition safety (completion already processed)
-            | (Ready, Running)      // Start time reached, spawn workload
-            | (Ready, Idle)         // Abort during coordinated start (no cleanup needed)
-            | (Running, Idle)       // Workload completed successfully
-            | (Running, Failed)     // Workload error
-            | (Running, Aborting)   // Abort signal during execution
-            | (Aborting, Idle)      // Cleanup complete
-            | (Failed, Idle)        // Auto-reset after sending error
-            | (Failed, Failed)      // v0.8.14: No-op for race condition safety (error already processed)
+            // New v0.8.25 barrier sync flow
+            (Idle, Validating)                  // Pre-flight validation starts
+            | (Validating, PrepareReady)        // Validation passed, ready for prepare
+            | (Validating, Failed)              // Validation failed
+            | (PrepareReady, Preparing)         // Barrier cleared, start prepare
+            | (Preparing, ExecuteReady)         // Prepare complete, ready for execute
+            | (Preparing, Failed)               // Prepare error
+            | (ExecuteReady, Executing)         // Barrier cleared, start execution
+            | (Executing, CleanupReady)         // Execution complete, ready for cleanup
+            | (Executing, Failed)               // Execution error
+            | (CleanupReady, Cleaning)          // Barrier cleared, start cleanup
+            | (Cleaning, Completed)             // Cleanup complete
+            | (Cleaning, Failed)                // Cleanup error
+            | (Completed, Idle)                 // Reset for next workload
+            | (Failed, Idle)                    // Error recovery
+            
+            // Abort from any state
+            | (_, Aborting)
+            | (Aborting, Idle)                  // Cleanup complete
+            
+            // Legacy backward-compatible flow (when barrier_sync.enabled=false)
+            | (Idle, Ready)                     // Old: RPC arrives, validation passes
+            | (Idle, Failed)                    // Old: RPC arrives, validation fails
+            | (Ready, Running)                  // Old: Start time reached, spawn workload
+            | (Ready, Idle)                     // Old: Abort during coordinated start
+            | (Running, Idle)                   // Old: Workload completed successfully
+            | (Running, Failed)                 // Old: Workload error
+            | (Running, Aborting)               // Old: Abort signal during execution
+            
+            // No-op transitions for race condition safety
+            | (Idle, Idle)
+            | (Failed, Failed)
         )
     }
     
@@ -293,6 +327,15 @@ impl AgentState {
     async fn get_num_agents(&self) -> Option<u32> {
         *self.num_agents.lock().await
     }
+    
+    async fn set_shared_storage(&self, shared: bool) {
+        let mut shared_storage = self.shared_storage.lock().await;
+        *shared_storage = Some(shared);
+    }
+    
+    async fn get_shared_storage(&self) -> Option<bool> {
+        *self.shared_storage.lock().await
+    }
 }
 
 struct AgentSvc {
@@ -305,13 +348,30 @@ impl AgentSvc {
     }
 }
 
-/// Extract filesystem path from Config.target or return None if not a file:// or direct:// URI
+/// Extract filesystem path from Config.target or multi_endpoint, return None if not a file:// or direct:// URI
 fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> Option<std::path::PathBuf> {
-    config.target.as_ref().and_then(|target| {
-        target.strip_prefix("file://")
+    // First try config.target (standalone mode)
+    if let Some(target) = config.target.as_ref() {
+        if let Some(path) = target.strip_prefix("file://")
             .or_else(|| target.strip_prefix("direct://"))
-            .map(std::path::PathBuf::from)
-    })
+            .map(std::path::PathBuf::from) {
+            return Some(path);
+        }
+    }
+    
+    // If target not set or not filesystem, check multi_endpoint (distributed mode)
+    if let Some(ref multi) = config.multi_endpoint {
+        for endpoint in &multi.endpoints {
+            if let Some(path) = endpoint.strip_prefix("file://")
+                .or_else(|| endpoint.strip_prefix("direct://"))
+                .map(std::path::PathBuf::from) {
+                // Return first filesystem endpoint found
+                return Some(path);
+            }
+        }
+    }
+    
+    None
 }
 
 #[tonic::async_trait]
@@ -405,6 +465,159 @@ impl Agent for AgentSvc {
             error_count: fs_summary.error_count() as i32,
             warning_count: fs_summary.warning_count() as i32,
             info_count: fs_summary.info_count() as i32,
+        }))
+    }
+
+    // v0.8.25: Barrier synchronization RPCs
+    async fn report_barrier_ready(
+        &self,
+        req: Request<BarrierRequest>,
+    ) -> Result<Response<BarrierResponse>, Status> {
+        let request = req.into_inner();
+        
+        info!(
+            "Agent {} reporting barrier '{}' readiness",
+            request.agent_id,
+            request.barrier_id
+        );
+        
+        // Process the progress report from the request
+        if let Some(progress) = request.progress {
+            debug!(
+                "Progress: phase={:?}, ops={}, at_barrier={}",
+                progress.current_phase,
+                progress.operations_completed,
+                progress.at_barrier
+            );
+        }
+        
+        // v0.8.25: Actual barrier coordination will be implemented when integrated with
+        // BarrierManager in controller. For now, acknowledge receipt and allow agent to proceed.
+        // The controller's BarrierManager will track all agents and only set proceed=true
+        // when the barrier is actually satisfied.
+        Ok(Response::new(BarrierResponse {
+            proceed: true,
+            waiting_agents: vec![],
+            failed_agents: vec![],
+            next_heartbeat_ms: 30000, // 30s default
+        }))
+    }
+
+    async fn query_agent_status(
+        &self,
+        req: Request<AgentQueryRequest>,
+    ) -> Result<Response<AgentQueryResponse>, Status> {
+        let request = req.into_inner();
+        
+        info!(
+            "Agent {} status query (reason: {})",
+            request.agent_id,
+            request.reason
+        );
+        
+        // Get current agent state
+        let current_state = self.state.get_state().await;
+        let agent_id = self.state.get_agent_id().await.unwrap_or_else(|| request.agent_id.clone());
+        
+        // Map WorkloadState to WorkloadPhase for reporting
+        let (current_phase, status_message) = match current_state {
+            WorkloadState::Idle => (
+                WorkloadPhase::PhaseIdle,
+                "Agent is idle and ready to accept workload".to_string()
+            ),
+            WorkloadState::Validating => (
+                WorkloadPhase::PhaseValidating,
+                "Running pre-flight validation".to_string()
+            ),
+            WorkloadState::PrepareReady => (
+                WorkloadPhase::PhasePrepareReady,
+                "Validation passed, waiting at prepare barrier".to_string()
+            ),
+            WorkloadState::Preparing => (
+                WorkloadPhase::PhasePreparing,
+                "Preparing objects for workload".to_string()
+            ),
+            WorkloadState::ExecuteReady => (
+                WorkloadPhase::PhaseExecuteReady,
+                "Prepare complete, waiting at execute barrier".to_string()
+            ),
+            WorkloadState::Executing => (
+                WorkloadPhase::PhaseExecuting,
+                "Executing workload".to_string()
+            ),
+            WorkloadState::CleanupReady => (
+                WorkloadPhase::PhaseCleanupReady,
+                "Execution complete, waiting at cleanup barrier".to_string()
+            ),
+            WorkloadState::Cleaning => (
+                WorkloadPhase::PhaseCleaning,
+                "Cleaning up objects".to_string()
+            ),
+            WorkloadState::Completed => (
+                WorkloadPhase::PhaseCompleted,
+                "All phases completed successfully".to_string()
+            ),
+            WorkloadState::Failed => (
+                WorkloadPhase::PhaseFailed,
+                self.state.error_message.lock().await.clone()
+                    .unwrap_or_else(|| "Agent in failed state".to_string())
+            ),
+            WorkloadState::Aborting => (
+                WorkloadPhase::PhaseAborting,
+                "Aborting workload".to_string()
+            ),
+            // Legacy states
+            WorkloadState::Ready => (
+                WorkloadPhase::PhasePrepareReady,
+                "Ready to start (legacy state)".to_string()
+            ),
+            WorkloadState::Running => (
+                WorkloadPhase::PhaseExecuting,
+                "Running workload (legacy state)".to_string()
+            ),
+        };
+        
+        // Get progress from LiveStatsTracker if available
+        let tracker = self.state.tracker.lock().await;
+        let (operations_completed, objects_created, bytes_written) = if let Some(t) = tracker.as_ref() {
+            let stats = t.snapshot();
+            (
+                stats.get_ops + stats.put_ops + stats.meta_ops,
+                stats.prepare_objects_created,
+                stats.get_bytes + stats.put_bytes,
+            )
+        } else {
+            (0, 0, 0)
+        };
+        drop(tracker); // Release lock
+        
+        Ok(Response::new(AgentQueryResponse {
+            current_progress: Some(PhaseProgress {
+                agent_id: agent_id.clone(),
+                current_phase: current_phase as i32,
+                phase_start_time_ms: 0, // TODO: Track phase start time
+                heartbeat_time_ms: chrono::Utc::now().timestamp_millis() as u64,
+                objects_created,
+                objects_total: 0, // TODO: Get from config
+                current_operation: status_message.clone(),
+                bytes_written,
+                errors_encountered: 0, // TODO: Track errors
+                operations_completed,
+                current_throughput: 0.0, // TODO: Calculate throughput
+                phase_elapsed_ms: 0, // TODO: Calculate from phase_start_time_ms
+                objects_deleted: 0, // TODO: Track in cleanup phase
+                objects_remaining: 0,
+                is_stuck: false, // TODO: Detect stuck state
+                stuck_reason: String::new(),
+                progress_rate: 0.0, // TODO: Calculate from recent progress
+                phase_completed: matches!(current_state, WorkloadState::Completed),
+                at_barrier: matches!(
+                    current_state,
+                    WorkloadState::PrepareReady | WorkloadState::ExecuteReady | WorkloadState::CleanupReady
+                ),
+            }),
+            is_alive: true,
+            status_message,
         }))
     }
 
@@ -564,6 +777,10 @@ impl Agent for AgentSvc {
             })?;
 
         debug!("YAML config parsed successfully");
+        debug!("Config has multi_endpoint: {}", config.multi_endpoint.is_some());
+        if let Some(ref me) = config.multi_endpoint {
+            debug!("Multi-endpoint config: {} endpoints, strategy: {}", me.endpoints.len(), me.strategy);
+        }
 
         // Apply agent-specific path prefix for isolation
         config
@@ -644,15 +861,21 @@ impl Agent for AgentSvc {
             use std::collections::HashMap;
             let prepare_multi_ep_cache: sai3_bench::workload::MultiEndpointCache = Arc::new(Mutex::new(HashMap::new()));
             
+            debug!("Prepare phase: config.multi_endpoint.is_some() = {}", config.multi_endpoint.is_some());
+            if let Some(ref me) = config.multi_endpoint {
+                debug!("Prepare phase: multi_endpoint has {} endpoints", me.endpoints.len());
+            }
+            
             let (prepared, manifest, prepare_metrics) = sai3_bench::workload::prepare_objects(
                 prepare_config,
                 Some(&config.workload),
-                None,  // live_stats_tracker
+                None,  // live_stats_tracker - not available in run_workload RPC (deprecated)
                 config.multi_endpoint.as_ref(),  // v0.8.22: pass multi-endpoint config
                 &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                 config.concurrency,
                 agent_index as usize,
                 num_agents as usize,
+                shared_storage,  // v0.8.24: Only filter by agent_id in shared storage mode
             ).await.map_err(|e| {
                 error!("Prepare phase failed: {}", e);
                 Status::internal(format!("Prepare phase failed: {}", e))
@@ -940,7 +1163,8 @@ impl Agent for AgentSvc {
         let current_state = self.state.get_state().await;
         
         match current_state {
-            WorkloadState::Running | WorkloadState::Ready => {
+            WorkloadState::Running | WorkloadState::Ready | WorkloadState::Executing | 
+            WorkloadState::Preparing | WorkloadState::Cleaning => {
                 warn!("⚠️  Abort workload requested - sending cancellation signal");
                 
                 // v0.7.13: Transition to Aborting state
@@ -988,6 +1212,75 @@ impl Agent for AgentSvc {
             }
             WorkloadState::Idle | WorkloadState::Failed => {
                 info!("Abort requested but agent is idle or failed");
+                Ok(Response::new(Empty {}))
+            }
+            
+            // ============================================================================
+            // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+            // ============================================================================
+            // TODO v0.8.25: Replace this catch-all with proper abort handling for each new state:
+            //
+            // WorkloadState::Validating => {
+            //     // Pre-flight validation in progress - abort immediately
+            //     // Transition: Validating → Aborting → Idle
+            //     warn!("⚠️  Abort during validation - cancelling pre-flight checks");
+            //     self.state.transition_to(WorkloadState::Aborting, "abort during validation").await?;
+            //     self.state.send_abort();
+            //     // Spawn cleanup task...
+            // }
+            //
+            // WorkloadState::PrepareReady | WorkloadState::ExecuteReady | WorkloadState::CleanupReady => {
+            //     // Agent at barrier, waiting for others - abort is trivial (no work in progress)
+            //     // Transition: *Ready → Aborting → Idle
+            //     info!("Abort at barrier (no work in progress) - resetting to Idle");
+            //     self.state.transition_to(WorkloadState::Idle, "abort at barrier").await?;
+            //     Ok(Response::new(Empty {}))
+            // }
+            //
+            // WorkloadState::Completed => {
+            //     // Workload already completed successfully - nothing to abort
+            //     info!("Abort requested but workload already completed");
+            //     Ok(Response::new(Empty {}))
+            // }
+            //
+            // For now, treat all new states conservatively as if they're Running/Preparing/Cleaning
+            // (which are already handled above). This ensures abort works even if state machine
+            // transitions to a new state we haven't explicitly coded for yet.
+            // ============================================================================
+            _ => {
+                warn!("⚠️  Abort requested in unhandled state {:?} - treating as active workload", current_state);
+                
+                // Conservative approach: assume state is active and needs abort signal
+                if let Err(e) = self.state.transition_to(WorkloadState::Aborting, "abort in unknown state").await {
+                    error!("Failed to transition to Aborting from {:?}: {}", current_state, e);
+                    return Err(Status::internal(format!("State transition failed: {}", e)));
+                }
+                
+                self.state.send_abort();
+                
+                // Same cleanup logic as Running/Ready above
+                let state_for_reset = self.state.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    let current = state_for_reset.get_state().await;
+                    if current == WorkloadState::Aborting {
+                        let _ = state_for_reset.transition_to(WorkloadState::Idle, "abort cleanup (5s)").await;
+                        info!("⏰ Abort cleanup (5s) - reset agent to Idle");
+                    } else if current == WorkloadState::Idle {
+                        debug!("Agent already reset to Idle via stream cleanup");
+                    } else {
+                        warn!("Unexpected state during abort: {:?}", current);
+                    }
+                    
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    let retry_state = state_for_reset.get_state().await;
+                    if retry_state == WorkloadState::Aborting {
+                        warn!("⚠️  Agent stuck in Aborting state after 15s - forcing reset to Idle");
+                        state_for_reset.set_state(WorkloadState::Idle).await;
+                        info!("⏰ Abort retry (15s) - forced agent to Idle state");
+                    }
+                });
+                
                 Ok(Response::new(Empty {}))
             }
         }
@@ -1374,7 +1667,8 @@ impl Agent for AgentSvc {
                                         sai3_bench::constants::AGENT_ERROR_FLUSH_DELAY_SECS
                                     )).await;
                                     
-                                    // Transition to Idle
+                                    // Transition to Failed then Idle
+                                    let _ = agent_state.set_error(e.to_string()).await;
                                     let _ = agent_state.transition_to(WorkloadState::Failed, &e).await;
                                     let _ = agent_state.transition_to(WorkloadState::Idle, "error sent").await;
                                     
@@ -1654,6 +1948,7 @@ impl Agent for AgentSvc {
                                     // Store agent_index and num_agents for distributed cleanup
                                     agent_state_reader.set_agent_index(agent_index).await;
                                     agent_state_reader.set_num_agents(num_agents).await;
+                                    agent_state_reader.set_shared_storage(shared_storage).await;  // v0.8.24
                                     
                                     // Store config_yaml for later use
                                     agent_state_reader.set_config_yaml(config_yaml.clone()).await;
@@ -1663,8 +1958,8 @@ impl Agent for AgentSvc {
                                         Ok(c) => c,
                                         Err(e) => {
                                             error!("Control reader: Invalid YAML config: {}", e);
-                                            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "invalid config").await;
                                             agent_state_reader.set_error(format!("Invalid YAML: {}", e)).await;
+                                            let _ = agent_state_reader.transition_to(WorkloadState::Failed, "invalid config").await;
                                             
                                             // Send ERROR via stats writer (it will pick up the error from state)
                                             let _ = tx_done.send(Err(format!("Invalid YAML config: {}", e))).await;
@@ -1674,6 +1969,7 @@ impl Agent for AgentSvc {
                                     
                                     if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
                                         error!("Control reader: Failed to apply agent prefix: {}", e);
+                                        agent_state_reader.set_error(format!("Failed to apply path prefix: {}", e)).await;
                                         let _ = agent_state_reader.transition_to(WorkloadState::Failed, "prefix application failed").await;
                                         let _ = tx_done.send(Err(format!("Failed to apply path prefix: {}", e))).await;
                                         return;
@@ -1682,6 +1978,7 @@ impl Agent for AgentSvc {
                                     // Validate config
                                     if let Err(e) = validate_workload_config(&config).await {
                                         error!("Control reader: Config validation failed: {}", e);
+                                        agent_state_reader.set_error(format!("Config validation failed: {}", e)).await;
                                         let _ = agent_state_reader.transition_to(WorkloadState::Failed, "validation failed").await;
                                         let _ = tx_done.send(Err(format!("Config validation failed: {}", e))).await;
                                         return;
@@ -1790,6 +2087,7 @@ impl Agent for AgentSvc {
                                         // Get agent_index and num_agents for distributed prepare/cleanup
                                         let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0) as usize;
                                         let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1) as usize;
+                                        let shared_storage = agent_state_for_task.get_shared_storage().await.unwrap_or(true);  // v0.8.24: Default to shared for backward compat
                                         
                                         // v0.8.7: Detect cleanup-only mode (ONLY checks cleanup flag)
                                         let is_cleanup_only = config_exec.prepare.as_ref()
@@ -1871,7 +2169,8 @@ impl Agent for AgentSvc {
                                                 &prepare_multi_ep_cache,  // v0.8.22: pass multi-endpoint cache for stats
                                                 config_exec.concurrency, 
                                                 agent_index, 
-                                                num_agents
+                                                num_agents,
+                                                shared_storage  // v0.8.24: Only filter by agent_id in shared storage mode
                                             ).await {
                                                 Ok((prepared, manifest, prepare_metrics)) => {
                                                     info!("Prepared {} objects for agent {}", prepared.len(), agent_id_exec);
@@ -2425,6 +2724,7 @@ impl Agent for AgentSvc {
                     let _ = tx_stats_for_control.send(timeout_msg).await;
                     
                     // Transition to Failed, then immediately back to Idle so agent can accept new connections
+                    agent_state_reader.set_error("READY state timeout".to_string()).await;
                     let _ = agent_state_reader.transition_to(WorkloadState::Failed, "READY state timeout").await;
                     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "auto-reset after READY timeout").await;
                     
@@ -2461,6 +2761,50 @@ impl Agent for AgentSvc {
                 WorkloadState::Failed => {
                     // Already failed - just log
                     info!("Control reader: Disconnect after failure (expected)");
+                }
+                
+                // ============================================================================
+                // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+                // ============================================================================
+                // TODO v0.8.25: Replace this catch-all with proper disconnect handling for each new state:
+                //
+                // WorkloadState::Validating => {
+                //     // Disconnect during pre-flight validation - treat as abnormal
+                //     warn!("Control reader: Disconnect during pre-flight validation");
+                //     agent_state_reader.send_abort();
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during validation").await;
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
+                // }
+                //
+                // WorkloadState::PrepareReady | WorkloadState::ExecuteReady | WorkloadState::CleanupReady => {
+                //     // Disconnect while waiting at barrier - clean transition to Idle (no work in progress)
+                //     info!("Control reader: Disconnect while at barrier - resetting to Idle");
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "barrier wait cancelled by disconnect").await;
+                // }
+                //
+                // WorkloadState::Preparing | WorkloadState::Executing | WorkloadState::Cleaning => {
+                //     // Disconnect during active phase - treat as abnormal, send abort
+                //     warn!("Control reader: Abnormal disconnect during {:?} phase", current_state);
+                //     agent_state_reader.send_abort();
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected during phase").await;
+                //     let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after abnormal disconnect").await;
+                // }
+                //
+                // WorkloadState::Completed => {
+                //     // Workload completed successfully - normal disconnect
+                //     info!("Control reader: Normal disconnect (workload completed)");
+                // }
+                //
+                // For now, treat all unknown states as potentially active workload states that need abort.
+                // This ensures we don't leave agents in bad states if the state machine evolves.
+                // ============================================================================
+                _ => {
+                    warn!("Control reader: Disconnect in unhandled state {:?} - treating as abnormal", current_state);
+                    
+                    // Conservative approach: assume state is active and needs abort/cleanup
+                    agent_state_reader.send_abort();
+                    let _ = agent_state_reader.transition_to(WorkloadState::Failed, "controller disconnected in unknown state").await;
+                    let _ = agent_state_reader.transition_to(WorkloadState::Idle, "cleanup after disconnect").await;
                 }
             }
         });
