@@ -277,7 +277,7 @@ stages:
   - Root cause: `base_uri` specified when agents have different `multi_endpoint` configurations
   - Listing phase used `base_uri` instead of each agent's first endpoint
   - Pre-flight now blocks this misconfiguration before runtime with clear fix recommendation
-  - Example error: "1 agents cannot access 'file:///mnt/vast1/benchmark/'"
+  - Example error: "1 agents cannot access 'file:///mnt/filesys1/benchmark/'"
 
 ### Testing
 

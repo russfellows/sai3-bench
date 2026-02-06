@@ -3618,8 +3618,8 @@ mod tests {
     fn test_multi_endpoint_round_robin_2_endpoints() {
         // Test that files are distributed evenly across 2 endpoints
         let endpoints = vec![
-            "file:///mnt/vast1/test/".to_string(),
-            "file:///mnt/vast2/test/".to_string(),
+            "file:///mnt/filesys1/test/".to_string(),
+            "file:///mnt/filesys2/test/".to_string(),
         ];
         
         let file_count = 100;
@@ -3640,10 +3640,10 @@ mod tests {
     fn test_multi_endpoint_round_robin_4_endpoints() {
         // Test that files are distributed evenly across 4 endpoints (typical agent config)
         let endpoints = vec![
-            "file:///mnt/vast1/test/".to_string(),
-            "file:///mnt/vast2/test/".to_string(),
-            "file:///mnt/vast3/test/".to_string(),
-            "file:///mnt/vast4/test/".to_string(),
+            "file:///mnt/filesys1/test/".to_string(),
+            "file:///mnt/filesys2/test/".to_string(),
+            "file:///mnt/filesys3/test/".to_string(),
+            "file:///mnt/filesys4/test/".to_string(),
         ];
         
         let file_count = 1000;
@@ -3665,9 +3665,9 @@ mod tests {
     fn test_multi_endpoint_round_robin_non_multiple() {
         // Test distribution when file count is NOT a multiple of endpoint count
         let endpoints = vec![
-            "file:///mnt/vast1/test/".to_string(),
-            "file:///mnt/vast2/test/".to_string(),
-            "file:///mnt/vast3/test/".to_string(),
+            "file:///mnt/filesys1/test/".to_string(),
+            "file:///mnt/filesys2/test/".to_string(),
+            "file:///mnt/filesys3/test/".to_string(),
         ];
         
         let file_count = 100;  // 100 / 3 = 33.33...
@@ -3694,10 +3694,10 @@ mod tests {
     fn test_multi_endpoint_round_robin_large_scale() {
         // Test with realistic large file count (16M files across 4 endpoints)
         let endpoints = vec![
-            "file:///mnt/vast1/benchmark/".to_string(),
-            "file:///mnt/vast2/benchmark/".to_string(),
-            "file:///mnt/vast3/benchmark/".to_string(),
-            "file:///mnt/vast4/benchmark/".to_string(),
+            "file:///mnt/filesys1/benchmark/".to_string(),
+            "file:///mnt/filesys2/benchmark/".to_string(),
+            "file:///mnt/filesys3/benchmark/".to_string(),
+            "file:///mnt/filesys4/benchmark/".to_string(),
         ];
         
         let file_count = 16_000_000_usize;
@@ -3751,7 +3751,7 @@ mod tests {
         // Test with 16 endpoints (4 agents × 4 endpoints each in distributed mode)
         let mut endpoints = Vec::new();
         for i in 1..=16 {
-            endpoints.push(format!("file:///mnt/vast{}/benchmark/", i));
+            endpoints.push(format!("file:///mnt/filesys{}/benchmark/", i));
         }
         
         let file_count = 64_032_768_usize;  // Realistic test size
@@ -3814,10 +3814,10 @@ mod tests {
     fn test_multi_endpoint_distributed_agents_isolated_storage() {
         // Test isolated storage mode: each agent creates ALL files on its own storage
         let endpoints = vec![
-            "file:///mnt/vast1/".to_string(),
-            "file:///mnt/vast2/".to_string(),
-            "file:///mnt/vast3/".to_string(),
-            "file:///mnt/vast4/".to_string(),
+            "file:///mnt/filesys1/".to_string(),
+            "file:///mnt/filesys2/".to_string(),
+            "file:///mnt/filesys3/".to_string(),
+            "file:///mnt/filesys4/".to_string(),
         ];
         
         let total_files_per_agent = 64_000_000_usize;
@@ -3896,7 +3896,7 @@ mod tests {
         for agent_id in 0..num_agents {
             let mut agent_endpoints = Vec::new();
             for i in 0..endpoints_per_agent {
-                agent_endpoints.push(format!("file:///mnt/agent{}_vast{}/", agent_id, i+1));
+                agent_endpoints.push(format!("file:///mnt/agent{}_filesys{}/", agent_id, i+1));
             }
             
             // In isolated mode, agent creates ALL files on its own storage
@@ -3920,7 +3920,7 @@ mod tests {
         // Verify shared mode: agents coordinate to create non-overlapping files
         let mut all_endpoints = Vec::new();
         for i in 1..=16 {
-            all_endpoints.push(format!("file:///shared/vast{}/", i));
+            all_endpoints.push(format!("file:///shared/filesys{}/", i));
         }
         
         let total_files = 64_000_000_usize;

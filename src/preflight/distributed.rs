@@ -182,9 +182,9 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/vast1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/vast5/benchmark/".to_string()]),
-                    create_agent("agent-3", vec!["file:///mnt/vast9/benchmark/".to_string()]),
+                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
+                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
+                    create_agent("agent-3", vec!["file:///mnt/filesys9/benchmark/".to_string()]),
                 ],
                 ssh: None,
                 deployment: None,
@@ -201,7 +201,7 @@ mod tests {
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
-                    base_uri: Some("file:///mnt/vast1/benchmark/".to_string()), // THE BUG
+                    base_uri: Some("file:///mnt/filesys1/benchmark/".to_string()), // THE BUG
                     use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
@@ -302,8 +302,8 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/vast1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/vast5/benchmark/".to_string()]),
+                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
+                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
                 ],
                 ssh: None,
                 deployment: None,

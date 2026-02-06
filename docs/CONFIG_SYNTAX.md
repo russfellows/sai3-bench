@@ -238,10 +238,10 @@ Load balance across multiple NFS mount points with identical namespaces:
 multi_endpoint:
   strategy: round_robin
   endpoints:
-    - "file:///mnt/vast1/benchmark/"
-    - "file:///mnt/vast2/benchmark/"
-    - "file:///mnt/vast3/benchmark/"
-    - "file:///mnt/vast4/benchmark/"
+    - "file:///mnt/filesys1/benchmark/"
+    - "file:///mnt/filesys2/benchmark/"
+    - "file:///mnt/filesys3/benchmark/"
+    - "file:///mnt/filesys4/benchmark/"
 
 workload:
   - op: get
@@ -1148,7 +1148,7 @@ distributed:
     - address: "host1.example.com:7761"
       id: "node-1"
       concurrency_override: 64     # Override global concurrency
-      target_override: "file:///mnt/vast1/benchmark/"
+      target_override: "file:///mnt/filesys1/benchmark/"
       env:
         RUST_LOG: "debug"
         AWS_PROFILE: "benchmark"

@@ -243,7 +243,7 @@ distributed:
 **Indicates storage issue** - check NFS performance:
 ```bash
 # On agent node, test NFS latency
-$ time ls -1 /mnt/vast*/benchmark/ | wc -l
+$ time ls -1 /mnt/filesys*/benchmark/ | wc -l
 # Should complete in <1s for 64M files across 16 mounts
 
 # If slow, tune NFS mount options:

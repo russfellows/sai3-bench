@@ -252,14 +252,14 @@ distributed:
   agents:
     - address: "node1:7761"
       multi_endpoint:
-        endpoints: ["file:///mnt/vast1/"]
+        endpoints: ["file:///mnt/filesys1/"]
     - address: "node2:7761"
       multi_endpoint:
-        endpoints: ["file:///mnt/vast5/"]
+        endpoints: ["file:///mnt/filesys5/"]
 
 prepare:
   ensure_objects:
-    - base_uri: "file:///mnt/vast1/"  # ❌ BUG - only node1 can access this!
+    - base_uri: "file:///mnt/filesys1/"  # ❌ BUG - only node1 can access this!
       use_multi_endpoint: true
 ```
 
