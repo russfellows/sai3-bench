@@ -417,9 +417,13 @@ fn test_calculate_required_timeouts_for_scale() {
     
     struct ScaleTest {
         name: &'static str,
+        #[allow(dead_code)]  // Test metadata for documentation
         width: usize,
+        #[allow(dead_code)]  // Test metadata for documentation
         depth: usize,
+        #[allow(dead_code)]  // Test metadata for documentation
         total_dirs: u64,
+        #[allow(dead_code)]  // Test metadata for documentation
         total_files: u64,
         tree_gen_time_secs: u64,
         listing_time_secs: u64,

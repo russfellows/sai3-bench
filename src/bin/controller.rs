@@ -5057,6 +5057,7 @@ workload:
                 missed_threshold,
                 query_timeout: 5,
                 query_retries: 2,
+                agent_barrier_timeout: 120,  // Default 2 minutes
             }
         }
 

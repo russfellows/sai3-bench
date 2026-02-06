@@ -7,6 +7,26 @@ This document defines the correct YAML configuration syntax for sai3-bench workl
 - [Configuration Validation](#configuration-validation)
 - [Basic Structure](#basic-structure)
 - [Multi-Endpoint Load Balancing](#multi-endpoint-load-balancing)
+  - [Global Multi-Endpoint Configuration](#global-multi-endpoint-configuration)
+  - [Per-Agent Endpoint Mapping](#per-agent-endpoint-mapping)
+  - [Load Balancing Strategies](#load-balancing-strategies)
+- [YAML-Driven Stage Orchestration](#yaml-driven-stage-orchestration)
+  - [Stage Configuration](#stage-configuration)
+  - [Stage Types](#stage-types)
+  - [Completion Criteria](#completion-criteria)
+  - [Multi-Stage Examples](#multi-stage-examples)
+- [Barrier Synchronization](#barrier-synchronization)
+  - [Global Barrier Configuration](#global-barrier-configuration)
+  - [Per-Stage Barriers](#per-stage-barriers)
+  - [Barrier Types](#barrier-types)
+- [Timeout Configuration](#timeout-configuration)
+  - [Agent Operation Timeouts](#agent-operation-timeouts)
+  - [Barrier Synchronization Timeouts](#barrier-synchronization-timeouts)
+  - [gRPC Communication Timeouts](#grpc-communication-timeouts)
+- [Distributed Testing](#distributed-testing)
+  - [Agent Configuration](#agent-configuration)
+  - [SSH Deployment](#ssh-deployment)
+  - [Path Selection Strategies](#path-selection-strategies)
 - [Page Cache Control](#page-cache-control)
 - [Operation Logging](#operation-logging)
 - [Target URI](#target-uri)
@@ -91,6 +111,1293 @@ workload:
     object_size: 1048576
     weight: 25
 ```
+
+## Multi-Endpoint Load Balancing
+
+**Introduced in v0.8.22**
+
+Multi-endpoint configuration enables distributing I/O operations across multiple storage endpoints for improved performance and bandwidth utilization. This is particularly useful for:
+
+- **Multi-NIC storage systems**: VAST, Weka, MinIO clusters with multiple network interfaces
+- **Distributed object storage**: Multiple S3 endpoints, regional buckets
+- **Multi-mount NFS**: Identical namespaces accessible via different mount points
+- **Load balancing**: Horizontal scaling across multiple storage backend IPs
+
+### Global Multi-Endpoint Configuration
+
+Configure endpoints that all agents will use:
+
+```yaml
+# Global multi-endpoint configuration (applied to all agents)
+multi_endpoint:
+  strategy: round_robin           # Load balancing strategy
+  endpoints:
+    - "s3://192.168.1.10:9000/bucket/"
+    - "s3://192.168.1.11:9000/bucket/"
+    - "s3://192.168.1.12:9000/bucket/"
+    - "s3://192.168.1.13:9000/bucket/"
+
+# Workload operations
+workload:
+  - op: get
+    path: "data/*.dat"
+    weight: 100
+    use_multi_endpoint: true      # Enable multi-endpoint for this operation
+```
+
+**Key requirements:**
+- All endpoints must present **identical namespace** (same files accessible from each endpoint)
+- Works with any storage backend: S3, Azure, GCS, file://, direct://
+- `use_multi_endpoint: true` required in workload operations to enable load balancing
+
+### Per-Agent Endpoint Mapping
+
+**Static endpoint assignment** (each agent gets specific endpoints):
+
+```yaml
+# No global multi_endpoint - agents have individual configs
+distributed:
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://192.168.1.10:9000/bucket/"  # Agent 1 gets endpoints 10 & 11
+          - "s3://192.168.1.11:9000/bucket/"
+    
+    - address: "host2:7761"
+      id: "agent-2"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://192.168.1.12:9000/bucket/"  # Agent 2 gets endpoints 12 & 13
+          - "s3://192.168.1.13:9000/bucket/"
+```
+
+**Use case**: 4 test hosts × 2 endpoints/host = 8 storage IPs fully utilized without overlap.
+
+### Per-Agent Override
+
+Mix global configuration with per-agent overrides:
+
+```yaml
+# Global config - most agents use these
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://10.0.1.10:9000/bucket/"
+    - "s3://10.0.1.11:9000/bucket/"
+
+distributed:
+  agents:
+    - address: "host1:7761"
+      # Uses global multi_endpoint config
+    
+    - address: "host2:7761"
+      multi_endpoint:               # Override: different endpoints for this agent
+        strategy: least_connections
+        endpoints:
+          - "s3://10.0.2.10:9000/bucket/"
+          - "s3://10.0.2.11:9000/bucket/"
+```
+
+### Load Balancing Strategies
+
+**`round_robin`** (default):
+- Simple sequential rotation through endpoints
+- Predictable and deterministic behavior
+- Best for: Homogeneous storage backends, testing consistency
+
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///mnt/nfs1/benchmark/"
+    - "file:///mnt/nfs2/benchmark/"
+```
+
+**`least_connections`**:
+- Routes to endpoint with fewest active requests
+- Adaptive load balancing
+- Best for: Heterogeneous backends, production-like scenarios
+
+```yaml
+multi_endpoint:
+  strategy: least_connections
+  endpoints:
+    - "s3://fast-tier:9000/bucket/"
+    - "s3://slow-tier:9000/bucket/"
+```
+
+### Multi-Endpoint with NFS
+
+Load balance across multiple NFS mount points with identical namespaces:
+
+```yaml
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///mnt/vast1/benchmark/"
+    - "file:///mnt/vast2/benchmark/"
+    - "file:///mnt/vast3/benchmark/"
+    - "file:///mnt/vast4/benchmark/"
+
+workload:
+  - op: get
+    path: "data/*.dat"
+    weight: 60
+    use_multi_endpoint: true
+  
+  - op: put
+    path: "output/"
+    object_size: 1048576
+    weight: 40
+    use_multi_endpoint: true
+```
+
+**Requirements for NFS**:
+- All mount points must expose **same namespace** (same files via each mount)
+- Common with: VAST, Weka, Lustre with multi-path access
+- Each mount point typically routes to different storage backend IP
+
+### Multi-Endpoint in Prepare Stage
+
+Enable multi-endpoint load balancing during data preparation:
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: null                # Omit base_uri in isolated mode
+      use_multi_endpoint: true      # Use endpoints from multi_endpoint config
+      count: 10000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://bucket1/path/"
+    - "s3://bucket2/path/"
+```
+
+**When to use**:
+- **Isolated mode**: Each agent prepares data in its own endpoint
+- **Distributed data generation**: Spread prepare load across multiple endpoints
+- **Per-agent storage**: Each agent has separate mount point or bucket
+
+**When NOT to use**:
+- **Shared storage**: All agents need access to same prepared data
+  - Use `base_uri: "s3://shared-bucket/data/"` instead
+  - Set `use_multi_endpoint: false`
+
+### Endpoint Statistics
+
+Multi-endpoint mode generates per-endpoint statistics files:
+
+**Output files** (v0.8.22+):
+- `workload_endpoint_stats.tsv` - Per-endpoint metrics for execute phase
+- `prepare_endpoint_stats.tsv` - Per-endpoint metrics for prepare phase
+
+**Columns**:
+- `endpoint`: Endpoint URI
+- `operation_count`: Number of operations to this endpoint
+- `bytes`: Total bytes transferred
+- `errors`: Error count
+- `latency_p50_us`, `latency_p90_us`, `latency_p99_us`, `latency_p999_us`: Latency percentiles
+
+**Use cases**:
+- Diagnose load balancing effectiveness
+- Identify slow endpoints
+- Verify endpoint isolation in distributed tests
+
+### Troubleshooting
+
+**Problem**: All agents accessing same endpoints instead of assigned ones
+
+**Cause**: Global `multi_endpoint` config sent to all agents
+
+**Solution**: Use per-agent endpoint configuration:
+```yaml
+distributed:
+  agents:
+    - address: "host1:7761"
+      multi_endpoint:
+        endpoints: ["s3://ip1/", "s3://ip2/"]  # Agent 1 specific
+```
+
+**Problem**: "base_uri is required" error in prepare stage
+
+**Fix**: Either set explicit base_uri OR use multi_endpoint:
+```yaml
+# Option 1: Explicit base_uri (shared storage)
+prepare:
+  ensure_objects:
+    - base_uri: "file:///shared/data/"
+      use_multi_endpoint: false
+
+# Option 2: Multi-endpoint (isolated storage)
+prepare:
+  ensure_objects:
+    - base_uri: null  # or omit entirely
+      use_multi_endpoint: true
+```
+
+## YAML-Driven Stage Orchestration
+
+**Introduced in v0.8.50 (Phases 1-3 complete)**
+
+YAML-driven stage orchestration enables flexible, multi-stage test workflows beyond the traditional prepare→execute→cleanup pattern. Define custom stages with independent configurations, execution ordering, and synchronization barriers.
+
+### Why Stage Orchestration?
+
+**Traditional flow** (single execute stage):
+```
+Prepare → Execute → Cleanup
+```
+
+**Modern multi-stage flows**:
+```
+Preflight Validation → Prepare Dataset → Warmup → Execute Benchmark → Cooldown → Cleanup
+```
+
+**Real-world use cases**:
+- **Multi-epoch training**: Separate stages for each training epoch with checkpointing
+- **Tiered testing**: Preflight checks → Small-scale test → Full-scale test
+- **Complex workflows**: Data generation → Format conversion → Validation → Execution
+
+### Stage Configuration
+
+Stages are defined in the `distributed.stages` array:
+
+```yaml
+distributed:
+  agents:
+    - address: "host1:7761"
+    - address: "host2:7761"
+  
+  # Define execution stages
+  stages:
+    - name: "preflight"
+      order: 1
+      completion: validation_passed
+      barrier:
+        type: all_or_nothing
+        agent_barrier_timeout: 300
+      timeout_secs: 300
+      config:
+        type: validation
+        timeout_secs: 300
+    
+    - name: "prepare"
+      order: 2
+      completion: tasks_done
+      barrier:
+        type: all_or_nothing
+        agent_barrier_timeout: 600
+      config:
+        type: prepare
+        expected_objects: 10000
+    
+    - name: "execute"
+      order: 3
+      completion: duration
+      barrier:
+        type: all_or_nothing
+        agent_barrier_timeout: 300
+      config:
+        type: execute
+        duration: "5m"
+    
+    - name: "cleanup"
+      order: 4
+      completion: tasks_done
+      optional: true
+      config:
+        type: cleanup
+        expected_objects: 10000
+```
+
+### Stage Types
+
+#### Execute Stage
+
+Runs read/write workload for fixed duration:
+
+```yaml
+- name: "benchmark"
+  order: 1
+  completion: duration
+  config:
+    type: execute
+    duration: "10m"
+```
+
+**Use cases**: Performance testing, sustained load, throughput measurement
+
+#### Prepare Stage
+
+Creates baseline objects before workload:
+
+```yaml
+- name: "data-generation"
+  order: 1
+  completion: tasks_done
+  config:
+    type: prepare
+    expected_objects: 50000  # Optional: for progress tracking
+```
+
+**Note**: Actual prepare configuration comes from top-level `prepare` section.
+
+#### Cleanup Stage
+
+Deletes objects after test completion:
+
+```yaml
+- name: "teardown"
+  order: 4
+  completion: tasks_done
+  optional: true  # Allow test to succeed even if cleanup fails
+  timeout_secs: 1800
+  config:
+    type: cleanup
+    expected_objects: 50000
+```
+
+**Best practice**: Mark cleanup as `optional: true` to avoid masking test failures.
+
+#### Validation Stage
+
+Pre-flight configuration and environment checks:
+
+```yaml
+- name: "preflight"
+  order: 1
+  completion: validation_passed
+  timeout_secs: 300
+  config:
+    type: validation
+    timeout_secs: 300
+```
+
+**Validation checks** (performed at controller):
+- Agent connectivity (gRPC health check)
+- Configuration consistency across agents
+- File/directory existence (if configured)
+
+#### Hybrid Stage
+
+Combines duration and task limits (whichever completes first):
+
+```yaml
+- name: "timed-prepare"
+  order: 1
+  completion: duration_or_tasks
+  config:
+    type: hybrid
+    max_duration: "30m"
+    expected_tasks: 100000
+```
+
+**Use case**: "Create 100k objects OR run for 30 minutes, whichever comes first"
+
+#### Custom Stage
+
+Execute custom scripts or commands:
+
+```yaml
+- name: "format-conversion"
+  order: 2
+  completion: script_exit
+  timeout_secs: 3600
+  config:
+    type: custom
+    command: "/usr/local/bin/convert-dataset"
+    args: ["--input", "/data/raw", "--output", "/data/formatted"]
+```
+
+**Note**: Custom stages run on agent hosts, not controller.
+
+### Completion Criteria
+
+Each stage defines **how it knows when it's done**:
+
+**`duration`**: Complete after fixed time period
+```yaml
+completion: duration
+config:
+  type: execute
+  duration: "5m"
+```
+
+**`tasks_done`**: Complete when all tasks finished
+```yaml
+completion: tasks_done
+config:
+  type: prepare
+  expected_objects: 10000
+```
+
+**`validation_passed`**: Complete when validation checks pass
+```yaml
+completion: validation_passed
+config:
+  type: validation
+```
+
+**`script_exit`**: Complete when external command exits
+```yaml
+completion: script_exit
+config:
+  type: custom
+  command: "./my-script.sh"
+```
+
+**`duration_or_tasks`**: Complete when either criterion met (hybrid)
+```yaml
+completion: duration_or_tasks
+config:
+  type: hybrid
+  max_duration: "1h"
+  expected_tasks: 500000
+```
+
+### Multi-Stage Examples
+
+**Multi-epoch ML training simulation**:
+
+```yaml
+distributed:
+  stages:
+    - name: "epoch-1"
+      order: 1
+      completion: duration
+      config:
+        type: execute
+        duration: "10m"
+    
+    - name: "checkpoint-1"
+      order: 2
+      completion: tasks_done
+      config:
+        type: custom
+        command: "save-checkpoint"
+        args: ["--epoch", "1"]
+    
+    - name: "epoch-2"
+      order: 3
+      completion: duration
+      config:
+        type: execute
+        duration: "10m"
+    
+    - name: "checkpoint-2"
+      order: 4
+      completion: tasks_done
+      config:
+        type: custom
+        command: "save-checkpoint"
+        args: ["--epoch", "2"]
+```
+
+**Tiered testing** (small → medium → large scale):
+
+```yaml
+distributed:
+  stages:
+    - name: "smoke-test"
+      order: 1
+      completion: duration
+      config:
+        type: execute
+        duration: "1m"
+    
+    - name: "medium-test"
+      order: 2
+      completion: duration
+      optional: true  # Allow skipping if smoke test fails
+      config:
+        type: execute
+        duration: "5m"
+    
+    - name: "full-test"
+      order: 3
+      completion: duration
+      config:
+        type: execute
+        duration: "30m"
+```
+
+### Default Stages (Backward Compatibility)
+
+If `stages` is **not specified**, sai3-bench generates default stages:
+
+```yaml
+# Implicit default (v0.8.50+):
+stages:
+  - name: "preflight"
+    order: 1
+    completion: validation_passed
+    timeout_secs: 300
+  
+  - name: "prepare"
+    order: 2
+    completion: tasks_done
+    # (only if prepare config exists)
+  
+  - name: "execute"
+    order: 3
+    completion: duration
+  
+  - name: "cleanup"
+    order: 4
+    completion: tasks_done
+    optional: true
+    timeout_secs: 3600
+```
+
+**This ensures backward compatibility** with legacy configs (pre-v0.8.50).
+
+### Stage Ordering
+
+**Critical**: Stages execute in **`order` field** sequence, NOT YAML position:
+
+```yaml
+stages:
+  - name: "cleanup"
+    order: 4         # Runs LAST (despite being first in YAML)
+  
+  - name: "prepare"
+    order: 1         # Runs FIRST
+  
+  - name: "execute"
+    order: 2         # Runs SECOND
+```
+
+**Best practice**: Use order values 1, 2, 3, 4... for clarity.
+
+**Warning**: Duplicate order values cause validation error.
+
+### Stage Output Files
+
+Each stage produces numbered TSV results files:
+
+```
+sai3-20260205-1440-test_barriers/
+├── 01_preflight_results.tsv
+├── 02_prepare_results.tsv
+├── 03_execute_results.tsv
+└── 04_cleanup_results.tsv
+```
+
+**Benefits**:
+- Tab ordering preserved in Excel (01→02→03→04)
+- Clear execution progression
+- Per-stage performance analysis
+
+**Analysis tool**: `sai3-analyze` supports numbered stage files (v0.8.50+).
+
+## Barrier Synchronization
+
+**Introduced in v0.8.25**
+
+Barrier synchronization ensures all agents reach coordination points before proceeding. Critical for:
+- **Multi-stage workflows**: All agents must complete prepare before execute
+- **Distributed testing**: Prevent timing skew between agents
+- **Large-scale tests**: Coordinate 300k+ directory creation across hosts
+
+### Why Barriers?
+
+**Without barriers** (v0.8.24 and earlier):
+```
+Agent 1: Prepare (30s) → Execute starts at T=30
+Agent 2: Prepare (45s) → Execute starts at T=45
+Result: 15-second timing skew, invalid performance results
+```
+
+**With barriers** (v0.8.25+):
+```
+Agent 1: Prepare (30s) → Wait at barrier
+Agent 2: Prepare (45s) → Reach barrier  
+Both: Barrier released → Execute starts at T=45 (synchronized)
+```
+
+### Global Barrier Configuration
+
+Enable barriers at distributed config level:
+
+```yaml
+distributed:
+  # Global barrier settings
+  barrier_sync:
+    enabled: true                    # Enable barrier synchronization
+    default_heartbeat_interval: 30   # Agent reports progress every 30s
+    default_missed_threshold: 3      # Query agent after 3 missed heartbeats (90s)
+    default_query_timeout: 10        # Wait 10s for query response
+    default_query_retries: 2         # Retry query twice before giving up
+```
+
+**Applies to ALL stages** unless overridden by per-stage configuration.
+
+### Per-Stage Barriers
+
+Configure barriers independently for each stage:
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    
+    # Validation phase barrier
+    validation:
+      type: all_or_nothing
+      heartbeat_interval: 30
+      agent_barrier_timeout: 300
+    
+    # Prepare phase barrier (longer timeout for large datasets)
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 30
+      agent_barrier_timeout: 600  # 10 minutes for 300k dirs
+    
+    # Execute phase barrier
+    execute:
+      type: all_or_nothing
+      heartbeat_interval: 30
+      agent_barrier_timeout: 300
+    
+    # Cleanup phase barrier (best effort)
+    cleanup:
+      type: best_effort           # Don't block on cleanup failures
+      agent_barrier_timeout: 300
+```
+
+### Barrier Types
+
+**`all_or_nothing`** (strict synchronization):
+- **ALL agents** must reach barrier
+- Missing agents cause entire workload to abort
+- **Use case**: Critical stages where consistency required (prepare, execute)
+
+```yaml
+barrier:
+  type: all_or_nothing
+  agent_barrier_timeout: 300
+```
+
+**`majority`** (fault-tolerant):
+- **>50% agents** must reach barrier
+- Stragglers marked failed and excluded from next stage
+- **Use case**: Large-scale tests where occasional agent failures acceptable
+
+```yaml
+barrier:
+  type: majority
+  agent_barrier_timeout: 600
+```
+
+**`best_effort`** (opportunistic):
+- Proceed when liveness check fails on stragglers
+- Stragglers continue independently (out of sync acceptable)
+- **Use case**: Cleanup stages, non-critical operations
+
+```yaml
+barrier:
+  type: best_effort
+  agent_barrier_timeout: 180
+```
+
+### Barrier Timing Parameters
+
+**`heartbeat_interval`**: How often agents report progress (seconds)
+- Default: 30 seconds
+- Recommendation: 30-60 for normal tests
+- Too low: Excessive network traffic
+- Too high: Slow failure detection
+
+**`missed_threshold`**: Missed heartbeats before query
+- Default: 3 (= 90 seconds with 30s interval)
+- Calculation: `timeout_before_query = interval × threshold`
+
+**`query_timeout`**: Timeout for explicit agent query (seconds)
+- Default: 10 seconds
+- How long to wait for query response before declaring failure
+
+**`query_retries`**: Retries for agent query
+- Default: 2 
+- Total query time: `timeout × (retries + 1) = 10 × 3 = 30s`
+
+**`agent_barrier_timeout`**: Agent-side wait timeout (seconds)
+- Default: 120 seconds
+- How long agent waits for barrier release from controller
+- **Critical sizing**: Must be > `(heartbeat_interval × missed_threshold) + (query_timeout × query_retries)`
+- Large-scale tests (300k+ dirs): Use 600+ seconds
+
+### Barrier Configuration Examples
+
+**Standard test** (normal synchronization):
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 30
+    default_missed_threshold: 3
+    default_query_timeout: 10
+    agent_barrier_timeout: 120  # 2 minutes
+  
+  agents:
+    - address: "host1:7761"
+    - address: "host2:7761"
+```
+
+**Large-scale test** (300k+ directories):
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 60          # Report less frequently
+      missed_threshold: 5             # 5 × 60s = 5 minutes before query
+      agent_barrier_timeout: 600      # 10 minutes for massive prepare
+```
+
+**Fault-tolerant distributed test**:
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    
+    prepare:
+      type: all_or_nothing    # All agents must complete prepare
+    
+    execute:
+      type: majority          # >50% agents sufficient for execute
+    
+    cleanup:
+      type: best_effort       # Don't block on cleanup failures
+```
+
+### Barrier Troubleshooting
+
+**Problem**: "Barrier timeout exceeded" error
+
+**Causes**:
+1. Agent still working (operation not complete)
+2. Agent crashed/disconnected
+3. `agent_barrier_timeout` too short for operation
+
+**Solutions**:
+```yaml
+# For long-running operations (large prepare)
+barrier:
+  agent_barrier_timeout: 1800  # 30 minutes
+
+# For flaky networks
+barrier:
+  heartbeat_interval: 15       # More frequent heartbeats
+  query_retries: 5             # More retries
+```
+
+**Problem**: Agents out of sync despite barriers
+
+**Cause**: Barriers disabled or misconfigured
+
+**Fix**:
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true  # Must be explicitly enabled!
+```
+
+## Timeout Configuration
+
+**Introduced in v0.8.50**
+
+Comprehensive timeout system prevents indefinite hangs in distributed testing. Three categories of timeouts:
+
+1. **Agent operation timeouts**: How long agents wait for storage operations
+2. **Barrier synchronization timeouts**: How long agents wait at coordination barriers
+3. **gRPC communication timeouts**: How long controller waits for RPC responses
+
+### Agent Operation Timeouts
+
+Configure per-stage timeouts for agent operations (data creation, workload execution, cleanup):
+
+```yaml
+distributed:
+  stages:
+    - name: "prepare"
+      order: 1
+      completion: tasks_done
+      timeout_secs: 600         # Agent timeout: 10 minutes for prepare
+      config:
+        type: prepare
+    
+    - name: "execute"
+      order: 2
+      completion: duration
+      timeout_secs: 3600        # Agent timeout: 1 hour for execute
+      config:
+        type: execute
+        duration: "30m"
+    
+    - name: "cleanup"
+      order: 3
+      completion: tasks_done
+      timeout_secs: 1800        # Agent timeout: 30 minutes for cleanup
+      config:
+        type: cleanup
+```
+
+**Default timeouts** (if not specified):
+- Prepare: 600 seconds (10 minutes)
+- Execute: 3600 seconds (1 hour)
+- Cleanup: 3600 seconds (1 hour)
+- Validation: 300 seconds (5 minutes)
+
+**Minimum timeout**: 60 seconds (validation enforced at config load)
+
+### Barrier Synchronization Timeouts
+
+Control how long agents wait at barriers (see [Barrier Synchronization](#barrier-synchronization)):
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    
+    prepare:
+      agent_barrier_timeout: 600  # 10 minutes for large dataset prepare
+    
+    execute:
+      agent_barrier_timeout: 300  # 5 minutes for execute barrier
+```
+
+**Key insight**: Barrier timeout is **separate from** agent operation timeout:
+- **Agent timeout**: How long agent works on operation
+- **Barrier timeout**: How long agent waits for OTHER agents at barrier
+
+### gRPC Communication Timeouts
+
+Configure gRPC call timeouts at distributed config level:
+
+```yaml
+distributed:
+  grpc_keepalive_interval: 30   # PING frames every 30 seconds
+  grpc_keepalive_timeout: 10    # Wait 10s for PONG before disconnect
+  
+  agents:
+    - address: "host1:7761"
+    - address: "host2:7761"
+```
+
+**Parameters**:
+
+**`grpc_keepalive_interval`**: How often PING frames sent (seconds)
+- Default: 30 seconds
+- Use case: Detect dead connections quickly
+- For slow operations (>30s): Increase to 60+ to avoid spurious disconnects
+
+**`grpc_keepalive_timeout`**: Wait time for PONG response (seconds)
+- Default: 10 seconds
+- Total disconnect detection time: `interval + timeout = 40s`
+
+### Health Check Timeouts
+
+**Fixed at 30 seconds** (not configurable):
+
+- Controller sends health check RPC to each agent
+- 30-second timeout for response
+- Failure indicates agent unreachable/crashed
+
+**Use case**: Rapid failure detection during test startup.
+
+### Timeout Configuration Best Practices
+
+**For normal tests** (small datasets, fast storage):
+
+```yaml
+distributed:
+  grpc_keepalive_interval: 30
+  grpc_keepalive_timeout: 10
+  
+  stages:
+    - name: "prepare"
+      timeout_secs: 600      # 10 minutes
+      barrier:
+        agent_barrier_timeout: 300
+    
+    - name: "execute"
+      timeout_secs: 3600     # 1 hour
+      barrier:
+        agent_barrier_timeout: 300
+```
+
+**For large-scale tests** (300k+ dirs, 64M+ files):
+
+```yaml
+distributed:
+  grpc_keepalive_interval: 60    # Less frequent (long operations expected)
+  grpc_keepalive_timeout: 20
+  
+  stages:
+    - name: "prepare"
+      timeout_secs: 3600          # 1 hour for massive dataset
+      barrier:
+        agent_barrier_timeout: 600  # 10 minutes for barrier sync
+```
+
+**For flaky networks**:
+
+```yaml
+distributed:
+  grpc_keepalive_interval: 15    # Frequent keepalives
+  grpc_keepalive_timeout: 30     # Generous timeout
+  
+  barrier_sync:
+    default_query_retries: 5     # More retries
+    default_query_timeout: 20    # Longer timeout per query
+```
+
+### Timeout Hierarchy
+
+When multiple timeouts apply, the **most specific wins**:
+
+1. **Per-stage timeout** (highest priority)
+2. **Per-phase barrier timeout**
+3. **Default barrier timeout**
+4. **gRPC keepalive timeout**
+5. **Health check timeout** (fixed 30s)
+
+Example:
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 30
+    prepare:
+      agent_barrier_timeout: 900  # Prepare-specific override
+  
+  stages:
+    - name: "prepare"
+      timeout_secs: 1800           # Agent operation timeout
+      barrier:
+        agent_barrier_timeout: 900  # Stage-specific barrier timeout (wins)
+```
+
+### Timeout Troubleshooting
+
+**Problem**: "Agent operation timeout exceeded"
+
+**Cause**: Agent operation (prepare/execute/cleanup) took longer than `timeout_secs`
+
+**Solution**: Increase stage timeout:
+```yaml
+stages:
+  - name: "prepare"
+    timeout_secs: 3600  # Was 600, now 1 hour
+```
+
+**Problem**: "gRPC deadline exceeded"
+
+**Cause**: gRPC call to agent timed out
+
+**Solutions**:
+1. Increase gRPC keepalive timings
+2. Check network connectivity
+3. Check agent is responsive (not hung)
+
+```yaml
+distributed:
+  grpc_keepalive_interval: 60   # Was 30
+  grpc_keepalive_timeout: 30    # Was 10
+```
+
+**Problem**: Operations take 60+ seconds but gRPC disconnects
+
+**Cause**: gRPC keepalive interval too short for slow operations
+
+**Solution**: Increase keepalive interval:
+```yaml
+distributed:
+  grpc_keepalive_interval: 120  # 2 minutes for very slow operations
+```
+
+## Distributed Testing
+
+Distributed testing enables coordinated multi-host execution with automated deployment, per-agent customization, and sophisticated synchronization.
+
+### Agent Configuration
+
+Define agent addresses and customizations:
+
+```yaml
+distributed:
+  shared_filesystem: true        # Storage shared across agents?
+  tree_creation_mode: coordinator  # Who creates directory tree?
+  path_selection: partitioned    # How agents select paths?
+  
+  agents:
+    - address: "host1.example.com:7761"
+      id: "node-1"
+      concurrency_override: 64     # Override global concurrency
+      target_override: "file:///mnt/vast1/benchmark/"
+      env:
+        RUST_LOG: "debug"
+        AWS_PROFILE: "benchmark"
+      volumes:
+        - "/mnt/nvme:/data"
+        - "/tmp/results:/results:ro"
+    
+    - address: "host2.example.com:7761"
+      id: "node-2"
+      concurrency_override: 128
+```
+
+**Per-agent fields**:
+
+- **`address`**: Agent hostname:port or IP:port
+- **`id`**: Friendly identifier (default: derived from address)
+- **`concurrency_override`**: Override global concurrency setting
+- **`target_override`**: Override base target URI
+- **`env`**: Environment variables injected into agent process/container
+- **`volumes`**: Docker volume mounts (format: `"host:container"` or `"host:container:mode"`)
+- **`path_template`**: Custom path template override
+- **`listen_port`**: Agent listen port (SSH mode only, default: 7761)
+- **`multi_endpoint`**: Per-agent multi-endpoint override (see [Multi-Endpoint](#multi-endpoint-load-balancing))
+
+### SSH Deployment
+
+Automated SSH deployment and agent lifecycle management:
+
+```yaml
+distributed:
+  ssh:
+    enabled: true
+    user: "benchuser"
+    key_path: "~/.ssh/id_ed25519"
+    timeout: 10
+    known_hosts: "~/.ssh/known_hosts"
+  
+  deployment:
+    deploy_type: "binary"                      # or "docker"
+    binary_path: "/usr/local/bin/sai3bench-agent"
+    container_runtime: "docker"                # or "podman"
+    image: "sai3bench:v0.8.50"
+    network_mode: "host"
+    pull_policy: "if_not_present"
+  
+  agents:
+    - address: "host1"              # Hostname only in SSH mode
+      listen_port: 7761
+    - address: "host2"
+      listen_port: 7761
+```
+
+**SSH configuration**:
+
+- **`enabled`**: Enable SSH automation (default: false)
+- **`user`**: SSH username (default: current user)
+- **`key_path`**: SSH private key path (default: `~/.ssh/id_rsa`)
+- **`timeout`**: SSH connection timeout seconds (default: 10)
+- **`known_hosts`**: Known hosts file (empty string = disable host key checking, INSECURE!)
+
+**Deployment types**:
+
+**Binary mode** (`deploy_type: binary`):
+- Executes `sai3bench-agent` binary directly on remote host
+- Requires binary pre-installed at `binary_path`
+- Simpler, lower overhead than containers
+
+**Docker mode** (`deploy_type: docker`):
+- Launches agent in container
+- Requires Docker/Podman installed on remote hosts
+- Automatic image pull based on `pull_policy`
+- Supports volume mounts and environment variables
+
+### Path Selection Strategies
+
+Control how agents select paths during workload execution:
+
+**`random`** (maximum contention):
+```yaml
+distributed:
+  path_selection: random
+```
+- All agents pick any directory randomly
+- Maximum metadata contention
+- Use case: Stress testing shared filesystem metadata servers
+
+**`partitioned`** (reduced contention):
+```yaml
+distributed:
+  path_selection: partitioned
+  partition_overlap: 0.3  # 30% chance to access other partitions
+```
+- Agents prefer `hash(path) % agent_id` directories
+- `partition_overlap` controls cross-partition access (0.0-1.0)
+- Use case: Realistic distributed workload with some sharing
+
+**`exclusive`** (minimal contention):
+```yaml
+distributed:
+  path_selection: exclusive
+```
+- Each agent ONLY uses assigned directories
+- Zero contention (purely isolated)
+- Use case: Pure performance testing without metadata contention
+
+**`weighted`** (probabilistic mix):
+```yaml
+distributed:
+  path_selection: weighted
+  partition_overlap: 0.5  # 50% local, 50% random
+```
+- Probabilistic mix of partitioned and random access
+- Controlled by `partition_overlap`
+
+### Tree Creation Modes
+
+Control who creates directory tree structure:
+
+**`isolated`**: Each agent creates separate tree
+```yaml
+distributed:
+  tree_creation_mode: isolated
+  path_template: "agent-{id}/"
+```
+- Agent 1: Creates `agent-1/` tree
+- Agent 2: Creates `agent-2/` tree
+- Use case: Per-agent storage (isolated disks, separate buckets)
+
+**`coordinator`**: Controller creates tree once
+```yaml
+distributed:
+  tree_creation_mode: coordinator
+```
+- Controller creates tree before agents start
+- Agents skip prepare phase (tree already exists)
+- Use case: Shared storage with expensive tree creation
+
+**`concurrent`**: All agents create same tree
+```yaml
+distributed:
+  tree_creation_mode: concurrent
+```
+- All agents attempt same mkdir operations
+- Idempotent mkdir handles race conditions
+- Use case: Shared storage with cheap idempotent mkdir
+
+### Distributed Testing Example
+
+Complete distributed test configuration:
+
+```yaml
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: partitioned
+  partition_overlap: 0.2
+  start_delay: 2
+  grpc_keepalive_interval: 30
+  grpc_keepalive_timeout: 10
+  
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 30
+    default_missed_threshold: 3
+  
+  ssh:
+    enabled: true
+    user: "benchuser"
+    key_path: "~/.ssh/id_ed25519"
+  
+  deployment:
+    deploy_type: "binary"
+    binary_path: "/usr/local/bin/sai3bench-agent"
+  
+  agents:
+    - address: "node1"
+      id: "agent-1"
+      concurrency_override: 64
+    
+    - address: "node2"
+      id: "agent-2"
+      concurrency_override: 64
+    
+    - address: "node3"
+      id: "agent-3"
+      concurrency_override: 128
+  
+  stages:
+    - name: "preflight"
+      order: 1
+      completion: validation_passed
+      timeout_secs: 300
+      config:
+        type: validation
+    
+    - name: "prepare"
+      order: 2
+      completion: tasks_done
+      timeout_secs: 1800
+      barrier:
+        type: all_or_nothing
+        agent_barrier_timeout: 600
+      config:
+        type: prepare
+        expected_objects: 100000
+    
+    - name: "execute"
+      order: 3
+      completion: duration
+      timeout_secs: 3600
+      barrier:
+        type: all_or_nothing
+        agent_barrier_timeout: 300
+      config:
+        type: execute
+        duration: "30m"
+    
+    - name: "cleanup"
+      order: 4
+      completion: tasks_done
+      optional: true
+      timeout_secs: 1800
+      config:
+        type: cleanup
+
+target: "file:///mnt/shared/benchmark/"
+duration: "30m"
+concurrency: 64
+
+prepare:
+  ensure_objects:
+    - base_uri: "file:///mnt/shared/benchmark/data/"
+      count: 100000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*.dat"
+    weight: 70
+  
+  - op: put
+    path: "output/"
+    object_size: 1048576
+    weight: 30
+```
+
+
 
 ## Page Cache Control (file:// URIs only)
 

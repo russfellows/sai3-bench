@@ -194,6 +194,8 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Isolated,  // Each agent creates separate tree
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -254,6 +256,8 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -309,6 +313,8 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Isolated,  // Isolated trees
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -373,6 +379,8 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),

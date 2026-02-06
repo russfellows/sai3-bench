@@ -294,6 +294,224 @@ prepare:
       use_multi_endpoint: true
 ```
 
+# Advanced Features
+
+## Multi-Endpoint Load Balancing (v0.8.22+)
+
+Distribute I/O operations across multiple storage endpoints to maximize bandwidth utilization. Perfect for:
+- **Multi-NIC storage systems** (VAST, Weka, MinIO clusters)
+- **Regional redundancy** (multiple S3 buckets, Azure regions)
+- **NFS multi-path** (same namespace via different mount points)
+
+### Quick Example
+
+```yaml
+# Global configuration - all agents use these endpoints
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://192.168.1.10:9000/bucket/"
+    - "s3://192.168.1.11:9000/bucket/"
+    - "s3://192.168.1.12:9000/bucket/"
+
+workload:
+  - op: get
+    path: "data/*.dat"
+    weight: 100
+    use_multi_endpoint: true  # Enable load balancing
+```
+
+**Load balancing strategies:**
+- `round_robin`: Simple sequential rotation (default, predictable)
+- `least_connections`: Adaptive routing to least-loaded endpoint
+
+**Per-agent endpoint mapping** (static assignment):
+
+```yaml
+distributed:
+  agents:
+    - address: "host1:7761"
+      multi_endpoint:
+        endpoints: ["s3://10.0.1.10:9000/bucket/"]  # Host1 specific
+    - address: "host2:7761"
+      multi_endpoint:
+        endpoints: ["s3://10.0.1.11:9000/bucket/"]  # Host2 specific
+```
+
+**Use case**: 4 test hosts × 2 endpoints/host = 8 storage IPs fully utilized.
+
+**Output**: Per-endpoint statistics files (`workload_endpoint_stats.tsv`, `prepare_endpoint_stats.tsv`) for diagnosing load balancing effectiveness.
+
+For complete multi-endpoint documentation including NFS examples, troubleshooting, and isolated vs shared storage modes, see **[CONFIG_SYNTAX.md § Multi-Endpoint Load Balancing](CONFIG_SYNTAX.md#multi-endpoint-load-balancing)**.
+
+## YAML-Driven Stage Orchestration (v0.8.50+)
+
+Define multi-stage test workflows beyond traditional prepare→execute→cleanup:
+
+### Basic Concept
+
+Instead of a single workload run, define **independent stages** with custom ordering:
+
+```yaml
+distributed:
+  stages:
+    - name: "preflight"
+      order: 1
+      completion: validation_passed
+      config:
+        type: validation
+    
+    - name: "prepare"
+      order: 2
+      completion: tasks_done
+      config:
+        type: prepare
+    
+    - name: "benchmark"
+      order: 3
+      completion: duration
+      config:
+        type: execute
+        duration: "30m"
+    
+    - name: "cleanup"
+      order: 4
+      completion: tasks_done
+      optional: true  # Allow test to succeed even if cleanup fails
+      config:
+        type: cleanup
+```
+
+**Stage types:**
+- **Execute**: Run workload for fixed duration
+- **Prepare**: Create baseline objects
+- **Cleanup**: Delete objects
+- **Validation**: Pre-flight configuration checks
+- **Hybrid**: Duration OR task completion (whichever first)
+- **Custom**: Run custom scripts/commands
+
+**Completion criteria:**
+- `duration`: Complete after time period (execute stages)
+- `tasks_done`: Complete when all tasks finished (prepare/cleanup)
+- `validation_passed`: Complete when checks pass (validation)
+- `duration_or_tasks`: Whichever completes first (hybrid)
+- `script_exit`: Complete when command exits (custom)
+
+**Real-world use cases:**
+- Multi-epoch ML training with checkpointing between stages
+- Tiered testing (smoke test → medium test → full test)
+- Complex workflows (generate → convert → validate → benchmark)
+
+**Output**: Each stage produces numbered TSV file (`01_preflight_results.tsv`, `02_prepare_results.tsv`, etc.) preserving execution order in analysis tools.
+
+For complete stage orchestration documentation including hybrid stages, custom commands, and default stage behavior, see **[CONFIG_SYNTAX.md § YAML-Driven Stage Orchestration](CONFIG_SYNTAX.md#yaml-driven-stage-orchestration)**.
+
+## Barrier Synchronization (v0.8.25+)
+
+Ensure all agents reach coordination points before proceeding. Critical for multi-stage workflows with timing precision.
+
+### Why Barriers Matter
+
+**Without barriers:**
+```
+Agent 1: Prepare (30s) → Execute starts at T=30
+Agent 2: Prepare (45s) → Execute starts at T=45
+Result: 15-second timing skew ❌
+```
+
+**With barriers:**
+```
+Agent 1: Prepare (30s) → Wait at barrier
+Agent 2: Prepare (45s) → Reach barrier
+Both: Execute starts at T=45 (synchronized) ✅
+```
+
+### Configuration
+
+```yaml
+distributed:
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 30  # Status report every 30s
+    default_missed_threshold: 3     # Query after 3 missed heartbeats
+    
+    # Per-stage barrier override
+    prepare:
+      type: all_or_nothing         # All agents must complete
+      agent_barrier_timeout: 600   # 10 minutes for large datasets
+    
+    execute:
+      type: all_or_nothing
+      agent_barrier_timeout: 300   # 5 minutes
+    
+    cleanup:
+      type: best_effort            # Don't block on cleanup failures
+```
+
+**Barrier types:**
+- `all_or_nothing`: ALL agents must reach barrier (strict)
+- `majority`: >50% agents sufficient (fault-tolerant)
+- `best_effort`: Proceed when stragglers fail liveness check (opportunistic)
+
+**Scaling for large tests (300k+ directories):**
+```yaml
+barrier_sync:
+  prepare:
+    agent_barrier_timeout: 1800  # 30 minutes for massive prepare
+    heartbeat_interval: 60       # Less frequent reports
+```
+
+For complete barrier synchronization documentation including timing parameters, troubleshooting, and large-scale test tuning, see **[CONFIG_SYNTAX.md § Barrier Synchronization](CONFIG_SYNTAX.md#barrier-synchronization)**.
+
+## Timeout Configuration (v0.8.50+)
+
+Prevent indefinite hangs in distributed testing with comprehensive timeout controls.
+
+### Three Timeout Categories
+
+**1. Agent operation timeouts** (per-stage):
+```yaml
+stages:
+  - name: "prepare"
+    timeout_secs: 600         # 10 minutes for data generation
+  
+  - name: "execute"
+    timeout_secs: 3600        # 1 hour for workload
+  
+  - name: "cleanup"
+    timeout_secs: 1800        # 30 minutes for deletion
+```
+
+**2. Barrier synchronization timeouts**:
+```yaml
+barrier_sync:
+  prepare:
+    agent_barrier_timeout: 600  # How long agents wait at barrier
+```
+
+**3. gRPC communication timeouts**:
+```yaml
+distributed:
+  grpc_keepalive_interval: 30   # PING every 30 seconds
+  grpc_keepalive_timeout: 10    # Wait 10s for PONG
+```
+
+**Default timeouts** (if not specified):
+- Prepare: 600s (10 minutes)
+- Execute: 3600s (1 hour)
+- Cleanup: 3600s (1 hour)
+- Validation: 300s (5 minutes)
+- Barrier sync: 120s (2 minutes)
+- gRPC keepalive: 30s interval + 10s timeout
+
+**For slow operations (>60s latency):**
+```yaml
+distributed:
+  grpc_keepalive_interval: 120  # Avoid spurious disconnects
+```
+
+For complete timeout documentation including best practices, timeout hierarchy, and troubleshooting, see **[CONFIG_SYNTAX.md § Timeout Configuration](CONFIG_SYNTAX.md#timeout-configuration)**.
+
 # 2 Data Generation Methods
 
 ## Fill Patterns

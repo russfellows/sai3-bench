@@ -4270,31 +4270,19 @@ mod tests {
         let spec_count = 1000u64;
         
         // Case 1: skip=false, force=false → normal LIST (simulated as 0 existing)
-        let (exist1, _): (u64, std::collections::HashSet<u64>) = 
-            if false && !false { (spec_count, std::collections::HashSet::new()) } 
-            else if false { (0, std::collections::HashSet::new()) } 
-            else { (0, std::collections::HashSet::new()) };
+        let exist1 = 0u64;  // Normal mode: would LIST, assume 0 for test
         assert_eq!(exist1, 0, "Normal mode: would LIST, assume 0 for test");
         
         // Case 2: skip=true, force=false → assume all exist (NO creation)
-        let (exist2, _): (u64, std::collections::HashSet<u64>) = 
-            if true && !false { (spec_count, std::collections::HashSet::new()) } 
-            else if false { (0, std::collections::HashSet::new()) } 
-            else { (0, std::collections::HashSet::new()) };
+        let exist2 = spec_count;  // skip_verification: assume all exist
         assert_eq!(exist2, 1000, "skip_verification: assume all exist");
         
         // Case 3: skip=false, force=true → force creates all
-        let (exist3, _): (u64, std::collections::HashSet<u64>) = 
-            if false && !true { (spec_count, std::collections::HashSet::new()) } 
-            else if true { (0, std::collections::HashSet::new()) } 
-            else { (0, std::collections::HashSet::new()) };
+        let exist3 = 0u64;  // force_overwrite: create all regardless
         assert_eq!(exist3, 0, "force_overwrite: create all regardless");
         
         // Case 4: skip=true, force=true → force takes precedence, creates all
-        let (exist4, _): (u64, std::collections::HashSet<u64>) = 
-            if true && !true { (spec_count, std::collections::HashSet::new()) } 
-            else if true { (0, std::collections::HashSet::new()) } 
-            else { (0, std::collections::HashSet::new()) };
+        let exist4 = 0u64;  // force_overwrite overrides skip_verification: create all
         assert_eq!(exist4, 0, "force_overwrite overrides skip_verification: create all");
     }
     

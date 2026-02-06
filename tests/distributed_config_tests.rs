@@ -914,6 +914,8 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         tree_creation_mode: TreeCreationMode::Concurrent,
         path_selection: PathSelectionStrategy::Partitioned,
         partition_overlap: 0.3,
+        grpc_keepalive_interval: 30,
+        grpc_keepalive_timeout: 10,
         barrier_sync: BarrierSyncConfig::default(),
         stages: None,
     };
