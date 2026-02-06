@@ -10,6 +10,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::info;
 
 /// Configuration for hierarchical directory structure generation
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,6 +89,14 @@ pub struct DirectoryTree {
 impl DirectoryTree {
     /// Create a new directory tree from configuration
     pub fn new(config: DirectoryStructureConfig) -> Result<Self> {
+        Self::new_with_progress(config, None)
+    }
+    
+    /// Create a new directory tree with optional progress reporting
+    pub fn new_with_progress(
+        config: DirectoryStructureConfig,
+        live_stats_tracker: Option<&crate::live_stats::LiveStatsTracker>,
+    ) -> Result<Self> {
         if config.width == 0 {
             bail!("Directory width must be at least 1");
         }
@@ -104,18 +113,26 @@ impl DirectoryTree {
             total_files: 0,
         };
         
-        tree.generate()?;
+        tree.generate(live_stats_tracker)?;
         Ok(tree)
     }
     
     /// Generate the complete directory tree structure
-    fn generate(&mut self) -> Result<()> {
+    fn generate(&mut self, live_stats_tracker: Option<&crate::live_stats::LiveStatsTracker>) -> Result<()> {
         // Calculate total directories: width^1 + width^2 + ... + width^depth
         self.total_directories = 0;
         for level in 1..=self.config.depth {
             let dirs_at_level = self.config.width.pow(level as u32);
             self.total_directories += dirs_at_level;
         }
+        
+        info!("Generating tree structure: {} total directories (width={}, depth={})",
+            self.total_directories, self.config.width, self.config.depth);
+        
+        // Progress reporting interval
+        const PROGRESS_INTERVAL: usize = 5000;
+        let mut dirs_processed = 0;
+        let start_time = std::time::Instant::now();
         
         // Generate all directory nodes
         for level in 1..=self.config.depth {
@@ -128,6 +145,26 @@ impl DirectoryTree {
                 level_paths.push(node.full_path.clone());
                 self.all_paths.push(node.full_path.clone());
                 self.directories.insert(key, node);
+                
+                dirs_processed += 1;
+                
+                // Send progress update every PROGRESS_INTERVAL directories
+                if dirs_processed % PROGRESS_INTERVAL == 0 {
+                    if let Some(tracker) = live_stats_tracker {
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let rate = dirs_processed as f64 / elapsed;
+                        let eta_secs = ((self.total_directories - dirs_processed) as f64 / rate).ceil() as u64;
+                        
+                        info!("Tree generation progress: {}/{} dirs ({:.1}%) | Rate: {:.0} dirs/s | ETA: {}s",
+                            dirs_processed, self.total_directories,
+                            (dirs_processed as f64 / self.total_directories as f64) * 100.0,
+                            rate, eta_secs);
+                        
+                        // Update LiveStats to keep controller informed (prevents timeout)
+                        // Use increment_stage_progress() to signal we're making progress
+                        tracker.increment_stage_progress();
+                    }
+                }
             }
             
             self.by_level.insert(level, level_paths);

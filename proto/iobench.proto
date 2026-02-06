@@ -134,6 +134,42 @@ message PrepareSummary {
   repeated EndpointStatsSnapshot endpoint_stats = 12;
 }
 
+// v0.8.27: Per-stage summary for incremental results collection
+// Sent when a stage completes, before waiting at barrier
+// Ensures data is not lost if later stages fail
+message StageSummary {
+  uint32 stage_index = 1;              // 0-based stage index
+  string stage_name = 2;               // Stage name from config (e.g., "prepare", "workload")
+  string stage_type = 3;               // Stage type: "prepare", "workload", "cleanup", "custom"
+  double wall_seconds = 4;             // Duration of this stage
+  
+  // Operation counts for this stage
+  uint64 get_ops = 5;
+  uint64 get_bytes = 6;
+  uint64 put_ops = 7;
+  uint64 put_bytes = 8;
+  uint64 meta_ops = 9;
+  uint64 errors = 10;
+  
+  // Per-operation aggregates
+  OpAggregateMetrics get = 11;
+  OpAggregateMetrics put = 12;
+  OpAggregateMetrics meta = 13;
+  
+  // HDR histogram data for accurate aggregation across agents
+  bytes histogram_get = 14;
+  bytes histogram_put = 15;
+  bytes histogram_meta = 16;
+  
+  // Per-bucket byte counts for accurate avg_bytes calculation
+  SizeBins get_bins = 17;
+  SizeBins put_bins = 18;
+  SizeBins meta_bins = 19;
+  
+  // Per-endpoint statistics
+  repeated EndpointStatsSnapshot endpoint_stats = 20;
+}
+
 // v0.7.5: Live performance statistics for distributed execution
 // Sent every 1 second during workload execution for real-time visibility
 message LiveStats {
@@ -230,6 +266,17 @@ message LiveStats {
   double meta_p50_us = 40;               // META p50 latency (microseconds)
   double meta_p90_us = 41;               // META p90 latency (microseconds)
   double meta_p99_us = 42;               // META p99 latency (microseconds)
+  
+  // v0.8.26: Barrier synchronization fields
+  // Agent sets these when waiting at a stage barrier
+  bool at_barrier = 43;                  // Agent reached barrier, waiting for release
+  string barrier_name = 44;              // Barrier identifier (e.g., "stage-1-prepare")
+  uint32 barrier_sequence = 45;          // Monotonic counter for ordering
+  
+  // v0.8.27: Per-stage summary for incremental results collection
+  // Populated when a stage completes (before barrier wait)
+  // Controller writes TSV immediately to avoid data loss
+  StageSummary stage_summary = 46;
 }
 
 service Agent {
@@ -254,6 +301,13 @@ service Agent {
   // Agent validates filesystem/object storage access and returns detailed errors
   // Controller aggregates results and aborts if any agent fails validation
   rpc PreFlightValidation(PreFlightRequest) returns (PreFlightResponse);
+  
+  // v0.8.25: Barrier synchronization for phase coordination
+  // Agent reports readiness for next phase + sends heartbeat
+  rpc ReportBarrierReady(BarrierRequest) returns (BarrierResponse);
+  
+  // v0.8.25: Controller queries agent when heartbeats missed
+  rpc QueryAgentStatus(AgentQueryRequest) returns (AgentQueryResponse);
 }
 
 // v0.8.4: Control messages from controller to agent
@@ -264,6 +318,8 @@ message ControlMessage {
     ABORT = 2;          // Cancel workload immediately
     ACKNOWLEDGE = 3;    // Acknowledge receipt of agent message
     PREFLIGHT = 4;      // v0.8.23: Run pre-flight validation
+    RELEASE_BARRIER = 5; // v0.8.26: Release agents waiting at barrier
+    GOODBYE = 6;        // v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
   }
   Command command = 1;
   
@@ -283,6 +339,11 @@ message ControlMessage {
   // Used for deterministic object distribution: file_idx % num_agents == agent_index
   uint32 agent_index = 8;
   uint32 num_agents = 9;
+  
+  // v0.8.26: Barrier release coordination
+  // For RELEASE_BARRIER command: which barrier is being released
+  string barrier_name = 10;      // e.g., "stage-3-execute" or "prepare"
+  uint32 barrier_sequence = 11;  // Monotonic counter for ordering
 }
 
 // v0.8.23: Pre-flight validation request/response
@@ -323,5 +384,76 @@ enum ErrorType {
   ERROR_TYPE_CONFIGURATION = 4;
   ERROR_TYPE_RESOURCE = 5;
   ERROR_TYPE_SYSTEM = 6;
+}
+
+// v0.8.25: Distributed barrier synchronization for phase coordination
+// Workload phases for granular state tracking
+enum WorkloadPhase {
+  PHASE_IDLE = 0;             // Ready to accept new workload
+  PHASE_VALIDATING = 1;       // Pre-flight checks running
+  PHASE_PREPARE_READY = 2;    // Validation passed, waiting for prepare barrier
+  PHASE_PREPARING = 3;        // Creating/cleaning objects
+  PHASE_EXECUTE_READY = 4;    // Prepare complete, waiting for execute barrier
+  PHASE_EXECUTING = 5;        // Running I/O workload
+  PHASE_CLEANUP_READY = 6;    // Execution complete, waiting for cleanup barrier
+  PHASE_CLEANING = 7;         // Removing objects
+  PHASE_COMPLETED = 8;        // All phases done successfully
+  PHASE_FAILED = 9;           // Error occurred
+  PHASE_ABORTING = 10;        // Emergency shutdown in progress
+}
+
+// v0.8.25: Heartbeat-based progress reporting
+message PhaseProgress {
+  string agent_id = 1;
+  WorkloadPhase current_phase = 2;
+  uint64 phase_start_time_ms = 3;
+  uint64 heartbeat_time_ms = 4;
+  
+  // Phase-specific progress fields
+  uint64 objects_created = 10;      // Prepare phase
+  uint64 objects_total = 11;        // Prepare phase
+  string current_operation = 12;    // "creating", "listing", "cleaning", etc.
+  uint64 bytes_written = 13;        // Prepare phase
+  uint64 errors_encountered = 14;   // Any phase
+  
+  uint64 operations_completed = 20; // Execute phase
+  double current_throughput = 21;   // Execute phase (ops/sec or GB/sec)
+  uint64 phase_elapsed_ms = 22;     // Any phase
+  
+  uint64 objects_deleted = 30;      // Cleanup phase
+  uint64 objects_remaining = 31;    // Cleanup phase
+  
+  // Liveness indicators
+  bool is_stuck = 40;               // Agent reports it's stuck (deadlock, etc.)
+  string stuck_reason = 41;         // Why agent thinks it's stuck
+  double progress_rate = 42;        // Objects/sec or ops/sec (0 = not progressing)
+  bool phase_completed = 43;        // Phase finished, ready for barrier
+  bool at_barrier = 44;             // Agent reached barrier, waiting for others
+}
+
+// v0.8.25: Barrier synchronization request
+message BarrierRequest {
+  string barrier_id = 1;     // "prepare", "execute", "cleanup"
+  string agent_id = 2;
+  PhaseProgress progress = 3; // Current progress (embedded heartbeat)
+}
+
+message BarrierResponse {
+  bool proceed = 1;          // true = barrier satisfied, proceed to next phase
+  repeated string waiting_agents = 2;  // Agents not yet at barrier
+  repeated string failed_agents = 3;   // Agents that won't reach barrier
+  uint64 next_heartbeat_ms = 4;        // When to send next heartbeat
+}
+
+// v0.8.25: Explicit agent query (when heartbeats missed)
+message AgentQueryRequest {
+  string agent_id = 1;
+  string reason = 2;  // "missed_heartbeats", "status_check", etc.
+}
+
+message AgentQueryResponse {
+  PhaseProgress current_progress = 1;
+  bool is_alive = 2;
+  string status_message = 3;  // Human-readable status
 }
 

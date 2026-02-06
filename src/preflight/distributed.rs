@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use crate::config::{
         Config, DistributedConfig, AgentConfig, MultiEndpointConfig, PrepareConfig, EnsureSpec,
-        FillPattern, TreeCreationMode, PathSelectionStrategy,
+        FillPattern, TreeCreationMode, PathSelectionStrategy, BarrierSyncConfig,
     };
 
     /// Helper to create a minimal Config for testing
@@ -182,9 +182,9 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/vast1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/vast5/benchmark/".to_string()]),
-                    create_agent("agent-3", vec!["file:///mnt/vast9/benchmark/".to_string()]),
+                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
+                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
+                    create_agent("agent-3", vec!["file:///mnt/filesys9/benchmark/".to_string()]),
                 ],
                 ssh: None,
                 deployment: None,
@@ -194,10 +194,14 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Isolated,  // Each agent creates separate tree
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
+                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
-                    base_uri: Some("file:///mnt/vast1/benchmark/".to_string()), // THE BUG
+                    base_uri: Some("file:///mnt/filesys1/benchmark/".to_string()), // THE BUG
                     use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
@@ -213,6 +217,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -251,6 +256,10 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
+                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -270,6 +279,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -292,8 +302,8 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/vast1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/vast5/benchmark/".to_string()]),
+                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
+                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
                 ],
                 ssh: None,
                 deployment: None,
@@ -303,6 +313,10 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Isolated,  // Isolated trees
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
+                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -322,6 +336,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -364,6 +379,10 @@ mod tests {
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
+                grpc_keepalive_interval: 30,
+                grpc_keepalive_timeout: 10,
+                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
+                stages: None,  // No YAML stages for tests
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -383,6 +402,7 @@ mod tests {
                 directory_structure: None,
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
+                force_overwrite: false,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );

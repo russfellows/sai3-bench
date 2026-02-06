@@ -43,6 +43,11 @@ distributed:
   shared_filesystem: true      # Treat file:// as shared storage
   tree_creation_mode: coordinator
   path_selection: random
+  
+  # v0.8.50: Enable barrier synchronization for coordinated testing
+  barrier_sync:
+    enabled: true
+  
   agents:
     - address: "127.0.0.1:7761"
       id: "test-agent-1"

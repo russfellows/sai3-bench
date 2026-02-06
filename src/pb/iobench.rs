@@ -231,6 +231,61 @@ pub struct PrepareSummary {
     #[prost(message, repeated, tag = "12")]
     pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
 }
+/// v0.8.27: Per-stage summary for incremental results collection
+/// Sent when a stage completes, before waiting at barrier
+/// Ensures data is not lost if later stages fail
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StageSummary {
+    /// 0-based stage index
+    #[prost(uint32, tag = "1")]
+    pub stage_index: u32,
+    /// Stage name from config (e.g., "prepare", "workload")
+    #[prost(string, tag = "2")]
+    pub stage_name: ::prost::alloc::string::String,
+    /// Stage type: "prepare", "workload", "cleanup", "custom"
+    #[prost(string, tag = "3")]
+    pub stage_type: ::prost::alloc::string::String,
+    /// Duration of this stage
+    #[prost(double, tag = "4")]
+    pub wall_seconds: f64,
+    /// Operation counts for this stage
+    #[prost(uint64, tag = "5")]
+    pub get_ops: u64,
+    #[prost(uint64, tag = "6")]
+    pub get_bytes: u64,
+    #[prost(uint64, tag = "7")]
+    pub put_ops: u64,
+    #[prost(uint64, tag = "8")]
+    pub put_bytes: u64,
+    #[prost(uint64, tag = "9")]
+    pub meta_ops: u64,
+    #[prost(uint64, tag = "10")]
+    pub errors: u64,
+    /// Per-operation aggregates
+    #[prost(message, optional, tag = "11")]
+    pub get: ::core::option::Option<OpAggregateMetrics>,
+    #[prost(message, optional, tag = "12")]
+    pub put: ::core::option::Option<OpAggregateMetrics>,
+    #[prost(message, optional, tag = "13")]
+    pub meta: ::core::option::Option<OpAggregateMetrics>,
+    /// HDR histogram data for accurate aggregation across agents
+    #[prost(bytes = "vec", tag = "14")]
+    pub histogram_get: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    pub histogram_put: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "16")]
+    pub histogram_meta: ::prost::alloc::vec::Vec<u8>,
+    /// Per-bucket byte counts for accurate avg_bytes calculation
+    #[prost(message, optional, tag = "17")]
+    pub get_bins: ::core::option::Option<SizeBins>,
+    #[prost(message, optional, tag = "18")]
+    pub put_bins: ::core::option::Option<SizeBins>,
+    #[prost(message, optional, tag = "19")]
+    pub meta_bins: ::core::option::Option<SizeBins>,
+    /// Per-endpoint statistics
+    #[prost(message, repeated, tag = "20")]
+    pub endpoint_stats: ::prost::alloc::vec::Vec<EndpointStatsSnapshot>,
+}
 /// v0.7.5: Live performance statistics for distributed execution
 /// Sent every 1 second during workload execution for real-time visibility
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -364,6 +419,23 @@ pub struct LiveStats {
     /// META p99 latency (microseconds)
     #[prost(double, tag = "42")]
     pub meta_p99_us: f64,
+    /// v0.8.26: Barrier synchronization fields
+    /// Agent sets these when waiting at a stage barrier
+    ///
+    /// Agent reached barrier, waiting for release
+    #[prost(bool, tag = "43")]
+    pub at_barrier: bool,
+    /// Barrier identifier (e.g., "stage-1-prepare")
+    #[prost(string, tag = "44")]
+    pub barrier_name: ::prost::alloc::string::String,
+    /// Monotonic counter for ordering
+    #[prost(uint32, tag = "45")]
+    pub barrier_sequence: u32,
+    /// v0.8.27: Per-stage summary for incremental results collection
+    /// Populated when a stage completes (before barrier wait)
+    /// Controller writes TSV immediately to avoid data loss
+    #[prost(message, optional, tag = "46")]
+    pub stage_summary: ::core::option::Option<StageSummary>,
 }
 /// Nested message and enum types in `LiveStats`.
 pub mod live_stats {
@@ -510,6 +582,15 @@ pub struct ControlMessage {
     pub agent_index: u32,
     #[prost(uint32, tag = "9")]
     pub num_agents: u32,
+    /// v0.8.26: Barrier release coordination
+    /// For RELEASE_BARRIER command: which barrier is being released
+    ///
+    /// e.g., "stage-3-execute" or "prepare"
+    #[prost(string, tag = "10")]
+    pub barrier_name: ::prost::alloc::string::String,
+    /// Monotonic counter for ordering
+    #[prost(uint32, tag = "11")]
+    pub barrier_sequence: u32,
 }
 /// Nested message and enum types in `ControlMessage`.
 pub mod control_message {
@@ -536,6 +617,10 @@ pub mod control_message {
         Acknowledge = 3,
         /// v0.8.23: Run pre-flight validation
         Preflight = 4,
+        /// v0.8.26: Release agents waiting at barrier
+        ReleaseBarrier = 5,
+        /// v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
+        Goodbye = 6,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -549,6 +634,8 @@ pub mod control_message {
                 Self::Abort => "ABORT",
                 Self::Acknowledge => "ACKNOWLEDGE",
                 Self::Preflight => "PREFLIGHT",
+                Self::ReleaseBarrier => "RELEASE_BARRIER",
+                Self::Goodbye => "GOODBYE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -559,6 +646,8 @@ pub mod control_message {
                 "ABORT" => Some(Self::Abort),
                 "ACKNOWLEDGE" => Some(Self::Acknowledge),
                 "PREFLIGHT" => Some(Self::Preflight),
+                "RELEASE_BARRIER" => Some(Self::ReleaseBarrier),
+                "GOODBYE" => Some(Self::Goodbye),
                 _ => None,
             }
         }
@@ -604,6 +693,113 @@ pub struct ValidationResult {
     /// "stat", "list", "read", "write", "delete", etc.
     #[prost(string, tag = "6")]
     pub test_phase: ::prost::alloc::string::String,
+}
+/// v0.8.25: Heartbeat-based progress reporting
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PhaseProgress {
+    #[prost(string, tag = "1")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "WorkloadPhase", tag = "2")]
+    pub current_phase: i32,
+    #[prost(uint64, tag = "3")]
+    pub phase_start_time_ms: u64,
+    #[prost(uint64, tag = "4")]
+    pub heartbeat_time_ms: u64,
+    /// Phase-specific progress fields
+    ///
+    /// Prepare phase
+    #[prost(uint64, tag = "10")]
+    pub objects_created: u64,
+    /// Prepare phase
+    #[prost(uint64, tag = "11")]
+    pub objects_total: u64,
+    /// "creating", "listing", "cleaning", etc.
+    #[prost(string, tag = "12")]
+    pub current_operation: ::prost::alloc::string::String,
+    /// Prepare phase
+    #[prost(uint64, tag = "13")]
+    pub bytes_written: u64,
+    /// Any phase
+    #[prost(uint64, tag = "14")]
+    pub errors_encountered: u64,
+    /// Execute phase
+    #[prost(uint64, tag = "20")]
+    pub operations_completed: u64,
+    /// Execute phase (ops/sec or GB/sec)
+    #[prost(double, tag = "21")]
+    pub current_throughput: f64,
+    /// Any phase
+    #[prost(uint64, tag = "22")]
+    pub phase_elapsed_ms: u64,
+    /// Cleanup phase
+    #[prost(uint64, tag = "30")]
+    pub objects_deleted: u64,
+    /// Cleanup phase
+    #[prost(uint64, tag = "31")]
+    pub objects_remaining: u64,
+    /// Liveness indicators
+    ///
+    /// Agent reports it's stuck (deadlock, etc.)
+    #[prost(bool, tag = "40")]
+    pub is_stuck: bool,
+    /// Why agent thinks it's stuck
+    #[prost(string, tag = "41")]
+    pub stuck_reason: ::prost::alloc::string::String,
+    /// Objects/sec or ops/sec (0 = not progressing)
+    #[prost(double, tag = "42")]
+    pub progress_rate: f64,
+    /// Phase finished, ready for barrier
+    #[prost(bool, tag = "43")]
+    pub phase_completed: bool,
+    /// Agent reached barrier, waiting for others
+    #[prost(bool, tag = "44")]
+    pub at_barrier: bool,
+}
+/// v0.8.25: Barrier synchronization request
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BarrierRequest {
+    /// "prepare", "execute", "cleanup"
+    #[prost(string, tag = "1")]
+    pub barrier_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub agent_id: ::prost::alloc::string::String,
+    /// Current progress (embedded heartbeat)
+    #[prost(message, optional, tag = "3")]
+    pub progress: ::core::option::Option<PhaseProgress>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BarrierResponse {
+    /// true = barrier satisfied, proceed to next phase
+    #[prost(bool, tag = "1")]
+    pub proceed: bool,
+    /// Agents not yet at barrier
+    #[prost(string, repeated, tag = "2")]
+    pub waiting_agents: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Agents that won't reach barrier
+    #[prost(string, repeated, tag = "3")]
+    pub failed_agents: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// When to send next heartbeat
+    #[prost(uint64, tag = "4")]
+    pub next_heartbeat_ms: u64,
+}
+/// v0.8.25: Explicit agent query (when heartbeats missed)
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentQueryRequest {
+    #[prost(string, tag = "1")]
+    pub agent_id: ::prost::alloc::string::String,
+    /// "missed_heartbeats", "status_check", etc.
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentQueryResponse {
+    #[prost(message, optional, tag = "1")]
+    pub current_progress: ::core::option::Option<PhaseProgress>,
+    #[prost(bool, tag = "2")]
+    pub is_alive: bool,
+    /// Human-readable status
+    #[prost(string, tag = "3")]
+    pub status_message: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -674,6 +870,72 @@ impl ErrorType {
             "ERROR_TYPE_CONFIGURATION" => Some(Self::Configuration),
             "ERROR_TYPE_RESOURCE" => Some(Self::Resource),
             "ERROR_TYPE_SYSTEM" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+/// v0.8.25: Distributed barrier synchronization for phase coordination
+/// Workload phases for granular state tracking
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkloadPhase {
+    /// Ready to accept new workload
+    PhaseIdle = 0,
+    /// Pre-flight checks running
+    PhaseValidating = 1,
+    /// Validation passed, waiting for prepare barrier
+    PhasePrepareReady = 2,
+    /// Creating/cleaning objects
+    PhasePreparing = 3,
+    /// Prepare complete, waiting for execute barrier
+    PhaseExecuteReady = 4,
+    /// Running I/O workload
+    PhaseExecuting = 5,
+    /// Execution complete, waiting for cleanup barrier
+    PhaseCleanupReady = 6,
+    /// Removing objects
+    PhaseCleaning = 7,
+    /// All phases done successfully
+    PhaseCompleted = 8,
+    /// Error occurred
+    PhaseFailed = 9,
+    /// Emergency shutdown in progress
+    PhaseAborting = 10,
+}
+impl WorkloadPhase {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::PhaseIdle => "PHASE_IDLE",
+            Self::PhaseValidating => "PHASE_VALIDATING",
+            Self::PhasePrepareReady => "PHASE_PREPARE_READY",
+            Self::PhasePreparing => "PHASE_PREPARING",
+            Self::PhaseExecuteReady => "PHASE_EXECUTE_READY",
+            Self::PhaseExecuting => "PHASE_EXECUTING",
+            Self::PhaseCleanupReady => "PHASE_CLEANUP_READY",
+            Self::PhaseCleaning => "PHASE_CLEANING",
+            Self::PhaseCompleted => "PHASE_COMPLETED",
+            Self::PhaseFailed => "PHASE_FAILED",
+            Self::PhaseAborting => "PHASE_ABORTING",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PHASE_IDLE" => Some(Self::PhaseIdle),
+            "PHASE_VALIDATING" => Some(Self::PhaseValidating),
+            "PHASE_PREPARE_READY" => Some(Self::PhasePrepareReady),
+            "PHASE_PREPARING" => Some(Self::PhasePreparing),
+            "PHASE_EXECUTE_READY" => Some(Self::PhaseExecuteReady),
+            "PHASE_EXECUTING" => Some(Self::PhaseExecuting),
+            "PHASE_CLEANUP_READY" => Some(Self::PhaseCleanupReady),
+            "PHASE_CLEANING" => Some(Self::PhaseCleaning),
+            "PHASE_COMPLETED" => Some(Self::PhaseCompleted),
+            "PHASE_FAILED" => Some(Self::PhaseFailed),
+            "PHASE_ABORTING" => Some(Self::PhaseAborting),
             _ => None,
         }
     }
@@ -948,6 +1210,57 @@ pub mod agent_client {
                 .insert(GrpcMethod::new("iobench.Agent", "PreFlightValidation"));
             self.inner.unary(req, path, codec).await
         }
+        /// v0.8.25: Barrier synchronization for phase coordination
+        /// Agent reports readiness for next phase + sends heartbeat
+        pub async fn report_barrier_ready(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BarrierRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BarrierResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/ReportBarrierReady",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "ReportBarrierReady"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// v0.8.25: Controller queries agent when heartbeats missed
+        pub async fn query_agent_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AgentQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AgentQueryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/iobench.Agent/QueryAgentStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("iobench.Agent", "QueryAgentStatus"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1023,6 +1336,20 @@ pub mod agent_server {
             request: tonic::Request<super::PreFlightRequest>,
         ) -> std::result::Result<
             tonic::Response<super::PreFlightResponse>,
+            tonic::Status,
+        >;
+        /// v0.8.25: Barrier synchronization for phase coordination
+        /// Agent reports readiness for next phase + sends heartbeat
+        async fn report_barrier_ready(
+            &self,
+            request: tonic::Request<super::BarrierRequest>,
+        ) -> std::result::Result<tonic::Response<super::BarrierResponse>, tonic::Status>;
+        /// v0.8.25: Controller queries agent when heartbeats missed
+        async fn query_agent_status(
+            &self,
+            request: tonic::Request<super::AgentQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AgentQueryResponse>,
             tonic::Status,
         >;
     }
@@ -1438,6 +1765,92 @@ pub mod agent_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PreFlightValidationSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/ReportBarrierReady" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReportBarrierReadySvc<T: Agent>(pub Arc<T>);
+                    impl<T: Agent> tonic::server::UnaryService<super::BarrierRequest>
+                    for ReportBarrierReadySvc<T> {
+                        type Response = super::BarrierResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BarrierRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::report_barrier_ready(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReportBarrierReadySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/iobench.Agent/QueryAgentStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct QueryAgentStatusSvc<T: Agent>(pub Arc<T>);
+                    impl<T: Agent> tonic::server::UnaryService<super::AgentQueryRequest>
+                    for QueryAgentStatusSvc<T> {
+                        type Response = super::AgentQueryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AgentQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Agent>::query_agent_status(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = QueryAgentStatusSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

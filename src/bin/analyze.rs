@@ -55,9 +55,17 @@ struct ResultsDir {
     path: PathBuf,
     timestamp: String,
     workload: String,
+    #[allow(dead_code)] // Used in tests, may be used in future Excel summary sheets
     hosts: String,
-    results_tsv: Option<PathBuf>,
+    // New numbered stage format (v0.8.50+)
+    preflight_results_tsv: Option<PathBuf>,
     prepare_results_tsv: Option<PathBuf>,
+    execute_results_tsv: Option<PathBuf>,
+    cleanup_results_tsv: Option<PathBuf>,
+    // Legacy format (pre-v0.8.50)
+    results_tsv: Option<PathBuf>,
+    legacy_prepare_results_tsv: Option<PathBuf>,
+    // Other files
     perf_log_tsv: Option<PathBuf>,
     workload_endpoint_stats_tsv: Option<PathBuf>,
     prepare_endpoint_stats_tsv: Option<PathBuf>,
@@ -103,9 +111,17 @@ impl ResultsDir {
             (dir_name.to_string(), "unknown".to_string(), "?".to_string())
         };
 
-        // Check for TSV files
-        let results_tsv = path.join("results.tsv");
-        let prepare_results_tsv = path.join("prepare_results.tsv");
+        // Check for new numbered stage TSV files (v0.8.50+)
+        let preflight_results_tsv = path.join("01_preflight_results.tsv");
+        let prepare_results_tsv = path.join("02_prepare_results.tsv");
+        let execute_results_tsv = path.join("03_execute_results.tsv");
+        let cleanup_results_tsv = path.join("04_cleanup_results.tsv");
+        
+        // Check for legacy TSV files (pre-v0.8.50)
+        let legacy_results_tsv = path.join("results.tsv");
+        let legacy_prepare_results_tsv = path.join("prepare_results.tsv");
+        
+        // Check for other TSV files
         let perf_log_tsv = path.join("perf_log.tsv");
         let workload_endpoint_stats_tsv = path.join("workload_endpoint_stats.tsv");
         let prepare_endpoint_stats_tsv = path.join("prepare_endpoint_stats.tsv");
@@ -115,12 +131,39 @@ impl ResultsDir {
             timestamp,
             workload,
             hosts,
-            results_tsv: if results_tsv.exists() { Some(results_tsv) } else { None },
+            // New numbered format
+            preflight_results_tsv: if preflight_results_tsv.exists() { 
+                Some(preflight_results_tsv) 
+            } else { 
+                None 
+            },
             prepare_results_tsv: if prepare_results_tsv.exists() { 
                 Some(prepare_results_tsv) 
             } else { 
                 None 
             },
+            execute_results_tsv: if execute_results_tsv.exists() { 
+                Some(execute_results_tsv) 
+            } else { 
+                None 
+            },
+            cleanup_results_tsv: if cleanup_results_tsv.exists() { 
+                Some(cleanup_results_tsv) 
+            } else { 
+                None 
+            },
+            // Legacy format
+            results_tsv: if legacy_results_tsv.exists() { 
+                Some(legacy_results_tsv) 
+            } else { 
+                None 
+            },
+            legacy_prepare_results_tsv: if legacy_prepare_results_tsv.exists() { 
+                Some(legacy_prepare_results_tsv) 
+            } else { 
+                None 
+            },
+            // Other files
             perf_log_tsv: if perf_log_tsv.exists() {
                 Some(perf_log_tsv)
             } else {
@@ -140,48 +183,61 @@ impl ResultsDir {
     }
 
     /// Generate a short, unique tab name (Excel limit: 31 chars)
-    /// Format: MMDD-HHMM-workload_Xh-R/P/L/WE/PE
-    fn generate_tab_name(&self, file_type: &str) -> String {
-        // Extract MMDD-HHMM from timestamp (20251222-1744 -> 1222-1744)
-        let short_time = if self.timestamp.len() >= 13 {
-            format!("{}-{}", &self.timestamp[4..8], &self.timestamp[9..13])
-        } else {
-            self.timestamp.clone()
-        };
-
+    /// Format: workload-stage or just stage (timestamp is in filename, not tabs)
+    fn generate_tab_name(&self, stage_name: &str) -> String {
         // Shorten workload name (remove "sai3-" prefix if present)
         let short_workload = self.workload
             .strip_prefix("sai3-")
             .unwrap_or(&self.workload);
 
-        // Shorten host count (1hosts -> 1h, 8hosts -> 8h)
-        let short_hosts = self.hosts.replace("hosts", "h");
+        // Try format: workload-stage
+        let with_workload = format!("{}-{}", short_workload, stage_name);
+        if with_workload.len() <= 31 {
+            return with_workload;
+        }
 
-        // Combine: 1222-1744-resnet50_1h-R
-        let mut tab_name = format!("{}-{}_{}-{}", 
-            short_time, 
-            short_workload, 
-            short_hosts,
-            file_type
-        );
-
-        // Truncate to 31 characters if needed (preserve file_type suffix)
-        if tab_name.len() > 31 {
-            // Find the workload portion and trim it
-            let suffix = format!("_{}-{}", short_hosts, file_type);
-            let prefix_len = short_time.len() + 1; // "MMDD-HHMM-"
-            let workload_max_len = 31 - prefix_len - suffix.len();
-            
+        // If workload+stage is too long, try truncating workload
+        let suffix_len = stage_name.len() + 1; // "-stage_name"
+        let workload_max_len = 31 - suffix_len;
+        
+        if workload_max_len > 3 {
             let trimmed_workload = if short_workload.len() > workload_max_len {
                 &short_workload[..workload_max_len]
             } else {
                 short_workload
             };
             
-            tab_name = format!("{}-{}{}", short_time, trimmed_workload, suffix);
+            format!("{}-{}", trimmed_workload, stage_name)
+        } else {
+            // If even truncated workload doesn't fit, just use stage name
+            stage_name.to_string()
         }
+    }
+}
 
-        tab_name
+/// Extract stage name from numbered TSV filename (including number prefix)
+/// Examples: "01_preflight_results.tsv" -> "01_preflight"
+///           "03_execute_results.tsv" -> "03_execute"
+fn extract_stage_name(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_str()?;
+    
+    // Pattern: NN_stagename_results.tsv (e.g., "01_preflight_results.tsv")
+    // We want to extract "01_preflight" (include the number prefix for ordering)
+    if let Some(stage_with_prefix) = filename.strip_suffix("_results.tsv") {
+        return Some(stage_with_prefix.to_string());
+    }
+    
+    // Fallback for legacy files: results.tsv -> workload, prepare_results.tsv -> prepare
+    if filename == "results.tsv" {
+        Some("workload".to_string())
+    } else if filename == "prepare_results.tsv" {
+        Some("prepare".to_string())
+    } else if filename == "perf_log.tsv" {
+        Some("perf_log".to_string())
+    } else if filename.ends_with("_endpoint_stats.tsv") {
+        filename.strip_suffix("_endpoint_stats.tsv").map(|s| s.to_string())
+    } else {
+        None
     }
 }
 
@@ -239,9 +295,13 @@ fn find_results_dirs(args: &Args) -> Result<Vec<ResultsDir>> {
         }
 
         if let Ok(results_dir) = ResultsDir::from_path(path.to_path_buf()) {
-            // Only include if it has at least one TSV file
-            if results_dir.results_tsv.is_some() 
+            // Only include if it has at least one TSV file (new or legacy format)
+            if results_dir.preflight_results_tsv.is_some()
                 || results_dir.prepare_results_tsv.is_some() 
+                || results_dir.execute_results_tsv.is_some()
+                || results_dir.cleanup_results_tsv.is_some()
+                || results_dir.results_tsv.is_some() 
+                || results_dir.legacy_prepare_results_tsv.is_some() 
                 || results_dir.perf_log_tsv.is_some() 
             {
                 results_dirs.push(results_dir);
@@ -256,12 +316,15 @@ fn find_results_dirs(args: &Args) -> Result<Vec<ResultsDir>> {
 }
 
 /// Read a TSV file and return its contents as rows
+/// Skips comment lines starting with '#' (v0.8.50+ format)
 fn read_tsv_file(path: &Path) -> Result<Vec<Vec<String>>> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read TSV file: {:?}", path))?;
 
     let rows: Vec<Vec<String>> = content
         .lines()
+        .filter(|line| !line.trim().starts_with('#'))  // Skip comment lines
+        .filter(|line| !line.trim().is_empty())        // Skip empty lines
         .map(|line| {
             line.split('\t')
                 .map(|cell| cell.to_string())
@@ -375,10 +438,75 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
     for results_dir in results_dirs {
         println!("Processing: {:?}", results_dir.path);
 
-        // Add results.tsv tab
+        // Add 01_preflight_results.tsv tab (new format)
+        if let Some(ref tsv_path) = results_dir.preflight_results_tsv {
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "preflight".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (01_preflight_results.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read 01_preflight_results.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add 02_prepare_results.tsv tab (new format)
+        if let Some(ref tsv_path) = results_dir.prepare_results_tsv {
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (02_prepare_results.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read 02_prepare_results.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add 03_execute_results.tsv tab (new format)
+        if let Some(ref tsv_path) = results_dir.execute_results_tsv {
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "execute".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (03_execute_results.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read 03_execute_results.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add 04_cleanup_results.tsv tab (new format)
+        if let Some(ref tsv_path) = results_dir.cleanup_results_tsv {
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "cleanup".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (04_cleanup_results.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read 04_cleanup_results.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add legacy results.tsv tab (old format)
         if let Some(ref tsv_path) = results_dir.results_tsv {
-            let tab_name = results_dir.generate_tab_name("R");
-            println!("  Creating tab: {} (results.tsv)", tab_name);
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "workload".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (results.tsv - legacy)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
                 .with_context(|| format!("Failed to read results.tsv from {:?}", results_dir.path))?;
@@ -390,10 +518,11 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
             tabs_created += 1;
         }
 
-        // Add prepare_results.tsv tab
-        if let Some(ref tsv_path) = results_dir.prepare_results_tsv {
-            let tab_name = results_dir.generate_tab_name("P");
-            println!("  Creating tab: {} (prepare_results.tsv)", tab_name);
+        // Add legacy prepare_results.tsv tab (old format)
+        if let Some(ref tsv_path) = results_dir.legacy_prepare_results_tsv {
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
+            println!("  Creating tab: {} (prepare_results.tsv - legacy)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
                 .with_context(|| format!("Failed to read prepare_results.tsv from {:?}", results_dir.path))?;
@@ -407,7 +536,8 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
         // Add perf_log.tsv tab
         if let Some(ref tsv_path) = results_dir.perf_log_tsv {
-            let tab_name = results_dir.generate_tab_name("L");
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "perf_log".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
             println!("  Creating tab: {} (perf_log.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -422,7 +552,8 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
         // Add workload_endpoint_stats.tsv tab
         if let Some(ref tsv_path) = results_dir.workload_endpoint_stats_tsv {
-            let tab_name = results_dir.generate_tab_name("WE");
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "workload_endpt".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
             println!("  Creating tab: {} (workload_endpoint_stats.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -437,7 +568,8 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
         // Add prepare_endpoint_stats.tsv tab
         if let Some(ref tsv_path) = results_dir.prepare_endpoint_stats_tsv {
-            let tab_name = results_dir.generate_tab_name("PE");
+            let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare_endpt".to_string());
+            let tab_name = results_dir.generate_tab_name(&stage_name);
             println!("  Creating tab: {} (prepare_endpoint_stats.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -489,12 +621,27 @@ fn main() -> Result<()> {
     println!("Found {} results directories:\n", results_dirs.len());
     for (idx, dir) in results_dirs.iter().enumerate() {
         println!("  {}. {:?}", idx + 1, dir.path.file_name().unwrap_or_default());
-        if dir.results_tsv.is_some() {
-            println!("      - results.tsv found");
+        // New numbered format (v0.8.50+)
+        if dir.preflight_results_tsv.is_some() {
+            println!("      - 01_preflight_results.tsv found");
         }
         if dir.prepare_results_tsv.is_some() {
-            println!("      - prepare_results.tsv found");
+            println!("      - 02_prepare_results.tsv found");
         }
+        if dir.execute_results_tsv.is_some() {
+            println!("      - 03_execute_results.tsv found");
+        }
+        if dir.cleanup_results_tsv.is_some() {
+            println!("      - 04_cleanup_results.tsv found");
+        }
+        // Legacy format (pre-v0.8.50)
+        if dir.results_tsv.is_some() {
+            println!("      - results.tsv found (legacy)");
+        }
+        if dir.legacy_prepare_results_tsv.is_some() {
+            println!("      - prepare_results.tsv found (legacy)");
+        }
+        // Other files
         if dir.perf_log_tsv.is_some() {
             println!("      - perf_log.tsv found");
         }
@@ -529,16 +676,32 @@ mod tests {
             timestamp: "20251222-1744".to_string(),
             workload: "sai3-resnet50".to_string(),
             hosts: "1hosts".to_string(),
-            results_tsv: None,
+            preflight_results_tsv: None,
             prepare_results_tsv: None,
+            execute_results_tsv: None,
+            cleanup_results_tsv: None,
+            results_tsv: None,
+            legacy_prepare_results_tsv: None,
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,
         };
 
-        let tab_name = results_dir.generate_tab_name("R");
-        assert_eq!(tab_name, "1222-1744-resnet50_1h-R");
+        let tab_name = results_dir.generate_tab_name("03_execute");
+        assert_eq!(tab_name, "resnet50-03_execute");
         assert!(tab_name.len() <= 31, "Tab name exceeds Excel limit");
+    }
+
+    #[test]
+    fn test_extract_stage_name() {
+        assert_eq!(extract_stage_name(Path::new("01_preflight_results.tsv")), Some("01_preflight".to_string()));
+        assert_eq!(extract_stage_name(Path::new("02_prepare_results.tsv")), Some("02_prepare".to_string()));
+        assert_eq!(extract_stage_name(Path::new("03_execute_results.tsv")), Some("03_execute".to_string()));
+        assert_eq!(extract_stage_name(Path::new("04_cleanup_results.tsv")), Some("04_cleanup".to_string()));
+        assert_eq!(extract_stage_name(Path::new("results.tsv")), Some("workload".to_string()));
+        assert_eq!(extract_stage_name(Path::new("prepare_results.tsv")), Some("prepare".to_string()));
+        assert_eq!(extract_stage_name(Path::new("perf_log.tsv")), Some("perf_log".to_string()));
+        assert_eq!(extract_stage_name(Path::new("workload_endpoint_stats.tsv")), Some("workload".to_string()));
     }
 
     #[test]
@@ -548,8 +711,12 @@ mod tests {
             timestamp: "20251222-1744".to_string(),
             workload: "very-long-workload-name-that-exceeds-limits".to_string(),
             hosts: "8hosts".to_string(),
-            results_tsv: None,
+            preflight_results_tsv: None,
             prepare_results_tsv: None,
+            execute_results_tsv: None,
+            cleanup_results_tsv: None,
+            results_tsv: None,
+            legacy_prepare_results_tsv: None,
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,

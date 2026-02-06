@@ -1,0 +1,110 @@
+#target: file:///mnt/filesys1/benchmark/
+concurrency: 64
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# Global multi-endpoint (fallback - not used since all agents have overrides)
+#multi_endpoint:
+#  strategy: least_connections
+#  endpoints:
+#    - "file:///mnt/filesys1/benchmark/"
+#    - "file:///mnt/filesys2/benchmark/"
+#    - "file:///mnt/filesys3/benchmark/"
+#    - "file:///mnt/filesys4/benchmark/"
+
+# Prepare phase: Create 500 TB of test data
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false  # LIST phase runs to verify objects exist (required for accurate prepare)
+  force_overwrite: true      # Create all files anyway, overwriting existing
+
+  # Create nested directory tree:
+  # width=24, depth=4 → 24^4 = 331,776 leaf directories
+  # 193 files per leaf directory × 331,776 dirs = 64,032,768 files
+  # 64M files × 8 MB average = 512,000 MB = ~500 TB
+  directory_structure:
+    width: 24                    # 24 subdirectories per level
+    depth: 4                     # 4 levels deep
+    files_per_dir: 193           # 193 files per leaf directory
+    distribution: "bottom"       # Files only in leaf directories
+    dir_mask: "d%d_w%d.dir"
+
+  # Total files calculation: 331,776 leaf dirs × 193 files/dir = 64,032,768 files
+  ensure_objects:
+    - # NO base_uri - each agent uses first multi_endpoint for listing
+      count: 64032768           # 64M files × 8 MB avg = ~500 TB
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 8MiB           # 8 MB mean
+        std_dev: 1MiB        # 1 MB standard deviation
+        min: 1MiB            # 1 MB min
+        max: 16MiB           # 16 MB max
+      use_multi_endpoint: true
+
+  cleanup: false  # Keep data for later use
+
+# Dummy workload (won't run with duration: 0s)
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+
+duration: 0s
+
+# Distributed configuration with per-agent endpoint assignments
+distributed:
+  shared_filesystem: false      # CORRECTED: Each agent has isolated storage
+  tree_creation_mode: isolated  # CORRECTED: Each agent creates its own tree
+  path_selection: random
+  agents:
+    # Agent 1: 172.21.4.10 → Mount points 1-4
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys1/benchmark/"
+          - "file:///mnt/filesys2/benchmark/"
+          - "file:///mnt/filesys3/benchmark/"
+          - "file:///mnt/filesys4/benchmark/"
+        strategy: least_connections
+
+    # Agent 2: 172.21.4.11 → Mount points 5-8
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys5/benchmark/"
+          - "file:///mnt/filesys6/benchmark/"
+          - "file:///mnt/filesys7/benchmark/"
+          - "file:///mnt/filesys8/benchmark/"
+        strategy: least_connections
+
+    # Agent 3: 172.21.4.12 → Mount points 9-12
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys9/benchmark/"
+          - "file:///mnt/filesys10/benchmark/"
+          - "file:///mnt/filesys11/benchmark/"
+          - "file:///mnt/filesys12/benchmark/"
+        strategy: least_connections
+
+    # Agent 4: 172.21.4.13 → Mount points 13-16
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys13/benchmark/"
+          - "file:///mnt/filesys14/benchmark/"
+          - "file:///mnt/filesys15/benchmark/"
+          - "file:///mnt/filesys16/benchmark/"
+        strategy: least_connections

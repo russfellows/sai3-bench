@@ -153,13 +153,128 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         }
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
+        
+        // Stage execution plan (v0.8.24+)
+        if let Some(ref dist_config) = config.distributed {
+            // Try to parse stages - if successful, show stage execution plan
+            match dist_config.get_sorted_stages(config.duration) {
+                Ok(stages) if !stages.is_empty() => {
+                    println!("┌─ YAML-Driven Stage Execution Plan ──────────────────────────────────┐");
+                    println!("│ {} stages will execute in order:", stages.len());
+                    println!("│");
+                    
+                    for (idx, stage) in stages.iter().enumerate() {
+                        let stage_num = idx + 1;
+                        let stage_type = match &stage.config {
+                            crate::config::StageSpecificConfig::Prepare { .. } => "PREPARE",
+                            crate::config::StageSpecificConfig::Execute { .. } => "EXECUTE",
+                            crate::config::StageSpecificConfig::Cleanup { .. } => "CLEANUP",
+                            crate::config::StageSpecificConfig::Custom { .. } => "CUSTOM",
+                            crate::config::StageSpecificConfig::Hybrid { .. } => "HYBRID",
+                            crate::config::StageSpecificConfig::Validation { .. } => "VALIDATION",
+                        };
+                        
+                        let completion = match stage.completion {
+                            crate::config::CompletionCriteria::Duration => "Duration",
+                            crate::config::CompletionCriteria::TasksDone => "TasksDone",
+                            crate::config::CompletionCriteria::ScriptExit => "ScriptExit",
+                            crate::config::CompletionCriteria::ValidationPassed => "ValidationPassed",
+                            crate::config::CompletionCriteria::DurationOrTasks => "DurationOrTasks",
+                        };
+                        
+                        println!("│ Stage {}: {} (order: {})", stage_num, stage.name, stage.order);
+                        println!("│   Type:       {}", stage_type);
+                        println!("│   Completion: {}", completion);
+                        
+                        // Show type-specific details
+                        match &stage.config {
+                            crate::config::StageSpecificConfig::Execute { duration } => {
+                                println!("│   Duration:   {:?}", duration);
+                            }
+                            crate::config::StageSpecificConfig::Prepare { expected_objects } => {
+                                if let Some(count) = expected_objects {
+                                    println!("│   Expected:   {} objects", count);
+                                }
+                            }
+                            crate::config::StageSpecificConfig::Cleanup { expected_objects } => {
+                                if let Some(count) = expected_objects {
+                                    println!("│   Expected:   {} objects", count);
+                                }
+                            }
+                            crate::config::StageSpecificConfig::Custom { command, args } => {
+                                println!("│   Command:    {} {:?}", command, args);
+                            }
+                            crate::config::StageSpecificConfig::Hybrid { max_duration, expected_tasks } => {
+                                if let Some(duration) = max_duration {
+                                    println!("│   Max Dur:    {:?}", duration);
+                                }
+                                if let Some(tasks) = expected_tasks {
+                                    println!("│   Tasks:      {}", tasks);
+                                }
+                            }
+                            crate::config::StageSpecificConfig::Validation { timeout_secs } => {
+                                if let Some(timeout) = timeout_secs {
+                                    println!("│   Timeout:    {}s", timeout);
+                                }
+                            }
+                        }
+                        
+                        // Show barrier configuration
+                        if let Some(ref stage_barrier) = stage.barrier {
+                            println!("│   Barrier:    ✅ {:?} (override)", stage_barrier.barrier_type);
+                        } else if dist_config.barrier_sync.enabled {
+                            println!("│   Barrier:    ✅ ENABLED (global)");
+                        } else {
+                            println!("│   Barrier:    ❌ DISABLED");
+                        }
+                        
+                        if idx < stages.len() - 1 {
+                            println!("│");
+                        }
+                    }
+                    
+                    println!("│");
+                    println!("│ All agents will synchronize at barriers between stages");
+                    println!("└──────────────────────────────────────────────────────────────────────┘");
+                    println!();
+                }
+                Ok(_) => {
+                    // No stages configured - using deprecated prepare/execute/cleanup flow
+                    println!("┌─ Execution Plan (DEPRECATED) ────────────────────────────────────────┐");
+                    println!("│ Using hardcoded prepare → execute → cleanup flow");
+                    println!("│");
+                    println!("│ ⚠️  RECOMMENDATION: Migrate to YAML-driven stages");
+                    println!("│    Add 'stages:' section to distributed config for better control");
+                    println!("└──────────────────────────────────────────────────────────────────────┘");
+                    println!();
+                }
+                Err(e) => {
+                    // Stage parsing error - show error
+                    println!("┌─ Stage Configuration ERROR ──────────────────────────────────────────┐");
+                    println!("│ ❌ Failed to parse stages: {}", e);
+                    println!("│");
+                    println!("│ The distributed test will NOT run with this configuration.");
+                    println!("│ Fix the stage configuration and run --dry-run again.");
+                    println!("└──────────────────────────────────────────────────────────────────────┘");
+                    println!();
+                    return Err(anyhow::anyhow!("Stage configuration error: {}", e));
+                }
+            }
+        }
     }
     
     // Prepare configuration
+    // Skip this section if using YAML-driven stages (prepare behavior defined in stages)
+    let using_stages = config.distributed.as_ref()
+        .and_then(|d| d.get_sorted_stages(config.duration).ok())
+        .map(|stages| !stages.is_empty())
+        .unwrap_or(false);
+    
     if let Some(ref prepare) = config.prepare {
-        println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
-        println!("│ Objects will be created BEFORE test execution");
-        println!("│");
+        if !using_stages {
+            println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
+            println!("│ Objects will be created BEFORE test execution");
+            println!("│");
         
         // Directory tree structure (if configured)
         if let Some(ref dir_config) = prepare.directory_structure {
@@ -219,11 +334,22 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 continue;
             }
             
-            let base_uri = spec.get_base_uri(None)
-                .unwrap_or_else(|_| String::from("<not configured>"));
+            // Determine URI display based on configuration mode
+            let uri_display = if spec.base_uri.is_none() && spec.use_multi_endpoint {
+                // In distributed mode with multi_endpoint, each agent uses its own endpoints
+                if config.distributed.is_some() {
+                    String::from("Per-agent multi-endpoint (see agent configs)")
+                } else {
+                    // Standalone mode with multi_endpoint
+                    String::from("Multi-endpoint load balancing (see above)")
+                }
+            } else {
+                spec.get_base_uri(None)
+                    .unwrap_or_else(|_| String::from("<not configured>"))
+            };
             
             println!("│ Flat Objects Section {}:", idx + 1);
-            println!("│   URI:              {}", base_uri);
+            println!("│   URI:              {}", uri_display);
             println!("│   Count:            {} objects", spec.count);
             
             // Display size information
@@ -283,6 +409,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
+        } // End of !using_stages check
     }
     
     // Workload operations

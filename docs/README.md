@@ -126,17 +126,46 @@ See [archive/README.md](archive/README.md) for complete list.
 
 ---
 
+## Implementation & Design Documentation
+
+Deep-dives into internal architecture and design decisions:
+
+| Document | Description |
+|----------|-------------|
+| **[YAML_DRIVEN_STAGE_ORCHESTRATION.md](YAML_DRIVEN_STAGE_ORCHESTRATION.md)** | Multi-stage workflow design with 6 stage types, completion criteria, and coordinator state machine |
+| **[DISTRIBUTED_BARRIER_SYNC_DESIGN.md](DISTRIBUTED_BARRIER_SYNC_DESIGN.md)** | Barrier synchronization architecture for coordinated multi-host testing |
+| **[PREFLIGHT_VALIDATION_IMPLEMENTATION.md](PREFLIGHT_VALIDATION_IMPLEMENTATION.md)** | Pre-flight validation system: path checks, timeout propagation, early failure detection |
+| **[TIMEOUT_FIX_IMPLEMENTATION.md](TIMEOUT_FIX_IMPLEMENTATION.md)** | Comprehensive timeout configuration: global/stage/barrier hierarchy with large-scale tuning |
+
+---
+
+## Analysis & Troubleshooting
+
+Performance analysis and design validation documents:
+
+| Document | Description |
+|----------|-------------|
+| **[EXECUTION_ORDER_ANALYSIS.md](EXECUTION_ORDER_ANALYSIS.md)** | Detailed analysis of distributed execution order and timing characteristics |
+| **[LARGE_SCALE_TIMEOUT_ANALYSIS.md](LARGE_SCALE_TIMEOUT_ANALYSIS.md)** | Timeout tuning for large-scale deployments (100+ agents) with network latency modeling |
+
+---
+
 ## Version Information
 
-**Current Version**: v0.8.22 (January 2026)
+**Current Version**: v0.8.50 (January 2026)
+
+**Major features in v0.8.50**:
+- **YAML-driven stage orchestration**: Multi-stage workflows with 6 stage types, 5 completion criteria
+- **Barrier synchronization**: Coordinated multi-host testing with pre/post/mid barriers
+- **Comprehensive timeouts**: Global/stage/barrier timeout hierarchy with automatic propagation
+- **Pre-flight validation**: Automated path checks, timeout validation, early failure detection
 
 **Recent major features**:
+- v0.8.23: Pre-flight validation system (path checks, early failure detection)
 - v0.8.22: Multi-endpoint statistics, per-agent endpoint assignment
 - v0.8.19: Critical race condition fixes, precise perf_log timing
 - v0.8.17: Complete perf_log percentiles (31 columns), sai3-analyze tool
 - v0.8.15: Performance logging system (perf_log.tsv)
-- v0.8.4: Bidirectional streaming state machine
-- v0.8.0: gRPC streaming architecture
 
 **See**: [CHANGELOG.md](CHANGELOG.md) for detailed release notes
 

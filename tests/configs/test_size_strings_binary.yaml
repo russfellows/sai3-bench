@@ -1,0 +1,20 @@
+# Test config to validate binary size string parsing (KiB/MiB/GiB)
+concurrency: 4
+duration: 0s
+
+prepare:
+  ensure_objects:
+    - count: 100
+      fill: zero
+      size_distribution:
+        type: lognormal
+        mean: 8MiB          # 8,388,608 bytes (binary)
+        std_dev: 1MiB       # 1,048,576 bytes (binary)
+        min: 1MiB           # 1,048,576 bytes (binary)
+        max: 16MiB          # 16,777,216 bytes (binary)
+  cleanup: true
+
+workload:
+  - op: get
+    path: "*"
+    weight: 100

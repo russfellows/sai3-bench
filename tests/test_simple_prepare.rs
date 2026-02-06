@@ -31,7 +31,8 @@ async fn test_single_agent_prepare() {
             use_multi_endpoint: false,
         }],
         directory_structure: None,  // No directory structure - flat files
-        skip_verification: false,  // Enable LIST to test distributed prepare
+        skip_verification: false,
+        force_overwrite: false,  // Enable LIST to test distributed prepare
         post_prepare_delay: 0,
         cleanup: false,
         cleanup_mode: CleanupMode::Tolerant,
@@ -51,6 +52,7 @@ async fn test_single_agent_prepare() {
         2,  // concurrency
         0,  // agent_id
         2,  // num_agents
+        true,  // shared_storage: agents coordinate
     ).await;
     println!("prepare_objects returned!");
     

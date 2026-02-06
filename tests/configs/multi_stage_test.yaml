@@ -1,0 +1,92 @@
+# Test configuration demonstrating YAML-driven stage orchestration
+# Shows: cleanup-first, multiple prepares, multiple executes, flexible ordering
+
+backend:
+  type: file
+  file:
+    root_path: /tmp/sai3-multi-stage-test
+    use_direct_io: false
+
+objects:
+  count: 100
+  size: 
+    dist: constant
+    bytes: 1048576  # 1 MB
+
+# YAML-driven stage orchestration
+distributed:
+  agents:
+    - address: localhost:50051
+      id: agent-1
+    - address: localhost:50052
+      id: agent-2
+  
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: partitioned
+  
+  barrier_sync:
+    enabled: true
+    timeout_seconds: 60
+  
+  # Stages execute in order (1 → 2 → 3 → 4 → 5 → 6)
+  stages:
+    # Stage 1: Cleanup old test data first (flexible ordering!)
+    - name: cleanup-old-test
+      order: 1
+      type: cleanup
+      completion: tasks_done
+      expected_objects: 100
+    
+    # Stage 2: Initial prepare (100 objects)
+    - name: prepare-epoch1
+      order: 2
+      type: prepare
+      completion: tasks_done
+      expected_objects: 100
+    
+    # Stage 3: First execute (30 seconds)
+    - name: execute-epoch1
+      order: 3
+      type: execute
+      duration: 30s
+      completion: duration
+    
+    # Stage 4: Second prepare (shows multiple prepares!)
+    - name: prepare-epoch2
+      order: 4
+      type: prepare
+      completion: tasks_done
+      expected_objects: 200
+    
+    # Stage 5: Second execute (60 seconds)
+    - name: execute-epoch2
+      order: 5
+      type: execute
+      duration: 60s
+      completion: duration
+    
+    # Stage 6: Final cleanup
+    - name: cleanup-final
+      order: 6
+      type: cleanup
+      completion: tasks_done
+      expected_objects: 300
+
+# Prepare config - provides cleanup_mode for CLEANUP stages
+# Note: prepare.cleanup field is IGNORED when using stages
+#       (cleanup controlled by presence of CLEANUP stage, not boolean)
+prepare:
+  enabled: true
+  cleanup_mode: tolerant  # Used by CLEANUP stages (strict/tolerant/besteffort)
+
+# Workload config (overridden by execute stages)
+workload:
+  - op: get
+    path: "*"
+    weight: 1
+  
+concurrency: 4
+
+# Default duration (overridden by execute stages)
+duration: 10s

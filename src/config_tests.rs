@@ -43,8 +43,8 @@ mod base_uri_tests {
         };
 
         let endpoints = vec![
-            "file:///mnt/vast1/".to_string(),
-            "file:///mnt/vast2/".to_string(),
+            "file:///mnt/filesys1/".to_string(),
+            "file:///mnt/filesys2/".to_string(),
         ];
 
         let result = spec.get_base_uri(Some(&endpoints));
@@ -159,28 +159,28 @@ mod base_uri_tests {
         };
 
         // Agent 1 endpoints
-        let agent1_endpoints = vec!["file:///mnt/vast1/benchmark/".to_string()];
+        let agent1_endpoints = vec!["file:///mnt/filesys1/benchmark/".to_string()];
         let result1 = spec.get_base_uri(Some(&agent1_endpoints));
         assert!(result1.is_ok());
-        assert_eq!(result1.unwrap(), "file:///mnt/vast1/benchmark/");
+        assert_eq!(result1.unwrap(), "file:///mnt/filesys1/benchmark/");
 
         // Agent 2 endpoints
-        let agent2_endpoints = vec!["file:///mnt/vast5/benchmark/".to_string()];
+        let agent2_endpoints = vec!["file:///mnt/filesys5/benchmark/".to_string()];
         let result2 = spec.get_base_uri(Some(&agent2_endpoints));
         assert!(result2.is_ok());
-        assert_eq!(result2.unwrap(), "file:///mnt/vast5/benchmark/");
+        assert_eq!(result2.unwrap(), "file:///mnt/filesys5/benchmark/");
 
         // Agent 3 endpoints
-        let agent3_endpoints = vec!["file:///mnt/vast9/benchmark/".to_string()];
+        let agent3_endpoints = vec!["file:///mnt/filesys9/benchmark/".to_string()];
         let result3 = spec.get_base_uri(Some(&agent3_endpoints));
         assert!(result3.is_ok());
-        assert_eq!(result3.unwrap(), "file:///mnt/vast9/benchmark/");
+        assert_eq!(result3.unwrap(), "file:///mnt/filesys9/benchmark/");
 
         // Agent 4 endpoints
-        let agent4_endpoints = vec!["file:///mnt/vast13/benchmark/".to_string()];
+        let agent4_endpoints = vec!["file:///mnt/filesys13/benchmark/".to_string()];
         let result4 = spec.get_base_uri(Some(&agent4_endpoints));
         assert!(result4.is_ok());
-        assert_eq!(result4.unwrap(), "file:///mnt/vast13/benchmark/");
+        assert_eq!(result4.unwrap(), "file:///mnt/filesys13/benchmark/");
     }
 
     /// Test 8: S3 URIs work correctly

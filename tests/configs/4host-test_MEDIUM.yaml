@@ -1,0 +1,91 @@
+# MEDIUM TEST: 13,824 directories, ~2.67M files, ~21 TB
+# Use this AFTER simple test passes
+concurrency: 64
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false
+  force_overwrite: true
+
+  # MEDIUM: width=24, depth=3 → 13,824 leaf dirs
+  # 13,824 dirs × 193 files = 2,668,032 files × 8MB = ~21 TB
+  directory_structure:
+    width: 24
+    depth: 3                     # REDUCED from 4 → tree generation ~5-10 seconds
+    files_per_dir: 193
+    distribution: "bottom"
+    dir_mask: "d%d_w%d.dir"
+
+  ensure_objects:
+    - count: 2668032             # 13,824 leaf dirs × 193 files
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 8MiB
+        std_dev: 1MiB
+        min: 1MiB
+        max: 16MiB
+      use_multi_endpoint: true
+
+  cleanup: false
+
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+
+duration: 0s
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys1/benchmark/"
+          - "file:///mnt/filesys2/benchmark/"
+          - "file:///mnt/filesys3/benchmark/"
+          - "file:///mnt/filesys4/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys5/benchmark/"
+          - "file:///mnt/filesys6/benchmark/"
+          - "file:///mnt/filesys7/benchmark/"
+          - "file:///mnt/filesys8/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys9/benchmark/"
+          - "file:///mnt/filesys10/benchmark/"
+          - "file:///mnt/filesys11/benchmark/"
+          - "file:///mnt/filesys12/benchmark/"
+        strategy: least_connections
+
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys13/benchmark/"
+          - "file:///mnt/filesys14/benchmark/"
+          - "file:///mnt/filesys15/benchmark/"
+          - "file:///mnt/filesys16/benchmark/"
+        strategy: least_connections

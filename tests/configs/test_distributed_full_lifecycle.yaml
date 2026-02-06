@@ -29,6 +29,11 @@ distributed:
   shared_filesystem: true
   tree_creation_mode: coordinator
   path_selection: random
+  
+  # v0.8.50: Enable barrier synchronization for full lifecycle coordination
+  barrier_sync:
+    enabled: true
+  
   agents:
     - address: "127.0.0.1:7761"
       id: "agent-1"

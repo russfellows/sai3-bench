@@ -37,12 +37,12 @@ pub struct SizeDistribution {
     #[serde(rename = "type")]
     pub dist_type: DistributionType,
     
-    /// Minimum size in bytes (floor)
-    #[serde(default)]
+    /// Minimum size in bytes (floor) - supports size strings like "1MB" or "1MiB"
+    #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub min: Option<u64>,
     
-    /// Maximum size in bytes (ceiling)
-    #[serde(default)]
+    /// Maximum size in bytes (ceiling) - supports size strings like "16MB" or "16MiB"
+    #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub max: Option<u64>,
     
     /// Distribution-specific parameters
@@ -64,12 +64,12 @@ pub enum DistributionType {
 /// Parameters specific to distribution types
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DistributionParams {
-    /// Mean size for lognormal distribution (in bytes)
-    #[serde(default)]
+    /// Mean size for lognormal distribution (in bytes) - supports size strings like "8MB" or "8MiB"
+    #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub mean: Option<u64>,
     
-    /// Standard deviation for lognormal distribution (in bytes)
-    #[serde(default)]
+    /// Standard deviation for lognormal distribution (in bytes) - supports size strings like "1MB" or "1MiB"
+    #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub std_dev: Option<u64>,
 }
 

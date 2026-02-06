@@ -1,5 +1,38 @@
 # sai3-bench AI Agent Guide
 
+## Critical Testing Philosophy
+
+**⚠️ CRITICAL PRINCIPLE**: Tests MUST verify intended behavior, NOT implementation details.
+
+- ✅ **CORRECT**: Write tests that check what the code SHOULD do (specification/requirements)
+- ❌ **WRONG**: Write tests that check what the code currently DOES (implementation bugs)
+
+**When tests fail**:
+1. **First**: Assume the test is correct (it reflects requirements)
+2. **Second**: Fix the code to match the intended behavior
+3. **NEVER**: Change the test to match buggy implementation
+
+**Example**:
+```rust
+// CORRECT - Test verifies intended behavior:
+// "AllOrNothing barrier should FAIL if ANY agent fails"
+#[test]
+fn test_all_or_nothing_with_failure() {
+    // Setup: 2 agents, 1 ready, 1 failed
+    assert_eq!(status, BarrierStatus::Failed);  // Intended: any failure = abort
+}
+
+// WRONG - Test verifies buggy implementation:
+// "AllOrNothing returns Ready if all ALIVE agents ready"
+#[test]
+fn test_all_or_nothing_with_failure() {
+    // Setup: 2 agents, 1 ready, 1 failed
+    assert_eq!(status, BarrierStatus::Ready);   // Bug: ignores failed agents!
+}
+```
+
+Tests that verify buggy behavior are worse than no tests - they legitimize bugs and prevent fixes.
+
 ## Critical Build and Debug Instructions
 
 **IMPORTANT**: When running `cargo build` or `cargo test`, do NOT pipe output to `head` or `tail`. The user needs to see the ENTIRE output, including all warnings and errors. Run build commands without filtering:
