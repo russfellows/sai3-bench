@@ -1008,6 +1008,25 @@ distributed:
 **`grpc_keepalive_timeout`**: Wait time for PONG response (seconds)
 - Default: 10 seconds
 - Total disconnect detection time: `interval + timeout = 40s`
+- **v0.8.51 Recommendation for large-scale**: Increase to 30 seconds for deployments with >100K files
+
+**`agent_ready_timeout`**: *(v0.8.51 new)* Timeout for agents to send initial READY signal (seconds)
+- Default: 120 seconds (2 minutes)
+- Agents perform config validation (including glob pattern expansion) before sending READY
+- Large directory structures require longer timeouts
+- **Recommendations by scale**:
+  - Small (<10K files): 60 seconds
+  - Medium (10K-100K files): 120 seconds (default)
+  - Large (100K-1M files): 300 seconds (5 minutes)
+  - Very large (>1M files): 600 seconds (10 minutes)
+
+**Example for large-scale deployment**:
+```yaml
+distributed:
+  grpc_keepalive_interval: 30
+  grpc_keepalive_timeout: 30      # Increased from 10 for heavy I/O
+  agent_ready_timeout: 300        # 5 min for large glob validation
+```
 
 ### Health Check Timeouts
 

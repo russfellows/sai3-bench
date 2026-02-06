@@ -3825,9 +3825,19 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                     let file_path = path.replace("file://", "");
                     // Check if it's a glob pattern
                     if file_path.contains('*') {
-                        let paths: Vec<_> = glob::glob(&file_path)
-                            .map_err(|e| anyhow::anyhow!("Invalid glob pattern '{}': {}", path, e))?
-                            .collect();
+                        // v0.8.51: Use spawn_blocking to prevent executor starvation on large globs
+                        let file_path_clone = file_path.clone();
+                        let path_clone = path.clone();
+                        let paths = tokio::task::spawn_blocking(move || -> Result<Vec<std::path::PathBuf>> {
+                            let paths: Vec<_> = glob::glob(&file_path_clone)
+                                .map_err(|e| anyhow::anyhow!("Invalid glob pattern '{}': {}", path_clone, e))?
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|e| anyhow::anyhow!("Glob error: {}", e))?;
+                            Ok(paths)
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Blocking task failed: {}", e))??;
+                        
                         if paths.is_empty() {
                             anyhow::bail!("No files found matching GET pattern: {}", path);
                         }

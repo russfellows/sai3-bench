@@ -1261,8 +1261,15 @@ async fn prepare_sequential(
                 // Collect results as they complete - v0.8.13: Handle errors gracefully
                 let mut created_objects = Vec::with_capacity(actual_to_create as usize);
                 let mut error_result: Option<anyhow::Error> = None;
+                let mut yield_counter = 0u64;  // v0.8.51: Counter for periodic yields
                 
                 while let Some(result) = futs.next().await {
+                    // v0.8.51: Yield every 100 operations to prevent executor starvation
+                    yield_counter += 1;
+                    if yield_counter.is_multiple_of(100) {
+                        tokio::task::yield_now().await;
+                    }
+                    
                     match result {
                         Ok(Ok(Some((uri, size, latency_us)))) => {
                             metrics.put.bytes += size;
@@ -1996,8 +2003,15 @@ async fn prepare_parallel(
     // Collect results as they complete - v0.8.13: Handle errors gracefully
     let mut all_prepared = Vec::with_capacity(total_to_create as usize);
     let mut error_result: Option<anyhow::Error> = None;
+    let mut yield_counter = 0u64;  // v0.8.51: Counter for periodic yields
     
     while let Some(result) = futs.next().await {
+        // v0.8.51: Yield every 100 operations to prevent executor starvation
+        yield_counter += 1;
+        if yield_counter.is_multiple_of(100) {
+            tokio::task::yield_now().await;
+        }
+        
         match result {
             Ok(Ok(Some((uri, size, latency_us)))) => {
                 // Successful PUT
@@ -2978,7 +2992,14 @@ pub async fn cleanup_prepared_objects(
     
     // Wait for all deletion tasks to complete
     // Tasks don't return errors (they log warnings instead), so we just need to detect panics
+    let mut yield_counter = 0u64;  // v0.8.51: Counter for periodic yields
     while let Some(res) = futs.next().await {
+        // v0.8.51: Yield every 100 operations to prevent executor starvation
+        yield_counter += 1;
+        if yield_counter.is_multiple_of(100) {
+            tokio::task::yield_now().await;
+        }
+        
         if let Err(e) = res {
             tracing::error!("Cleanup task panicked: {}", e);
             // Continue with remaining tasks even if one panicked

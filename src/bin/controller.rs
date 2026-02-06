@@ -1900,6 +1900,11 @@ async fn run_distributed_workload(
     
     info!("Pre-flight validation passed - proceeding with workload execution");
     
+    // v0.8.51: Extract ready_timeout from config before spawning tasks
+    let agent_ready_timeout_secs = config.distributed.as_ref()
+        .map(|d| d.agent_ready_timeout)
+        .unwrap_or(120);
+    
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
@@ -2013,9 +2018,10 @@ async fn run_distributed_workload(
             
             debug!("Agent {} sent config via control channel", addr);
             
-            // Wait for READY status (status=1) with agent timestamp
+            // v0.8.51: Use configurable ready_timeout (default 120s, was hardcoded 30s)
+            // Large-scale deployments (>100K files) need longer timeout for glob validation
             let mut ready_received = false;
-            let ready_timeout = tokio::time::Duration::from_secs(30);
+            let ready_timeout = tokio::time::Duration::from_secs(agent_ready_timeout_secs);
             let ready_deadline = tokio::time::Instant::now() + ready_timeout;
             
             while !ready_received && tokio::time::Instant::now() < ready_deadline {
@@ -4603,9 +4609,19 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                     let file_path = path.replace("file://", "");
                     // Check if it's a glob pattern
                     if file_path.contains('*') {
-                        let paths: Vec<_> = glob::glob(&file_path)
-                            .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", path, e))?
-                            .collect();
+                        // v0.8.51: Use spawn_blocking to prevent executor starvation on large globs
+                        let file_path_clone = file_path.clone();
+                        let path_clone = path.clone();
+                        let paths = tokio::task::spawn_blocking(move || -> Result<Vec<std::path::PathBuf>> {
+                            let paths: Vec<_> = glob::glob(&file_path_clone)
+                                .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", path_clone, e))?
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|e| anyhow!("Glob error: {}", e))?;
+                            Ok(paths)
+                        })
+                        .await
+                        .map_err(|e| anyhow!("Blocking task failed: {}", e))??;
+                        
                         if paths.is_empty() {
                             bail!("No files found matching GET pattern: {}", path);
                         }
