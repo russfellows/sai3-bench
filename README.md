@@ -1,12 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.50-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.51-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-407%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-419%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-**🚀 NEW (v0.8.50)**: **YAML-driven stage orchestration** with 6 stage types, **barrier synchronization** for coordinated multi-host testing, and **comprehensive timeout configuration** (global/stage/barrier hierarchy). [See docs/CHANGELOG.md](docs/CHANGELOG.md) for details.
+**🚀 NEW (v0.8.51)**: **Critical blocking I/O fixes** for large-scale deployments (>100K files). Configurable `agent_ready_timeout` (default 120s), non-blocking glob operations, and periodic yielding in prepare loops prevent executor starvation. [See docs/CHANGELOG.md](docs/CHANGELOG.md) for details.
+
+**🚀 NEW (v0.8.50)**: **YAML-driven stage orchestration** with 6 stage types, **barrier synchronization** for coordinated multi-host testing, and **comprehensive timeout configuration** (global/stage/barrier hierarchy).
 
 **🚀 NEW (v0.8.23)**: Pre-flight distributed configuration validation prevents common misconfigurations (base_uri with isolated mode) before execution.
 

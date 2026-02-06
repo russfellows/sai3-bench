@@ -8,6 +8,85 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.51] - 2026-02-06
+
+**Critical Release: Blocking I/O Fixes for Large-Scale Deployments**
+
+This release addresses four critical executor starvation issues identified in production large-scale testing (>100K files). These fixes are essential for distributed deployments where agents must validate extensive directory structures and create millions of objects without blocking the async executor.
+
+### Added
+
+- **Comprehensive unit test suite for blocking I/O fixes** (12 new tests)
+  - `test_agent_ready_timeout_default` - Verifies 120s default timeout
+  - `test_agent_ready_timeout_custom` - Tests custom timeout parsing (60s-600s)
+  - `test_agent_ready_timeout_scale_recommendations` - Scale-based timeout validation
+  - `test_timeout_duration_conversion` - Duration conversion logic
+  - `test_timeout_realistic_values` - Real-world scenarios (10K-1M files)
+  - `test_backward_compatibility_no_timeout` - Default fallback behavior
+  - `test_glob_does_not_block_executor` - Concurrent task progress during glob
+  - `test_glob_large_directory` - 10K file glob without executor starvation
+  - `test_prepare_yields_during_creation` - 500 object prepare with heartbeats
+  - `test_prepare_sequential_yields` - Sequential mode yielding validation
+  - `test_executor_responsiveness_large_prepare` - 1000 object integration test
+  - `test_small_prepare_still_works` - Regression test for small workloads
+  - Total test count: **419 tests passing**
+
+### Changed
+
+- **Configurable agent_ready_timeout** (default: 120s, was hardcoded 30s)
+  - New configuration field: `distributed.agent_ready_timeout`
+  - Allows agents time to complete glob validation at scale
+  - Scale recommendations: 60s (small), 120s (medium), 300s (large), 600s (very large)
+  - Prevents "Agent did not send READY within 30s" errors in large-scale tests
+  - See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for configuration details
+
+- **Non-blocking glob operations** (spawn_blocking)
+  - `agent.rs` line 3828: Moved blocking glob to thread pool
+  - `controller.rs` line 4606: Moved blocking glob to thread pool
+  - Prevents 5-30 second executor stalls during file path expansion
+  - Critical for configurations with >100K files and glob patterns
+
+- **Periodic yielding in prepare loops** (tokio::task::yield_now)
+  - `prepare.rs` line 1269: Yield every 100 operations in parallel prepare
+  - `prepare.rs` line 2011: Yield every 100 operations in sequential prepare
+  - `prepare.rs` line 2999: Yield every 100 operations in cleanup
+  - Allows heartbeats, READY signals, and stats updates during million-object operations
+  - Uses `.is_multiple_of(100)` per clippy suggestion
+
+### Fixed
+
+- **Executor starvation during large-scale operations**
+  - Fixed blocking glob preventing gRPC heartbeats
+  - Fixed prepare phase blocking stats writer task
+  - Fixed cleanup phase blocking barrier coordination
+  - All fixes validated with concurrent task execution tests
+
+- **Test fixture compilation errors**
+  - Updated 5 test functions with new `agent_ready_timeout` field
+  - `src/preflight/distributed.rs`: 4 test fixtures updated
+  - `tests/distributed_config_tests.rs`: 1 test fixture updated
+  - All 419 tests passing with zero compilation errors
+
+### Documentation
+
+- Updated [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) with agent_ready_timeout recommendations
+- Added comprehensive blocking I/O fix documentation
+- Design documents archived in [docs/archive/](archive/):
+  - `BLOCKING_IO_FIXES_REQUIRED.md`
+  - `LARGE_SCALE_TIMEOUT_ANALYSIS.md`
+  - `TIMEOUT_FIX_IMPLEMENTATION.md`
+
+### Migration Guide
+
+**No breaking changes** - All fixes are backward compatible. Existing configurations will use default timeout values.
+
+**Recommended actions for large-scale deployments:**
+1. Add `agent_ready_timeout` to distributed config based on file count
+2. Verify glob patterns resolve quickly or increase timeout accordingly
+3. Monitor agent READY times in logs to tune timeout values
+
+---
+
 ## [0.8.50] - 2026-02-05
 
 **Major Release: YAML-Driven Stage Orchestration + Barrier Synchronization + Configurable Timeouts**

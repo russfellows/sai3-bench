@@ -916,6 +916,7 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         partition_overlap: 0.3,
         grpc_keepalive_interval: 30,
         grpc_keepalive_timeout: 10,
+        agent_ready_timeout: 120,  // v0.8.51: Default timeout
         barrier_sync: BarrierSyncConfig::default(),
         stages: None,
     };
