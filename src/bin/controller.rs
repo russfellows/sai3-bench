@@ -1524,7 +1524,7 @@ impl BarrierManager {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     
                     // Log progress every 10 seconds
-                    if start.elapsed().as_secs() % 10 == 0 && start.elapsed().as_millis() % 10000 < 100 {
+                    if start.elapsed().as_secs().is_multiple_of(10) && start.elapsed().as_millis() % 10000 < 100 {
                         let waiting: Vec<_> = self.agents.keys()
                             .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
                             .map(|s| {
@@ -2408,7 +2408,7 @@ async fn run_distributed_workload(
     // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
     let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
         if distributed_config.barrier_sync.enabled {
-            let agent_ids: Vec<String> = agent_addrs.iter().cloned().collect();
+            let agent_ids: Vec<String> = agent_addrs.to_vec();
             // Use default phase config (prepare) for initialization
             // Specific phase configs will be used in wait_for_barrier() calls
             let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
@@ -2682,7 +2682,7 @@ async fn run_distributed_workload(
                                 
                                 // Collect summaries for this stage (with agent_id for proper attribution)
                                 stage_summaries.entry(stage_key.clone())
-                                    .or_insert_with(Vec::new)
+                                    .or_default()
                                     .push((stats.agent_id.clone(), stage_sum));
                                 
                                 // Check if all agents have reported for this stage

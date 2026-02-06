@@ -1439,7 +1439,7 @@ async fn prepare_parallel(
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
             } else {
-                create_store_for_uri(&base_uri)?
+                create_store_for_uri(base_uri)?
             };
             
             // List existing objects with this prefix (unless skip_verification is enabled)
@@ -1460,7 +1460,7 @@ async fn prepare_parallel(
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     store.as_ref(),
-                    &base_uri,
+                    base_uri,
                     tree_manifest,
                     agent_id,
                     num_agents,

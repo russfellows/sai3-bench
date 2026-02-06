@@ -1549,9 +1549,11 @@ pub struct PhaseBarrierConfig {
 /// Completion criteria for stage execution (how stage knows it's done)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CompletionCriteria {
     /// Complete after specified duration (time-based)
     /// Used by: execute stages, custom stages with fixed runtime
+    #[default]
     Duration,
     
     /// Complete when all tasks finished (task-based)
@@ -1572,11 +1574,6 @@ pub enum CompletionCriteria {
     DurationOrTasks,
 }
 
-impl Default for CompletionCriteria {
-    fn default() -> Self {
-        CompletionCriteria::Duration
-    }
-}
 
 /// Stage-specific configuration based on stage type
 #[derive(Debug, Clone, Serialize, Deserialize)]

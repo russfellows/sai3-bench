@@ -215,23 +215,23 @@ impl AgentState {
         match (from, to) {
             // Stage execution: not ready -> ready (at barrier)
             (AtStage { stage_index: i1, ready_for_next: false, .. }, 
-             AtStage { stage_index: i2, ready_for_next: true, .. }) if i1 == i2 => return true,
+             AtStage { stage_index: i2, ready_for_next: true, .. }) if i1 == i2 => true,
             
             // Stage transition: ready at stage N -> executing stage N+1
             (AtStage { stage_index: i1, ready_for_next: true, .. }, 
-             AtStage { stage_index: i2, ready_for_next: false, .. }) if *i2 == i1 + 1 => return true,
+             AtStage { stage_index: i2, ready_for_next: false, .. }) if *i2 == i1 + 1 => true,
             
             // v0.8.28: Validated state (pseudo-stage 0) -> execute first real stage (also index 0)
             // This handles: "validated" ready -> "preflight" executing (both at index 0)
             (AtStage { stage_index: 0, ready_for_next: true, stage_name }, 
-             AtStage { stage_index: 0, ready_for_next: false, .. }) if stage_name == "validated" => return true,
+             AtStage { stage_index: 0, ready_for_next: false, .. }) if stage_name == "validated" => true,
             
             // Start first stage from Idle (executing mode)
-            (Idle, AtStage { stage_index: 0, ready_for_next: false, .. }) => return true,
+            (Idle, AtStage { stage_index: 0, ready_for_next: false, .. }) => true,
             
             // v0.8.28: Validation complete - ready for first stage barrier
             // This is used when START handler validates config and sets ready state
-            (Idle, AtStage { stage_index: 0, ready_for_next: true, .. }) => return true,
+            (Idle, AtStage { stage_index: 0, ready_for_next: true, .. }) => true,
             
             // =========================================================================
             // LEGACY TRANSITION COMMENTED OUT - v0.8.29 Preparing state removed
@@ -241,30 +241,30 @@ impl AgentState {
             // (Preparing, AtStage { stage_index: 0, ready_for_next: false, .. }) => return true,
             
             // Complete final stage -> Completed
-            (AtStage { ready_for_next: true, .. }, Completed) => return true,
+            (AtStage { ready_for_next: true, .. }, Completed) => true,
             
             // v0.8.28: Cleanup after disconnect at barrier -> Idle
-            (AtStage { ready_for_next: true, .. }, Idle) => return true,
+            (AtStage { ready_for_next: true, .. }, Idle) => true,
             
             // Stage error -> Failed
-            (AtStage { .. }, Failed) => return true,
+            (AtStage { .. }, Failed) => true,
             
             // Abort from any stage
-            (AtStage { .. }, Aborting) => return true,
+            (AtStage { .. }, Aborting) => true,
             
             // Terminal state transitions
-            (Completed, Idle) => return true,  // Reset for next workload
-            (Failed, Idle) => return true,     // Error recovery
+            (Completed, Idle) => true,  // Reset for next workload
+            (Failed, Idle) => true,     // Error recovery
             
             // Abort from any state
-            (_, Aborting) => return true,
-            (Aborting, Idle) => return true,   // Cleanup complete after abort
+            (_, Aborting) => true,
+            (Aborting, Idle) => true,   // Cleanup complete after abort
             
             // No-op: Idle → Idle for safety
-            (Idle, Idle) => return true,
-            (Failed, Failed) => return true,
+            (Idle, Idle) => true,
+            (Failed, Failed) => true,
             
-            _ => return false,  // All other transitions invalid
+            _ => false,  // All other transitions invalid
         }
         
         /* v0.8.29: ALL LEGACY TRANSITIONS REMOVED - Use YAML-driven stages only
@@ -1587,7 +1587,7 @@ impl Agent for AgentSvc {
                         error!("Stats writer: Timeout waiting for workload to start ({} seconds). Current state: {:?}",
                                MAX_WAIT_SECS, state);
                         return;
-                    } else if wait_count % 10 == 0 {
+                    } else if wait_count.is_multiple_of(10) {
                         // Log every 10 seconds while waiting
                         warn!("Stats writer: Still waiting for workload to start ({}s, state: {:?})",
                               wait_count, state);
@@ -2090,7 +2090,7 @@ impl Agent for AgentSvc {
             let mut loop_iteration = 0u64;
             loop {
                 loop_iteration += 1;
-                if loop_iteration % 100 == 0 {
+                if loop_iteration.is_multiple_of(100) {
                     debug!("Control reader: loop iteration {} - waiting for messages", loop_iteration);
                 }
                 tokio::select! {
