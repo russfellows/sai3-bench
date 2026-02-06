@@ -196,6 +196,7 @@ mod tests {
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
+                agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -258,6 +259,7 @@ mod tests {
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
+                agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -315,6 +317,7 @@ mod tests {
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
+                agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),
@@ -381,6 +384,7 @@ mod tests {
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
+                agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
             }),

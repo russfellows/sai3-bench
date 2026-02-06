@@ -1082,6 +1082,13 @@ pub struct DistributedConfig {
     #[serde(default = "default_grpc_keepalive_timeout")]
     pub grpc_keepalive_timeout: u64,
     
+    /// v0.8.51: Timeout for agents to send initial READY signal after receiving config (default: 120)
+    /// Agents perform config validation (including glob pattern expansion) before sending READY.
+    /// Large directory structures (>100K files) require longer timeouts.
+    /// Recommendations: Small (<10K files): 60s, Medium (10K-100K): 120s, Large (>100K): 300-600s
+    #[serde(default = "default_agent_ready_timeout")]
+    pub agent_ready_timeout: u64,
+    
     /// v0.8.25: Barrier synchronization for phase coordination
     /// Disabled by default for backward compatibility
     #[serde(default)]
@@ -1254,6 +1261,10 @@ fn default_grpc_keepalive_interval() -> u64 {
 
 fn default_grpc_keepalive_timeout() -> u64 {
     10  // 10 seconds - wait for PONG
+}
+
+fn default_agent_ready_timeout() -> u64 {
+    120  // 120 seconds (2 minutes) - increased from 30s in v0.8.51 for large-scale deployments
 }
 
 /// Directory tree creation mode for distributed testing
