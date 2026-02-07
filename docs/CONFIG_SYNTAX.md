@@ -1830,6 +1830,32 @@ prepare:
   cleanup: true              # Remove prepared objects after test
 ```
 
+**Note: Thousand Separators in YAML Numbers (v0.8.52+)**
+
+For improved readability, numeric values support thousand separators (commas, underscores, or spaces):
+
+```yaml
+prepare:
+  directory_structure:
+    width: 100
+    depth: 3
+    files_per_dir: 10,000     # Comma separator (more readable than 10000)
+    distribution: uniform
+  
+  ensure_objects:
+    - count: 1,000,000         # 1 million objects
+      min_size: 1,048,576      # 1 MiB (1024 × 1024)
+      max_size: 104,857,600    # 100 MiB
+    
+    # Alternative: underscore separators (common in Rust/Python)
+    - count: 500_000
+      min_size: 524_288        # 512 KiB
+    
+    # Alternative: space separators (common in some locales)
+    - count: 250 000
+      min_size: 262 144        # 256 KiB
+```
+
 ### Cleanup-Only Mode (v0.8.7+)
 
 Run cleanup without prepare or workload phases - useful for cleaning up after interrupted benchmarks:

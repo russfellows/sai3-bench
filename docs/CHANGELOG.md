@@ -8,6 +8,108 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.52] - 2026-02-06
+
+**Maintainability Release: Adaptive Retry + Code Refactoring + Enhanced UX**
+
+This release improves code maintainability, enhances prepare phase resilience with adaptive retry strategies, and adds user-friendly numeric formatting across the codebase.
+
+### Added
+
+- **Adaptive retry strategy for prepare phase failures** (80-20 rule)
+  - Intelligent retry based on failure rate:
+    - `<20%` failures: Full retry (10 attempts) - likely transient issues
+    - `20-80%` failures: Limited retry (3 attempts) - potential systemic problems
+    - `>80%` failures: Skip retry - clear systemic failure, no point retrying
+  - Deferred retry runs AFTER main prepare phase completes
+  - More aggressive exponential backoff (500ms initial, 30s max, 2.0× multiplier)
+  - Prevents "missing object" errors during execution phase
+  - Eliminates fast path performance impact
+  - **11 comprehensive unit tests** for all failure rate scenarios
+  - Total test count: **436 tests passing** (+17 from v0.8.51)
+
+- **Thousand separator formatting for numeric output**
+  - Dry-run displays: `64,032,768 files` instead of `64032768 files`
+  - TSV column headers: sizes like `1,048,576` for improved readability
+  - All validation messages: clearer numeric output
+  - Dependency: `num-format` crate (v0.4+)
+
+- **YAML numeric input with thousand separators** (v0.8.52)
+  - Support for commas, underscores, and spaces in YAML numbers
+  - Examples: `count: 64,032,768`, `count: 64_032_768`, `count: 64 032 768`
+  - Custom serde deserializers handle all three separator formats
+  - Applies to all numeric fields: `count`, `min_size`, `max_size`, `width`, `depth`, `files_per_dir`
+  - Backward compatible: plain numbers (`64032768`) still work
+  - See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for examples
+
+- **Configuration conflict detection warnings**
+  - Warns when `cleanup: false` conflicts with YAML cleanup stage
+  - Helps prevent unintended behavior in multi-stage configurations
+  - Non-fatal: displays warning but continues execution
+
+### Changed
+
+- **Code refactoring: Split prepare.rs into 10 focused modules** (Phase 1)
+  - Original: monolithic 4,778-line file
+  - New structure: 10 modules averaging ~478 lines each
+  - **Module breakdown:**
+    - `error_tracking.rs` (181 lines) - PrepareErrorTracker, ListingErrorTracker
+    - `retry.rs` (231 lines) - Adaptive retry with 80-20 rule
+    - `metrics.rs` (87 lines) - PreparedObject, PrepareMetrics types
+    - `listing.rs` (364 lines) - Distributed listing with progress
+    - `sequential.rs` (587 lines) - Sequential prepare strategy
+    - `parallel.rs` (812 lines) - Parallel prepare strategy
+    - `directory_tree.rs` (709 lines) - Tree operations and agent assignment
+    - `cleanup.rs` (382 lines) - Cleanup and verification
+    - `tests.rs` (1,312 lines) - All 178 prepare phase tests
+    - `mod.rs` (237 lines) - Public API and orchestration
+  - **Benefits:**
+    - Average module size reduced 10× (4,778 → ~478 lines)
+    - Clear separation of concerns
+    - Easier code navigation and maintenance
+    - Test isolation in dedicated module
+    - Improved IDE performance and analysis
+  - **Verification:**
+    - All 178 prepare tests passing
+    - Zero compilation warnings
+    - Build time unchanged (~12s)
+    - No functionality changes - pure refactoring
+
+- **Improved validation error messages**
+  - All numeric values use thousand separators for readability
+  - Directory structure validation shows formatted counts
+  - Conflict warnings highlight specific configuration issues
+
+### Fixed
+
+- **Custom serde deserializers for numeric fields**
+  - New `src/serde_helpers.rs` module with deserializer utilities
+  - Applied to `DirectoryStructure` and `EnsureObjects` structs
+  - Handles all separator formats transparently
+
+### Documentation
+
+- Updated [README.md](../README.md) with v0.8.52 feature descriptions
+- Added thousand separator examples to [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)
+- All example configurations updated to show readable numeric format
+
+### Migration Guide
+
+**No breaking changes** - All updates are backward compatible.
+
+**Optional enhancements:**
+1. Use thousand separators in YAML configs for better readability:
+   ```yaml
+   prepare:
+     ensure_objects:
+       - count: 10,000,000  # More readable than 10000000
+         min_size: 1,048,576  # Clearly shows 1 MiB
+   ```
+2. Review prepare phase retry behavior in logs - new adaptive strategy may change retry patterns
+3. Monitor prepare phase warnings for configuration conflicts
+
+---
+
 ## [0.8.51] - 2026-02-06
 
 **Critical Release: Blocking I/O Fixes for Large-Scale Deployments**
