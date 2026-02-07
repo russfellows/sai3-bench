@@ -26,7 +26,7 @@ This release improves code maintainability, enhances prepare phase resilience wi
   - Prevents "missing object" errors during execution phase
   - Eliminates fast path performance impact
   - **11 comprehensive unit tests** for all failure rate scenarios
-  - Total test count: **436 tests passing** (+17 from v0.8.51)
+  - Total test count: **446 tests passing** (+27 from v0.8.51)
 
 - **Thousand separator formatting for numeric output**
   - Dry-run displays: `64,032,768 files` instead of `64032768 files`
@@ -40,6 +40,19 @@ This release improves code maintainability, enhances prepare phase resilience wi
   - Custom serde deserializers handle all three separator formats
   - Applies to all numeric fields: `count`, `min_size`, `max_size`, `width`, `depth`, `files_per_dir`
   - Backward compatible: plain numbers (`64032768`) still work
+  - See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for examples
+
+- **Human-readable time units in YAML configuration** (v0.8.52)
+  - Support for time unit suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
+  - Examples: `duration: "5m"`, `timeout: "2h"`, `delay: "30s"`
+  - Applies to all timeout/duration fields:
+    - `duration`, `start_delay`, `post_prepare_delay`
+    - `grpc_keepalive_interval`, `grpc_keepalive_timeout`
+    - `agent_ready_timeout`, `query_timeout`, `agent_barrier_timeout`
+    - `default_heartbeat_interval`, `default_query_timeout`
+    - SSH `timeout` and all barrier sync timeouts
+  - Backward compatible: plain integers still interpreted as seconds
+  - **10 comprehensive unit tests** for duration parsing
   - See [CONFIG_SYNTAX.md](CONFIG_SYNTAX.md) for examples
 
 - **Configuration conflict detection warnings**

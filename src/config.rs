@@ -511,7 +511,8 @@ pub struct PrepareConfig {
     
     /// Delay in seconds after prepare phase completes (for cloud storage eventual consistency)
     /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
-    #[serde(default)]
+    /// Supports time units: "5s", "2m", "1h" (or plain seconds: 300)
+    #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub post_prepare_delay: u64,
     
     /// Optional directory tree structure (rdf-bench style width/depth model)
@@ -1037,7 +1038,8 @@ pub struct DistributedConfig {
     
     /// Delay in seconds before coordinated start (default: 2)
     /// Allows time for all agents to receive config and prepare
-    #[serde(default = "default_start_delay")]
+    /// Supports time units: "30s", "5m", "1h" (or plain seconds: 300)
+    #[serde(default = "default_start_delay", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub start_delay: u64,
     
     /// Path prefix template for agent isolation (default: "agent-{id}/")
@@ -1075,19 +1077,22 @@ pub struct DistributedConfig {
     /// gRPC keep-alive interval in seconds (default: 30)
     /// How often PING frames are sent to detect dead connections
     /// For very slow operations (>30s), increase to 60+ to avoid premature disconnects
-    #[serde(default = "default_grpc_keepalive_interval")]
+    /// Supports time units: "30s", "5m", "1h" (or plain seconds: 300)
+    #[serde(default = "default_grpc_keepalive_interval", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub grpc_keepalive_interval: u64,
     
     /// gRPC keep-alive timeout in seconds (default: 10)
     /// How long to wait for PONG response before declaring connection dead
-    #[serde(default = "default_grpc_keepalive_timeout")]
+    /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
+    #[serde(default = "default_grpc_keepalive_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub grpc_keepalive_timeout: u64,
     
     /// v0.8.51: Timeout for agents to send initial READY signal after receiving config (default: 120)
     /// Agents perform config validation (including glob pattern expansion) before sending READY.
     /// Large directory structures (>100K files) require longer timeouts.
     /// Recommendations: Small (<10K files): 60s, Medium (10K-100K): 120s, Large (>100K): 300-600s
-    #[serde(default = "default_agent_ready_timeout")]
+    /// Supports time units: "2m", "5m", "10m" (or plain seconds: 300)
+    #[serde(default = "default_agent_ready_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub agent_ready_timeout: u64,
     
     /// v0.8.25: Barrier synchronization for phase coordination
@@ -1167,7 +1172,8 @@ pub struct SshConfig {
     pub key_path: Option<String>,
     
     /// SSH connection timeout in seconds (default: 10)
-    #[serde(default = "default_ssh_timeout")]
+    /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
+    #[serde(default = "default_ssh_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub timeout: u64,
     
     /// Known hosts file path (default: ~/.ssh/known_hosts)
@@ -1543,7 +1549,8 @@ pub struct PhaseBarrierConfig {
     pub missed_threshold: u32,
     
     /// Timeout for explicit agent query (default: 10s)
-    #[serde(default = "default_query_timeout")]
+    /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
+    #[serde(default = "default_query_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub query_timeout: u64,
     
     /// Retries for agent query (default: 2)
@@ -1554,7 +1561,8 @@ pub struct PhaseBarrierConfig {
     /// How long each agent waits for controller to release barrier
     /// Must be > (heartbeat_interval * missed_threshold + query_timeout * query_retries)
     /// For very large scales (300k+ dirs), use 600s+
-    #[serde(default = "default_agent_barrier_timeout")]
+    /// Supports time units: "2m", "5m", "10m" (or plain seconds: 600)
+    #[serde(default = "default_agent_barrier_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub agent_barrier_timeout: u64,
 }
 
@@ -1684,13 +1692,15 @@ pub struct BarrierSyncConfig {
     pub enabled: bool,
     
     /// Default heartbeat settings (apply to all phases unless overridden)
-    #[serde(default = "default_heartbeat_interval")]
+    /// Supports time units: "30s", "1m", "5m" (or plain seconds: 300)
+    #[serde(default = "default_heartbeat_interval", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub default_heartbeat_interval: u64,
     
     #[serde(default = "default_missed_threshold")]
     pub default_missed_threshold: u32,
     
-    #[serde(default = "default_query_timeout")]
+    /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
+    #[serde(default = "default_query_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
     pub default_query_timeout: u64,
     
     #[serde(default = "default_query_retries")]
