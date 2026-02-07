@@ -75,10 +75,25 @@ This will:
 
 ## Basic Structure
 
+**Note: Human-Readable Time Units (v0.8.52+)**
+
+All timeout and duration fields support convenient time unit suffixes for better readability:
+- **Supported units**: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
+- **Examples**: `"30s"`, `"5m"`, `"2h"`, `"1d"`
+- **Backward compatible**: Plain integers still work (interpreted as seconds)
+- **Applies to**: `duration`, `start_delay`, `grpc_keepalive_interval`, `grpc_keepalive_timeout`, `agent_ready_timeout`, `post_prepare_delay`, `query_timeout`, `agent_barrier_timeout`, and all barrier/SSH timeout fields
+
+```yaml
+# All of these are equivalent:
+duration: "300s"    # 300 seconds
+duration: "5m"      # 5 minutes = 300 seconds  
+duration: 300       # Plain integer (backward compatible)
+```
+
 ```yaml
 # Global settings
 target: "gs://bucket-name/"   # Base URI for all operations (optional)
-duration: "60s"               # Test duration (examples: "30s", "5m", "1h")
+duration: "60s"               # Test duration - supports time units: "5m", "2h" (or plain: 300)
 concurrency: 32               # Number of parallel workers
 page_cache_mode: auto         # Page cache hint for file:// URIs (optional)
                               # Values: auto, sequential, random, dontneed, normal
@@ -918,13 +933,18 @@ distributed:
 
 ## Timeout Configuration
 
-**Introduced in v0.8.50**
+**Introduced in v0.8.50, enhanced in v0.8.52 with human-readable time units**
 
 Comprehensive timeout system prevents indefinite hangs in distributed testing. Three categories of timeouts:
 
 1. **Agent operation timeouts**: How long agents wait for storage operations
 2. **Barrier synchronization timeouts**: How long agents wait at coordination barriers
 3. **gRPC communication timeouts**: How long controller waits for RPC responses
+
+**Time Unit Support (v0.8.52+)**: All timeout fields support human-readable units:
+- **Units**: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
+- **Examples**: `"30s"`, `"5m"`, `"2h"`, `"1d"`
+- **Backward compatible**: Plain integers still work (interpreted as seconds)
 
 ### Agent Operation Timeouts
 
@@ -936,22 +956,22 @@ distributed:
     - name: "prepare"
       order: 1
       completion: tasks_done
-      timeout_secs: 600         # Agent timeout: 10 minutes for prepare
+      timeout_secs: "10m"       # 10 minutes (600 seconds) - with time units
       config:
         type: prepare
     
     - name: "execute"
       order: 2
       completion: duration
-      timeout_secs: 3600        # Agent timeout: 1 hour for execute
+      timeout_secs: "1h"        # 1 hour (3600 seconds) - with time units
       config:
         type: execute
-        duration: "30m"
+        duration: "30m"          # Execute for 30 minutes
     
     - name: "cleanup"
       order: 3
       completion: tasks_done
-      timeout_secs: 1800        # Agent timeout: 30 minutes for cleanup
+      timeout_secs: 1800        # 30 minutes - plain integer still works
       config:
         type: cleanup
 ```
@@ -973,11 +993,16 @@ distributed:
   barrier_sync:
     enabled: true
     
+    # Using time units for better readability (v0.8.52+)
     prepare:
-      agent_barrier_timeout: 600  # 10 minutes for large dataset prepare
+      agent_barrier_timeout: "10m"  # 10 minutes for large dataset prepare
     
     execute:
-      agent_barrier_timeout: 300  # 5 minutes for execute barrier
+      agent_barrier_timeout: "5m"   # 5 minutes for execute barrier
+    
+    # Plain integers still work (interpreted as seconds)
+    cleanup:
+      agent_barrier_timeout: 180     # 3 minutes (180 seconds)
 ```
 
 **Key insight**: Barrier timeout is **separate from** agent operation timeout:
@@ -990,8 +1015,15 @@ Configure gRPC call timeouts at distributed config level:
 
 ```yaml
 distributed:
-  grpc_keepalive_interval: 30   # PING frames every 30 seconds
-  grpc_keepalive_timeout: 10    # Wait 10s for PONG before disconnect
+  # Using time units (v0.8.52+) - more readable
+  grpc_keepalive_interval: "30s"   # PING frames every 30 seconds
+  grpc_keepalive_timeout: "10s"    # Wait 10s for PONG before disconnect
+  agent_ready_timeout: "2m"        # 2 minutes for agents to send READY
+  start_delay: "5s"                # 5 second delay before coordinated start
+  
+  # Or use plain integers (backward compatible, interpreted as seconds)
+  # grpc_keepalive_interval: 30
+  # grpc_keepalive_timeout: 10
   
   agents:
     - address: "host1:7761"
@@ -1000,18 +1032,21 @@ distributed:
 
 **Parameters**:
 
-**`grpc_keepalive_interval`**: How often PING frames sent (seconds)
+**`grpc_keepalive_interval`**: How often PING frames sent
 - Default: 30 seconds
+- Format: `"30s"`, `"1m"`, or plain integer `30`
 - Use case: Detect dead connections quickly
-- For slow operations (>30s): Increase to 60+ to avoid spurious disconnects
+- For slow operations (>30s): Increase to `"1m"` or `"2m"` to avoid spurious disconnects
 
-**`grpc_keepalive_timeout`**: Wait time for PONG response (seconds)
+**`grpc_keepalive_timeout`**: Wait time for PONG response
 - Default: 10 seconds
+- Format: `"10s"`, `"30s"`, or plain integer `10`
 - Total disconnect detection time: `interval + timeout = 40s`
-- **v0.8.51 Recommendation for large-scale**: Increase to 30 seconds for deployments with >100K files
+- **v0.8.51 Recommendation for large-scale**: Increase to `"30s"` for deployments with >100K files
 
-**`agent_ready_timeout`**: *(v0.8.51 new)* Timeout for agents to send initial READY signal (seconds)
+**`agent_ready_timeout`**: *(v0.8.51 new)* Timeout for agents to send initial READY signal
 - Default: 120 seconds (2 minutes)
+- Format: `"2m"`, `"5m"`, `"10m"`, or plain integer `120`
 - Agents perform config validation (including glob pattern expansion) before sending READY
 - Large directory structures require longer timeouts
 - **Recommendations by scale**:
@@ -1121,7 +1156,7 @@ distributed:
 ```yaml
 stages:
   - name: "prepare"
-    timeout_secs: 3600  # Was 600, now 1 hour
+    timeout_secs: "1h"  # Was "10m" (600s), now 1 hour - using time units
 ```
 
 **Problem**: "gRPC deadline exceeded"
@@ -1135,8 +1170,9 @@ stages:
 
 ```yaml
 distributed:
-  grpc_keepalive_interval: 60   # Was 30
-  grpc_keepalive_timeout: 30    # Was 10
+  grpc_keepalive_interval: "1m"    # Was "30s", using time units
+  grpc_keepalive_timeout: "30s"    # Was "10s"
+  # Or use plain integers: 60 and 30
 ```
 
 **Problem**: Operations take 60+ seconds but gRPC disconnects
@@ -1146,7 +1182,8 @@ distributed:
 **Solution**: Increase keepalive interval:
 ```yaml
 distributed:
-  grpc_keepalive_interval: 120  # 2 minutes for very slow operations
+  grpc_keepalive_interval: "2m"  # 2 minutes for very slow operations (using time units)
+  # Or: grpc_keepalive_interval: 120  # Plain integer (seconds) also works
 ```
 
 ## Distributed Testing
@@ -1162,6 +1199,11 @@ distributed:
   shared_filesystem: true        # Storage shared across agents?
   tree_creation_mode: coordinator  # Who creates directory tree?
   path_selection: partitioned    # How agents select paths?
+  
+  # Time-related settings support human-readable units (v0.8.52+)
+  start_delay: "30s"             # Delay before starting (or plain: 30)
+  grpc_keepalive_interval: "1m"  # Keepalive interval (or plain: 60)
+  agent_ready_timeout: "5m"      # Agent ready timeout (or plain: 300)
   
   agents:
     - address: "host1.example.com:7761"
@@ -1828,6 +1870,32 @@ prepare:
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test
+```
+
+**Note: Thousand Separators in YAML Numbers (v0.8.52+)**
+
+For improved readability, numeric values support thousand separators (commas, underscores, or spaces):
+
+```yaml
+prepare:
+  directory_structure:
+    width: 100
+    depth: 3
+    files_per_dir: 10,000     # Comma separator (more readable than 10000)
+    distribution: uniform
+  
+  ensure_objects:
+    - count: 1,000,000         # 1 million objects
+      min_size: 1,048,576      # 1 MiB (1024 × 1024)
+      max_size: 104,857,600    # 100 MiB
+    
+    # Alternative: underscore separators (common in Rust/Python)
+    - count: 500_000
+      min_size: 524_288        # 512 KiB
+    
+    # Alternative: space separators (common in some locales)
+    - count: 250 000
+      min_size: 262 144        # 256 KiB
 ```
 
 ### Cleanup-Only Mode (v0.8.7+)
