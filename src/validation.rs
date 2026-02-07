@@ -5,6 +5,18 @@ use crate::config::{Config, PageCacheMode, ProcessScaling};
 use crate::size_generator::SizeGenerator;
 use crate::workload::BackendType;
 use anyhow::{Context, Result};
+use num_format::{Locale, ToFormattedString};
+
+/// Format a u64 with thousand separators using system locale
+/// Example: 64032768 → "64,032,768" (US locale)
+fn format_with_thousands(n: u64) -> String {
+    n.to_formatted_string(&Locale::en)
+}
+
+/// Format a usize with thousand separators
+fn format_usize(n: usize) -> String {
+    (n as u64).to_formatted_string(&Locale::en)
+}
 
 /// Display comprehensive configuration validation summary
 /// This function is used by both the standalone binary and the controller
@@ -118,6 +130,24 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             println!("│ Partition Overlap: {:.1}%", dist.partition_overlap * 100.0);
         }
         
+        // v0.8.51: Show timeout configuration if modified from defaults
+        println!("│");
+        println!("│ gRPC Timeouts:");
+        if dist.grpc_keepalive_interval != 30 {
+            println!("│   Keepalive:      {}s ⚠️  CUSTOM (default: 30s)", dist.grpc_keepalive_interval);
+        }
+        if dist.grpc_keepalive_timeout != 10 {
+            println!("│   Keepalive TO:   {}s ⚠️  CUSTOM (default: 10s)", dist.grpc_keepalive_timeout);
+        }
+        if dist.agent_ready_timeout != 120 {
+            let timeout_display = if dist.agent_ready_timeout >= 60 {
+                format!("{}m", dist.agent_ready_timeout / 60)
+            } else {
+                format!("{}s", dist.agent_ready_timeout)
+            };
+            println!("│   Agent Ready:    {} ⚠️  CUSTOM (default: 120s)", timeout_display);
+        }
+        
         // v0.8.22: Display global multi-endpoint configuration if present
         if let Some(ref global_multi) = config.multi_endpoint {
             println!("│");
@@ -193,12 +223,12 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             }
                             crate::config::StageSpecificConfig::Prepare { expected_objects } => {
                                 if let Some(count) = expected_objects {
-                                    println!("│   Expected:   {} objects", count);
+                                    println!("│   Expected:   {} objects", format_usize(*count));
                                 }
                             }
                             crate::config::StageSpecificConfig::Cleanup { expected_objects } => {
                                 if let Some(count) = expected_objects {
-                                    println!("│   Expected:   {} objects", count);
+                                    println!("│   Expected:   {} objects", format_usize(*count));
                                 }
                             }
                             crate::config::StageSpecificConfig::Custom { command, args } => {
@@ -219,11 +249,31 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             }
                         }
                         
-                        // Show barrier configuration
+                        // Show barrier configuration with timeout details (v0.8.51)
                         if let Some(ref stage_barrier) = stage.barrier {
-                            println!("│   Barrier:    ✅ {:?} (override)", stage_barrier.barrier_type);
+                            println!("│   Barrier:    ✅ {:?} (stage override)", stage_barrier.barrier_type);
+                            
+                            // Show timeout if different from default (120s)
+                            if stage_barrier.agent_barrier_timeout != 120 {
+                                let timeout_display = if stage_barrier.agent_barrier_timeout >= 86400 {
+                                    format!("{}h", stage_barrier.agent_barrier_timeout / 3600)
+                                } else if stage_barrier.agent_barrier_timeout >= 3600 {
+                                    format!("{:.1}h", stage_barrier.agent_barrier_timeout as f64 / 3600.0)
+                                } else if stage_barrier.agent_barrier_timeout >= 60 {
+                                    format!("{}m", stage_barrier.agent_barrier_timeout / 60)
+                                } else {
+                                    format!("{}s", stage_barrier.agent_barrier_timeout)
+                                };
+                                println!("│   Timeout:    {} ⚠️  CUSTOM (default: 120s)", timeout_display);
+                            }
+                            
+                            // Show heartbeat if different from default (30s)
+                            if stage_barrier.heartbeat_interval != 30 {
+                                println!("│   Heartbeat:  {}s ⚠️  CUSTOM (default: 30s)", 
+                                    stage_barrier.heartbeat_interval);
+                            }
                         } else if dist_config.barrier_sync.enabled {
-                            println!("│   Barrier:    ✅ ENABLED (global)");
+                            println!("│   Barrier:    ✅ ENABLED (global config)");
                         } else {
                             println!("│   Barrier:    ❌ DISABLED");
                         }
@@ -237,6 +287,134 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     println!("│ All agents will synchronize at barriers between stages");
                     println!("└──────────────────────────────────────────────────────────────────────┘");
                     println!();
+                    
+                    // v0.8.52: Check for conflicting cleanup configuration
+                    // If explicit stages exist + has cleanup stage + prepare.cleanup=false → WARN
+                    if let Some(ref prepare) = config.prepare {
+                        let has_cleanup_stage = stages.iter().any(|s| matches!(s.config, crate::config::StageSpecificConfig::Cleanup { .. }));
+                        
+                        if has_cleanup_stage && !prepare.cleanup {
+                            println!("┌─ ⚠️  CONFIGURATION CONFLICT DETECTED ⚠️  ────────────────────────────┐");
+                            println!("│                                                                      │");
+                            println!("│ 🔴 CONFLICTING CLEANUP SETTINGS:                                     │");
+                            println!("│                                                                      │");
+                            println!("│   prepare.cleanup: false     (requests: KEEP objects)                │");
+                            println!("│   stages: includes CLEANUP   (requests: DELETE objects)              │");
+                            println!("│                                                                      │");
+                            println!("│ 🚨 PRECEDENCE DECISION:                                              │");
+                            println!("│                                                                      │");
+                            println!("│   ✅ Explicit YAML stages take precedence                            │");
+                            println!("│   ❌ prepare.cleanup: false is IGNORED                               │");
+                            println!("│                                                                      │");
+                            println!("│ 📢 WHAT WILL HAPPEN:                                                 │");
+                            println!("│                                                                      │");
+                            println!("│   → Cleanup stage WILL execute                                       │");
+                            println!("│   → All {} objects WILL be deleted                                   │", 
+                                if let Some(ref dir_struct) = prepare.directory_structure {
+                                    let total_files = (dir_struct.width as u64).pow(dir_struct.depth as u32) * dir_struct.files_per_dir as u64;
+                                    format_with_thousands(total_files)
+                                } else {
+                                    "prepared".to_string()
+                                });
+                            println!("│   → Data will NOT be kept for reuse                                 │");
+                            println!("│                                                                      │");
+                            println!("│ 🔧 TO FIX THIS CONFLICT:                                             │");
+                            println!("│                                                                      │");
+                            println!("│   Option 1 (Keep data):                                              │");
+                            println!("│     Remove the cleanup stage from 'stages:' list                     │");
+                            println!("│                                                                      │");
+                            println!("│   Option 2 (Delete data):                                            │");
+                            println!("│     Set prepare.cleanup: true to match stages intent                 │");
+                            println!("│                                                                      │");
+                            println!("└──────────────────────────────────────────────────────────────────────┘");
+                            println!();
+                        } else if !has_cleanup_stage && prepare.cleanup {
+                            println!("┌─ ⚠️  CONFIGURATION CONFLICT DETECTED ⚠️  ────────────────────────────┐");
+                            println!("│                                                                      │");
+                            println!("│ 🔴 CONFLICTING CLEANUP SETTINGS:                                     │");
+                            println!("│                                                                      │");
+                            println!("│   prepare.cleanup: true      (requests: DELETE objects)              │");
+                            println!("│   stages: NO cleanup stage   (requests: KEEP objects)                │");
+                            println!("│                                                                      │");
+                            println!("│ 🚨 PRECEDENCE DECISION:                                              │");
+                            println!("│                                                                      │");
+                            println!("│   ✅ Explicit YAML stages take precedence                            │");
+                            println!("│   ❌ prepare.cleanup: true is IGNORED                                │");
+                            println!("│                                                                      │");
+                            println!("│ 📢 WHAT WILL HAPPEN:                                                 │");
+                            println!("│                                                                      │");
+                            println!("│   → NO cleanup stage will execute                                    │");
+                            println!("│   → All {} objects WILL be kept                                      │", 
+                                if let Some(ref dir_struct) = prepare.directory_structure {
+                                    let total_files = (dir_struct.width as u64).pow(dir_struct.depth as u32) * dir_struct.files_per_dir as u64;
+                                    format_with_thousands(total_files)
+                                } else {
+                                    "prepared".to_string()
+                                });
+                            println!("│   → Data available for subsequent runs                               │");
+                            println!("│                                                                      │");
+                            println!("│ 🔧 TO FIX THIS CONFLICT:                                             │");
+                            println!("│                                                                      │");
+                            println!("│   Option 1 (Keep data):                                              │");
+                            println!("│     Set prepare.cleanup: false to match stages intent                │");
+                            println!("│                                                                      │");
+                            println!("│   Option 2 (Delete data):                                            │");
+                            println!("│     Add cleanup stage to 'stages:' list                              │");
+                            println!("│                                                                      │");
+                            println!("└──────────────────────────────────────────────────────────────────────┘");
+                            println!();
+                        }
+                    }
+                    
+                    // v0.8.51: Display prepare configuration when using stages
+                    // (since it's hidden in the main prepare section for stage-driven workflows)
+                    if let Some(ref prepare) = config.prepare {
+                        println!("┌─ Prepare Phase Configuration (for prepare stage) ───────────────────┐");
+                        println!("│ Strategy:           {:?}", prepare.prepare_strategy);
+                        println!("│ Skip Verification:  {} {}", 
+                            if prepare.skip_verification { "✅ YES" } else { "❌ NO" },
+                            if prepare.skip_verification { "(no LIST before create)" } else { "(LIST to check existing)" });
+                        println!("│ Force Overwrite:    {}", 
+                            if prepare.force_overwrite { "✅ YES (overwrite existing)" } else { "❌ NO (skip existing)" });
+                        println!("│ Cleanup:            {}", 
+                            if prepare.cleanup { "✅ YES (delete after test)" } else { "❌ NO (keep objects)" });
+                        
+                        // Show barrier timeout from prepare stage if available
+                        if let Some(ref dist_config) = config.distributed {
+                            if let Ok(stages) = dist_config.get_sorted_stages(config.duration) {
+                                if let Some(prepare_stage) = stages.iter().find(|s| matches!(s.config, crate::config::StageSpecificConfig::Prepare { .. })) {
+                                    if let Some(ref barrier) = prepare_stage.barrier {
+                                        let timeout_secs = barrier.agent_barrier_timeout;
+                                        let timeout_display = if timeout_secs >= 86400 {
+                                            format!("{} hours", timeout_secs / 3600)
+                                        } else if timeout_secs >= 3600 {
+                                            format!("{:.1} hours", timeout_secs as f64 / 3600.0)
+                                        } else if timeout_secs >= 60 {
+                                            format!("{} minutes", timeout_secs / 60)
+                                        } else {
+                                            format!("{} seconds", timeout_secs)
+                                        };
+                                        println!("│ Max Duration:       {} (barrier timeout)", timeout_display);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Show directory tree summary if configured
+                        if let Some(ref dir_config) = prepare.directory_structure {
+                            println!("│");
+                            println!("│ 📁 Directory Tree:");
+                            let leaf_dirs = (dir_config.width as u64).pow(dir_config.depth as u32);
+                            println!("│   Width × Depth:    {} × {} = {} leaf dirs", 
+                                dir_config.width, dir_config.depth, format_with_thousands(leaf_dirs));
+                            println!("│   Files/Dir:        {} files per leaf", format_usize(dir_config.files_per_dir));
+                            let total_files = leaf_dirs * dir_config.files_per_dir as u64;
+                            println!("│   Total Files:      {} files", format_with_thousands(total_files));
+                        }
+                        
+                        println!("└──────────────────────────────────────────────────────────────────────┘");
+                        println!();
+                    }
                 }
                 Ok(_) => {
                     // No stages configured - using deprecated prepare/execute/cleanup flow
@@ -275,6 +453,13 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
             println!("│ Objects will be created BEFORE test execution");
             println!("│");
+            println!("│ Strategy:           {:?}", prepare.prepare_strategy);
+            println!("│ Skip Verification:  {} {}", 
+                if prepare.skip_verification { "✅ YES" } else { "❌ NO" },
+                if prepare.skip_verification { "(no LIST before create)" } else { "(LIST to check existing)" });
+            println!("│ Force Overwrite:    {}", 
+                if prepare.force_overwrite { "✅ YES (overwrite existing)" } else { "❌ NO (skip existing)" });
+            println!("│");
         
         // Directory tree structure (if configured)
         if let Some(ref dir_config) = prepare.directory_structure {
@@ -296,8 +481,8 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             let manifest = TreeManifest::from_tree(&tree);
             
             println!("│ 📊 Calculated Tree Metrics:");
-            println!("│   Total Directories:  {}", manifest.total_dirs);
-            println!("│   Total Files:        {}", manifest.total_files);
+            println!("│   Total Directories:  {}", format_usize(manifest.total_dirs));
+            println!("│   Total Files:        {}", format_usize(manifest.total_files));
             
             // Calculate total data size
             let total_bytes = if manifest.total_files > 0 {
@@ -324,7 +509,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             let (size_val, size_unit) = format_bytes(total_bytes);
             
             println!("│   Total Data Size:    {} bytes ({:.2} {})", 
-                total_bytes, size_val, size_unit);
+                format_with_thousands(total_bytes), size_val, size_unit);
             println!("│");
         }
         
@@ -350,7 +535,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             
             println!("│ Flat Objects Section {}:", idx + 1);
             println!("│   URI:              {}", uri_display);
-            println!("│   Count:            {} objects", spec.count);
+            println!("│   Count:            {} objects", format_with_thousands(spec.count));
             
             // Display size information
             if let Some(ref size_spec) = spec.size_spec {
@@ -416,6 +601,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     println!("┌─ Workload Operations ────────────────────────────────────────────────┐");
     let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();
     println!("│ {} operation types, total weight: {}", config.workload.len(), total_weight);
+    println!("│ Execution Duration: {:?}", config.duration);
     println!("│");
     
     for (idx, weighted_op) in config.workload.iter().enumerate() {

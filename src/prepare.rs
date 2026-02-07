@@ -124,6 +124,211 @@ impl PrepareErrorTracker {
     }
 }
 
+/// Result of a successful retry operation
+#[derive(Debug, Clone)]
+pub struct RetrySuccess {
+    pub uri: String,
+    pub size: u64,
+    pub latency: Duration,
+}
+
+/// Results from the deferred retry phase (v0.8.52)
+#[derive(Debug, Clone)]
+pub struct RetryResults {
+    pub successes: Vec<RetrySuccess>,
+    pub permanent_failures: Vec<(String, String)>,  // (uri, error_message)
+}
+
+/// Determine retry strategy based on failure rate
+/// 
+/// Returns: (should_retry, max_retries, description)
+/// 
+/// Strategy:
+/// - failure_rate > 80%: Skip retry (systemic failure)
+/// - failure_rate 20-80%: Limited retry (3 attempts)
+/// - failure_rate < 20%: Full retry (10 attempts)
+fn determine_retry_strategy(failed_count: usize, total_attempted: usize) -> (bool, u32, String) {
+    if total_attempted == 0 {
+        return (false, 0, "No objects attempted".to_string());
+    }
+    
+    let failure_rate = (failed_count as f64 / total_attempted as f64) * 100.0;
+    
+    if failure_rate > 80.0 {
+        (false, 0, format!(
+            "Skipping retry: {:.1}% failure rate indicates systemic issue (failed: {}, total: {})",
+            failure_rate, failed_count, total_attempted
+        ))
+    } else if failure_rate >= 20.0 {
+        (true, 3, format!(
+            "Limited retry: {:.1}% failure rate (3 attempts max)",
+            failure_rate
+        ))
+    } else {
+        (true, 10, format!(
+            "Full retry: {:.1}% failure rate (10 attempts max)",
+            failure_rate
+        ))
+    }
+}
+
+/// Retry all failed objects using more aggressive retry settings
+/// This runs AFTER the main prepare phase completes, so it doesn't impact fast path performance
+/// 
+/// Strategy:
+/// - Use fewer concurrent workers (concurrency/4) to avoid overwhelming backend
+/// - More aggressive exponential backoff (longer delays)
+/// - Adaptive retry count based on failure rate (see determine_retry_strategy)
+/// - Fail permanently after all retries exhausted
+async fn retry_failed_objects(
+    failures: Vec<PrepareFailure>,
+    store_cache: &Arc<std::collections::HashMap<String, Arc<Box<dyn s3dlio::ObjectStore>>>>,
+    live_stats_tracker: Option<&Arc<crate::live_stats::LiveStatsTracker>>,
+    concurrency: usize,
+    total_attempted: usize,
+) -> RetryResults {
+    use futures::stream::FuturesUnordered;
+    
+    let mut successes = Vec::new();
+    let mut permanent_failures = Vec::new();
+    
+    if failures.is_empty() {
+        return RetryResults { successes, permanent_failures };
+    }
+    
+    // v0.8.52: Adaptive retry based on failure rate
+    let (should_retry, max_retries, strategy_desc) = determine_retry_strategy(failures.len(), total_attempted);
+    
+    if !should_retry {
+        warn!("🚫 {}", strategy_desc);
+        // Mark all failures as permanent
+        for failure in failures {
+            permanent_failures.push((failure.uri, format!("Skipped retry due to high failure rate: {}", failure.error)));
+        }
+        return RetryResults { successes, permanent_failures };
+    }
+    
+    info!("🔄 {}", strategy_desc);
+    info!("🔄 Retrying {} failed objects with {} workers...", failures.len(), concurrency);
+    
+    let sem = Arc::new(Semaphore::new(concurrency));
+    let mut futs = FuturesUnordered::new();
+    
+    // Adaptive retry config based on failure rate
+    let retry_config = RetryConfig {
+        max_retries,               // Adaptive: 3 for high failure, 10 for low
+        initial_delay_ms: 500,     // Start with longer delay
+        max_delay_ms: 30000,       // Up to 30 seconds between attempts
+        backoff_multiplier: 2.0,
+        jitter_factor: 0.3,
+    };
+    
+    for failure in failures {
+        let sem2 = sem.clone();
+        let stores = store_cache.clone();
+        let retry_cfg = retry_config.clone();
+        let tracker = live_stats_tracker.cloned();
+        
+        futs.push(tokio::spawn(async move {
+            let _permit = sem2.acquire_owned().await.unwrap();
+            
+            // Extract store_uri from full URI (scheme://bucket or file:///path)
+            let store_uri = if let Some(pos) = failure.uri.rfind('/') {
+                failure.uri[..=pos].to_string()
+            } else {
+                failure.uri.clone()  // Fallback: use full URI as store URI
+            };
+            
+            // Get cached store instance
+            let store = match stores.get(&store_uri) {
+                Some(s) => s.clone(),
+                None => {
+                    // Store not in cache - might be different URI format
+                    // Try to find a matching store by prefix
+                    let matching_store = stores.iter()
+                        .find(|(uri, _)| failure.uri.starts_with(*uri))
+                        .map(|(_, store)| store.clone());
+                    
+                    match matching_store {
+                        Some(s) => s,
+                        None => return (None, Some((
+                            failure.uri.clone(),
+                            format!("Store not found in cache for URI: {}", failure.uri)
+                        ))),
+                    }
+                }
+            };
+            
+            // Regenerate data for retry (using same parameters as original)
+            // For simplicity, use Random fill pattern (most common case)
+            // TODO: Store fill pattern in PrepareFailure if we need exact regeneration
+            let data = crate::data_gen_pool::generate_data_optimized(
+                failure.size as usize,
+                1,  // Default dedup
+                0,  // Default compress
+            );
+            
+            let put_start = Instant::now();
+            let uri_for_retry = failure.uri.clone();
+            
+            let put_result = retry_with_backoff(
+                &format!("RETRY {}", &failure.uri),
+                &retry_cfg,
+                || {
+                    let store_ref = store.clone();
+                    let uri_ref = uri_for_retry.clone();
+                    let data_ref = data.clone();
+                    async move {
+                        store_ref.put(&uri_ref, data_ref).await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                    }
+                }
+            ).await;
+            
+            match put_result {
+                RetryResult::Success(_) => {
+                    let latency = put_start.elapsed();
+                    
+                    // Record in live stats if available
+                    if let Some(ref t) = tracker {
+                        t.record_put(failure.size as usize, latency);
+                    }
+                    
+                    (Some(RetrySuccess {
+                        uri: failure.uri,
+                        size: failure.size,
+                        latency,
+                    }), None)
+                }
+                RetryResult::Failed(e) => {
+                    (None, Some((failure.uri, format!("{}", e))))
+                }
+            }
+        }));
+    }
+    
+    // Collect results
+    while let Some(result) = futs.next().await {
+        match result {
+            Ok((Some(success), None)) => {
+                successes.push(success);
+            }
+            Ok((None, Some(failure))) => {
+                permanent_failures.push(failure);
+            }
+            Ok(_) => {
+                // Shouldn't happen (both Some or both None)
+                warn!("Unexpected retry result state");
+            }
+            Err(e) => {
+                warn!("Retry task panicked: {}", e);
+            }
+        }
+    }
+    
+    RetryResults { successes, permanent_failures }
+}
+
 /// Information about a prepared object
 #[derive(Debug, Clone)]
 pub struct PreparedObject {
@@ -1312,6 +1517,53 @@ async fn prepare_sequential(
                 let (total_errors, _) = error_tracker.get_stats();
                 if total_errors > 0 {
                     warn!("⚠️ Pool {} completed with {} failed objects", prefix, total_errors);
+                    
+                    // v0.8.52: DEFERRED RETRY PHASE - Retry all failed objects
+                    // Create minimal store cache for this pool's URI
+                    let mut store_map = std::collections::HashMap::new();
+                    store_map.insert(base_uri.clone(), shared_store.clone());
+                    let store_cache = Arc::new(store_map);
+                    
+                    let failures = error_tracker.get_failures();
+                    if !failures.is_empty() {
+                        info!("🔄 Starting deferred retry phase for {} failed objects in pool {}...", 
+                              failures.len(), prefix);
+                        
+                        let retry_results = retry_failed_objects(
+                            failures,
+                            &store_cache,
+                            live_stats_tracker.as_ref(),
+                            concurrency / 4,  // Use fewer workers for retries
+                            actual_to_create as usize,  // Total attempted for adaptive retry
+                        ).await;
+                        
+                        // Update metrics with retry results
+                        for result in &retry_results.successes {
+                            metrics.put.bytes += result.size;
+                            metrics.put.ops += 1;
+                            metrics.put_bins.add(result.size);
+                            let bucket = crate::metrics::bucket_index(result.size as usize);
+                            metrics.put_hists.record(bucket, result.latency);
+                            
+                            created_objects.push(PreparedObject {
+                                uri: result.uri.clone(),
+                                size: result.size,
+                                created: true,
+                            });
+                        }
+                        
+                        // Report retry statistics
+                        info!("✅ Retry phase for pool {} complete: {} succeeded, {} permanently failed",
+                              prefix, retry_results.successes.len(), retry_results.permanent_failures.len());
+                        
+                        if !retry_results.permanent_failures.is_empty() {
+                            warn!("❌ {} objects in pool {} failed even after retries (first 10):",
+                                  retry_results.permanent_failures.len(), prefix);
+                            for (uri, error) in retry_results.permanent_failures.iter().take(10) {
+                                warn!("  - {}: {}", uri, error);
+                            }
+                        }
+                    }
                 }
                 
                 pb.finish_with_message(format!("created {} {} objects", actual_to_create, prefix));
@@ -2065,6 +2317,50 @@ async fn prepare_parallel(
     let (total_errors, _) = error_tracker.get_stats();
     if total_errors > 0 {
         warn!("⚠️ Prepare completed with {} failed objects (below threshold, continuing)", total_errors);
+        
+        // v0.8.52: DEFERRED RETRY PHASE - Retry all failed objects
+        // This happens AFTER the fast path completes, so no performance impact on main create loop
+        let failures = error_tracker.get_failures();
+        if !failures.is_empty() {
+            info!("🔄 Starting deferred retry phase for {} failed objects...", failures.len());
+            
+            let retry_results = retry_failed_objects(
+                failures,
+                &store_cache,
+                live_stats_tracker.as_ref(),
+                concurrency / 4,  // Use fewer workers for retries to avoid overwhelming backend
+                total_to_create as usize,  // Total attempted for adaptive retry
+            ).await;
+            
+            // Update metrics with retry results
+            for result in &retry_results.successes {
+                metrics.put.bytes += result.size;
+                metrics.put.ops += 1;
+                metrics.put_bins.add(result.size);
+                let bucket = crate::metrics::bucket_index(result.size as usize);
+                metrics.put_hists.record(bucket, result.latency);
+                
+                all_prepared.push(PreparedObject {
+                    uri: result.uri.clone(),
+                    size: result.size,
+                    created: true,
+                });
+            }
+            
+            // Report retry statistics
+            info!("✅ Retry phase complete: {} succeeded, {} permanently failed", 
+                  retry_results.successes.len(), retry_results.permanent_failures.len());
+            
+            if !retry_results.permanent_failures.is_empty() {
+                warn!("❌ {} objects failed even after retries:", retry_results.permanent_failures.len());
+                for (uri, error) in retry_results.permanent_failures.iter().take(10) {
+                    warn!("  - {}: {}", uri, error);
+                }
+                if retry_results.permanent_failures.len() > 10 {
+                    warn!("  ... and {} more", retry_results.permanent_failures.len() - 10);
+                }
+            }
+        }
     }
     
     // Wait for monitoring task to complete cleanly
@@ -4364,5 +4660,119 @@ mod tests {
         
         let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
         assert_eq!(to_create, 1000, "force_overwrite creates all 1000 files (overwrites existing 500)");
+    }
+
+    // -------------------------------------------------------------------------
+    // Adaptive Retry Strategy Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_adaptive_retry_low_failure_rate() {
+        // 5% failure rate should trigger full retry (10 attempts)
+        let (should_retry, max_retries, description) = determine_retry_strategy(5, 100);
+        
+        assert!(should_retry, "Low failure rate (5%) should trigger retry");
+        assert_eq!(max_retries, 10, "Low failure rate should get full 10 retry attempts");
+        assert!(description.contains("Full retry"), "Description should indicate full retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_medium_failure_rate() {
+        // 50% failure rate should trigger limited retry (3 attempts)
+        let (should_retry, max_retries, description) = determine_retry_strategy(50, 100);
+        
+        assert!(should_retry, "Medium failure rate (50%) should trigger retry");
+        assert_eq!(max_retries, 3, "Medium failure rate should get limited 3 retry attempts");
+        assert!(description.contains("Limited retry"), "Description should indicate limited retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_high_failure_rate() {
+        // 85% failure rate should skip retry entirely
+        let (should_retry, max_retries, description) = determine_retry_strategy(85, 100);
+        
+        assert!(!should_retry, "High failure rate (85%) should skip retry");
+        assert_eq!(max_retries, 0, "High failure rate should have 0 retry attempts");
+        assert!(description.contains("Skipping retry"), "Description should indicate skipping retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_boundary_20_percent() {
+        // Exactly 20% failure rate is at the low/medium boundary (should be medium: limited retry)
+        let (should_retry, max_retries, description) = determine_retry_strategy(20, 100);
+        
+        assert!(should_retry, "20% failure rate should trigger retry (medium range)");
+        assert_eq!(max_retries, 3, "20% boundary should get limited 3 retry attempts");
+        assert!(description.contains("Limited retry"), "Description should indicate limited retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_boundary_80_percent() {
+        // Exactly 80% failure rate is at the medium/high boundary (should be medium: limited retry)
+        let (should_retry, max_retries, description) = determine_retry_strategy(80, 100);
+        
+        assert!(should_retry, "80% failure rate should trigger retry (medium range)");
+        assert_eq!(max_retries, 3, "80% boundary should get limited 3 retry attempts");
+        assert!(description.contains("Limited retry"), "Description should indicate limited retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_boundary_81_percent() {
+        // Just above 80% should skip retry
+        let (should_retry, max_retries, description) = determine_retry_strategy(81, 100);
+        
+        assert!(!should_retry, "81% failure rate should skip retry (high range)");
+        assert_eq!(max_retries, 0, "81% failure rate should have 0 retry attempts");
+        assert!(description.contains("Skipping retry"), "Description should indicate skipping retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_zero_failures() {
+        // 0% failure rate should trigger full retry (though in practice won't be called)
+        let (should_retry, max_retries, description) = determine_retry_strategy(0, 100);
+        
+        assert!(should_retry, "0% failure rate should trigger retry");
+        assert_eq!(max_retries, 10, "0% failure rate should get full 10 retry attempts");
+        assert!(description.contains("Full retry"), "Description should indicate full retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_all_failures() {
+        // 100% failure rate should skip retry (systemic issue)
+        let (should_retry, max_retries, description) = determine_retry_strategy(100, 100);
+        
+        assert!(!should_retry, "100% failure rate should skip retry");
+        assert_eq!(max_retries, 0, "100% failure rate should have 0 retry attempts");
+        assert!(description.contains("Skipping retry"), "Description should indicate skipping retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_small_sample_size() {
+        // Test with small numbers: 2 failures out of 3 attempts = 66.7%
+        let (should_retry, max_retries, description) = determine_retry_strategy(2, 3);
+        
+        assert!(should_retry, "66.7% failure rate should trigger limited retry");
+        assert_eq!(max_retries, 3, "Medium failure rate should get limited 3 retry attempts");
+        assert!(description.contains("Limited retry"), "Description should indicate limited retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_large_sample_size() {
+        // Test with large numbers: 1500 failures out of 10000 attempts = 15%
+        let (should_retry, max_retries, description) = determine_retry_strategy(1500, 10000);
+        
+        assert!(should_retry, "15% failure rate should trigger full retry");
+        assert_eq!(max_retries, 10, "Low failure rate should get full 10 retry attempts");
+        assert!(description.contains("Full retry"), "Description should indicate full retry: {}", description);
+    }
+
+    #[test]
+    fn test_adaptive_retry_edge_19_percent() {
+        // Just below 20% threshold
+        let (should_retry, max_retries, description) = determine_retry_strategy(19, 100);
+        
+        assert!(should_retry, "19% failure rate should trigger full retry");
+        assert_eq!(max_retries, 10, "Just below 20% should get full 10 retry attempts");
+        assert!(description.contains("Full retry"), "Description should indicate full retry: {}", description);
     }
 }

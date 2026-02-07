@@ -16,13 +16,15 @@ use tracing::info;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectoryStructureConfig {
     /// Number of subdirectories per directory level
+    #[serde(deserialize_with = "crate::serde_helpers::deserialize_usize_with_separators")]
     pub width: usize,
     
     /// Number of levels in the directory tree (1 = flat, 2+ = nested)
+    #[serde(deserialize_with = "crate::serde_helpers::deserialize_usize_with_separators")]
     pub depth: usize,
     
     /// Number of files to create in each directory
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_usize_with_separators")]
     pub files_per_dir: usize,
     
     /// File distribution strategy: "bottom" (only at deepest level) or "all" (at every level)

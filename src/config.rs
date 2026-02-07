@@ -567,6 +567,7 @@ pub struct EnsureSpec {
     pub use_multi_endpoint: bool,
     
     /// Target number of objects to ensure exist
+    #[serde(deserialize_with = "crate::serde_helpers::deserialize_u64_with_separators")]
     pub count: u64,
     
     /// Minimum object size in bytes (deprecated - use size_distribution)
