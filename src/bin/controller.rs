@@ -33,7 +33,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary, WorkloadPhase};
 // Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
 // Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
@@ -1464,6 +1464,9 @@ impl BarrierManager {
     }
     
     /// Wait for barrier with heartbeat-based liveness checking
+    /// 
+    /// v0.8.60: CRITICAL - Added timeout using agent_barrier_timeout config
+    /// Returns BarrierStatus::Failed + error if timeout exceeded (prevents infinite wait)
     async fn wait_for_barrier(
         &mut self,
         phase_name: &str,
@@ -1475,7 +1478,54 @@ impl BarrierManager {
             self.config.heartbeat_interval.max(10)
         );
         
+        // v0.8.60: Barrier timeout from config (default 120s)
+        let barrier_timeout = Duration::from_secs(self.config.agent_barrier_timeout);
+        info!("Barrier '{}': timeout set to {:?}", phase_name, barrier_timeout);
+        
         loop {
+            // v0.8.60: CHECK TIMEOUT FIRST - prevents infinite wait if agents desynchronized
+            if start.elapsed() >= barrier_timeout {
+                error!(
+                    "❌ Barrier '{}' TIMEOUT after {:?}: only {}/{} agents ready, {} failed",
+                    phase_name,
+                    start.elapsed(),
+                    self.ready_agents.len(),
+                    self.agents.len(),
+                    self.failed_agents.len()
+                );
+                
+                // List which agents are stuck
+                let stuck_agents: Vec<_> = self.agents.keys()
+                    .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
+                    .map(|s| {
+                        let hb = &self.agents[s];
+                        let prog = hb.last_progress.as_ref()
+                            .map(|p| format!("phase: {:?}, ops: {}", 
+                                WorkloadPhase::try_from(p.current_phase).unwrap_or(WorkloadPhase::PhaseIdle),
+                                p.operations_completed))
+                            .unwrap_or_else(|| "no progress".to_string());
+                        format!(
+                            "{} ({}s since heartbeat, {})",
+                            s,
+                            Instant::now().duration_since(hb.last_heartbeat).as_secs(),
+                            prog
+                        )
+                    })
+                    .collect();
+                
+                error!(
+                    "Stuck agents ({}): {}",
+                    stuck_agents.len(),
+                    stuck_agents.join(", ")
+                );
+                
+                return Err(anyhow!(
+                    "Barrier '{}' timeout after {:?} - agents may be desynchronized. Use RESET to recover.",
+                    phase_name,
+                    start.elapsed()
+                ));
+            }
+            
             // Check barrier status
             let status = self.check_barrier();
             
@@ -1626,6 +1676,31 @@ impl BarrierManager {
             barrier_state.released = true;
             info!("Barrier '{}' cleared (will not release again)", barrier_name);
         }
+    }
+    
+    /// v0.8.60: CRITICAL - Reset barrier manager state (called after sending RESET to agents)
+    /// 
+    /// Clears all barriers, ready/failed agent tracking, and resets heartbeats.
+    /// Controller must send RESET commands via tx_control channels BEFORE calling this.
+    fn reset_barrier_state(&mut self) {
+        warn!("🔄 Resetting barrier manager state (desync recovery)");
+        
+        // Clear barrier manager state
+        self.ready_agents.clear();
+        self.failed_agents.clear();
+        self.barrier_agents.clear();
+        
+        // Reset heartbeats
+        let now = Instant::now();
+        for (_, hb) in self.agents.iter_mut() {
+            hb.last_heartbeat = now;
+            hb.last_progress = None;
+            hb.missed_count = 0;
+            hb.is_alive = true;
+            hb.query_in_progress = false;
+        }
+        
+        info!("✅ Barrier manager state reset complete");
     }
 }
 

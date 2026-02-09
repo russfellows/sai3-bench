@@ -621,6 +621,8 @@ pub mod control_message {
         ReleaseBarrier = 5,
         /// v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
         Goodbye = 6,
+        /// v0.8.60: Force agent back to Idle state (controller/agent desync recovery)
+        Reset = 7,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -636,6 +638,7 @@ pub mod control_message {
                 Self::Preflight => "PREFLIGHT",
                 Self::ReleaseBarrier => "RELEASE_BARRIER",
                 Self::Goodbye => "GOODBYE",
+                Self::Reset => "RESET",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -648,6 +651,7 @@ pub mod control_message {
                 "PREFLIGHT" => Some(Self::Preflight),
                 "RELEASE_BARRIER" => Some(Self::ReleaseBarrier),
                 "GOODBYE" => Some(Self::Goodbye),
+                "RESET" => Some(Self::Reset),
                 _ => None,
             }
         }

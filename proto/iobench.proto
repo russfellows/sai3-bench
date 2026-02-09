@@ -320,6 +320,7 @@ message ControlMessage {
     PREFLIGHT = 4;      // v0.8.23: Run pre-flight validation
     RELEASE_BARRIER = 5; // v0.8.26: Release agents waiting at barrier
     GOODBYE = 6;        // v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
+    RESET = 7;          // v0.8.60: Force agent back to Idle state (controller/agent desync recovery)
   }
   Command command = 1;
   

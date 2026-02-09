@@ -2637,6 +2637,54 @@ impl Agent for AgentSvc {
                                 // Break out of control reader loop - stream will close cleanly
                                 break;
                             }
+                            Ok(Command::Reset) => {
+                                // v0.8.60: CRITICAL - Force agent back to Idle state (controller/agent desync recovery)
+                                warn!("Control reader: Received RESET - forcing agent back to Idle (desync recovery)");
+                                
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?} before reset", current_state);
+                                
+                                // Cancel any ongoing work
+                                agent_state_reader.send_abort();
+                                
+                                // Clear error state directly
+                                *agent_state_reader.error_message.lock().await = None;
+                                
+                                // Force transition to Idle (bypasses normal state machine validation)
+                                // This is safe because controller is authoritative - we trust its view
+                                *agent_state_reader.state.lock().await = WorkloadState::Idle;
+                                *agent_state_reader.completion_sent.lock().await = false;
+                                
+                                // Clear cached config and tracker state
+                                *agent_state_reader.config_yaml.lock().await = None;
+                                *agent_state_reader.tracker.lock().await = None;
+                                *agent_state_reader.agent_index.lock().await = None;
+                                *agent_state_reader.num_agents.lock().await = None;
+                                *agent_state_reader.shared_storage.lock().await = None;
+                                *agent_state_reader.stages.lock().await = None;
+                                
+                                info!("✅ RESET complete - agent now in Idle state, ready for new coordination");
+                                
+                                // Send acknowledgement that reset completed
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let reset_ack = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: 1,  // IDLE
+                                    error_message: "Reset complete - back to Idle".to_string(),
+                                     ..Default::default()
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(reset_ack).await {
+                                    warn!("Control reader: Failed to send reset acknowledgement: {}", e);
+                                }
+                            }
                             Err(e) => {
                                 warn!("Control reader: Unknown command: {}", e);
                             }
