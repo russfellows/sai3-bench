@@ -3128,8 +3128,8 @@ async fn execute_stages_workflow(
                 }
             }
             
-            sai3_bench::config::StageSpecificConfig::Validation { timeout_secs } => {
-                info!("Executing VALIDATION stage: {} (timeout: {:?}s)", stage.name, timeout_secs);
+            sai3_bench::config::StageSpecificConfig::Validation => {
+                info!("Executing VALIDATION stage: {} (timeout: {:?}s)", stage.name, stage.timeout_secs);
                 
                 // Validation stage completes immediately - actual validation happened
                 // at RPC level (pre-flight checks) before YAML stages execute

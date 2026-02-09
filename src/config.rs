@@ -1643,11 +1643,8 @@ pub enum StageSpecificConfig {
     
     /// Validation stage (pre-flight checks, no workload execution)
     /// Completes immediately - validation happens at RPC level before stages run
-    Validation {
-        /// Optional timeout for validation (default: 300s)
-        #[serde(default)]
-        timeout_secs: Option<u64>,
-    },
+    /// Use stage.timeout_secs for timeout configuration (not nested here to avoid duplication)
+    Validation,
 }
 
 /// Stage configuration for YAML-driven stage orchestration
@@ -1870,9 +1867,7 @@ impl DistributedConfig {
                 barrier: self.barrier_sync.validation.clone(),
                 timeout_secs: Some(300), // 5 minutes for validation
                 optional: false,
-                config: StageSpecificConfig::Validation {
-                    timeout_secs: Some(300),
-                },
+                config: StageSpecificConfig::Validation,
             },
             StageConfig {
                 name: "prepare".to_string(),

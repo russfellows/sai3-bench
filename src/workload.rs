@@ -349,6 +349,33 @@ pub fn create_multi_endpoint_store(
     Ok(store)
 }
 
+/// Extract file index from path for round-robin endpoint mapping
+/// 
+/// Parses file names like "file_00000009.dat" or "prepared-00000042.dat" to extract the numeric index.
+/// Used to map files to endpoints using the same round-robin logic as prepare phase.
+/// 
+/// # Examples
+/// ```
+/// assert_eq!(extract_file_index_from_path("d1_w1.dir/file_00000009.dat"), Some(9));
+/// assert_eq!(extract_file_index_from_path("prepared-00000042.dat"), Some(42));
+/// assert_eq!(extract_file_index_from_path("file_00000000.dat"), Some(0));
+/// ```
+fn extract_file_index_from_path(path: &str) -> Option<usize> {
+    // Extract filename from path (after last '/')
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    
+    // Remove extension
+    let name_without_ext = filename.strip_suffix(".dat").unwrap_or(filename);
+    
+    // Extract numeric part after last '_' or '-'
+    if let Some(idx) = name_without_ext.rfind('_').or_else(|| name_without_ext.rfind('-')) {
+        let num_str = &name_without_ext[idx+1..];
+        num_str.parse::<usize>().ok()
+    } else {
+        None
+    }
+}
+
 /// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
 pub fn create_store_with_logger_and_config(
     uri: &str,
@@ -2037,8 +2064,23 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // URI resolution needs to happen outside the retry closure
                         let full_uri = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
-                            let base_uri = cfg.target.as_ref()
-                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            // v0.8.53: Multi-endpoint support for tree mode with round-robin mapping
+                            // Extract file index and calculate correct endpoint (same logic as prepare phase)
+                            let base_uri = if use_multi_ep {
+                                if let Some(ref me_cfg) = cfg.multi_endpoint {
+                                    // Extract file index from path (e.g., "file_00000009.dat" → 9)
+                                    let file_idx = extract_file_index_from_path(&file_path)
+                                        .unwrap_or(0);  // Fallback to endpoint 0
+                                    let endpoint_idx = file_idx % me_cfg.endpoints.len();
+                                    &me_cfg.endpoints[endpoint_idx]
+                                } else {
+                                    cfg.target.as_ref()
+                                        .ok_or_else(|| anyhow!("target or multi_endpoint required in tree mode"))?
+                                }
+                            } else {
+                                cfg.target.as_ref()
+                                    .ok_or_else(|| anyhow!("target required in tree mode"))?
+                            };
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
@@ -2111,8 +2153,20 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             use crate::size_generator::SizeGenerator;
                             let mut size_generator = SizeGenerator::new(&size_spec)?;
                             let sz = size_generator.generate();
-                            let base_uri = cfg.target.as_ref()
-                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            // v0.8.53: Multi-endpoint support for tree mode with round-robin mapping
+                            let base_uri = if use_multi_ep {
+                                if let Some(ref me_cfg) = cfg.multi_endpoint {
+                                    let file_idx = extract_file_index_from_path(&file_path).unwrap_or(0);
+                                    let endpoint_idx = file_idx % me_cfg.endpoints.len();
+                                    &me_cfg.endpoints[endpoint_idx]
+                                } else {
+                                    cfg.target.as_ref()
+                                        .ok_or_else(|| anyhow!("target or multi_endpoint required in tree mode"))?
+                                }
+                            } else {
+                                cfg.target.as_ref()
+                                    .ok_or_else(|| anyhow!("target required in tree mode"))?
+                            };
                             let full_uri = if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
@@ -2246,8 +2300,20 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // v0.7.13: Wrap STAT operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
-                            let base_uri = cfg.target.as_ref()
-                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            // v0.8.53: Multi-endpoint support for tree mode with round-robin mapping
+                            let base_uri = if use_multi_ep {
+                                if let Some(ref me_cfg) = cfg.multi_endpoint {
+                                    let file_idx = extract_file_index_from_path(&file_path).unwrap_or(0);
+                                    let endpoint_idx = file_idx % me_cfg.endpoints.len();
+                                    &me_cfg.endpoints[endpoint_idx]
+                                } else {
+                                    cfg.target.as_ref()
+                                        .ok_or_else(|| anyhow!("target or multi_endpoint required in tree mode"))?
+                                }
+                            } else {
+                                cfg.target.as_ref()
+                                    .ok_or_else(|| anyhow!("target required in tree mode"))?
+                            };
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
@@ -2313,8 +2379,20 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // v0.7.13: Wrap DELETE operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
-                            let base_uri = cfg.target.as_ref()
-                                .ok_or_else(|| anyhow!("target required in tree mode"))?;
+                            // v0.8.53: Multi-endpoint support for tree mode with round-robin mapping
+                            let base_uri = if use_multi_ep {
+                                if let Some(ref me_cfg) = cfg.multi_endpoint {
+                                    let file_idx = extract_file_index_from_path(&file_path).unwrap_or(0);
+                                    let endpoint_idx = file_idx % me_cfg.endpoints.len();
+                                    &me_cfg.endpoints[endpoint_idx]
+                                } else {
+                                    cfg.target.as_ref()
+                                        .ok_or_else(|| anyhow!("target or multi_endpoint required in tree mode"))?
+                                }
+                            } else {
+                                cfg.target.as_ref()
+                                    .ok_or_else(|| anyhow!("target required in tree mode"))?
+                            };
                             if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, file_path)
                             } else {
