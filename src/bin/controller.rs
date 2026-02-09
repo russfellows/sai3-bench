@@ -2085,6 +2085,9 @@ async fn run_distributed_workload(
                 num_agents,               // v0.8.7: For distributed cleanup
                 barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
                 barrier_sequence: 0,
+                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                target_stage_name: String::new(),
+                ready_for_next: false,
             };
             
             if let Err(e) = tx_control.send(config_msg).await {
@@ -2155,6 +2158,9 @@ async fn run_distributed_workload(
                 num_agents,               // v0.8.7: Redundant but consistent
                 barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
                 barrier_sequence: 0,
+                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                target_stage_name: String::new(),
+                ready_for_next: false,
             };
             
             if let Err(e) = tx_control.send(start_msg).await {
@@ -2773,6 +2779,9 @@ async fn run_distributed_workload(
                                             num_agents: 0,
                                             barrier_name: barrier_info.barrier_name.clone(),
                                             barrier_sequence: barrier_info.barrier_sequence,
+                                            target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                                            target_stage_name: String::new(),
+                                            ready_for_next: false,
                                         };
                                         // Use broadcast - all agent tasks receive, but only matching one forwards
                                         if let Err(e) = tx_control_broadcast.send(release_msg) {
@@ -3344,6 +3353,9 @@ async fn run_distributed_workload(
         num_agents: 0,
         barrier_name: String::new(),
         barrier_sequence: 0,
+        target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+        target_stage_name: String::new(),
+        ready_for_next: false,
     };
     // Broadcast to all agents - each agent task receives and forwards
     if let Err(e) = tx_control_broadcast.send(goodbye_msg) {

@@ -321,6 +321,7 @@ message ControlMessage {
     RELEASE_BARRIER = 5; // v0.8.26: Release agents waiting at barrier
     GOODBYE = 6;        // v0.8.29: Graceful disconnect - controller is leaving, agent should return to Idle
     RESET = 7;          // v0.8.60: Force agent back to Idle state (controller/agent desync recovery)
+    SYNC_STATE = 8;     // v0.8.60: Force agent to specific stage/phase (re-coordination after desync)
   }
   Command command = 1;
   
@@ -345,6 +346,12 @@ message ControlMessage {
   // For RELEASE_BARRIER command: which barrier is being released
   string barrier_name = 10;      // e.g., "stage-3-execute" or "prepare"
   uint32 barrier_sequence = 11;  // Monotonic counter for ordering
+  
+  // v0.8.60: State synchronization (SYNC_STATE command)
+  // Forces agent to transition to specified stage/phase
+  uint32 target_stage_index = 12;  // Stage index to jump to (0-based)
+  string target_stage_name = 13;   // Stage name for logging (e.g., "epoch-2-execute")
+  bool ready_for_next = 14;        // true = at barrier, false = executing stage
 }
 
 // v0.8.23: Pre-flight validation request/response

@@ -2685,6 +2685,62 @@ impl Agent for AgentSvc {
                                     warn!("Control reader: Failed to send reset acknowledgement: {}", e);
                                 }
                             }
+                            Ok(Command::SyncState) => {
+                                // v0.8.60: CRITICAL - Force agent to specific stage/phase (re-coordination)
+                                warn!(
+                                    "Control reader: Received SYNC_STATE - forcing to stage {} '{}' (ready_for_next={})",
+                                    control_msg.target_stage_index,
+                                    control_msg.target_stage_name,
+                                    control_msg.ready_for_next
+                                );
+                                
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?} before sync", current_state);
+                                
+                                // Force transition to target stage (bypasses normal state machine validation)
+                                // Controller is authoritative - we trust its view of where we should be
+                                let target_state = WorkloadState::AtStage {
+                                    stage_index: control_msg.target_stage_index as usize,
+                                    stage_name: control_msg.target_stage_name.clone(),
+                                    ready_for_next: control_msg.ready_for_next,
+                                };
+                                
+                                *agent_state_reader.state.lock().await = target_state.clone();
+                                
+                                info!(
+                                    "✅ SYNC_STATE complete - agent now at stage {} '{}' (ready_for_next={})",
+                                    control_msg.target_stage_index,
+                                    control_msg.target_stage_name,
+                                    control_msg.ready_for_next
+                                );
+                                
+                                // Send acknowledgement that sync completed
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let status_code = if control_msg.ready_for_next { 2 } else { 1 };  // READY vs not
+                                
+                                let sync_ack = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: status_code,
+                                    error_message: format!(
+                                        "Synced to stage {} '{}' (ready={})",
+                                        control_msg.target_stage_index,
+                                        control_msg.target_stage_name,
+                                        control_msg.ready_for_next
+                                    ),
+                                     ..Default::default()
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(sync_ack).await {
+                                    warn!("Control reader: Failed to send sync acknowledgement: {}", e);
+                                }
+                            }
                             Err(e) => {
                                 warn!("Control reader: Unknown command: {}", e);
                             }

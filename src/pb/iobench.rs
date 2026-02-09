@@ -591,6 +591,18 @@ pub struct ControlMessage {
     /// Monotonic counter for ordering
     #[prost(uint32, tag = "11")]
     pub barrier_sequence: u32,
+    /// v0.8.60: State synchronization (SYNC_STATE command)
+    /// Forces agent to transition to specified stage/phase
+    ///
+    /// Stage index to jump to (0-based)
+    #[prost(uint32, tag = "12")]
+    pub target_stage_index: u32,
+    /// Stage name for logging (e.g., "epoch-2-execute")
+    #[prost(string, tag = "13")]
+    pub target_stage_name: ::prost::alloc::string::String,
+    /// true = at barrier, false = executing stage
+    #[prost(bool, tag = "14")]
+    pub ready_for_next: bool,
 }
 /// Nested message and enum types in `ControlMessage`.
 pub mod control_message {
@@ -623,6 +635,8 @@ pub mod control_message {
         Goodbye = 6,
         /// v0.8.60: Force agent back to Idle state (controller/agent desync recovery)
         Reset = 7,
+        /// v0.8.60: Force agent to specific stage/phase (re-coordination after desync)
+        SyncState = 8,
     }
     impl Command {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -639,6 +653,7 @@ pub mod control_message {
                 Self::ReleaseBarrier => "RELEASE_BARRIER",
                 Self::Goodbye => "GOODBYE",
                 Self::Reset => "RESET",
+                Self::SyncState => "SYNC_STATE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -652,6 +667,7 @@ pub mod control_message {
                 "RELEASE_BARRIER" => Some(Self::ReleaseBarrier),
                 "GOODBYE" => Some(Self::Goodbye),
                 "RESET" => Some(Self::Reset),
+                "SYNC_STATE" => Some(Self::SyncState),
                 _ => None,
             }
         }
