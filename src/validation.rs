@@ -242,8 +242,8 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                     println!("│   Tasks:      {}", tasks);
                                 }
                             }
-                            crate::config::StageSpecificConfig::Validation { timeout_secs } => {
-                                if let Some(timeout) = timeout_secs {
+                            crate::config::StageSpecificConfig::Validation => {
+                                if let Some(timeout) = stage.timeout_secs {
                                     println!("│   Timeout:    {}s", timeout);
                                 }
                             }
@@ -654,6 +654,148 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
+    
+    // v0.8.53: Multi-endpoint + directory tree validation with sample file paths
+    if let Some(ref prepare) = config.prepare {
+        if let Some(ref dir_config) = prepare.directory_structure {
+            // Check if any operation uses multi_endpoint
+            let has_multi_endpoint_ops = prepare.ensure_objects.iter().any(|spec| spec.use_multi_endpoint);
+            let workload_uses_multi_ep = config.workload.iter().any(|wo| {
+                matches!(&wo.spec, 
+                    crate::config::OpSpec::Get { use_multi_endpoint: true, .. } | 
+                    crate::config::OpSpec::Put { use_multi_endpoint: true, .. } |
+                    crate::config::OpSpec::Stat { use_multi_endpoint: true, .. } |
+                    crate::config::OpSpec::Delete { use_multi_endpoint: true, .. })
+            });
+            
+            if has_multi_endpoint_ops || workload_uses_multi_ep {
+                println!("┌─ Multi-Endpoint File Distribution ──────────────────────────────────┐");
+                
+                // Collect ALL endpoints from ALL agents (distributed mode) or global config
+                // Structure: Vec<(agent_id, endpoint_url)>
+                let mut all_endpoints: Vec<(String, String)> = Vec::new();
+                
+                if let Some(ref dist) = config.distributed {
+                    // Distributed mode: collect from each agent
+                    for (idx, agent) in dist.agents.iter().enumerate() {
+                        if let Some(ref me_cfg) = agent.multi_endpoint {
+                            let agent_id = agent.id.clone().unwrap_or_else(|| format!("agent-{}", idx));
+                            for endpoint in &me_cfg.endpoints {
+                                all_endpoints.push((agent_id.clone(), endpoint.clone()));
+                            }
+                        }
+                    }
+                    
+                    // Fallback to global config if no per-agent endpoints
+                    if all_endpoints.is_empty() {
+                        if let Some(ref me_cfg) = config.multi_endpoint {
+                            for endpoint in &me_cfg.endpoints {
+                                all_endpoints.push(("global".to_string(), endpoint.clone()));
+                            }
+                        }
+                    }
+                } else if let Some(ref me_cfg) = config.multi_endpoint {
+                    // Single-node mode: use global config
+                    for endpoint in &me_cfg.endpoints {
+                        all_endpoints.push(("single".to_string(), endpoint.clone()));
+                    }
+                }
+                
+                if !all_endpoints.is_empty() {
+                    println!("│ ⚠️  IMPORTANT: Files are distributed ROUND-ROBIN by index");
+                    println!("│");
+                    println!("│ Total endpoints: {} across {} agent(s)", 
+                        all_endpoints.len(),
+                        if let Some(ref dist) = config.distributed { dist.agents.len() } else { 1 }
+                    );
+                    println!("│ Distribution pattern: file_NNNNNNNN.dat → endpoint[N % {}]", all_endpoints.len());
+                    
+                    // Show pattern description
+                    if all_endpoints.len() == 2 {
+                        println!("│   • Even indices (0, 2, 4, 6...) → endpoint 1");
+                        println!("│   • Odd indices (1, 3, 5, 7...) → endpoint 2");
+                    } else if all_endpoints.len() == 4 {
+                        println!("│   • Indices 0, 4, 8, 12... → endpoint 1");
+                        println!("│   • Indices 1, 5, 9, 13... → endpoint 2");
+                        println!("│   • Indices 2, 6, 10, 14... → endpoint 3");
+                        println!("│   • Indices 3, 7, 11, 15... → endpoint 4");
+                    } else {
+                        for i in 0..std::cmp::min(all_endpoints.len(), 6) {
+                            println!("│   • Indices {}, {}, {}... → endpoint {}", 
+                                i, i + all_endpoints.len(), i + 2*all_endpoints.len(), i + 1);
+                        }
+                        if all_endpoints.len() > 6 {
+                            println!("│   ... ({} more endpoints)", all_endpoints.len() - 6);
+                        }
+                    }
+                    println!("│");
+                    
+                    // Generate sample file paths using DirectoryTree
+                    use crate::directory_tree::DirectoryTree;
+                    match DirectoryTree::new(dir_config.clone()) {
+                        Ok(tree) => {
+                            use crate::directory_tree::TreeManifest;
+                            let manifest = TreeManifest::from_tree(&tree);
+                            
+                            // Show 2 sample files per endpoint, grouped by agent
+                            println!("│ Sample files (first 2 per endpoint):");
+                            println!("│");
+                            
+                            let mut current_agent = String::new();
+                            for (ep_idx, (agent_id, endpoint)) in all_endpoints.iter().enumerate() {
+                                // Print agent header when we switch agents
+                                if agent_id != &current_agent {
+                                    if !current_agent.is_empty() {
+                                        println!("│");
+                                    }
+                                    current_agent = agent_id.clone();
+                                    if let Some(ref dist) = config.distributed {
+                                        if dist.agents.len() > 1 {
+                                            println!("│ Agent: {}", agent_id);
+                                        }
+                                    }
+                                }
+                                
+                                println!("│ Endpoint {} ({}):", ep_idx + 1, endpoint);
+                                
+                                // Find first 2 files that go to this endpoint
+                                let mut files_shown = 0;
+                                for i in 0..manifest.total_files {
+                                    if i % all_endpoints.len() == ep_idx {
+                                        if let Some(rel_path) = manifest.get_file_path(i) {
+                                            // Build full URI
+                                            let full_uri = if endpoint.ends_with('/') {
+                                                format!("{}{}", endpoint, rel_path)
+                                            } else {
+                                                format!("{}/{}", endpoint, rel_path)
+                                            };
+                                            println!("│   {}", full_uri);
+                                            files_shown += 1;
+                                            if files_shown >= 2 {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Count total files for this endpoint
+                                let total_on_endpoint = (manifest.total_files + all_endpoints.len() - 1 - ep_idx) / all_endpoints.len();
+                                if total_on_endpoint > files_shown {
+                                    println!("│   ... ({} more on this endpoint)", total_on_endpoint - files_shown);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("│ ⚠️  Could not generate sample paths: {}", e);
+                        }
+                    }
+                }
+                
+                println!("└──────────────────────────────────────────────────────────────────────┘");
+                println!();
+            }
+        }
+    }
     
     // Summary
     println!("✅ Configuration is valid and ready to run");
