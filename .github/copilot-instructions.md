@@ -33,6 +33,52 @@ fn test_all_or_nothing_with_failure() {
 
 Tests that verify buggy behavior are worse than no tests - they legitimize bugs and prevent fixes.
 
+## Compiler Warnings Are Critical Diagnostics
+
+**⚠️ NEVER IGNORE RUST COMPILER WARNINGS**: The Rust compiler is your debugging partner, not a nuisance.
+
+**Cardinal Rules**:
+1. **NEVER** suppress warnings with `#[allow(dead_code)]`, `#[allow(unused_variables)]`, or underscore prefixes (`_unused`)
+2. **ALWAYS** investigate the root cause - warnings indicate LOGIC ERRORS, not style issues
+3. **FIX THE LOGIC**, don't silence the messenger
+
+**Common Warning Categories and Real Bugs They Reveal**:
+
+- **`unused variable 'x'`** → Variable is checked but result ignored (incomplete implementation)
+- **`field 'y' is never read`** → Data stored but never used (design flaw or missing feature)
+- **`function 'foo' is never used`** → Implemented but no caller exists (missing auto-recovery trigger)
+- **`value assigned is never read`** → Logic error (assignments before overwrites in tests)
+- **`variant 'Bar' is never constructed`** → Incomplete test coverage or dead enum variant
+
+**Real Example from v0.8.60** (Fixed February 2026):
+```rust
+// WARNING: unused variable `bm` (barrier_manager)
+if let Some(ref mut bm) = barrier_manager {
+    // Comment: "barrier will be released by stats processing loop"
+    // NO ACTUAL WAIT CALL - dead code!
+}
+// ROOT CAUSE: Race condition - validation barrier timeout bug
+// FIX: Remove dead extraction, implement actual wait or remove block entirely
+```
+
+**8 Warnings Revealed 8 Critical Bugs**:
+1. Incomplete cache integration (TODO not finished)
+2. Unused diagnostic field (should log cache location)
+3. Dead validation barrier wait (race condition causing timeouts)
+4. Missing auto-recovery (reset_barrier_state implemented but never called)
+5-7. Test logic errors (assignments immediately overwritten)
+8. Test coverage gap (Idle variant never constructed)
+
+**Action Protocol**:
+1. See warning → **STOP** and investigate immediately
+2. Read the code context around the warning
+3. Understand the INTENDED behavior vs ACTUAL behavior
+4. Fix the logic bug, not the warning
+5. Verify fix with tests
+6. Learn from the mistake
+
+Compiler warnings are free bug reports. Ignoring them is technical debt accumulation.
+
 ## Critical Build and Debug Instructions
 
 **IMPORTANT**: When running `cargo build` or `cargo test`, do NOT pipe output to `head` or `tail`. The user needs to see the ENTIRE output, including all warnings and errors. Run build commands without filtering:

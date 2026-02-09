@@ -1519,6 +1519,9 @@ impl BarrierManager {
                     stuck_agents.join(", ")
                 );
                 
+                // v0.8.60: Reset barrier state on timeout to enable recovery
+                self.reset_barrier_state();
+                
                 return Err(anyhow!(
                     "Barrier '{}' timeout after {:?} - agents may be desynchronized. Use RESET to recover.",
                     phase_name,
@@ -2509,32 +2512,16 @@ async fn run_distributed_workload(
         None
     };
     
-    // v0.8.60: CRITICAL BUG FIX - Wait for validation/preflight barrier if YAML stages configured
-    // When using YAML-driven stages, agents complete validation stage and wait at barrier.
-    // Controller MUST wait for barrier before proceeding, otherwise agents timeout.
-    // This was causing "Barrier 'stage_preflight' not released after 5 retries - aborting workload"
-    if let Some(ref mut bm) = barrier_manager {
-        if let Some(ref distributed_config) = config.distributed {
-            // Check if first stage is validation/preflight
-            if let Some(ref stages) = distributed_config.stages {
-                if !stages.is_empty() {
-                    let first_stage = &stages[0];
-                    // Check if first stage is validation type
-                    if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
-                        info!("Waiting for validation/preflight barrier: '{}'", first_stage.name);
-                        eprintln!("🔄 Waiting for validation barrier synchronization...");
-                        
-                        // Wait for barrier (agents report via at_barrier=true in stats stream)
-                        // The barrier gets released automatically in the stats processing loop
-                        // when all agents reach the barrier (see check_barrier_ready logic)
-                        
-                        // NOTE: We don't explicitly wait here because the barrier release
-                        // happens asynchronously in the stats processing loop below.
-                        // The agents will wait at their barriers, and when all are ready,
-                        // the controller sends RELEASE_BARRIER messages via the broadcast channel.
-                        
-                        info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
-                    }
+    // v0.8.60: Validation/preflight barrier handling
+    // When using YAML-driven stages with validation, barrier release happens asynchronously
+    // in the stats processing loop when all agents report at_barrier=true.
+    // No explicit wait needed here - controller sends RELEASE_BARRIER via broadcast channel.
+    if let Some(ref distributed_config) = config.distributed {
+        if let Some(ref stages) = distributed_config.stages {
+            if !stages.is_empty() {
+                let first_stage = &stages[0];
+                if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
+                    info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
                 }
             }
         }

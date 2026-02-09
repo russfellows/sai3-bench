@@ -185,13 +185,10 @@ impl MetadataPrefetcher {
 
                 let handle = tokio::spawn(async move {
                     // Each worker opens its own cache reference (read-only)
-                    let worker_cache = if let Some(ref path) = cache_path {
-                        // Note: In production, we'd reuse the cache handle, but for now
-                        // we demonstrate the concept
-                        None // TODO: Pass cache handle properly
-                    } else {
-                        None
-                    };
+                    // TODO: Cache handle sharing not yet implemented - would require Arc<Cache>
+                    // For now, cache is only used at coordinator level, not in worker threads
+                    // Note: cache_path is captured in closure but not used (incomplete feature)
+                    let _cache_path_unused = cache_path;
 
                     loop {
                         let uri = {
@@ -203,7 +200,7 @@ impl MetadataPrefetcher {
                             Some(uri) => {
                                 let metadata = fetch_metadata_with_cache(
                                     &uri,
-                                    worker_cache.as_ref(),
+                                    None,  // TODO: Worker-level cache not yet implemented
                                     &config_hash,
                                 ).await;
                                 

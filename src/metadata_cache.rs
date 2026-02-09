@@ -792,6 +792,8 @@ impl CoordinatorCache {
             .keyspace("config_metadata", KeyspaceCreateOptions::default)
             .context("Failed to create config_metadata keyspace")?;
 
+        info!("✅ Coordinator cache initialized at: {}", cache_dir.display());
+        
         Ok(CoordinatorCache {
             db,
             cache_dir,
@@ -810,6 +812,11 @@ impl CoordinatorCache {
         } else {
             Ok(None)
         }
+    }
+
+    /// Get cache directory path (for diagnostics/logging)
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.cache_dir
     }
 
     /// Put tree manifest into cache
