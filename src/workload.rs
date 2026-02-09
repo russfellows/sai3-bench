@@ -355,10 +355,10 @@ pub fn create_multi_endpoint_store(
 /// Used to map files to endpoints using the same round-robin logic as prepare phase.
 /// 
 /// # Examples
-/// ```
-/// assert_eq!(extract_file_index_from_path("d1_w1.dir/file_00000009.dat"), Some(9));
-/// assert_eq!(extract_file_index_from_path("prepared-00000042.dat"), Some(42));
-/// assert_eq!(extract_file_index_from_path("file_00000000.dat"), Some(0));
+/// ```text
+/// extract_file_index_from_path("d1_w1.dir/file_00000009.dat") => Some(9)
+/// extract_file_index_from_path("prepared-00000042.dat") => Some(42)
+/// extract_file_index_from_path("file_00000000.dat") => Some(0)
 /// ```
 fn extract_file_index_from_path(path: &str) -> Option<usize> {
     // Extract filename from path (after last '/')

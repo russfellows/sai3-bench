@@ -515,6 +515,18 @@ fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> O
                     return Some(fs_path);
                 }
             }
+            
+            // Also check distributed.agents[].multi_endpoint.endpoints (v0.8.60+)
+            if let Some(ref multi) = agent.multi_endpoint {
+                for endpoint in &multi.endpoints {
+                    if let Some(path) = endpoint.strip_prefix("file://")
+                        .or_else(|| endpoint.strip_prefix("direct://"))
+                        .map(std::path::PathBuf::from) {
+                        // Return first filesystem endpoint found
+                        return Some(path);
+                    }
+                }
+            }
         }
     }
     
@@ -4150,5 +4162,228 @@ mod tests {
     #[ignore = "Uses deprecated Ready/Running states removed in v0.8.29"]
     async fn test_race_condition_scenario_error_path() {
         // Test body removed - uses deprecated states
+    }
+
+    // ========================================================================
+    // Filesystem Path Extraction Tests (v0.8.60 - Critical Bug Fix)
+    // Bug: extract_filesystem_path_from_config() didn't check 
+    //      distributed.agents[].multi_endpoint.endpoints
+    // Impact: Filesystem validation was skipped for multi-endpoint configs
+    // ========================================================================
+
+    #[test]
+    fn test_extract_filesystem_path_standalone_file_uri() {
+        let yaml = r#"
+target: "file:///tmp/test-data/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from config.target");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/tmp/test-data/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_standalone_direct_uri() {
+        let yaml = r#"
+target: "direct:///mnt/nvme/test/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract direct:// path from config.target");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/nvme/test/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_multi_endpoint_top_level() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///mnt/disk1/"
+    - "file:///mnt/disk2/"
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from multi_endpoint.endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/disk1/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_prepare_ensure_objects() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "file:///data/prepared/"
+      count: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from prepare.ensure_objects[].base_uri");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/data/prepared/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_distributed_target_override() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+      target_override: "file:///agent1/data/"
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from distributed.agents[].target_override");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/agent1/data/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_distributed_multi_endpoint_bug_fix() {
+        // THIS IS THE CRITICAL BUG FIX TEST
+        // Config structure from 4host-vast-64mfiles-with-barriers.yaml
+        // Previously returned None, causing "Skipping filesystem validation" message
+        let yaml = r#"
+concurrency: 64
+duration: 30s
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast1/benchmark/"
+          - "file:///mnt/vast2/benchmark/"
+          - "file:///mnt/vast3/benchmark/"
+          - "file:///mnt/vast4/benchmark/"
+        strategy: round_robin
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast5/benchmark/"
+        strategy: round_robin
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), 
+            "CRITICAL BUG: Should extract file:// path from distributed.agents[].multi_endpoint.endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/vast1/benchmark/"),
+            "Should return first filesystem endpoint from first agent");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_s3() {
+        let yaml = r#"
+target: "s3://my-bucket/prefix/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for s3:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_azure() {
+        let yaml = r#"
+target: "az://container/path/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for az:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_gcs() {
+        let yaml = r#"
+target: "gs://bucket/prefix/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for gs:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_empty_config() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for empty config");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_mixed_endpoints_prefers_first_filesystem() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+      multi_endpoint:
+        endpoints:
+          - "s3://bucket1/"
+          - "file:///mnt/data/"
+          - "file:///mnt/other/"
+        strategy: round_robin
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract first filesystem path from mixed endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/data/"));
     }
 }

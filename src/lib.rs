@@ -19,6 +19,7 @@ pub mod live_stats; // Live stats tracking for distributed execution (v0.7.5+)
 
 #[cfg(test)]
 mod config_tests; // Unit tests for config module (base_uri handling, etc.)
+pub mod metadata_cache; // Distributed metadata cache with fjall v3 + state tracking (v0.8.60+)
 pub mod metadata_prefetch; // Async metadata pre-fetching (v0.6.9+)
 pub mod metrics; // Shared metrics infrastructure (v0.5.1+)
 pub mod multiprocess; // Multi-process scaling for parallel I/O (v0.7.3+)
