@@ -8,6 +8,49 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.53] - 2026-02-09
+
+**Critical Fixes: Multi-Endpoint + Directory Tree Workloads**
+
+This release fixes critical bugs affecting multi-endpoint configurations with directory tree structures, and enhances dry-run validation output for better visibility.
+
+### Fixed
+
+- **Multi-endpoint + directory tree workload routing** (CRITICAL)
+  - GET/PUT/STAT/DELETE operations now correctly route to the endpoint where each file was created
+  - Fixed round-robin endpoint calculation: extracts file index from filename, computes `endpoint_idx = file_idx % num_endpoints`
+  - Applies to all tree mode operations in distributed workloads
+  - **Impact**: Workloads that previously failed with 0 ops now execute correctly
+  - Example: 2 agents × 2 endpoints = 4 total mount points, all files now accessible
+  - **Files changed**: `src/workload.rs` (+94 lines endpoint routing logic)
+
+- **"duplicate field `timeout_secs`" deserialization error in distributed validation stage**
+  - Removed duplicate `timeout_secs` field from `StageConfig::Validation` variant
+  - Configuration now uses single top-level `timeout_secs` field
+  - **Impact**: Agents no longer crash on startup when parsing YAML with validation stages
+  - **Files changed**: `src/config.rs` (-7 lines), `src/bin/agent.rs` (2 lines field access)
+
+### Enhanced
+
+- **Dry-run validation now shows complete file distribution across ALL endpoints**
+  - Previously: Only showed first agent's first endpoint
+  - Now: Displays all endpoints from all agents with full URIs
+  - Shows round-robin pattern visualization (e.g., "indices 0,4,8,12 → endpoint1")
+  - Displays first 2 sample files per endpoint with complete file:// / s3:// / az:// URIs
+  - Grouped by agent for multi-agent configurations
+  - **Impact**: Users can verify correct endpoint distribution before running expensive workloads
+  - **Files changed**: `src/validation.rs` (+146 lines multi-endpoint display logic)
+
+### Testing
+
+- Verified with 2 agents × 2 endpoints = 4 total mount points
+- 80 files distributed perfectly (20 per endpoint, round-robin by index)
+- 11 GET operations succeeded (previously failed with 0 ops)
+- Dry-run shows complete URI distribution across all 4 endpoints
+- All existing tests passing (446 total)
+
+---
+
 ## [0.8.52] - 2026-02-06
 
 **Maintainability Release: Adaptive Retry + Code Refactoring + Enhanced UX**
