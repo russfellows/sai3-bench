@@ -1221,6 +1221,8 @@ fn run_workload(
                 0,  // agent_id (standalone mode)
                 1,  // num_agents (standalone mode)
                 true,  // shared_storage (N/A in standalone, but use true for backward compat)
+                None,  // v0.8.60: No results_dir in standalone CLI (cache disabled for now)
+                None,  // v0.8.60: No config for cache hash (cache disabled for now)
             ))?;
             
             let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 

@@ -52,6 +52,7 @@ indicatif = "^0.17"
 # CSV parsing for op-log replay
 csv = "^1.3"
 zstd = "^0.13"
+tar = "^0.4"  # v0.8.60: Tarball creation for KV cache checkpoints
 
 # SSH automation for distributed deployment (v0.6.11+)
 ssh2 = "^0.9"

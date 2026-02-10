@@ -48,7 +48,7 @@ mod tests {
         let result = rt.block_on(async {
             // Verify function signature accepts concurrency parameter
             // This will return immediately with empty results since no objects to prepare
-            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0, false).await
+            prepare_objects(&config, None, None, None, &multi_ep_cache, 1, test_concurrency, 0, false, None, None).await
         });
         
         // Should succeed with empty object list
@@ -78,7 +78,7 @@ mod tests {
         let multi_ep_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         for concurrency in [1, 16, 32, 64, 128] {
             let result = rt.block_on(async {
-                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0, false).await
+                prepare_objects(&config, None, None, None, &multi_ep_cache, 1, concurrency, 0, false, None, None).await
             });
             
             assert!(result.is_ok(), "Failed with concurrency={}", concurrency);

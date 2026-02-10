@@ -172,6 +172,7 @@ mod tests {
                 endpoints,
                 strategy: "round_robin".to_string(),
             }),
+            kv_cache_dir: None,
         }
     }
 
@@ -199,6 +200,7 @@ mod tests {
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
+                kv_cache_dir: None,
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -262,6 +264,7 @@ mod tests {
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
+                kv_cache_dir: None,
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -320,6 +323,7 @@ mod tests {
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
+                kv_cache_dir: None,
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
@@ -372,6 +376,7 @@ mod tests {
                         path_template: None,
                         listen_port: 7762,
                         multi_endpoint: None,  // Missing multi_endpoint
+                        kv_cache_dir: None,
                     },
                 ],
                 ssh: None,
@@ -387,6 +392,7 @@ mod tests {
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
                 stages: None,  // No YAML stages for tests
+                kv_cache_dir: None,
             }),
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {

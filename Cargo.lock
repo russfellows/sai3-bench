@@ -4569,6 +4569,7 @@ dependencies = [
  "shellexpand",
  "ssh2",
  "sysinfo",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",

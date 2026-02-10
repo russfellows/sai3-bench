@@ -38,10 +38,18 @@ pub(crate) async fn prepare_parallel(
     agent_id: usize,
     num_agents: usize,
     shared_storage: bool,  // v0.8.24: Only filter by agent_id in shared storage mode
+    metadata_cache: Option<Arc<tokio::sync::Mutex<crate::metadata_cache::MetadataCache>>>,  // v0.8.60: KV cache
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
+    
+    // v0.8.60: Log cache status
+    if metadata_cache.is_some() {
+        info!("📊 Metadata cache ENABLED for parallel prepare");
+    } else {
+        info!("Metadata cache disabled for parallel prepare");
+    }
     
     // Structure to hold task information BEFORE URI assignment
     struct TaskSpec {

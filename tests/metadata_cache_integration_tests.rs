@@ -30,7 +30,7 @@ async fn test_4_endpoint_coordination() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(4);
     let config_hash = "4ep_test".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
     assert_eq!(cache.num_endpoints(), 4);
 
     // Plan 100 objects, verify round-robin distribution
@@ -52,7 +52,7 @@ async fn test_multi_endpoint_progress_aggregation() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(3);
     let config_hash = "progress_3ep".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Endpoint 0: 30 created
     for i in (0..90).step_by(3) {
@@ -96,7 +96,7 @@ async fn test_resume_after_partial_prepare() {
 
     // Phase 1: Initial prepare (simulate crash after 50 objects)
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         // Plan 100 objects
         for i in 0..100 {
@@ -116,7 +116,7 @@ async fn test_resume_after_partial_prepare() {
 
     // Phase 2: Resume (reopen cache, find Planned objects, complete them)
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         // Find objects that need creation
         let mut total_needs_creation = 0;
@@ -151,7 +151,7 @@ async fn test_resume_after_failures() {
 
     // Phase 1: First attempt with failures
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         // Plan 50 objects, 30 succeed, 20 fail
         for i in 0..50 {
@@ -172,7 +172,7 @@ async fn test_resume_after_failures() {
 
     // Phase 2: Retry failed objects
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         // Find failed objects and retry
         let mut total_retries = 0;
@@ -209,7 +209,7 @@ async fn test_drift_detection_external_deletion() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(1);
     let config_hash = "drift_detect".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Create 20 objects
     for i in 0..20 {
@@ -246,7 +246,7 @@ async fn test_pre_workload_validation() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(2);
     let config_hash = "validation".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Plan 100 objects, create 95, fail 5
     for i in 0..100 {
@@ -293,7 +293,7 @@ async fn test_config_hash_change_invalidation() {
     
     // Phase 1: Create cache with config1, add objects, flush and drop
     {
-        let cache_1 = MetadataCache::new(&results_dir, &endpoints, config_hash_1.clone()).await.unwrap();
+        let cache_1 = MetadataCache::new(&results_dir, &endpoints, config_hash, None_1.clone()).await.unwrap();
 
         // Plan 100 objects
         for i in 0..100 {
@@ -313,7 +313,7 @@ async fn test_config_hash_change_invalidation() {
 
     // Phase 2: Create new cache, verify config isolation
     {
-        let cache_2 = MetadataCache::new(&results_dir, &endpoints, config_hash_2.clone()).await.unwrap();
+        let cache_2 = MetadataCache::new(&results_dir, &endpoints, config_hash, None_2.clone()).await.unwrap();
 
         // Old config data should NOT be visible with new config hash
         let counts_2 = cache_2.endpoint(0).unwrap().count_by_state(&config_hash_2).unwrap();
@@ -334,7 +334,7 @@ async fn test_listing_cache_compression() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(1);
     let config_hash = "listing_test".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Create 1000 object paths
     let objects: Vec<String> = (0..1000)
@@ -359,7 +359,7 @@ async fn test_stress_100k_objects_single_endpoint() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(1);
     let config_hash = "stress_100k".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Plan 100,000 objects in batches
     let batch_size = 10_000;
@@ -395,7 +395,7 @@ async fn test_stress_10k_objects_per_endpoint_4_endpoints() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(4);
     let config_hash = "stress_4ep".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Each endpoint gets 10,000 objects (40,000 total)
     for ep_idx in 0..4 {
@@ -435,7 +435,7 @@ async fn test_persistence_across_cache_reopens() {
 
     // Phase 1: Create cache, add 1000 objects, flush
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         for i in 0..1000 {
             cache.endpoint(0).unwrap().plan_object(&config_hash, i, &format!("file_{}.dat", i), 2048).unwrap();
@@ -452,7 +452,7 @@ async fn test_persistence_across_cache_reopens() {
 
     // Phase 2: Reopen cache, verify data persisted
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
         let counts = cache.endpoint(0).unwrap().count_by_state(&config_hash).unwrap();
         assert_eq!(counts.get(&ObjectState::Created), Some(&500), "Created objects should persist");
@@ -475,7 +475,7 @@ async fn test_empty_endpoint() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(2);
     let config_hash = "empty_ep".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Endpoint 0: 100 objects
     for i in (0..200).step_by(2) {
@@ -497,7 +497,7 @@ async fn test_missing_object_lookup() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(1);
     let config_hash = "missing".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Plan object 0
     cache.endpoint(0).unwrap().plan_object(&config_hash, 0, "file_0.dat", 1024).unwrap();
@@ -516,7 +516,7 @@ async fn test_zero_size_objects() {
     let (_temp, endpoints, results_dir) = setup_multi_endpoint_env(1);
     let config_hash = "zero_size".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone()).await.unwrap();
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone()).await.unwrap();
 
     // Plan 10 zero-size objects
     for i in 0..10 {

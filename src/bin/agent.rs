@@ -1053,6 +1053,8 @@ impl Agent for AgentSvc {
                 agent_index as usize,
                 num_agents as usize,
                 shared_storage,  // v0.8.24: Only filter by agent_id in shared storage mode
+                None,  // v0.8.60: No results_dir in deprecated run_workload RPC (cache disabled)
+                None,  // v0.8.60: No config for cache hash (cache disabled)
             ).await.map_err(|e| {
                 error!("Prepare phase failed: {}", e);
                 Status::internal(format!("Prepare phase failed: {}", e))
@@ -3010,6 +3012,16 @@ async fn execute_stages_workflow(
 ) -> Result<sai3_bench::workload::Summary, String> {
     info!("Starting YAML-driven stage workflow with {} stages", stages.len());
     
+    // v0.8.60: Create results directory for metadata cache and stage outputs
+    let results_base = std::env::temp_dir();
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M");
+    let results_dir_name = format!("sai3-agent-{}-{}", timestamp, agent_id);
+    let results_dir = results_base.join(&results_dir_name);
+    if let Err(e) = std::fs::create_dir_all(&results_dir) {
+        warn!("Failed to create results directory (cache disabled): {}", e);
+    }
+    info!("📁 Agent results directory: {}", results_dir.display());
+    
     // Wire tracker into config
     config.live_stats_tracker = Some(tracker.clone());
     
@@ -3090,6 +3102,8 @@ async fn execute_stages_workflow(
                         agent_index,
                         num_agents,
                         shared_storage,
+                        Some(&results_dir),  // v0.8.60: Enable metadata cache
+                        Some(&config),       // v0.8.60: For config hash generation
                     ).await {
                         Ok((prepared, manifest, prepare_metrics)) => {
                             info!("Prepare stage complete: {} objects", prepared.len());

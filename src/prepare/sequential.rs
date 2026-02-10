@@ -32,7 +32,15 @@ pub(crate) async fn prepare_sequential(
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
+    metadata_cache: Option<Arc<tokio::sync::Mutex<crate::metadata_cache::MetadataCache>>>,  // v0.8.60: KV cache
 ) -> Result<Vec<PreparedObject>> {
+    // v0.8.60: Log cache status
+    if metadata_cache.is_some() {
+        info!("📊 Metadata cache ENABLED for sequential prepare");
+    } else {
+        info!("Metadata cache disabled for sequential prepare");
+    }
+    
     let mut all_prepared = Vec::new();
     
     for spec in &config.ensure_objects {
