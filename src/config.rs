@@ -1122,12 +1122,14 @@ pub struct DistributedConfig {
     #[serde(default)]
     pub barrier_sync: BarrierSyncConfig,
     
-    /// v0.8.26: YAML-driven stage orchestration (optional)
+    /// v0.8.61: YAML-driven stage orchestration (REQUIRED for distributed mode)
     /// Explicit stage ordering with flexible completion criteria
-    /// If not specified, generates default stages: [preflight, prepare, execute, cleanup]
+    /// Stages MUST be defined when using distributed testing
     /// Stages are sorted by 'order' field, not YAML position
+    /// Legacy auto-generation removed in v0.8.61 - stages are mandatory
+    /// Note: default allows parsing old configs for conversion
     #[serde(default)]
-    pub stages: Option<Vec<StageConfig>>,
+    pub stages: Vec<StageConfig>,
     
     /// v0.8.60: Default KV cache directory for metadata caching (optional)
     /// Used to isolate LSM operations (journals, compaction, version files) from test storage
@@ -1807,26 +1809,18 @@ impl BarrierSyncConfig {
 impl DistributedConfig {
     /// Get sorted stages (by order field), generating defaults if not specified
     /// 
-    /// Default stages (backward compatibility):
-    /// 1. preflight (validation_passed)
-    /// 2. prepare (tasks_done)
-    /// 3. execute (duration)
-    /// 4. cleanup (tasks_done)
-    pub fn get_sorted_stages(&self, default_duration: std::time::Duration) -> Result<Vec<StageConfig>, String> {
-        let stages = if let Some(ref stages) = self.stages {
-            // Validate user-provided stages
-            self.validate_stages(stages)?;
-            
-            // Sort by order field
-            let mut sorted = stages.clone();
-            sorted.sort_by_key(|s| s.order);
-            sorted
-        } else {
-            // Generate default stages for backward compatibility
-            self.generate_default_stages(default_duration)
-        };
+    /// Get sorted stages from configuration (stages are now MANDATORY)
+    pub fn get_sorted_stages(&self) -> Result<Vec<StageConfig>, String> {
+        let stages = &self.stages;
         
-        Ok(stages)
+        // Validate user-provided stages
+        self.validate_stages(stages)?;
+        
+        // Sort by order field
+        let mut sorted = stages.clone();
+        sorted.sort_by_key(|s| s.order);
+        
+        Ok(sorted)
     }
     
     /// Validate stage configuration
@@ -1895,53 +1889,6 @@ impl DistributedConfig {
         Ok(())
     }
     
-    /// Generate default stages for backward compatibility
-    fn generate_default_stages(&self, default_duration: std::time::Duration) -> Vec<StageConfig> {
-        vec![
-            StageConfig {
-                name: "preflight".to_string(),
-                order: 1,
-                completion: CompletionCriteria::ValidationPassed,
-                barrier: self.barrier_sync.validation.clone(),
-                timeout_secs: Some(300), // 5 minutes for validation
-                optional: false,
-                config: StageSpecificConfig::Validation,
-            },
-            StageConfig {
-                name: "prepare".to_string(),
-                order: 2,
-                completion: CompletionCriteria::TasksDone,
-                barrier: self.barrier_sync.prepare.clone(),
-                timeout_secs: None, // No timeout for prepare (takes as long as needed)
-                optional: false,
-                config: StageSpecificConfig::Prepare {
-                    expected_objects: None,
-                },
-            },
-            StageConfig {
-                name: "execute".to_string(),
-                order: 3,
-                completion: CompletionCriteria::Duration,
-                barrier: self.barrier_sync.execute.clone(),
-                timeout_secs: None, // No timeout for execute (duration is part of config)
-                optional: false,
-                config: StageSpecificConfig::Execute {
-                    duration: default_duration,
-                },
-            },
-            StageConfig {
-                name: "cleanup".to_string(),
-                order: 4,
-                completion: CompletionCriteria::TasksDone,
-                barrier: self.barrier_sync.cleanup.clone(),
-                timeout_secs: Some(3600), // 1 hour timeout for cleanup
-                optional: true, // Cleanup can fail without aborting test
-                config: StageSpecificConfig::Cleanup {
-                    expected_objects: None,
-                },
-            },
-        ]
-    }
 }
 
 /// Multi-process scaling configuration (v0.7.3+)

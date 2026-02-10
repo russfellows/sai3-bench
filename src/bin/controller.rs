@@ -748,6 +748,37 @@ enum Commands {
         #[arg(long)]
         shared_prepare: Option<bool>,
     },
+    
+    /// Convert legacy YAML configs to explicit stages format (v0.8.61+)
+    /// 
+    /// Converts old implicit-stage configs (top-level duration/workload) to new
+    /// explicit-stage format (distributed.stages array).
+    /// 
+    /// Creates backup files (.yaml.bak) before conversion.
+    /// Validates converted configs before replacing original.
+    /// 
+    /// Examples:
+    ///   sai3bench-ctl convert --config mixed.yaml
+    ///   sai3bench-ctl convert --config mixed.yaml --dry-run
+    ///   sai3bench-ctl convert --files tests/configs/*.yaml
+    ///   sai3bench-ctl convert --files tests/configs/*.yaml --no-validate
+    Convert {
+        /// Single config file to convert
+        #[arg(long, conflicts_with = "files")]
+        config: Option<PathBuf>,
+        
+        /// Multiple config files to convert
+        #[arg(long, conflicts_with = "config", num_args = 1..)]
+        files: Option<Vec<PathBuf>>,
+        
+        /// Show what would be converted without making changes
+        #[arg(long)]
+        dry_run: bool,
+        
+        /// Skip validation after conversion (faster but risky)
+        #[arg(long)]
+        no_validate: bool,
+    },
 }
 
 // v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
@@ -1100,6 +1131,102 @@ async fn main() -> Result<()> {
                 &cli.agent_domain,
             )
             .await?;
+        }
+        
+        Commands::Convert { config, files, dry_run, no_validate } => {
+            use sai3_bench::config_converter::{convert_yaml_file, ConversionResult};
+            
+            // Determine files to process
+            let files_to_convert: Vec<PathBuf> = if let Some(single_config) = config {
+                vec![single_config.clone()]
+            } else if let Some(file_list) = files {
+                file_list.clone()
+            } else {
+                bail!("Must specify either --config or --files");
+            };
+            
+            if files_to_convert.is_empty() {
+                bail!("No files provided for conversion");
+            }
+            
+            println!("╔═══════════════════════════════════════════════════════════════════════╗");
+            println!("║        YAML Config Converter: Legacy → Explicit Stages              ║");
+            println!("╚═══════════════════════════════════════════════════════════════════════╝");
+            println!();
+            
+            if *dry_run {
+                println!("🔍 DRY RUN MODE - No changes will be made");
+            } else if *no_validate {
+                println!("⚠️  VALIDATION DISABLED - Configs will NOT be validated");
+            }
+            
+            println!();
+            println!("Processing {} file(s)...", files_to_convert.len());
+            println!();
+            
+            let mut success_count = 0;
+            let mut skip_count = 0;
+            let mut fail_count = 0;
+            
+            for file_path in &files_to_convert {
+                println!("📄 {}", file_path.display());
+                
+                if !file_path.exists() {
+                    println!("  ❌ File does not exist");
+                    fail_count += 1;
+                    continue;
+                }
+                
+                match convert_yaml_file(file_path, !no_validate, *dry_run) {
+                    Ok(ConversionResult::AlreadyHasStages) => {
+                        println!("  ℹ️  Already has stages section - skipping");
+                        skip_count += 1;
+                    }
+                    Ok(ConversionResult::NoConversionNeeded) => {
+                        println!("  ℹ️  No distributed/workload section - skipping");
+                        skip_count += 1;
+                    }
+                    Ok(ConversionResult::DryRun { stage_count }) => {
+                        println!("  🔄 Would convert → {} stages", stage_count);
+                        success_count += 1;
+                    }
+                    Ok(ConversionResult::Converted { stage_count, backup_path }) => {
+                        println!("  ✅ Converted → {} stages", stage_count);
+                        println!("  💾 Backup: {}", backup_path);
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        println!("  ❌ Conversion failed: {}", e);
+                        if let Some(source) = e.source() {
+                            println!("     Cause: {}", source);
+                        }
+                        fail_count += 1;
+                    }
+                }
+                
+                println!();
+            }
+            
+            // Summary
+            println!("╔═══════════════════════════════════════════════════════════════════════╗");
+            println!("║                     CONVERSION SUMMARY                               ║");
+            println!("╚═══════════════════════════════════════════════════════════════════════╝");
+            println!();
+            println!("✅ Converted: {}", success_count);
+            println!("ℹ️  Skipped:   {}", skip_count);
+            println!("❌ Failed:    {}", fail_count);
+            println!("📁 Total:     {}", files_to_convert.len());
+            println!();
+            
+            if !dry_run && success_count > 0 {
+                println!("💾 Backups saved with .yaml.bak extension");
+                println!("   To restore: mv <file>.yaml.bak <file>.yaml");
+                println!();
+            }
+            
+            if fail_count > 0 {
+                bail!("{} file(s) failed to convert", fail_count);
+            }
         }
     }
 
@@ -2002,10 +2129,68 @@ async fn run_distributed_workload(
     
     info!("Pre-flight validation passed - proceeding with workload execution");
     
+    // v0.8.61: Log concurrency configuration for each agent (CRITICAL for debugging performance)
+    info!("=== Concurrency Configuration ===");
+    if let Some(ref distributed) = config.distributed {
+        for (_idx, agent_cfg) in distributed.agents.iter().enumerate() {
+            let agent_id = agent_cfg.id.as_deref().unwrap_or("unknown");
+            
+            // Determine effective concurrency (override or global)
+            let effective_concurrency = agent_cfg.concurrency_override.unwrap_or(config.concurrency);
+            
+            // Count endpoints for this agent
+            let num_endpoints = agent_cfg.multi_endpoint.as_ref()
+                .map(|m| m.endpoints.len())
+                .unwrap_or(1);  // Single endpoint if no multi_endpoint
+            
+            // CRITICAL VALIDATION: Concurrency must be >= num_endpoints (1 thread per endpoint minimum)
+            if effective_concurrency < num_endpoints {
+                error!("Agent '{}': concurrency={} is LESS than endpoints={}", 
+                       agent_id, effective_concurrency, num_endpoints);
+                error!("  This will cause poor performance - some endpoints will be idle!");
+                error!("  RECOMMENDATION: Set concurrency >= {} (at least 1 thread per endpoint)", num_endpoints);
+                bail!("Agent '{}' has insufficient concurrency ({}) for {} endpoints. Minimum required: {}", 
+                      agent_id, effective_concurrency, num_endpoints, num_endpoints);
+            }
+            
+            // Log concurrency details
+            if agent_cfg.concurrency_override.is_some() {
+                info!("  Agent {}: {} threads (concurrency_override), {} endpoints → {:.1} threads/endpoint",
+                      agent_id, effective_concurrency, num_endpoints, 
+                      effective_concurrency as f64 / num_endpoints as f64);
+            } else {
+                info!("  Agent {}: {} threads (global concurrency), {} endpoints → {:.1} threads/endpoint",
+                      agent_id, effective_concurrency, num_endpoints,
+                      effective_concurrency as f64 / num_endpoints as f64);
+            }
+        }
+        
+        // Calculate total concurrency across all agents
+        let total_concurrency: usize = distributed.agents.iter()
+            .map(|a| a.concurrency_override.unwrap_or(config.concurrency))
+            .sum();
+        
+        info!("  TOTAL: {} threads across {} agents", total_concurrency, distributed.agents.len());
+    } else {
+        info!("  Single-node mode: {} threads", config.concurrency);
+    }
+    info!("=================================");
+    
     // v0.8.51: Extract ready_timeout from config before spawning tasks
     let agent_ready_timeout_secs = config.distributed.as_ref()
         .map(|d| d.agent_ready_timeout)
         .unwrap_or(120);
+    
+    // v0.8.61: Check if using YAML-driven stages (determines whether to send Phase 2 START)
+    let using_yaml_stages = config.distributed.as_ref()
+        .map(|d| !d.stages.is_empty())
+        .unwrap_or(false);
+    
+    if using_yaml_stages {
+        info!("Using YAML-driven stages - Phase 2 START will be skipped (barrier coordination mode)");
+    } else {
+        info!("Using legacy workload format - Phase 2 START will be sent");
+    }
     
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
@@ -2025,13 +2210,15 @@ async fn run_distributed_workload(
         
         // v0.8.22: Apply per-agent multi_endpoint and target overrides if specified
         // This allows static endpoint mapping: each agent uses specific subset of endpoints
+        // v0.8.61: Apply concurrency_override to set per-agent thread count
         let agent_specific_config = if let Some(ref distributed) = config.distributed {
             if idx < distributed.agents.len() {
                 let agent_cfg = &distributed.agents[idx];
                 let has_multi_ep = agent_cfg.multi_endpoint.is_some();
                 let has_target = agent_cfg.target_override.is_some();
+                let has_concurrency_override = agent_cfg.concurrency_override.is_some();
                 
-                if has_multi_ep || has_target {
+                if has_multi_ep || has_target || has_concurrency_override {
                     // Agent has overrides - apply them to config
                     let mut modified_config = config.clone();
                     
@@ -2046,11 +2233,17 @@ async fn run_distributed_workload(
                         modified_config.multi_endpoint = Some(agent_multi_ep.clone());
                     }
                     
+                    // v0.8.61: Apply concurrency_override (per-agent thread count)
+                    if let Some(override_concurrency) = agent_cfg.concurrency_override {
+                        modified_config.concurrency = override_concurrency;
+                        info!("Agent {}: Using concurrency_override: {} threads", agent_id, override_concurrency);
+                    }
+                    
                     // Serialize modified config to YAML
                     match serde_yaml::to_string(&modified_config) {
                         Ok(yaml) => {
-                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={})", 
-                                   agent_id, has_multi_ep, has_target);
+                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={}, concurrency={})", 
+                                   agent_id, has_multi_ep, has_target, has_concurrency_override);
                             yaml
                         }
                         Err(e) => {
@@ -2170,31 +2363,39 @@ async fn run_distributed_workload(
                 return Err(anyhow!("Agent {} did not send READY within {}s", agent_id, ready_timeout.as_secs()));
             }
             
-            // Phase 2: Send START command with coordinated timestamp
-            // This happens after ALL agents are READY (controlled by main loop)
-            // For now, send it immediately after READY for backward compatibility with test
-            let start_msg = ControlMessage {
-                command: control_message::Command::Start as i32,
-                config_yaml: String::new(),  // Already sent in Phase 1
-                agent_id: agent_id.clone(),
-                path_prefix: String::new(),
-                shared_storage: false,
-                start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
-                ack_sequence: 0,
-                agent_index: idx as u32,  // v0.8.7: Redundant but consistent
-                num_agents,               // v0.8.7: Redundant but consistent
-                barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
-                barrier_sequence: 0,
-                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
-                target_stage_name: String::new(),
-                ready_for_next: false,
-            };
+            // v0.8.61: Phase 2 START is ONLY for legacy (non-YAML-driven-stages) workflows
+            // When using YAML-driven stages, agents transition to preflight stage after Phase 1 START
+            // and wait at barrier. Controller releases barrier via RELEASE_BARRIER broadcast, not START.
             
-            if let Err(e) = tx_control.send(start_msg).await {
-                return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+            if !using_yaml_stages {
+                // LEGACY: Phase 2 START with coordinated timestamp for old-style workloads
+                // This happens after ALL agents are READY (controlled by main loop)
+                // For now, send it immediately after READY for backward compatibility with test
+                let start_msg = ControlMessage {
+                    command: control_message::Command::Start as i32,
+                    config_yaml: String::new(),  // Already sent in Phase 1
+                    agent_id: agent_id.clone(),
+                    path_prefix: String::new(),
+                    shared_storage: false,
+                    start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
+                    ack_sequence: 0,
+                    agent_index: idx as u32,  // v0.8.7: Redundant but consistent
+                    num_agents,               // v0.8.7: Redundant but consistent
+                    barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                    barrier_sequence: 0,
+                    target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                    target_stage_name: String::new(),
+                    ready_for_next: false,
+                };
+                
+                if let Err(e) = tx_control.send(start_msg).await {
+                    return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+                }
+                
+                debug!("Agent {} sent Phase 2 START timestamp {}ns (legacy mode)", addr, start_ns);
+            } else {
+                info!("Agent {} using YAML-driven stages - skipping Phase 2 START (barrier coordination mode)", agent_id);
             }
-            
-            debug!("Agent {} sent start timestamp {}ns via control channel", addr, start_ns);
             
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
@@ -2541,12 +2742,11 @@ async fn run_distributed_workload(
     // in the stats processing loop when all agents report at_barrier=true.
     // No explicit wait needed here - controller sends RELEASE_BARRIER via broadcast channel.
     if let Some(ref distributed_config) = config.distributed {
-        if let Some(ref stages) = distributed_config.stages {
-            if !stages.is_empty() {
-                let first_stage = &stages[0];
-                if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
-                    info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
-                }
+        let stages = &distributed_config.stages;
+        if !stages.is_empty() {
+            let first_stage = &stages[0];
+            if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
+                info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
             }
         }
     }

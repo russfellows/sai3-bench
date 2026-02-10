@@ -10,6 +10,7 @@ pub mod pb {
 }
 
 pub mod config;
+pub mod config_converter; // Legacy YAML to explicit stages converter (v0.8.61+)
 pub mod cleanup; // Cleanup operations for prepared objects (v0.8.7+)
 pub mod constants; // Central constants and defaults (v0.8.0+)
 pub mod cpu_monitor;

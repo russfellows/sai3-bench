@@ -140,6 +140,94 @@ cp tests/configs/directory-tree/tree_test_basic.yaml /tmp/my_test.yaml
 
 This is not a suggestion - this is a MANDATORY workflow. Every time you create YAML from scratch, you WILL waste time debugging syntax errors.
 
+## Config Converter: Legacy to Explicit Stages (v0.8.61+)
+
+**PURPOSE**: Automatically convert old implicit-stage YAML configs to new explicit-stage format.
+
+**Background**: Prior to v0.8.61, sai3-bench configs had implicit stages (preflight → prepare → workload → cleanup) that executed automatically in that order. Starting in v0.8.61, ALL configs require explicit `distributed.stages` sections that define the execution order, type, and completion criteria for each stage.
+
+**What Gets Converted**:
+- Old configs: Top-level `duration`, `concurrency`, `workload` with optional `prepare`
+- New configs: `distributed.stages` array with explicit stage definitions
+- Works for BOTH standalone (single-node) and distributed (multi-agent) configs
+
+**Conversion Rules**:
+1. **Preflight stage** (always created): Type=validation, order=1, timeout=300s
+2. **Prepare stage** (if prepare section exists): Type=prepare, order=2, completion=tasks_done
+3. **Execute stage** (always created): Type=execute, order=next, duration from top-level
+4. **Cleanup stage** (if prepare.cleanup=true): Type=cleanup, order=last, completion=tasks_done
+
+**Usage Examples**:
+```bash
+# Convert single file with dry-run (recommended first step)
+./target/release/sai3-bench convert --config tests/configs/mixed.yaml --dry-run
+
+# Convert single file (creates .yaml.bak backup)
+./target/release/sai3-bench convert --config tests/configs/mixed.yaml
+
+# Convert multiple files at once
+./target/release/sai3-bench convert --files tests/configs/*.yaml --dry-run
+
+# Convert without validation (faster but risky)
+./target/release/sai3-bench convert --config mixed.yaml --no-validate
+
+# Convert and validate converted config works
+./target/release/sai3-bench convert --config mixed.yaml
+./target/release/sai3-bench run --config mixed.yaml --dry-run
+```
+
+**Conversion Output**:
+- Original file: Backed up to `<filename>.yaml.bak`
+- Converted file: Replaces original with explicit stages
+- New distributed section created if needed (for standalone configs)
+- Empty agents list for standalone configs
+
+**Example Conversion**:
+```yaml
+# OLD FORMAT (implicit stages):
+duration: 30s
+concurrency: 32
+target: "s3://bucket/test/"
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+
+# NEW FORMAT (explicit stages):
+duration: 30s
+concurrency: 32
+target: "s3://bucket/test/"
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+distributed:
+  agents: []  # Empty for standalone configs
+  stages:
+    - name: preflight
+      order: 1
+      type: validation
+      completion: validation_passed
+      timeout_secs: 300
+    - name: execute
+      order: 2
+      type: execute
+      completion: duration
+      duration: 30s
+```
+
+**Validation**:
+- Converter uses `validation::display_config_summary()` to validate converted configs
+- Use `--no-validate` to skip validation (faster but risky)
+- Always test converted configs with `--dry-run` before running workloads
+
+**Skipped Files**:
+- Configs that already have `distributed.stages` (detected automatically)
+- Configs without `workload` section (invalid configs)
+- Non-YAML files
+
+**IMPORTANT**: The converter creates minimal distributed configs for standalone mode with empty agents list. This is correct - stages are required even for single-node execution.
+
 ## Critical Build and Debug Instructions
 
 **IMPORTANT**: When running `cargo build` or `cargo test`, do NOT pipe output to `head` or `tail`. The user needs to see the ENTIRE output, including all warnings and errors. Run build commands without filtering:
@@ -199,10 +287,11 @@ sai3-bench is a comprehensive multi-protocol I/O benchmarking suite with unified
 ## Module Architecture (v0.8.16)
 
 ### Core Source Modules (`src/`)
-- **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`
+- **`main.rs`** - Single-node CLI with subcommands: `run`, `replay`, `util`, `sort`, `convert`
 - **`bin/agent.rs`** - gRPC agent with bidirectional streaming (state machine: Idle→Ready→Running)
 - **`bin/controller.rs`** - Coordinator with bidirectional streaming (orchestrates multi-agent workloads)
-- **`config.rs`** - YAML config parsing with PrepareConfig, WorkloadConfig, CleanupMode
+- **`config.rs`** - YAML config parsing with PrepareConfig, WorkloadConfig, CleanupMode, StageConfig
+- **`config_converter.rs`** - Legacy YAML to explicit stages converter (v0.8.61+)
 - **`constants.rs`** - Centralized constants (timeouts, defaults, thresholds) - **check here first**
 - **`workload.rs`** - Workload execution engine with weighted operations
 - **`prepare.rs`** - Object preparation with parallel/sequential strategies
