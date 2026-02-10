@@ -191,7 +191,7 @@ stages:
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    let sorted = config.get_sorted_stages(Duration::from_secs(60)).unwrap();
+    let sorted = config.get_sorted_stages().unwrap();
     assert_eq!(sorted.len(), 4);
     
     // Verify sorted by order field (not YAML position)
@@ -219,7 +219,7 @@ path_selection: partitioned
     
     assert!(config.stages.is_none());
     
-    let stages = config.get_sorted_stages(Duration::from_secs(120)).unwrap();
+    let stages = config.get_sorted_stages().unwrap();
     assert_eq!(stages.len(), 4);
     
     // Verify default stages
@@ -269,7 +269,7 @@ stages:
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    let result = config.get_sorted_stages(Duration::from_secs(60));
+    let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("duplicate stage name"));
 }
@@ -295,7 +295,7 @@ stages:
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    let result = config.get_sorted_stages(Duration::from_secs(60));
+    let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("duplicate stage order"));
 }
@@ -318,7 +318,7 @@ stages:
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    let result = config.get_sorted_stages(Duration::from_secs(60));
+    let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("should use Duration"));
 }

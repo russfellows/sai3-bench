@@ -1148,7 +1148,7 @@ impl EndpointCache {
     /// ```
     pub async fn write_checkpoint(&self, agent_id: Option<usize>) -> Result<String> {
         use std::time::Duration;
-        use tokio::time::sleep;
+        use tokio::time::{sleep, timeout};
 
         // CRITICAL: Guaranteed flush with verification
         // Force ALL pending writes to disk and sync
@@ -1160,8 +1160,17 @@ impl EndpointCache {
         sleep(Duration::from_millis(100)).await;
         
         // Verify database files exist before archiving
-        self.verify_database_files()
-            .context("Database files missing after flush - cannot create checkpoint")?;
+        // CRITICAL FIX (v0.8.61): Use spawn_blocking for filesystem read with timeout
+        let cache_location = self.cache_location.clone();
+        timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                Self::verify_database_files_sync(&cache_location)
+            })
+        )
+        .await
+        .context("Database verification timed out after 5 seconds - filesystem may be unresponsive")??
+        .context("Database files missing after flush - cannot create checkpoint")?;
 
         let checkpoint_name = if let Some(id) = agent_id {
             format!(".sai3-cache-agent-{}.tar.zst", id)
@@ -1208,12 +1217,31 @@ impl EndpointCache {
 
     /// Attempt to write checkpoint (single try)
     async fn try_write_checkpoint(&self, checkpoint_name: &str) -> Result<String> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        info!("📦 Step 1/2: Creating checkpoint archive (tar + zstd compression)...");
+        
         // Create tar.zst archive from cache directory
-        let archive_bytes = self.create_checkpoint_archive()
-            .context("Failed to create checkpoint archive")?;
+        // CRITICAL FIX (v0.8.61): Use spawn_blocking to prevent executor starvation
+        // Timeout: 30 seconds (conservative - should complete in <10s for most workloads)
+        let cache_location = self.cache_location.clone();
+        let archive_start = std::time::Instant::now();
+        
+        let archive_bytes = timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                Self::create_checkpoint_archive_sync(&cache_location)
+            })
+        )
+        .await
+        .map_err(|_| anyhow!("⏱️  Archive creation TIMED OUT after 30 seconds - disk I/O may be hung"))??
+        .context("Failed to create checkpoint archive")?;
 
         let archive_size = archive_bytes.len();
-        debug!("Created checkpoint archive: {} bytes", archive_size);
+        let archive_elapsed = archive_start.elapsed();
+        info!("✅ Step 1/2: Archive created ({:.2} MB, took {:.2}s)", 
+            archive_size as f64 / 1_048_576.0, archive_elapsed.as_secs_f64());
 
         // Determine storage type and write accordingly
         if self.endpoint_uri.starts_with("file://") {
@@ -1223,14 +1251,39 @@ impl EndpointCache {
             let base_path = url.to_file_path()
                 .map_err(|_| anyhow!("Invalid file:// path"))?;
             
-            // Ensure directory exists
-            std::fs::create_dir_all(&base_path)
-                .with_context(|| format!("Failed to create checkpoint directory: {}", base_path.display()))?;
-            
             let checkpoint_path = base_path.join(checkpoint_name);
+            
+            info!("📦 Step 2/2: Writing checkpoint to filesystem: {}", checkpoint_path.display());
 
-            std::fs::write(&checkpoint_path, &archive_bytes)
-                .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            // CRITICAL FIX (v0.8.61): Use spawn_blocking for filesystem operations
+            // Timeout calculation: assume minimum 10 MB/s write speed (very conservative)
+            // For 64MB archive: 6.4 seconds + 3.6 seconds buffer = 10 seconds
+            let timeout_secs = std::cmp::max(10, (archive_size as u64 / 10_000_000) + 4);
+            
+            let base_path_clone = base_path.clone();
+            let checkpoint_path_clone = checkpoint_path.clone();
+            let archive_bytes_clone = archive_bytes.clone();
+            let write_start = std::time::Instant::now();
+            
+            timeout(
+                Duration::from_secs(timeout_secs),
+                tokio::task::spawn_blocking(move || {
+                    // Ensure directory exists
+                    std::fs::create_dir_all(&base_path_clone)?;
+                    std::fs::write(&checkpoint_path_clone, &archive_bytes_clone)?;
+                    Ok::<(), std::io::Error>(())
+                })
+            )
+            .await
+            .map_err(|_| anyhow!(
+                "⏱️  File write TIMED OUT after {} seconds ({:.2} MB at <10 MB/s) - check NFS mount, disk space, or filesystem health",
+                timeout_secs, archive_size as f64 / 1_048_576.0
+            ))??
+            .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            
+            let write_elapsed = write_start.elapsed();
+            let write_speed_mb_s = (archive_size as f64 / 1_048_576.0) / write_elapsed.as_secs_f64();
+            info!("✅ Step 2/2: Checkpoint written ({:.2} MB/s)", write_speed_mb_s);
 
             Ok(checkpoint_path.display().to_string())
 
@@ -1240,14 +1293,36 @@ impl EndpointCache {
                 .ok_or_else(|| anyhow!("Invalid direct:// URI"))?;
             let base_path = PathBuf::from(path_str);
             
-            // Ensure directory exists
-            std::fs::create_dir_all(&base_path)
-                .with_context(|| format!("Failed to create checkpoint directory: {}", base_path.display()))?;
-            
             let checkpoint_path = base_path.join(checkpoint_name);
+            
+            info!("📦 Step 2/2: Writing checkpoint to direct I/O: {}", checkpoint_path.display());
 
-            std::fs::write(&checkpoint_path, &archive_bytes)
-                .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            // CRITICAL FIX (v0.8.61): Use spawn_blocking for filesystem operations
+            let timeout_secs = std::cmp::max(10, (archive_size as u64 / 10_000_000) + 4);
+            
+            let base_path_clone = base_path.clone();
+            let checkpoint_path_clone = checkpoint_path.clone();
+            let write_start = std::time::Instant::now();
+            
+            timeout(
+                Duration::from_secs(timeout_secs),
+                tokio::task::spawn_blocking(move || {
+                    // Ensure directory exists
+                    std::fs::create_dir_all(&base_path_clone)?;
+                    std::fs::write(&checkpoint_path_clone, &archive_bytes)?;
+                    Ok::<(), std::io::Error>(())
+                })
+            )
+            .await
+            .map_err(|_| anyhow!(
+                "⏱️  File write TIMED OUT after {} seconds - check disk space or filesystem health",
+                timeout_secs
+            ))??
+            .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            
+            let write_elapsed = write_start.elapsed();
+            let write_speed_mb_s = (archive_size as f64 / 1_048_576.0) / write_elapsed.as_secs_f64();
+            info!("✅ Step 2/2: Checkpoint written ({:.2} MB/s)", write_speed_mb_s);
 
             Ok(checkpoint_path.display().to_string())
 
@@ -1255,13 +1330,21 @@ impl EndpointCache {
                   self.endpoint_uri.starts_with("az://") || 
                   self.endpoint_uri.starts_with("gs://") {
             // Cloud storage: upload via ObjectStore
+            info!("📦 Step 2/2: Uploading checkpoint to cloud storage: {}", self.endpoint_uri);
+            
             let store = store_for_uri(&self.endpoint_uri)
                 .context("Failed to create object store")?;
 
             // Upload checkpoint archive
             let checkpoint_uri = format!("{}{}", self.endpoint_uri, checkpoint_name);
-            store.put(&checkpoint_uri, Bytes::from(archive_bytes)).await
+            let upload_start = std::time::Instant::now();
+            
+            store.put(&checkpoint_uri, Bytes::from(archive_bytes.clone())).await
                 .with_context(|| format!("Failed to upload checkpoint to {}", checkpoint_uri))?;
+            
+            let upload_elapsed = upload_start.elapsed();
+            let upload_speed_mb_s = (archive_bytes.len() as f64 / 1_048_576.0) / upload_elapsed.as_secs_f64();
+            info!("✅ Step 2/2: Checkpoint uploaded ({:.2} MB/s)", upload_speed_mb_s);
 
             Ok(checkpoint_uri)
 
@@ -1273,25 +1356,27 @@ impl EndpointCache {
         }
     }
 
-    /// Verify database files exist on disk before checkpointing
+    /// Verify database files exist on disk before checkpointing (SYNCHRONOUS - blocking I/O)
     ///
     /// This ensures the database was actually flushed to disk by fjall
-    fn verify_database_files(&self) -> Result<()> {
+    /// 
+    /// CRITICAL: This is a synchronous function that must be called via spawn_blocking
+    fn verify_database_files_sync(cache_location: &PathBuf) -> Result<()> {
         // Count files in cache directory to ensure it's not empty
-        let entries: Vec<_> = std::fs::read_dir(&self.cache_location)
+        let entries: Vec<_> = std::fs::read_dir(cache_location)
             .context("Failed to read cache directory")?
             .collect();
         
         if entries.is_empty() {
             return Err(anyhow!(
                 "Cache directory is empty: {} - database not initialized?",
-                self.cache_location.display()
+                cache_location.display()
             ));
         }
         
         // List what we actually have
         info!("📂 Database directory verification:");
-        info!("   Location: {}", self.cache_location.display());
+        info!("   Location: {}", cache_location.display());
         for entry in &entries {
             if let Ok(entry) = entry {
                 let path = entry.path();
@@ -1305,17 +1390,19 @@ impl EndpointCache {
         Ok(())
     }
 
-    /// Create tar.zst archive from cache directory
+    /// Create tar.zst archive from cache directory (SYNCHRONOUS - blocking I/O)
     ///
     /// Returns compressed archive as byte vector
-    fn create_checkpoint_archive(&self) -> Result<Vec<u8>> {
+    /// 
+    /// CRITICAL: This is a synchronous function that must be called via spawn_blocking
+    fn create_checkpoint_archive_sync(cache_location: &PathBuf) -> Result<Vec<u8>> {
         use tar::Builder;
         use zstd::stream::write::Encoder;
 
         // Log cache directory contents before archiving
         info!("📂 Cache directory contents before archiving:");
-        info!("   Location: {}", self.cache_location.display());
-        if let Ok(entries) = std::fs::read_dir(&self.cache_location) {
+        info!("   Location: {}", cache_location.display());
+        if let Ok(entries) = std::fs::read_dir(cache_location) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let metadata = entry.metadata().ok();
@@ -1335,15 +1422,15 @@ impl EndpointCache {
         let mut tar_builder = Builder::new(encoder);
 
         // Get cache directory name for proper archive structure
-        let cache_dir_name = self.cache_location.file_name()
+        let cache_dir_name = cache_location.file_name()
             .ok_or_else(|| anyhow!("Cache location has no directory name"))?;
 
         // Add cache directory contents to archive with proper naming
         // This creates archive structure: cache-dir-name/file1, cache-dir-name/file2, etc.
-        tar_builder.append_dir_all(cache_dir_name, &self.cache_location)
+        tar_builder.append_dir_all(cache_dir_name, cache_location)
             .with_context(|| format!(
                 "Failed to add cache directory to archive: {}",
-                self.cache_location.display()
+                cache_location.display()
             ))?;
 
         // Finish tar archive
@@ -1489,9 +1576,22 @@ impl EndpointCache {
         endpoint_uri: &str,
         checkpoint_name: &str,
     ) -> Result<String> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
         // Create tar.zst archive from cache directory
-        let archive_bytes = Self::create_checkpoint_archive_static(cache_location)
-            .context("Failed to create checkpoint archive")?;
+        // CRITICAL FIX (v0.8.61): Use spawn_blocking to prevent executor starvation
+        // Timeout: 30 seconds for archive creation
+        let cache_location_clone = cache_location.clone();
+        let archive_bytes = timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                EndpointCache::create_checkpoint_archive_sync(&cache_location_clone)
+            })
+        )
+        .await
+        .context("Checkpoint archive creation timed out after 30 seconds")??
+        .context("Failed to create checkpoint archive")?;
 
         let archive_size = archive_bytes.len();
         debug!("Created checkpoint archive: {} bytes", archive_size);
@@ -1504,8 +1604,18 @@ impl EndpointCache {
                 .map_err(|_| anyhow!("Invalid file:// path"))?;
             let checkpoint_path = base_path.join(checkpoint_name);
 
-            std::fs::write(&checkpoint_path, &archive_bytes)
-                .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            // CRITICAL FIX (v0.8.61): Use spawn_blocking with timeout
+            let checkpoint_path_clone = checkpoint_path.clone();
+            let archive_bytes_clone = archive_bytes.clone();
+            timeout(
+                Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    std::fs::write(&checkpoint_path_clone, &archive_bytes_clone)
+                })
+            )
+            .await
+            .context("File write timed out after 10 seconds")??
+            .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
 
             Ok(checkpoint_path.display().to_string())
 
@@ -1515,8 +1625,17 @@ impl EndpointCache {
             let base_path = PathBuf::from(path_str);
             let checkpoint_path = base_path.join(checkpoint_name);
 
-            std::fs::write(&checkpoint_path, &archive_bytes)
-                .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
+            // CRITICAL FIX (v0.8.61): Use spawn_blocking with timeout
+            let checkpoint_path_clone = checkpoint_path.clone();
+            timeout(
+                Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    std::fs::write(&checkpoint_path_clone, &archive_bytes)
+                })
+            )
+            .await
+            .context("File write timed out after 10 seconds")??
+            .with_context(|| format!("Failed to write checkpoint: {}", checkpoint_path.display()))?;
 
             Ok(checkpoint_path.display().to_string())
 
@@ -1541,31 +1660,8 @@ impl EndpointCache {
         }
     }
 
-    /// Static helper to create archive from cache directory
-    fn create_checkpoint_archive_static(cache_location: &PathBuf) -> Result<Vec<u8>> {
-        use tar::Builder;
-        use zstd::stream::write::Encoder;
-
-        let buffer = Vec::new();
-        let encoder = Encoder::new(buffer, 3)
-            .context("Failed to create zstd encoder")?;
-
-        let mut tar_builder = Builder::new(encoder);
-
-        tar_builder.append_dir_all(".", cache_location)
-            .with_context(|| format!(
-                "Failed to add cache directory to archive: {}",
-                cache_location.display()
-            ))?;
-
-        let encoder = tar_builder.into_inner()
-            .context("Failed to finalize tar archive")?;
-
-        let compressed = encoder.finish()
-            .context("Failed to finalize zstd compression")?;
-
-        Ok(compressed)
-    }
+    // Note: create_checkpoint_archive_static was removed (duplicate of create_checkpoint_archive_sync)
+    // All checkpoint creation now uses create_checkpoint_archive_sync with spawn_blocking + timeout
 }
 
 
@@ -3291,6 +3387,104 @@ mod tests {
             let counts = cache.count_by_state(config_hash).unwrap();
             assert_eq!(counts.get(&ObjectState::Planned), Some(&50), 
                 "Should restore all 50 objects from latest checkpoint");
+        }
+    }
+
+    // ========================================================================
+    // CRITICAL: Regression tests for v0.8.61 executor-blocking bug fix
+    // ========================================================================
+    
+    /// Test that checkpoint creation doesn't block the executor
+    ///
+    /// This simulates the v0.8.61 hang by creating a checkpoint while
+    /// also running concurrent async tasks. If checkpoint blocks, the
+    /// concurrent tasks will timeout.
+    #[tokio::test]
+    async fn test_v0_8_61_checkpoint_does_not_block_executor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_uri = format!("file://{}", temp_dir.path().join("storage").display());
+        
+        // Create cache with some data
+        let cache = EndpointCache::new(&storage_uri, 0, Some(0), None).await.unwrap();
+        
+        // Plan some objects to make checkpoint non-trivial
+        for i in 0..100 {
+            cache.plan_object("test_hash", i, &format!("file_{}.dat", i), 1024).unwrap();
+        }
+
+        // Spawn concurrent "heartbeat" task that must continue while checkpoint runs
+        let heartbeat_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = heartbeat_flag.clone();
+        
+        let heartbeat = tokio::spawn(async move {
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        // Create checkpoint (should use spawn_blocking, not block executor)
+        let checkpoint_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            cache.write_checkpoint(Some(0))
+        )
+        .await;
+
+        // Wait for heartbeat
+        let heartbeat_result = tokio::time::timeout(std::time::Duration::from_secs(3), heartbeat).await;
+
+        // Verify both completed
+        assert!(checkpoint_result.is_ok(), "Checkpoint should complete without timeout (v0.8.61 bug: blocking I/O froze executor)");
+        assert!(heartbeat_result.is_ok(), "Heartbeat should run concurrently (v0.8.61 bug: checkpoint blocked everything)");
+        assert!(heartbeat_flag.load(std::sync::atomic::Ordering::Relaxed), "Heartbeat should have run at least once");
+    }
+
+    /// Test that multiple concurrent checkpoints don't deadlock
+    ///
+    /// Simulates 4 agents all creating checkpoints simultaneously
+    /// (the exact scenario that hung in v0.8.60)
+    #[tokio::test]
+    async fn test_v0_8_61_concurrent_checkpoints_from_4_agents() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        // Create 4 agent caches (simulating 4-agent distributed test)
+        let mut handles = Vec::new();
+        
+        for agent_id in 0..4 {
+            let temp_path = temp_dir.path().to_path_buf();
+            
+            let handle = tokio::spawn(async move {
+                let storage_uri = format!("file://{}", temp_path.join(format!("storage-{}", agent_id)).display());
+                let cache = EndpointCache::new(&storage_uri, 0, Some(agent_id), None).await.unwrap();
+
+                // Plan objects
+                for i in 0..50 {
+                    cache.plan_object("concurrent_test", i, &format!("file_{}.dat", i), 1024).unwrap();
+                }
+
+                // Create checkpoint
+                cache.write_checkpoint(Some(agent_id)).await
+            });
+            
+            handles.push(handle);
+        }
+
+        // All 4 agents should complete checkpoints without timeout
+        // v0.8.60 bug: All 4 agents froze at exactly 69 objects when first checkpoint fired
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            futures::future::join_all(handles)
+        )
+        .await;
+
+        assert!(results.is_ok(), "All 4 concurrent checkpoints should complete without timeout (v0.8.61 bug: all agents hung)");
+        
+        let checkpoint_results: Vec<_> = results.unwrap().into_iter().collect();
+        assert_eq!(checkpoint_results.len(), 4, "All 4 agents should complete");
+        
+        for (agent_id, result) in checkpoint_results.iter().enumerate() {
+            assert!(result.is_ok(), "Agent {} checkpoint task should not panic", agent_id);
+            assert!(result.as_ref().unwrap().is_ok(), "Agent {} checkpoint should succeed", agent_id);
         }
     }
 }

@@ -2228,12 +2228,8 @@ impl Agent for AgentSvc {
                                     
                                     // Phase 2b: Parse YAML-driven stages if configured
                                     // If stages exist, agent will use AtStage state machine
-                                    // If None, agent will use deprecated hardcoded states (backward compat)
                                     let stages = if let Some(ref distributed_config) = config.distributed {
-                                        // Use config.duration as default_duration for stages (backward compat)
-                                        let default_duration = config.duration;
-                                        
-                                        match distributed_config.get_sorted_stages(default_duration) {
+                                        match distributed_config.get_sorted_stages() {
                                             Ok(stage_vec) => {
                                                 if !stage_vec.is_empty() {
                                                     info!("Control reader: Parsed {} YAML-driven stages", stage_vec.len());
@@ -2378,39 +2374,31 @@ impl Agent for AgentSvc {
                                         let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1) as usize;
                                         let shared_storage = agent_state_for_task.get_shared_storage().await.unwrap_or(true);  // v0.8.24: Default to shared for backward compat
                                         
-                                        // Phase 2b: Check if YAML-driven stages are configured
-                                        let stages = agent_state_for_task.get_stages().await;
+                                        // Phase 2b: Get YAML-driven stages (REQUIRED in v0.8.61+)
+                                        let stages = agent_state_for_task.get_stages().await
+                                            .expect("FATAL: No stages found - distributed mode requires YAML-driven stages");
                                         
-                                        // If stages exist, use stage-driven execution
-                                        // Otherwise fall back to deprecated hardcoded prepare->execute->cleanup flow
-                                        if let Some(stages_vec) = stages {
-                                            info!("Using YAML-driven stage execution ({} stages)", stages_vec.len());
-                                            
-                                            // Execute stage-driven workflow (NEW)
-                                            let stage_result = execute_stages_workflow(
-                                                stages_vec,
-                                                config_exec.clone(),
-                                                agent_state_for_task.clone(),
-                                                tracker_for_prepare.clone(),
-                                                tx_done_exec.clone(),
-                                                tx_prepare_exec.clone(),
-                                                tx_stats_exec.clone(),  // v0.8.26: For barrier coordination
-                                                final_op_log_path.clone(),
-                                                agent_op_log_path_exec.clone(),
-                                                agent_id_exec.clone(),
-                                                agent_index,
-                                                num_agents,
-                                                shared_storage,
-                                            ).await;
-                                            
-                                            // Send result to stats writer
-                                            let _ = tx_done_exec.send(stage_result).await;
-                                            return;  // Exit workload task
-                                        }
+                                        info!("Using YAML-driven stage execution ({} stages)", stages.len());
                                         
-                                        // YAML stages MUST be configured - error if we reach here
-                                        error!("No stages configured - check yaml config");
-                                        let _ = tx_done_exec.send(Err("No stages configured. Enable barrier_sync to use YAML stages.".to_string())).await;
+                                        // Execute stage-driven workflow
+                                        let stage_result = execute_stages_workflow(
+                                            stages,
+                                            config_exec.clone(),
+                                            agent_state_for_task.clone(),
+                                            tracker_for_prepare.clone(),
+                                            tx_done_exec.clone(),
+                                            tx_prepare_exec.clone(),
+                                            tx_stats_exec.clone(),  // v0.8.26: For barrier coordination
+                                            final_op_log_path.clone(),
+                                            agent_op_log_path_exec.clone(),
+                                            agent_id_exec.clone(),
+                                            agent_index,
+                                            num_agents,
+                                            shared_storage,
+                                        ).await;
+                                        
+                                        // Send result to stats writer
+                                        let _ = tx_done_exec.send(stage_result).await;
                                         
                                     });
                                     
