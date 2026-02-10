@@ -1231,9 +1231,6 @@ enum BarrierStatus {
 struct BarrierManager {
     agents: HashMap<String, AgentHeartbeat>,
     config: PhaseBarrierConfig,
-    /// TODO: Use barrier_start for overall barrier timeout tracking (not yet implemented)
-    #[allow(dead_code)]
-    barrier_start: Instant,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
     /// v0.8.26: Per-barrier tracking for named barriers (stage_X, etc.)
@@ -1272,7 +1269,6 @@ impl BarrierManager {
         Self {
             agents,
             config,
-            barrier_start: Instant::now(),
             ready_agents: HashSet::new(),
             failed_agents: HashSet::new(),
             barrier_agents: HashMap::new(),  // v0.8.26: Per-barrier tracking
@@ -2724,7 +2720,7 @@ async fn run_distributed_workload(
                                 objects_remaining: if current_stage == WorkloadStage::StageCleanup {
                                     stats.stage_progress_total.saturating_sub(stats.stage_progress_current)
                                 } else { 0 },
-                                is_stuck: false,  // TODO: Add stuck detection based on progress rate
+                                is_stuck: false,  // Not implemented - no stuck detection logic
                                 stuck_reason: String::new(),
                                 progress_rate: if stats.stage_elapsed_s > 0.0 {
                                     stats.stage_progress_current as f64 / stats.stage_elapsed_s

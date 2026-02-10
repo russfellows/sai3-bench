@@ -347,9 +347,7 @@ impl AgentState {
         info!("Abort signal broadcast to workload");
     }
     
-    /// Subscribe to abort signals
-    /// TODO: Wire into execute_stages_workflow for proper abort handling
-    #[allow(dead_code)]  // Reserved for abort handling in YAML stage workflow
+    /// Subscribe to abort signals (used in execute_stages_workflow for proper abort handling)
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
     }
@@ -773,21 +771,21 @@ impl Agent for AgentSvc {
             current_progress: Some(PhaseProgress {
                 agent_id: agent_id.clone(),
                 current_phase: current_phase as i32,
-                phase_start_time_ms: 0, // TODO: Track phase start time
+                phase_start_time_ms: 0, // Not tracked - use heartbeat_time_ms
                 heartbeat_time_ms: chrono::Utc::now().timestamp_millis() as u64,
                 objects_created,
-                objects_total: 0, // TODO: Get from config
+                objects_total: 0, // Not available in LiveStatsTracker (stage-based tracking)
                 current_operation: status_message.clone(),
                 bytes_written,
-                errors_encountered: 0, // TODO: Track errors
+                errors_encountered: 0, // Not tracked - LiveStatsTracker has no error counters
                 operations_completed,
-                current_throughput: 0.0, // TODO: Calculate throughput
-                phase_elapsed_ms: 0, // TODO: Calculate from phase_start_time_ms
-                objects_deleted: 0, // TODO: Track in cleanup phase
+                current_throughput: 0.0, // Not calculated - use ops/bytes for throughput calc
+                phase_elapsed_ms: 0, // Not tracked - use stage_elapsed_s from LiveStatsSnapshot
+                objects_deleted: 0, // Not tracked - cleanup uses LIST results
                 objects_remaining: 0,
-                is_stuck: false, // TODO: Detect stuck state
+                is_stuck: false, // Not implemented - no stuck detection logic
                 stuck_reason: String::new(),
-                progress_rate: 0.0, // TODO: Calculate from recent progress
+                progress_rate: 0.0, // Not calculated - derive from operations_completed
                 phase_completed: matches!(current_state, WorkloadState::Completed),
                 // v0.8.29: Detect barrier state from AtStage { ready_for_next: true }
                 at_barrier: matches!(
@@ -1396,9 +1394,11 @@ impl Agent for AgentSvc {
             }
             
             // ============================================================================
-            // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+            // CATCH-ALL ARM FOR BARRIER SYNC STATES (CONSERVATIVE FAILSAFE)
             // ============================================================================
-            // TODO v0.8.25: Replace this catch-all with proper abort handling for each new state:
+            // This catch-all handles any future states added to WorkloadState enum.
+            // Design decision: Conservative approach treats unknown states as active workload,
+            // ensuring abort always works even if explicit handling not yet added.
             //
             // WorkloadState::Validating => {
             //     // Pre-flight validation in progress - abort immediately
@@ -2551,7 +2551,7 @@ impl Agent for AgentSvc {
                                 
                                 // Convert to proto and send via LiveStats status=7 (PREFLIGHT_RESULT)
                                 // We encode validation results in error_message as JSON for now
-                                // TODO Phase 2: Add proper PreFlightResult field to LiveStats message
+                                // Future: Add proper PreFlightResult field to LiveStats message (requires proto change)
                                 let passed = !fs_summary.has_errors();
                                 let results_json = serde_json::json!({
                                     "passed": passed,
@@ -2934,9 +2934,11 @@ impl Agent for AgentSvc {
                 }
                 
                 // ============================================================================
-                // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+                // CATCH-ALL ARM FOR BARRIER SYNC STATES (CONSERVATIVE FAILSAFE)
                 // ============================================================================
-                // TODO v0.8.25: Replace this catch-all with proper disconnect handling for each new state:
+                // This catch-all handles any future states added to WorkloadState enum.
+                // Design decision: Conservative approach treats disconnect during unknown states
+                // as abnormal, ensuring proper cleanup even if explicit handling not yet added.
                 //
                 // WorkloadState::Validating => {
                 //     // Disconnect during pre-flight validation - treat as abnormal
@@ -3011,12 +3013,23 @@ async fn execute_stages_workflow(
     // Wire tracker into config
     config.live_stats_tracker = Some(tracker.clone());
     
+    // v0.8.60: Wire abort signal for graceful shutdown during stage execution
+    let mut abort_rx = agent_state.subscribe_abort();
+    
     // Storage for prepared objects (needed for cleanup stages)
     let mut prepared_objects: Vec<sai3_bench::prepare::PreparedObject> = Vec::new();
     let mut tree_manifest = None;  // Type inferred from prepare_objects return
     
     // Iterate through stages in order
     for (stage_index, stage) in stages.iter().enumerate() {
+        // Check for abort before starting next stage
+        tokio::select! {
+            _ = abort_rx.recv() => {
+                warn!("Abort signal received during stage workflow - stopping at stage {}/{}", stage_index + 1, stages.len());
+                return Err("Workload aborted by user".to_string());
+            }
+            _ = async {} => {}
+        }
         info!("=== Stage {}/{}: {} ===", stage_index + 1, stages.len(), stage.name);
         
         // Transition to AtStage (ready_for_next=false, executing)
@@ -3370,7 +3383,7 @@ async fn execute_stages_workflow(
             put_ops: stage_snapshot.put_ops,
             put_bytes: stage_snapshot.put_bytes,
             meta_ops: stage_snapshot.meta_ops,
-            errors: 0,  // TODO: Track errors per stage
+            errors: 0,  // Not tracked - LiveStatsTracker has no error counters (future: add to tracker)
             get: Some(OpAggregateMetrics {
                 bytes: stage_snapshot.get_bytes,
                 ops: stage_snapshot.get_ops,
@@ -3402,7 +3415,7 @@ async fn execute_stages_workflow(
             get_bins: proto_get_bins,
             put_bins: proto_put_bins,
             meta_bins: proto_meta_bins,
-            endpoint_stats: Vec::new(),  // TODO: Capture per-stage endpoint stats
+            endpoint_stats: Vec::new(),  // Not tracked - LiveStatsTracker has no per-endpoint data (future: add endpoint tracking)
         };
         
         info!("Stage '{}' summary: {} GET ops, {} PUT ops, {} META ops in {:.2}s",
