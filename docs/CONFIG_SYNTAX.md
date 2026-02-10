@@ -1233,6 +1233,115 @@ distributed:
 - **`path_template`**: Custom path template override
 - **`listen_port`**: Agent listen port (SSH mode only, default: 7761)
 - **`multi_endpoint`**: Per-agent multi-endpoint override (see [Multi-Endpoint](#multi-endpoint-load-balancing))
+- **`kv_cache_dir`**: Per-agent KV cache directory override (v0.8.60+, see [KV Cache Isolation](#kv-cache-isolation))
+
+### KV Cache Isolation
+
+**Critical for accurate performance measurements** (v0.8.60+)
+
+The metadata KV cache uses LSM (Log-Structured Merge-tree) operations that generate random small-block I/O. To prevent contaminating workload measurements, the cache is stored separately during preparation, then copied back to the storage under test.
+
+**Global default** (all agents use same base directory):
+
+```yaml
+distributed:
+  kv_cache_dir: "/mnt/local-ssd/kv-cache"  # Fast local storage
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"  # Uses /mnt/local-ssd/kv-cache/sai3-cache-agent-0-{hash}/
+    - address: "host2:7761"
+      id: "agent-2"  # Uses /mnt/local-ssd/kv-cache/sai3-cache-agent-1-{hash}/
+```
+
+**Per-agent override** (heterogeneous storage):
+
+```yaml
+distributed:
+  kv_cache_dir: "/mnt/slow-disk/kv-cache"  # Default for most agents
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"
+      kv_cache_dir: "/mnt/nvme/kv-cache"  # Fast local NVMe
+    - address: "host2:7761"
+      id: "agent-2"
+      # Uses global default: /mnt/slow-disk/kv-cache/
+```
+
+**Default behavior** (no configuration):
+
+```yaml
+distributed:
+  agents:
+    - address: "host1:7761"
+      # kv_cache_dir omitted → defaults to /tmp/sai3-cache-agent-0-{hash}/
+```
+
+**How it works**:
+
+1. **During prepare**: KV cache writes go to isolated location (`kv_cache_dir` or `/tmp/`)
+2. **After prepare**: Cache copied back to storage under test (e.g., `file:///mnt/test/.sai3-cache-agent-0/`)
+3. **Benefits**: 
+   - LSM operations (journals, compaction, version files) don't pollute workload I/O
+   - Random small-block I/O isolated from sequential large-block testing
+   - Accurate performance measurements for storage under test
+
+**Recommended**: Use fast local SSD/NVMe for `kv_cache_dir` to avoid I/O bottlenecks during object creation.
+
+### KV Cache Checkpointing
+
+**Automatic data loss protection** (v0.8.60+)
+
+Long-running prepare operations (e.g., creating 100M objects over 12 hours) risk losing hours of work if interrupted. Periodic checkpointing saves cache state to storage under test at regular intervals.
+
+**Top-level configuration** (applies to standalone AND distributed modes):
+
+```yaml
+cache_checkpoint_interval_secs: 300  # Checkpoint every 5 minutes (DEFAULT)
+```
+
+**Standalone mode example** (`sai3-bench run`):
+
+```yaml
+target: "s3://my-bucket/test/"
+cache_checkpoint_interval_secs: 600  # Checkpoint every 10 minutes
+prepare:
+  strategy: tree
+  # ... prepare config ...
+```
+
+**Distributed mode example** (`sai3bench-ctl`):
+
+```yaml
+cache_checkpoint_interval_secs: 300  # All agents checkpoint every 5 minutes
+distributed:
+  agents:
+    - address: "host1:7761"
+      id: "agent-1"  # Checkpoints to .sai3-cache-agent-1.tar.zst
+    - address: "host2:7761"
+      id: "agent-2"  # Checkpoints to .sai3-cache-agent-2.tar.zst
+```
+
+**Disable periodic checkpointing** (only checkpoint at end):
+
+```yaml
+cache_checkpoint_interval_secs: 0  # Disabled
+```
+
+**How it works**:
+
+1. **During prepare**: Background task creates tar.zst archive of cache every N seconds
+2. **Cloud storage** (s3://, az://, gs://): Upload archive via ObjectStore::put()
+3. **Filesystem** (file://, direct://): Write .tar.zst file to disk
+4. **Agent-specific**: Each agent creates its own checkpoint (`.sai3-cache-agent-{id}.tar.zst`)
+5. **At most 5 minutes of lost work** (default) if prepare crashes
+
+**Benefits**:
+- Protects against data loss in long-running prepares (hours, days)
+- Works for all storage backends (filesystem and cloud)
+- Automatic retry with exponential backoff (5 attempts)
+- Minimal overhead (~3x compression from zstd)
+
+**Default**: 300 seconds (5 minutes) - chosen to balance safety vs. overhead.
 
 ### SSH Deployment
 

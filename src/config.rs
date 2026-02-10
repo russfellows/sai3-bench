@@ -101,6 +101,24 @@ pub struct Config {
     /// Default: None (single target URI)
     #[serde(default)]
     pub multi_endpoint: Option<MultiEndpointConfig>,
+
+    /// v0.8.60: KV cache checkpoint interval in seconds (optional)
+    /// Controls periodic persistence of metadata cache to storage under test
+    /// Works for BOTH standalone (sai3-bench run) and distributed (sai3bench-ctl) modes
+    /// 0 = Disabled (only checkpoint at end of prepare)
+    /// Default: 300 seconds (5 minutes) for long-running prepares
+    /// 
+    /// **Why periodic checkpointing?**
+    /// - Protects against data loss if prepare crashes after hours of work
+    /// - For cloud storage (s3://, az://, gs://), creates .tar.zst archive and uploads via ObjectStore
+    /// - For filesystem (file://, direct://), creates .tar.zst archive on disk
+    /// 
+    /// Example: checkpoint every 10 minutes during 12-hour prepare:
+    /// ```yaml
+    /// cache_checkpoint_interval_secs: 600
+    /// ```
+    #[serde(default = "default_cache_checkpoint_interval")]
+    pub cache_checkpoint_interval_secs: u64,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -109,6 +127,10 @@ fn default_duration() -> std::time::Duration {
 
 fn default_concurrency() -> usize {
     crate::constants::DEFAULT_CONCURRENCY
+}
+
+pub fn default_cache_checkpoint_interval() -> u64 {
+    300  // 5 minutes - protects long-running prepares from data loss
 }
 
 /// Error handling configuration (v0.8.0+)
@@ -1106,6 +1128,15 @@ pub struct DistributedConfig {
     /// Stages are sorted by 'order' field, not YAML position
     #[serde(default)]
     pub stages: Option<Vec<StageConfig>>,
+    
+    /// v0.8.60: Default KV cache directory for metadata caching (optional)
+    /// Used to isolate LSM operations (journals, compaction, version files) from test storage
+    /// Default: System temp dir (/tmp on Linux, %TEMP% on Windows)
+    /// This prevents random small-block I/O from contaminating workload measurements
+    /// Example: "/mnt/local-ssd/kv-cache" for fast local storage
+    /// Per-agent overrides: Use agents[].kv_cache_dir to specify different paths per agent
+    #[serde(default)]
+    pub kv_cache_dir: Option<std::path::PathBuf>,
 }
 
 /// Individual agent configuration
@@ -1154,6 +1185,13 @@ pub struct AgentConfig {
     /// Example: Agent 1 -> [IP1, IP2], Agent 2 -> [IP3, IP4], etc.
     #[serde(default)]
     pub multi_endpoint: Option<MultiEndpointConfig>,
+    
+    /// Per-agent KV cache directory override (v0.8.60+)
+    /// Overrides distributed.kv_cache_dir for this specific agent
+    /// Useful for heterogeneous storage: fast local SSDs on some nodes, slower on others
+    /// Example: "/mnt/agent1-local-ssd/kv-cache"
+    #[serde(default)]
+    pub kv_cache_dir: Option<std::path::PathBuf>,
 }
 
 /// SSH configuration for automated deployment

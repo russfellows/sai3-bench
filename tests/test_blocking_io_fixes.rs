@@ -293,7 +293,7 @@ async fn test_prepare_yields_during_creation() -> Result<()> {
     
     // Run prepare (should yield every 100 operations)
     let prepare_task = tokio::spawn(async move {
-        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true).await
+        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true, None, None).await
     });
     
     // Collect heartbeats while prepare runs
@@ -366,7 +366,7 @@ async fn test_prepare_sequential_yields() -> Result<()> {
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
     let prepare_task = tokio::spawn(async move {
-        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true).await
+        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true, None, None).await
     });
     
     let mut heartbeat_count = 0;
@@ -448,7 +448,7 @@ async fn test_executor_responsiveness_large_prepare() -> Result<()> {
     
     // Run prepare in background
     let prepare_task = tokio::spawn(async move {
-        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 32, 0, true).await
+        prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 32, 0, true, None, None).await
     });
     
     // Collect messages from both tasks
@@ -669,7 +669,7 @@ async fn test_small_prepare_still_works() -> Result<()> {
     };
     
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true).await?;
+    let (objects, _, _) = prepare_objects(&prepare_config, None, None, None, &multi_ep_cache, 1, 16, 0, true, None, None).await?;
     
     assert_eq!(objects.len(), 10, "Small prepare should still work");
     println!("✓ Regression: Small prepare (10 objects) works correctly");

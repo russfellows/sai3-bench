@@ -597,6 +597,74 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         } // End of !using_stages check
     }
     
+    // v0.8.60: KV Cache Configuration (always show when prepare is enabled)
+    if config.prepare.is_some() {
+        println!("┌─ KV Cache & Checkpointing ───────────────────────────────────────────┐");
+        
+        // Checkpoint interval (always show, including default)
+        let checkpoint_interval = config.cache_checkpoint_interval_secs;
+        if checkpoint_interval > 0 {
+            let (interval_val, interval_unit) = if checkpoint_interval >= 3600 {
+                (checkpoint_interval / 3600, "hours")
+            } else if checkpoint_interval >= 60 {
+                (checkpoint_interval / 60, "minutes")
+            } else {
+                (checkpoint_interval, "seconds")
+            };
+            
+            let interval_display = if checkpoint_interval == 300 {
+                format!("{} {} (DEFAULT)", interval_val, interval_unit)
+            } else {
+                format!("{} {} ⚠️  CUSTOM", interval_val, interval_unit)
+            };
+            
+            println!("│ Checkpoint Interval: {}", interval_display);
+            println!("│   ✅ Periodic checkpointing ENABLED");
+            println!("│   📦 Creates tar.zst archives during prepare");
+            println!("│   🔄 Maximum data loss: {} {}", interval_val, interval_unit);
+            println!("│   💾 Archive format: .sai3-cache-agent-{{id}}.tar.zst");
+        } else {
+            println!("│ Checkpoint Interval: DISABLED (0 seconds)");
+            println!("│   ⚠️  Only final checkpoint at end of prepare");
+            println!("│   🔴 Risk: ALL metadata lost if prepare crashes");
+        }
+        println!("│");
+        
+        // KV cache directory (show where LSM operations will be isolated)
+        if let Some(ref dist) = config.distributed {
+            // Distributed mode - check for global or per-agent overrides
+            if let Some(ref kv_cache_dir) = dist.kv_cache_dir {
+                println!("│ KV Cache Directory:  {} (GLOBAL)", kv_cache_dir.display());
+            } else {
+                println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
+            }
+            
+            // Check for per-agent overrides
+            let has_agent_overrides = dist.agents.iter()
+                .any(|a| a.kv_cache_dir.is_some());
+            
+            if has_agent_overrides {
+                println!("│");
+                println!("│ Per-Agent Overrides:");
+                for (idx, agent) in dist.agents.iter().enumerate() {
+                    if let Some(ref agent_kv_dir) = agent.kv_cache_dir {
+                        let agent_id = agent.id.as_deref().unwrap_or("auto");
+                        println!("│   Agent {}: {} (id: {})", idx + 1, agent_kv_dir.display(), agent_id);
+                    }
+                }
+            }
+        } else {
+            // Standalone mode - no distributed config
+            println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
+        }
+        
+        println!("│");
+        println!("│ 📝 Purpose: Isolate LSM I/O from storage under test");
+        println!("│ 🎯 Benefits: Accurate performance measurements");
+        println!("└──────────────────────────────────────────────────────────────────────┘");
+        println!();
+    }
+    
     // Workload operations
     println!("┌─ Workload Operations ────────────────────────────────────────────────┐");
     let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();

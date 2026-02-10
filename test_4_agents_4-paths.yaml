@@ -1,0 +1,167 @@
+###################################################################################
+# Simplified 2-Agent Test - Validation Stage timeout_secs Fix Verification
+# 
+# Scale: Small test (16 dirs, 160 files, ~16 MB)
+# Agents: 2 local agents with 2 endpoints each
+# Purpose: Verify "duplicate field timeout_secs" bug is fixed
+###################################################################################
+
+# Base target (overridden by multi_endpoint)
+target: "file:///mnt/nvme_data/sai3-test/"
+
+concurrency: 4
+page_cache_mode: dontneed
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# Prepare phase: Create small test dataset
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+
+  # Small directory tree for testing
+  # width=2, depth=2 → 2^2 = 4 leaf directories per agent (8 total)
+  # 16 files per leaf directory 
+  directory_structure:
+    width: 2
+    depth: 2
+    files_per_dir: 40
+    distribution: "bottom"
+    dir_mask: "d%d_w%d.dir"
+
+  # Total: 160 files × ~100 KB = ~16 MB
+  ensure_objects:
+    - count: 160
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 100KiB
+        std_dev: 20KiB
+        min: 50KiB
+        max: 200KiB
+      use_multi_endpoint: true
+
+  cleanup: false
+
+# Short workload for testing
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+duration: 5s
+
+# Distributed configuration with barrier sync
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+
+  # gRPC Communication Timeouts
+  grpc_keepalive_interval: 60
+  grpc_keepalive_timeout: 30
+  agent_ready_timeout: 120
+
+  # Barrier Synchronization - 
+  barrier_sync:
+    enabled: true
+    
+    validation:
+      type: all_or_nothing
+      heartbeat_interval: 10
+      missed_threshold: 3
+      query_timeout: 5
+      query_retries: 2
+      agent_barrier_timeout: 60
+    
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 30
+      missed_threshold: 3
+      query_timeout: 10
+      query_retries: 2
+      agent_barrier_timeout: 300
+    
+    execute:
+      type: all_or_nothing
+      heartbeat_interval: 10
+      missed_threshold: 3
+      query_timeout: 5
+      query_retries: 2
+      agent_barrier_timeout: 60
+
+  # Should now work without "duplicate field" error!
+  stages:
+    - name: "preflight"
+      order: 1
+      completion: validation_passed
+      type: validation
+      timeout_secs: 60       # ← THIS was causing duplicate field error!
+    
+    - name: "prepare"  
+      order: 2
+      completion: tasks_done
+      type: prepare
+    
+    - name: "execute"
+      order: 3
+      completion: duration
+      type: execute
+      duration: 5s
+
+  #############################################################################
+  # Agent Configuration with Multi-Endpoint Load Balancing
+  #############################################################################
+  agents:
+    # Agent 1: 172.21.4.10 → Mount points 1-4
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast1/benchmark/"
+          - "file:///mnt/vast2/benchmark/"
+          - "file:///mnt/vast3/benchmark/"
+          - "file:///mnt/vast4/benchmark/"
+        strategy: round_robin
+
+    # Agent 2: 172.21.4.11 → Mount points 5-8
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast5/benchmark/"
+          - "file:///mnt/vast6/benchmark/"
+          - "file:///mnt/vast7/benchmark/"
+          - "file:///mnt/vast8/benchmark/"
+        strategy: round_robin
+
+    # Agent 3: 172.21.4.12 → Mount points 9-12
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast9/benchmark/"
+          - "file:///mnt/vast10/benchmark/"
+          - "file:///mnt/vast11/benchmark/"
+          - "file:///mnt/vast12/benchmark/"
+        strategy: round_robin
+
+    # Agent 4: 172.21.4.13 → Mount points 13-16
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast13/benchmark/"
+          - "file:///mnt/vast14/benchmark/"
+          - "file:///mnt/vast15/benchmark/"
+          - "file:///mnt/vast16/benchmark/"
+        strategy: round_robin
+
+

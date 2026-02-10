@@ -8,6 +8,81 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.60] - 2026-02-10
+
+**KV Cache Checkpoint Restoration - Complete Resume Capability**
+
+This release completes the checkpoint implementation with automatic restoration on startup, enabling full resume capability after crashes or restarts. Checkpoints are now created AND restored for both standalone and distributed modes.
+
+### Added
+
+- **Checkpoint restoration on startup** (CRITICAL)
+  - `EndpointCache::new()` now calls `try_restore_from_checkpoint()` BEFORE opening database
+  - Downloads checkpoint from storage (`{endpoint}/.sai3-cache-agent-{id}.tar.zst`)
+  - Extracts tar.zst to local cache location
+  - Opens restored fjall database with all object states intact
+  - **Impact**: Agents can resume long-running prepare operations after crashes/restarts
+  - **Files changed**: `src/metadata_cache.rs` (+120 lines restoration logic)
+
+- **Checkpoint creation for standalone mode**
+  - `sai3-bench run` now passes `results_dir` and `config` to `prepare_objects()`
+  - Periodic checkpoints created every 5 minutes (configurable via `cache_checkpoint_interval_secs`)
+  - Works with all storage backends (file://, s3://, az://, gs://)
+  - **Impact**: Single-node workloads can now resume after interruption
+  - **Files changed**: `src/main.rs` (+2 lines enable cache)
+
+### Fixed
+
+- **Race condition in checkpoint creation** (CRITICAL)
+  - Changed from `maybe_flush()` to guaranteed `force_flush()` before archiving
+  - Added database file verification after flush to ensure files are on disk
+  - Prevents corruption from intervening writes between flush and archive creation
+  - **Impact**: Checkpoints now reliably contain all committed object states
+  - **Files changed**: `src/metadata_cache.rs` (+25 lines verification)
+
+- **Checkpoint extraction verification**
+  - Added comprehensive diagnostics for restoration process
+  - Verifies cache directory and database files exist after extraction
+  - Logs restored object counts for validation
+  - **Impact**: Easier debugging of restoration issues
+  - **Files changed**: `src/metadata_cache.rs` (+35 lines diagnostics)
+
+### Enhanced
+
+- **9 comprehensive checkpoint tests** covering all scenarios:
+  - Archive contains KV database files
+  - Restoration from storage
+  - No checkpoint on storage (graceful fallback)
+  - Local cache newer than checkpoint (skip restore)
+  - Agent ID isolation (separate checkpoints per agent)
+  - Checkpoint overwrites (latest wins)
+  - Storage location verification (checkpoints at storage URI, not cache location)
+  - Large dataset (1000 objects)
+  - Multiple restore cycles
+
+### Testing
+
+- **545 tests passing** (14 ignored performance tests)
+  - All checkpoint restoration tests passing
+  - All integration tests updated for new `prepare_objects()` signature
+  - All doc tests updated for new `MetadataCache::new()` signature
+  - **0 test failures, 0 compilation errors, 0 warnings**
+
+### Configuration
+
+**New top-level field:**
+```yaml
+cache_checkpoint_interval_secs: 300  # Default: 5 minutes, 0 = disabled
+```
+
+**Checkpoint locations:**
+- `file:///path/` → `{path}/.sai3-cache-agent-{id}.tar.zst`
+- `s3://bucket/` → `s3://bucket/.sai3-cache-agent-{id}.tar.zst`
+- `az://container/` → `az://container/.sai3-cache-agent-{id}.tar.zst`
+- `gs://bucket/` → `gs://bucket/.sai3-cache-agent-{id}.tar.zst`
+
+---
+
 ## [0.8.53] - 2026-02-09
 
 **Critical Fixes: Multi-Endpoint + Directory Tree Workloads**

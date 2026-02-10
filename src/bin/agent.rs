@@ -347,9 +347,7 @@ impl AgentState {
         info!("Abort signal broadcast to workload");
     }
     
-    /// Subscribe to abort signals
-    /// TODO: Wire into execute_stages_workflow for proper abort handling
-    #[allow(dead_code)]  // Reserved for abort handling in YAML stage workflow
+    /// Subscribe to abort signals (used in execute_stages_workflow for proper abort handling)
     fn subscribe_abort(&self) -> broadcast::Receiver<()> {
         self.abort_tx.subscribe()
     }
@@ -513,6 +511,18 @@ fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> O
                     .or_else(|| target.strip_prefix("direct://"))
                     .map(std::path::PathBuf::from) {
                     return Some(fs_path);
+                }
+            }
+            
+            // Also check distributed.agents[].multi_endpoint.endpoints (v0.8.60+)
+            if let Some(ref multi) = agent.multi_endpoint {
+                for endpoint in &multi.endpoints {
+                    if let Some(path) = endpoint.strip_prefix("file://")
+                        .or_else(|| endpoint.strip_prefix("direct://"))
+                        .map(std::path::PathBuf::from) {
+                        // Return first filesystem endpoint found
+                        return Some(path);
+                    }
                 }
             }
         }
@@ -761,21 +771,21 @@ impl Agent for AgentSvc {
             current_progress: Some(PhaseProgress {
                 agent_id: agent_id.clone(),
                 current_phase: current_phase as i32,
-                phase_start_time_ms: 0, // TODO: Track phase start time
+                phase_start_time_ms: 0, // Not tracked - use heartbeat_time_ms
                 heartbeat_time_ms: chrono::Utc::now().timestamp_millis() as u64,
                 objects_created,
-                objects_total: 0, // TODO: Get from config
+                objects_total: 0, // Not available in LiveStatsTracker (stage-based tracking)
                 current_operation: status_message.clone(),
                 bytes_written,
-                errors_encountered: 0, // TODO: Track errors
+                errors_encountered: 0, // Not tracked - LiveStatsTracker has no error counters
                 operations_completed,
-                current_throughput: 0.0, // TODO: Calculate throughput
-                phase_elapsed_ms: 0, // TODO: Calculate from phase_start_time_ms
-                objects_deleted: 0, // TODO: Track in cleanup phase
+                current_throughput: 0.0, // Not calculated - use ops/bytes for throughput calc
+                phase_elapsed_ms: 0, // Not tracked - use stage_elapsed_s from LiveStatsSnapshot
+                objects_deleted: 0, // Not tracked - cleanup uses LIST results
                 objects_remaining: 0,
-                is_stuck: false, // TODO: Detect stuck state
+                is_stuck: false, // Not implemented - no stuck detection logic
                 stuck_reason: String::new(),
-                progress_rate: 0.0, // TODO: Calculate from recent progress
+                progress_rate: 0.0, // Not calculated - derive from operations_completed
                 phase_completed: matches!(current_state, WorkloadState::Completed),
                 // v0.8.29: Detect barrier state from AtStage { ready_for_next: true }
                 at_barrier: matches!(
@@ -1043,6 +1053,8 @@ impl Agent for AgentSvc {
                 agent_index as usize,
                 num_agents as usize,
                 shared_storage,  // v0.8.24: Only filter by agent_id in shared storage mode
+                None,  // v0.8.60: No results_dir in deprecated run_workload RPC (cache disabled)
+                None,  // v0.8.60: No config for cache hash (cache disabled)
             ).await.map_err(|e| {
                 error!("Prepare phase failed: {}", e);
                 Status::internal(format!("Prepare phase failed: {}", e))
@@ -1384,9 +1396,11 @@ impl Agent for AgentSvc {
             }
             
             // ============================================================================
-            // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+            // CATCH-ALL ARM FOR BARRIER SYNC STATES (CONSERVATIVE FAILSAFE)
             // ============================================================================
-            // TODO v0.8.25: Replace this catch-all with proper abort handling for each new state:
+            // This catch-all handles any future states added to WorkloadState enum.
+            // Design decision: Conservative approach treats unknown states as active workload,
+            // ensuring abort always works even if explicit handling not yet added.
             //
             // WorkloadState::Validating => {
             //     // Pre-flight validation in progress - abort immediately
@@ -2539,7 +2553,7 @@ impl Agent for AgentSvc {
                                 
                                 // Convert to proto and send via LiveStats status=7 (PREFLIGHT_RESULT)
                                 // We encode validation results in error_message as JSON for now
-                                // TODO Phase 2: Add proper PreFlightResult field to LiveStats message
+                                // Future: Add proper PreFlightResult field to LiveStats message (requires proto change)
                                 let passed = !fs_summary.has_errors();
                                 let results_json = serde_json::json!({
                                     "passed": passed,
@@ -2624,6 +2638,110 @@ impl Agent for AgentSvc {
                                 
                                 // Break out of control reader loop - stream will close cleanly
                                 break;
+                            }
+                            Ok(Command::Reset) => {
+                                // v0.8.60: CRITICAL - Force agent back to Idle state (controller/agent desync recovery)
+                                warn!("Control reader: Received RESET - forcing agent back to Idle (desync recovery)");
+                                
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?} before reset", current_state);
+                                
+                                // Cancel any ongoing work
+                                agent_state_reader.send_abort();
+                                
+                                // Clear error state directly
+                                *agent_state_reader.error_message.lock().await = None;
+                                
+                                // Force transition to Idle (bypasses normal state machine validation)
+                                // This is safe because controller is authoritative - we trust its view
+                                *agent_state_reader.state.lock().await = WorkloadState::Idle;
+                                *agent_state_reader.completion_sent.lock().await = false;
+                                
+                                // Clear cached config and tracker state
+                                *agent_state_reader.config_yaml.lock().await = None;
+                                *agent_state_reader.tracker.lock().await = None;
+                                *agent_state_reader.agent_index.lock().await = None;
+                                *agent_state_reader.num_agents.lock().await = None;
+                                *agent_state_reader.shared_storage.lock().await = None;
+                                *agent_state_reader.stages.lock().await = None;
+                                
+                                info!("✅ RESET complete - agent now in Idle state, ready for new coordination");
+                                
+                                // Send acknowledgement that reset completed
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let reset_ack = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: 1,  // IDLE
+                                    error_message: "Reset complete - back to Idle".to_string(),
+                                     ..Default::default()
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(reset_ack).await {
+                                    warn!("Control reader: Failed to send reset acknowledgement: {}", e);
+                                }
+                            }
+                            Ok(Command::SyncState) => {
+                                // v0.8.60: CRITICAL - Force agent to specific stage/phase (re-coordination)
+                                warn!(
+                                    "Control reader: Received SYNC_STATE - forcing to stage {} '{}' (ready_for_next={})",
+                                    control_msg.target_stage_index,
+                                    control_msg.target_stage_name,
+                                    control_msg.ready_for_next
+                                );
+                                
+                                let current_state = agent_state_reader.get_state().await;
+                                info!("Control reader: Current state is {:?} before sync", current_state);
+                                
+                                // Force transition to target stage (bypasses normal state machine validation)
+                                // Controller is authoritative - we trust its view of where we should be
+                                let target_state = WorkloadState::AtStage {
+                                    stage_index: control_msg.target_stage_index as usize,
+                                    stage_name: control_msg.target_stage_name.clone(),
+                                    ready_for_next: control_msg.ready_for_next,
+                                };
+                                
+                                *agent_state_reader.state.lock().await = target_state.clone();
+                                
+                                info!(
+                                    "✅ SYNC_STATE complete - agent now at stage {} '{}' (ready_for_next={})",
+                                    control_msg.target_stage_index,
+                                    control_msg.target_stage_name,
+                                    control_msg.ready_for_next
+                                );
+                                
+                                // Send acknowledgement that sync completed
+                                let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
+                                let status_code = if control_msg.ready_for_next { 2 } else { 1 };  // READY vs not
+                                
+                                let sync_ack = LiveStats {
+                                    agent_id: agent_id.clone(),
+                                    timestamp_s: 0.0,
+                                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                    elapsed_s: 0.0,
+                                    completed: false,
+                                    final_summary: None,
+                                    status: status_code,
+                                    error_message: format!(
+                                        "Synced to stage {} '{}' (ready={})",
+                                        control_msg.target_stage_index,
+                                        control_msg.target_stage_name,
+                                        control_msg.ready_for_next
+                                    ),
+                                     ..Default::default()
+                                };
+                                
+                                if let Err(e) = tx_stats_for_control.send(sync_ack).await {
+                                    warn!("Control reader: Failed to send sync acknowledgement: {}", e);
+                                }
                             }
                             Err(e) => {
                                 warn!("Control reader: Unknown command: {}", e);
@@ -2818,9 +2936,11 @@ impl Agent for AgentSvc {
                 }
                 
                 // ============================================================================
-                // CATCH-ALL ARM FOR v0.8.25 BARRIER SYNC STATES (TEMPORARY FAILSAFE)
+                // CATCH-ALL ARM FOR BARRIER SYNC STATES (CONSERVATIVE FAILSAFE)
                 // ============================================================================
-                // TODO v0.8.25: Replace this catch-all with proper disconnect handling for each new state:
+                // This catch-all handles any future states added to WorkloadState enum.
+                // Design decision: Conservative approach treats disconnect during unknown states
+                // as abnormal, ensuring proper cleanup even if explicit handling not yet added.
                 //
                 // WorkloadState::Validating => {
                 //     // Disconnect during pre-flight validation - treat as abnormal
@@ -2892,8 +3012,21 @@ async fn execute_stages_workflow(
 ) -> Result<sai3_bench::workload::Summary, String> {
     info!("Starting YAML-driven stage workflow with {} stages", stages.len());
     
+    // v0.8.60: Create results directory for metadata cache and stage outputs
+    let results_base = std::env::temp_dir();
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M");
+    let results_dir_name = format!("sai3-agent-{}-{}", timestamp, agent_id);
+    let results_dir = results_base.join(&results_dir_name);
+    if let Err(e) = std::fs::create_dir_all(&results_dir) {
+        warn!("Failed to create results directory (cache disabled): {}", e);
+    }
+    info!("📁 Agent results directory: {}", results_dir.display());
+    
     // Wire tracker into config
     config.live_stats_tracker = Some(tracker.clone());
+    
+    // v0.8.60: Wire abort signal for graceful shutdown during stage execution
+    let mut abort_rx = agent_state.subscribe_abort();
     
     // Storage for prepared objects (needed for cleanup stages)
     let mut prepared_objects: Vec<sai3_bench::prepare::PreparedObject> = Vec::new();
@@ -2901,6 +3034,14 @@ async fn execute_stages_workflow(
     
     // Iterate through stages in order
     for (stage_index, stage) in stages.iter().enumerate() {
+        // Check for abort before starting next stage
+        tokio::select! {
+            _ = abort_rx.recv() => {
+                warn!("Abort signal received during stage workflow - stopping at stage {}/{}", stage_index + 1, stages.len());
+                return Err("Workload aborted by user".to_string());
+            }
+            _ = async {} => {}
+        }
         info!("=== Stage {}/{}: {} ===", stage_index + 1, stages.len(), stage.name);
         
         // Transition to AtStage (ready_for_next=false, executing)
@@ -2961,6 +3102,8 @@ async fn execute_stages_workflow(
                         agent_index,
                         num_agents,
                         shared_storage,
+                        Some(&results_dir),  // v0.8.60: Enable metadata cache
+                        Some(&config),       // v0.8.60: For config hash generation
                     ).await {
                         Ok((prepared, manifest, prepare_metrics)) => {
                             info!("Prepare stage complete: {} objects", prepared.len());
@@ -3254,7 +3397,7 @@ async fn execute_stages_workflow(
             put_ops: stage_snapshot.put_ops,
             put_bytes: stage_snapshot.put_bytes,
             meta_ops: stage_snapshot.meta_ops,
-            errors: 0,  // TODO: Track errors per stage
+            errors: 0,  // Not tracked - LiveStatsTracker has no error counters (future: add to tracker)
             get: Some(OpAggregateMetrics {
                 bytes: stage_snapshot.get_bytes,
                 ops: stage_snapshot.get_ops,
@@ -3286,7 +3429,7 @@ async fn execute_stages_workflow(
             get_bins: proto_get_bins,
             put_bins: proto_put_bins,
             meta_bins: proto_meta_bins,
-            endpoint_stats: Vec::new(),  // TODO: Capture per-stage endpoint stats
+            endpoint_stats: Vec::new(),  // Not tracked - LiveStatsTracker has no per-endpoint data (future: add endpoint tracking)
         };
         
         info!("Stage '{}' summary: {} GET ops, {} PUT ops, {} META ops in {:.2}s",
@@ -4150,5 +4293,228 @@ mod tests {
     #[ignore = "Uses deprecated Ready/Running states removed in v0.8.29"]
     async fn test_race_condition_scenario_error_path() {
         // Test body removed - uses deprecated states
+    }
+
+    // ========================================================================
+    // Filesystem Path Extraction Tests (v0.8.60 - Critical Bug Fix)
+    // Bug: extract_filesystem_path_from_config() didn't check 
+    //      distributed.agents[].multi_endpoint.endpoints
+    // Impact: Filesystem validation was skipped for multi-endpoint configs
+    // ========================================================================
+
+    #[test]
+    fn test_extract_filesystem_path_standalone_file_uri() {
+        let yaml = r#"
+target: "file:///tmp/test-data/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from config.target");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/tmp/test-data/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_standalone_direct_uri() {
+        let yaml = r#"
+target: "direct:///mnt/nvme/test/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract direct:// path from config.target");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/nvme/test/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_multi_endpoint_top_level() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///mnt/disk1/"
+    - "file:///mnt/disk2/"
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from multi_endpoint.endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/disk1/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_prepare_ensure_objects() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "file:///data/prepared/"
+      count: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from prepare.ensure_objects[].base_uri");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/data/prepared/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_distributed_target_override() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+      target_override: "file:///agent1/data/"
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract file:// path from distributed.agents[].target_override");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/agent1/data/"));
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_distributed_multi_endpoint_bug_fix() {
+        // THIS IS THE CRITICAL BUG FIX TEST
+        // Config structure from 4host-vast-64mfiles-with-barriers.yaml
+        // Previously returned None, causing "Skipping filesystem validation" message
+        let yaml = r#"
+concurrency: 64
+duration: 30s
+workload:
+  - op: get
+    path: "d*_w*.dir/**/*"
+    weight: 100
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast1/benchmark/"
+          - "file:///mnt/vast2/benchmark/"
+          - "file:///mnt/vast3/benchmark/"
+          - "file:///mnt/vast4/benchmark/"
+        strategy: round_robin
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/vast5/benchmark/"
+        strategy: round_robin
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), 
+            "CRITICAL BUG: Should extract file:// path from distributed.agents[].multi_endpoint.endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/vast1/benchmark/"),
+            "Should return first filesystem endpoint from first agent");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_s3() {
+        let yaml = r#"
+target: "s3://my-bucket/prefix/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for s3:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_azure() {
+        let yaml = r#"
+target: "az://container/path/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for az:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_object_storage_gcs() {
+        let yaml = r#"
+target: "gs://bucket/prefix/"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for gs:// URIs");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_empty_config() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_none(), "Should return None for empty config");
+    }
+
+    #[test]
+    fn test_extract_filesystem_path_mixed_endpoints_prefers_first_filesystem() {
+        let yaml = r#"
+concurrency: 16
+duration: 60s
+workload: []
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "127.0.0.1:7761"
+      id: "agent-1"
+      multi_endpoint:
+        endpoints:
+          - "s3://bucket1/"
+          - "file:///mnt/data/"
+          - "file:///mnt/other/"
+        strategy: round_robin
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+        
+        let path = extract_filesystem_path_from_config(&config);
+        assert!(path.is_some(), "Should extract first filesystem path from mixed endpoints");
+        assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/data/"));
     }
 }

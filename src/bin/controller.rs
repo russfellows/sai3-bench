@@ -33,7 +33,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary, WorkloadPhase};
 // Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
 // Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
@@ -1019,6 +1019,34 @@ async fn main() -> Result<()> {
                     bail!("Configuration validation failed: {}", e);
                 }
                 
+                // v0.8.60: CRITICAL - Validate distributed configuration during dry-run
+                // This catches base_uri conflicts, multi-endpoint issues, etc. BEFORE runtime
+                match sai3_bench::preflight::distributed::validate_distributed_config(&parsed_config) {
+                    Ok(validation_results) => {
+                        if !validation_results.is_empty() {
+                            eprintln!("\n🔍 Distributed Config Validation (dry-run)");
+                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            
+                            let (passed, errors, warnings) = 
+                                sai3_bench::preflight::display_validation_results(&validation_results, None);
+                            
+                            if !passed {
+                                eprintln!("\n❌ Distributed configuration validation FAILED");
+                                eprintln!("   {} errors, {} warnings", errors, warnings);
+                                eprintln!("\nFix the above configuration errors before running.");
+                                bail!("Distributed configuration validation failed with {} errors", errors);
+                            } else if warnings > 0 {
+                                eprintln!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
+                                eprintln!();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Distributed config validation error: {}", e);
+                        bail!("Failed to validate distributed configuration: {}", e);
+                    }
+                }
+                
                 // Only print full summary with "Configuration is valid" if validation passed
                 sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
                 
@@ -1231,9 +1259,6 @@ enum BarrierStatus {
 struct BarrierManager {
     agents: HashMap<String, AgentHeartbeat>,
     config: PhaseBarrierConfig,
-    /// TODO: Use barrier_start for overall barrier timeout tracking (not yet implemented)
-    #[allow(dead_code)]
-    barrier_start: Instant,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
     /// v0.8.26: Per-barrier tracking for named barriers (stage_X, etc.)
@@ -1272,7 +1297,6 @@ impl BarrierManager {
         Self {
             agents,
             config,
-            barrier_start: Instant::now(),
             ready_agents: HashSet::new(),
             failed_agents: HashSet::new(),
             barrier_agents: HashMap::new(),  // v0.8.26: Per-barrier tracking
@@ -1464,6 +1488,9 @@ impl BarrierManager {
     }
     
     /// Wait for barrier with heartbeat-based liveness checking
+    /// 
+    /// v0.8.60: CRITICAL - Added timeout using agent_barrier_timeout config
+    /// Returns BarrierStatus::Failed + error if timeout exceeded (prevents infinite wait)
     async fn wait_for_barrier(
         &mut self,
         phase_name: &str,
@@ -1475,7 +1502,57 @@ impl BarrierManager {
             self.config.heartbeat_interval.max(10)
         );
         
+        // v0.8.60: Barrier timeout from config (default 120s)
+        let barrier_timeout = Duration::from_secs(self.config.agent_barrier_timeout);
+        info!("Barrier '{}': timeout set to {:?}", phase_name, barrier_timeout);
+        
         loop {
+            // v0.8.60: CHECK TIMEOUT FIRST - prevents infinite wait if agents desynchronized
+            if start.elapsed() >= barrier_timeout {
+                error!(
+                    "❌ Barrier '{}' TIMEOUT after {:?}: only {}/{} agents ready, {} failed",
+                    phase_name,
+                    start.elapsed(),
+                    self.ready_agents.len(),
+                    self.agents.len(),
+                    self.failed_agents.len()
+                );
+                
+                // List which agents are stuck
+                let stuck_agents: Vec<_> = self.agents.keys()
+                    .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
+                    .map(|s| {
+                        let hb = &self.agents[s];
+                        let prog = hb.last_progress.as_ref()
+                            .map(|p| format!("phase: {:?}, ops: {}", 
+                                WorkloadPhase::try_from(p.current_phase).unwrap_or(WorkloadPhase::PhaseIdle),
+                                p.operations_completed))
+                            .unwrap_or_else(|| "no progress".to_string());
+                        format!(
+                            "{} ({}s since heartbeat, {})",
+                            s,
+                            Instant::now().duration_since(hb.last_heartbeat).as_secs(),
+                            prog
+                        )
+                    })
+                    .collect();
+                
+                error!(
+                    "Stuck agents ({}): {}",
+                    stuck_agents.len(),
+                    stuck_agents.join(", ")
+                );
+                
+                // v0.8.60: Reset barrier state on timeout to enable recovery
+                self.reset_barrier_state();
+                
+                return Err(anyhow!(
+                    "Barrier '{}' timeout after {:?} - agents may be desynchronized. Use RESET to recover.",
+                    phase_name,
+                    start.elapsed()
+                ));
+            }
+            
             // Check barrier status
             let status = self.check_barrier();
             
@@ -1626,6 +1703,31 @@ impl BarrierManager {
             barrier_state.released = true;
             info!("Barrier '{}' cleared (will not release again)", barrier_name);
         }
+    }
+    
+    /// v0.8.60: CRITICAL - Reset barrier manager state (called after sending RESET to agents)
+    /// 
+    /// Clears all barriers, ready/failed agent tracking, and resets heartbeats.
+    /// Controller must send RESET commands via tx_control channels BEFORE calling this.
+    fn reset_barrier_state(&mut self) {
+        warn!("🔄 Resetting barrier manager state (desync recovery)");
+        
+        // Clear barrier manager state
+        self.ready_agents.clear();
+        self.failed_agents.clear();
+        self.barrier_agents.clear();
+        
+        // Reset heartbeats
+        let now = Instant::now();
+        for (_, hb) in self.agents.iter_mut() {
+            hb.last_heartbeat = now;
+            hb.last_progress = None;
+            hb.missed_count = 0;
+            hb.is_alive = true;
+            hb.query_in_progress = false;
+        }
+        
+        info!("✅ Barrier manager state reset complete");
     }
 }
 
@@ -2010,6 +2112,9 @@ async fn run_distributed_workload(
                 num_agents,               // v0.8.7: For distributed cleanup
                 barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
                 barrier_sequence: 0,
+                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                target_stage_name: String::new(),
+                ready_for_next: false,
             };
             
             if let Err(e) = tx_control.send(config_msg).await {
@@ -2080,6 +2185,9 @@ async fn run_distributed_workload(
                 num_agents,               // v0.8.7: Redundant but consistent
                 barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
                 barrier_sequence: 0,
+                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                target_stage_name: String::new(),
+                ready_for_next: false,
             };
             
             if let Err(e) = tx_control.send(start_msg).await {
@@ -2428,6 +2536,21 @@ async fn run_distributed_workload(
         None
     };
     
+    // v0.8.60: Validation/preflight barrier handling
+    // When using YAML-driven stages with validation, barrier release happens asynchronously
+    // in the stats processing loop when all agents report at_barrier=true.
+    // No explicit wait needed here - controller sends RELEASE_BARRIER via broadcast channel.
+    if let Some(ref distributed_config) = config.distributed {
+        if let Some(ref stages) = distributed_config.stages {
+            if !stages.is_empty() {
+                let first_stage = &stages[0];
+                if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
+                    info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
+                }
+            }
+        }
+    }
+    
     // v0.7.13: Show countdown to coordinated start (suspend progress bar during countdown)
     if total_delay_secs > 0 {
         progress_bar.suspend(|| {
@@ -2625,7 +2748,7 @@ async fn run_distributed_workload(
                                 objects_remaining: if current_stage == WorkloadStage::StageCleanup {
                                     stats.stage_progress_total.saturating_sub(stats.stage_progress_current)
                                 } else { 0 },
-                                is_stuck: false,  // TODO: Add stuck detection based on progress rate
+                                is_stuck: false,  // Not implemented - no stuck detection logic
                                 stuck_reason: String::new(),
                                 progress_rate: if stats.stage_elapsed_s > 0.0 {
                                     stats.stage_progress_current as f64 / stats.stage_elapsed_s
@@ -2667,6 +2790,9 @@ async fn run_distributed_workload(
                                             num_agents: 0,
                                             barrier_name: barrier_info.barrier_name.clone(),
                                             barrier_sequence: barrier_info.barrier_sequence,
+                                            target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                                            target_stage_name: String::new(),
+                                            ready_for_next: false,
                                         };
                                         // Use broadcast - all agent tasks receive, but only matching one forwards
                                         if let Err(e) = tx_control_broadcast.send(release_msg) {
@@ -3238,6 +3364,9 @@ async fn run_distributed_workload(
         num_agents: 0,
         barrier_name: String::new(),
         barrier_sequence: 0,
+        target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+        target_stage_name: String::new(),
+        ready_for_next: false,
     };
     // Broadcast to all agents - each agent task receives and forwards
     if let Err(e) = tx_control_broadcast.send(goodbye_msg) {

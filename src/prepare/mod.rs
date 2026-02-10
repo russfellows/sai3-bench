@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
-use tracing::info;
+use tracing::{debug, info, warn}; // v0.8.60: Added debug/warn for cache handling
 
 use crate::config::{PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
@@ -63,19 +63,27 @@ pub use crate::workload::{create_store_for_uri, detect_pool_requirements};
 ///
 /// v0.8.52+: Deferred retry with adaptive strategy based on failure rates
 ///
+/// v0.8.60+: Metadata cache integration for state tracking and resume capability
+///
 /// # Arguments
 /// * `config` - Prepare configuration (object counts, sizes, etc.)
 /// * `workload` - Optional workload operations (used to determine if separate pools are needed)
 /// * `live_stats_tracker` - Optional live stats tracker for progress reporting
+/// * `multi_endpoint_config` - Multi-endpoint configuration
+/// * `multi_ep_cache` - Multi-endpoint object store cache
 /// * `concurrency` - Number of parallel workers for object creation
 /// * `agent_id` - 0-based agent index (0, 1, 2, ...)
 /// * `num_agents` - Total number of agents in distributed execution
+/// * `shared_storage` - v0.8.24: Only filter by agent_id in shared storage mode
+/// * `results_dir` - v0.8.60: Results directory for metadata cache (None disables cache)
+/// * `full_config` - v0.8.60: Full config for cache hash generation (None disables cache)
 /// 
 /// # Behavior
 /// - If num_agents == 1: Creates all objects (standalone mode)
 /// - If num_agents > 1: Each agent creates only its assigned subset using modulo distribution
 ///   - Agent i creates object j if (j % num_agents == agent_id)
 ///   - Ensures no overlap and complete coverage across all agents
+/// - If results_dir and full_config provided: Creates metadata cache for state tracking
 #[allow(clippy::too_many_arguments)]  // TODO: Refactor to params struct in future release
 pub async fn prepare_objects(
     config: &PrepareConfig,
@@ -87,8 +95,112 @@ pub async fn prepare_objects(
     agent_id: usize,
     num_agents: usize,
     shared_storage: bool,  // v0.8.24: Only filter by agent_id in shared storage mode
+    results_dir: Option<&std::path::Path>,  // v0.8.60: For metadata cache
+    full_config: Option<&crate::config::Config>,  // v0.8.60: For cache hash generation
 ) -> Result<(Vec<PreparedObject>, Option<TreeManifest>, PrepareMetrics)> {
     let prepare_start = Instant::now();
+    
+    // v0.8.60: Create metadata cache if enabled (with comprehensive logging)
+    let metadata_cache = if let (Some(res_dir), Some(cfg)) = (results_dir, full_config) {
+        // Extract endpoint URIs for cache creation
+        let endpoint_uris: Vec<String> = if let Some(multi_ep) = multi_endpoint_config {
+            multi_ep.endpoints.clone()
+        } else if let Some(first_spec) = config.ensure_objects.first() {
+            // Single endpoint mode - try to extract from base_uri
+            vec![first_spec.get_base_uri(None).unwrap_or_else(|_| "unknown://".to_string())]
+        } else {
+            Vec::new()
+        };
+        
+        if !endpoint_uris.is_empty() {
+            let config_hash = crate::metadata_cache::generate_config_hash(cfg);
+            
+            info!("╔══════════════════════════════════════════════════════════════╗");
+            info!("║  METADATA CACHE: Creating distributed KV cache (fjall v3)   ║");
+            info!("╚══════════════════════════════════════════════════════════════╝");
+            info!("");
+            info!("📂 Results directory: {}", res_dir.display());
+            info!("🔑 Config hash: {}", config_hash);
+            info!("📊 Endpoints: {} total", endpoint_uris.len());
+            
+            // v0.8.60: Pass agent_id to create agent-specific endpoint cache
+            let agent_id_opt = if num_agents > 1 { Some(agent_id) } else { None };
+            
+            // v0.8.60: Extract KV cache base directory from config
+            // Prefer per-agent override, fallback to global default, then system temp
+            let kv_cache_base_dir = cfg.distributed.as_ref().and_then(|d| {
+                // Try per-agent override first
+                d.agents.get(agent_id).and_then(|a| a.kv_cache_dir.as_ref())
+                    // Fallback to global distributed config
+                    .or(d.kv_cache_dir.as_ref())
+            });
+            
+            match crate::metadata_cache::MetadataCache::new(
+                res_dir,
+                &endpoint_uris,
+                config_hash,
+                agent_id_opt,
+                kv_cache_base_dir.map(|p| p.as_path()),
+            ).await {
+                Ok(cache) => {
+                    info!("");
+                    info!("✅ Metadata cache initialization complete!");
+                    info!("   This cache will track object states (Planned → Creating → Created)");
+                    info!("   and enable resume capability for interrupted prepare operations.");
+                    info!("");
+                    Some(Arc::new(tokio::sync::Mutex::new(cache)))
+                }
+                Err(e) => {
+                    warn!("Failed to create metadata cache (will proceed without cache): {}", e);
+                    warn!("This is not fatal - prepare will work without resume capability.");
+                    None
+                }
+            }
+        } else {
+            warn!("No endpoints detected for metadata cache - cache disabled");
+            None
+        }
+    } else {
+        // Cache disabled (results_dir or full_config not provided)
+        if results_dir.is_none() {
+            info!("Metadata cache disabled: no results directory provided");
+        }
+        if full_config.is_none() {
+            info!("Metadata cache disabled: no config provided for hash generation");
+        }
+        None
+    };
+    
+    // v0.8.60: Spawn periodic checkpoint tasks if enabled
+    // Default: 300 seconds (5 minutes) to protect against data loss
+    // Works for BOTH standalone (sai3-bench run) and distributed (sai3bench-ctl) modes
+    // Top-level field has precedence; distributed.cache_checkpoint_interval_secs is for backward compat
+    let checkpoint_interval = full_config
+        .map(|cfg| cfg.cache_checkpoint_interval_secs)
+        .unwrap_or(300);  // Default to 5 minutes if no config provided
+    
+    let mut checkpoint_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if checkpoint_interval > 0 {
+        if let Some(cache_arc) = metadata_cache.as_ref() {
+            let cache = cache_arc.lock().await;
+            let agent_id_opt = if num_agents > 1 { Some(agent_id) } else { None };
+            
+            info!("");
+            info!("⏰ Periodic checkpointing ENABLED: {} second interval", checkpoint_interval);
+            info!("   Protects against data loss in long-running prepares");
+            
+            for (idx, endpoint_cache) in cache.endpoints() {
+                let handle = endpoint_cache.spawn_periodic_checkpoint(checkpoint_interval, agent_id_opt);
+                checkpoint_handles.push(handle);
+                debug!("Spawned periodic checkpoint task for endpoint {}", idx);
+            }
+        }
+    } else {
+        debug!("Periodic checkpointing disabled (interval = 0)");
+    }
+    
+    // Keep checkpoint handles alive during prepare
+    let _checkpoint_guards = checkpoint_handles;
     
     // Detect if we need separate readonly and deletable pools
     let (has_delete, has_readonly) = if let Some(wl) = workload {
@@ -153,11 +265,11 @@ pub async fn prepare_objects(
     let all_prepared = match config.prepare_strategy {
         PrepareStrategy::Sequential => {
             info!("Using sequential prepare strategy (one size group at a time)");
-            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents).await?
+            prepare_sequential(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents, metadata_cache.clone()).await?
         }
         PrepareStrategy::Parallel => {
             info!("Using parallel prepare strategy (all sizes interleaved)");
-            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents, shared_storage).await?
+            prepare_parallel(config, needs_separate_pools, &mut metrics, live_stats_tracker.clone(), multi_endpoint_config, multi_ep_cache, tree_manifest.as_ref(), concurrency, agent_id, num_agents, shared_storage, metadata_cache.clone()).await?
         }
     };
     
@@ -192,6 +304,49 @@ pub async fn prepare_objects(
     
     info!("Prepare complete: {} objects ready ({} created, {} existed), wall time: {:.2}s", 
         all_prepared.len(), metrics.objects_created, metrics.objects_existed, metrics.wall_seconds);
+    
+    // v0.8.60: Cancel periodic checkpoint tasks before final checkpoint
+    // This prevents race between background tasks and final checkpoint
+    for handle in _checkpoint_guards.into_iter() {
+        handle.abort();
+    }
+    debug!("Cancelled periodic checkpoint tasks");
+    
+    // v0.8.60: CRITICAL - Persist KV cache to storage under test (FINAL checkpoint)
+    // The metadata cache MUST be checkpointed from isolated location (e.g., /tmp/)
+    // to the storage under test for resume capability and data integrity
+    // Uses tar.zst archives that work for BOTH filesystem and cloud storage
+    if let Some(cache_arc) = metadata_cache.as_ref() {
+        let cache = cache_arc.lock().await;
+        let agent_id_opt = if num_agents > 1 { Some(agent_id) } else { None };
+        
+        info!("");
+        info!("╔══════════════════════════════════════════════════════════════╗");
+        info!("║  CRITICAL: Persisting KV cache checkpoint to storage        ║");
+        info!("╚══════════════════════════════════════════════════════════════╝");
+        
+        // Write checkpoint for each endpoint cache
+        for (idx, endpoint_cache) in cache.endpoints() {
+            match endpoint_cache.write_checkpoint(agent_id_opt).await {
+                Ok(checkpoint_location) => {
+                    info!("✅ Endpoint {} checkpoint created: {}", idx, checkpoint_location);
+                }
+                Err(e) => {
+                    // For ALL URIs (including cloud), checkpoint failure is CRITICAL
+                    // Cloud URIs now supported via tar.zst upload
+                    return Err(e.context(format!(
+                        "CRITICAL: Failed to create endpoint {} KV cache checkpoint",
+                        idx
+                    )));
+                }
+            }
+        }
+        
+        info!("");
+        info!("✅ All KV cache checkpoints successfully created");
+        info!("   Resume capability enabled - prepare can be safely restarted");
+        info!("");
+    }
     
     Ok((all_prepared, tree_manifest, metrics))
 }

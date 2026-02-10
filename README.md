@@ -1,12 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.53-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.60-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-446%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-545%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-**🚀 NEW (v0.8.53)**: **Critical multi-endpoint + directory tree fix** - GET/PUT/STAT/DELETE operations now correctly route to round-robin endpoints, fixing 0-ops workload failures. Enhanced dry-run shows ALL endpoints with full URIs.
+**🚀 NEW (v0.8.60)**: **KV cache checkpoint restoration** - Complete resume capability! Checkpoints now automatically restored on startup, enabling agents to resume long-running prepare operations after crashes/restarts. Works for both standalone and distributed modes.
+
+**🚀 (v0.8.53)**: **Critical multi-endpoint + directory tree fix** - GET/PUT/STAT/DELETE operations now correctly route to round-robin endpoints, fixing 0-ops workload failures. Enhanced dry-run shows ALL endpoints with full URIs.
 
 **🚀 (v0.8.52)**: **Deferred retry for prepare failures** eliminates "missing object" errors during execution. Failed creates are automatically retried after the main loop with aggressive exponential backoff (10 attempts, up to 30s delay), ensuring completeness without impacting fast path performance. **Thousand separator display** in dry-run (64,032,768 files) and optional YAML input support ("64,032,768"). **Human-readable time units** in YAML: use "5m", "2h", "30s" instead of seconds (300, 7200, 30).
 
