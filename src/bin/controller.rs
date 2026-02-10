@@ -1019,6 +1019,34 @@ async fn main() -> Result<()> {
                     bail!("Configuration validation failed: {}", e);
                 }
                 
+                // v0.8.60: CRITICAL - Validate distributed configuration during dry-run
+                // This catches base_uri conflicts, multi-endpoint issues, etc. BEFORE runtime
+                match sai3_bench::preflight::distributed::validate_distributed_config(&parsed_config) {
+                    Ok(validation_results) => {
+                        if !validation_results.is_empty() {
+                            eprintln!("\n🔍 Distributed Config Validation (dry-run)");
+                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            
+                            let (passed, errors, warnings) = 
+                                sai3_bench::preflight::display_validation_results(&validation_results, None);
+                            
+                            if !passed {
+                                eprintln!("\n❌ Distributed configuration validation FAILED");
+                                eprintln!("   {} errors, {} warnings", errors, warnings);
+                                eprintln!("\nFix the above configuration errors before running.");
+                                bail!("Distributed configuration validation failed with {} errors", errors);
+                            } else if warnings > 0 {
+                                eprintln!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
+                                eprintln!();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Distributed config validation error: {}", e);
+                        bail!("Failed to validate distributed configuration: {}", e);
+                    }
+                }
+                
                 // Only print full summary with "Configuration is valid" if validation passed
                 sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
                 
