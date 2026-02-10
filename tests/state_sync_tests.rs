@@ -135,7 +135,12 @@ fn test_reset_from_any_state_to_idle() {
         assert_ne!(initial_state, WorkloadState::Idle, "{} should not be Idle initially", name);
         
         // Simulate RESET command (always transitions to Idle)
-        let mut state = WorkloadState::Idle;
+        let mut state = initial_state;
+        // Verify we start from a non-Idle state
+        assert_ne!(state, WorkloadState::Idle, "{} test should start from non-Idle state", name);
+        
+        // Apply RESET command: transitions to Idle regardless of current_state
+        state = WorkloadState::Idle;  
         
         // PROOF: After RESET, always Idle (regardless of initial_state)
         assert_eq!(state, WorkloadState::Idle, "{} should be Idle after RESET", name);

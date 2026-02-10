@@ -32,6 +32,7 @@ fn make_test_config(target: Option<String>) -> Config {
         multi_endpoint: None,
         perf_log: None,
         warmup_period: None,
+        cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
     }
 }
 

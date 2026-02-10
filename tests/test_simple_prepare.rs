@@ -53,6 +53,8 @@ async fn test_single_agent_prepare() {
         0,  // agent_id
         2,  // num_agents
         true,  // shared_storage: agents coordinate
+        None,  // results_dir
+        None,  // full_config
     ).await;
     println!("prepare_objects returned!");
     

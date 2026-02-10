@@ -904,6 +904,7 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
                 path_template: None,
                 listen_port: 7761,
                 multi_endpoint: None,
+                kv_cache_dir: None,
             }
         ],
         ssh: None,
@@ -919,6 +920,7 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         agent_ready_timeout: 120,  // v0.8.51: Default timeout
         barrier_sync: BarrierSyncConfig::default(),
         stages: None,
+        kv_cache_dir: None,
     };
     
     // Serialize to YAML

@@ -27,7 +27,7 @@ async fn test_prepare_to_workload_with_cache() {
     let config_hash = "integration_test".to_string();
 
     // Create metadata cache
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone())
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone(), None, None)
         .await
         .unwrap();
 
@@ -172,7 +172,7 @@ async fn test_cache_persistence_across_restarts() {
 
     // Phase 1: Create cache, populate, flush
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone())
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone(), None, None)
             .await
             .unwrap();
 
@@ -200,7 +200,7 @@ async fn test_cache_persistence_across_restarts() {
 
     // Phase 2: Reopen cache, verify data persisted
     {
-        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone())
+        let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone(), None, None)
             .await
             .unwrap();
 
@@ -278,7 +278,7 @@ async fn test_cache_vs_stat_performance() {
     let endpoints = vec![endpoint_uri.clone()];
     let config_hash = "perf_test".to_string();
 
-    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash, None.clone())
+    let cache = MetadataCache::new(&results_dir, &endpoints, config_hash.clone(), None, None)
         .await
         .unwrap();
 

@@ -5,15 +5,13 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{PrepareConfig, PrepareStrategy, CleanupMode};
-    use crate::directory_tree::TreeManifest;
+    use crate::config::PrepareConfig;
     
     // Import from prepare module
     use crate::prepare::{
         error_tracking::{PrepareErrorTracker, ListingErrorTracker},
         retry::determine_retry_strategy,
         listing::ListingResult,
-        metrics::{PreparedObject, PrepareMetrics},
         prepare_objects,
     };
     

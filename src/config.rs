@@ -129,7 +129,7 @@ fn default_concurrency() -> usize {
     crate::constants::DEFAULT_CONCURRENCY
 }
 
-fn default_cache_checkpoint_interval() -> u64 {
+pub fn default_cache_checkpoint_interval() -> u64 {
     300  // 5 minutes - protects long-running prepares from data loss
 }
 
