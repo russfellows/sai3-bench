@@ -1039,8 +1039,11 @@ async fn main() -> Result<()> {
             // Read config to check for distributed.agents
             let config_yaml = fs::read_to_string(config)
                 .with_context(|| format!("Failed to read config file: {}", config.display()))?;
-            let parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+            let mut parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
                 .context("Failed to parse YAML config")?;
+
+            sai3_bench::validation::apply_directory_tree_counts(&mut parsed_config)
+                .context("Directory tree count validation failed")?;
             
             // v0.7.12: Use comprehensive validation display (same as standalone binary)
             if *dry_run {
@@ -1928,14 +1931,19 @@ async fn run_distributed_workload(
     }
     
     // Read YAML configuration
-    let config_yaml = fs::read_to_string(config_path)
+    let mut config_yaml = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     debug!("Config YAML loaded, {} bytes", config_yaml.len());
     
     // Parse config early so we can use it for progress bar and storage detection
-    let config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
+    let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
         .context("Failed to parse config")?;
+
+    sai3_bench::validation::apply_directory_tree_counts(&mut config)
+        .context("Directory tree count validation failed")?;
+    config_yaml = serde_yaml::to_string(&config)
+        .context("Failed to serialize config with directory tree counts")?;
 
     // Determine if storage is shared:
     // 1. CLI flag --shared-prepare takes highest priority (explicit override)
@@ -2854,6 +2862,8 @@ async fn run_distributed_workload(
     
     // v0.8.9: Track stage for transition detection (replaces was_in_prepare_phase)
     let mut last_stage = WorkloadStage::StageUnknown;
+    let mut last_stage_name = String::new();
+    let mut stage_elapsed_s: f64 = 0.0;
     
     // v0.8.4: Track prepare phase high-water marks (never decrease during prepare)
     let mut max_prepare_created: u64 = 0;
@@ -2867,6 +2877,9 @@ async fn run_distributed_workload(
     // This prevents race condition where display and perf_log both call aggregate()
     let mut last_aggregate: Option<AggregateStats> = None;
     
+    // Reset controller perf-log elapsed timing at workload start (after countdown)
+    perf_log_tracker.reset_for_stage();
+
     // Process live stats stream
     loop {
         // v0.7.13: Check for stalled agents (timeout detection) using agent_trackers
@@ -3112,7 +3125,7 @@ async fn run_distributed_workload(
                         }
                         let cleanup_current = max_cleanup_current;
                         let cleanup_total = max_cleanup_total;
-                        let stage_elapsed_s = stats.stage_elapsed_s;  // Capture before move
+                        let stage_elapsed_snapshot = stats.stage_elapsed_s;  // Capture before move
                         
                         // v0.8.9: Update agent state based on current_stage enum
                         match current_stage {
@@ -3138,7 +3151,10 @@ async fn run_distributed_workload(
                         
                         // v0.8.9: Track last known stage for phase transition detection
                         let prev_stage = last_stage;
+                        let prev_stage_name = last_stage_name.clone();
+                        let current_stage_name = stats.stage_name.clone();
                         last_stage = current_stage;
+                        last_stage_name = current_stage_name.clone();
                         
                         // v0.8.19: Lazily initialize per-agent perf-log writer and tracker (always enabled)
                         // Per-agent perf-log creation for each active agent
@@ -3220,6 +3236,19 @@ async fn run_distributed_workload(
                                     }
                                 }
                             }
+                        }
+
+                        // Reset perf-log elapsed timing on any stage transition (without resetting counters)
+                        if current_stage != prev_stage || current_stage_name != prev_stage_name {
+                            workload_start = std::time::Instant::now();
+                            perf_log_tracker.reset_for_stage();
+                            for tracker in agent_perf_trackers.values_mut() {
+                                tracker.reset_for_stage();
+                            }
+                            stage_elapsed_s = stats.stage_elapsed_s;
+                            debug!("Stage transition detected ({} -> {}): reset perf_log elapsed timing", prev_stage_name, current_stage_name);
+                        } else {
+                            stage_elapsed_s = stage_elapsed_s.max(stats.stage_elapsed_s);
                         }
                         
                         // v0.8.13: Check for ERROR status FIRST, regardless of completed flag
@@ -3336,8 +3365,8 @@ async fn run_distributed_workload(
                                     // Show cleanup progress as "deleted/total (percentage)"
                                     let pct = (cleanup_current as f64 / cleanup_total as f64 * 100.0) as u32;
                                     // v0.8.9: Format cleanup-specific progress (DELETE ops/s)
-                                    let cleanup_rate = if stage_elapsed_s > 0.0 {
-                                        cleanup_current as f64 / stage_elapsed_s
+                                    let cleanup_rate = if stage_elapsed_snapshot > 0.0 {
+                                        cleanup_current as f64 / stage_elapsed_snapshot
                                     } else {
                                         0.0
                                     };
@@ -3430,9 +3459,9 @@ async fn run_distributed_workload(
                 let entry = sai3_bench::perf_log::PerfLogEntry {
                     agent_id: "controller".to_string(),
                     timestamp_epoch_ms: timestamp_ms,
-                    elapsed_s: agg.elapsed_s,
+                    elapsed_s: stage_elapsed_s,
                     stage: perf_stage,
-                    stage_name: String::new(),
+                    stage_name: last_stage_name.clone(),
                     
                     // Use windowed values directly (same as display)
                     get_ops: delta_get_ops,
@@ -3507,12 +3536,13 @@ async fn run_distributed_workload(
                             cpu_system_percent: agent_stats.cpu_system_percent,
                             cpu_iowait_percent: agent_stats.cpu_iowait_percent,
                         };
-                        let agent_entry = agent_tracker.compute_delta(
+                        let mut agent_entry = agent_tracker.compute_delta(
                             agent_id,
                             &agent_metrics,
                             perf_stage,
-                            String::new(),
+                            last_stage_name.clone(),
                         );
+                        agent_entry.elapsed_s = agent_stats.stage_elapsed_s;
                         
                         if let Err(e) = agent_writer.write_entry(&agent_entry) {
                             warn!("Failed to write per-agent perf-log entry for {}: {}", agent_id, e);

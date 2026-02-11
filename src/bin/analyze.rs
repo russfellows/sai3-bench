@@ -19,6 +19,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use rust_xlsxwriter::{Format, Workbook, Worksheet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -41,8 +42,12 @@ struct Args {
     base_dir: PathBuf,
 
     /// Output Excel file path
-    #[arg(short, long, default_value = "sai3bench-results.xlsx")]
-    output: PathBuf,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Overwrite output file if it already exists
+    #[arg(long, default_value_t = false)]
+    overwrite: bool,
 
     /// Include per-agent results (future feature)
     #[arg(long)]
@@ -69,6 +74,7 @@ struct ResultsDir {
     perf_log_tsv: Option<PathBuf>,
     workload_endpoint_stats_tsv: Option<PathBuf>,
     prepare_endpoint_stats_tsv: Option<PathBuf>,
+    agent_perf_logs: Vec<(String, PathBuf)>,
 }
 
 impl ResultsDir {
@@ -107,8 +113,17 @@ impl ResultsDir {
                 (dir_name.to_string(), "unknown".to_string(), "?".to_string())
             }
         } else {
-            // No underscore found, fallback
-            (dir_name.to_string(), "unknown".to_string(), "?".to_string())
+            // No underscore: try parsing as sai3-YYYYMMDD-HHMM-workload
+            let parts: Vec<&str> = dir_name.split('-').collect();
+            if parts.len() >= 4 {
+                let date = parts.get(1).unwrap_or(&"unknown");
+                let time = parts.get(2).unwrap_or(&"0000");
+                let timestamp = format!("{}-{}", date, time);
+                let workload = parts[3..].join("-");
+                (timestamp, workload, "unknown".to_string())
+            } else {
+                (dir_name.to_string(), dir_name.to_string(), "unknown".to_string())
+            }
         };
 
         // Check for new numbered stage TSV files (v0.8.50+)
@@ -125,6 +140,29 @@ impl ResultsDir {
         let perf_log_tsv = path.join("perf_log.tsv");
         let workload_endpoint_stats_tsv = path.join("workload_endpoint_stats.tsv");
         let prepare_endpoint_stats_tsv = path.join("prepare_endpoint_stats.tsv");
+
+        let mut agent_perf_logs = Vec::new();
+        let agents_dir = path.join("agents");
+        if agents_dir.exists() {
+            for entry in fs::read_dir(&agents_dir)
+                .with_context(|| format!("Failed to read agents directory: {:?}", agents_dir))?
+            {
+                let entry = entry?;
+                let agent_path = entry.path();
+                if !agent_path.is_dir() {
+                    continue;
+                }
+                let agent_name = agent_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("agent")
+                    .to_string();
+                let perf_log_path = agent_path.join("perf_log.tsv");
+                if perf_log_path.exists() {
+                    agent_perf_logs.push((agent_name, perf_log_path));
+                }
+            }
+        }
 
         Ok(Self {
             path,
@@ -179,6 +217,7 @@ impl ResultsDir {
             } else {
                 None
             },
+            agent_perf_logs,
         })
     }
 
@@ -239,6 +278,26 @@ fn extract_stage_name(path: &Path) -> Option<String> {
     } else {
         None
     }
+}
+
+fn fit_tab_name(base: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        return base.to_string();
+    }
+
+    let combined = format!("{}-{}", base, suffix);
+    if combined.len() <= 31 {
+        return combined;
+    }
+
+    let max_base_len = 31usize.saturating_sub(suffix.len() + 1);
+    let trimmed_base = if base.len() > max_base_len {
+        &base[..max_base_len]
+    } else {
+        base
+    };
+
+    format!("{}-{}", trimmed_base, suffix)
 }
 
 /// Find all results directories matching the pattern or list
@@ -434,6 +493,22 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         .set_font_name("Aptos");
 
     let mut tabs_created = 0;
+    let mut used_tab_names: HashSet<String> = HashSet::new();
+    let mut unique_tab_name = |base: String, results_dir: &ResultsDir| -> String {
+        let with_timestamp = fit_tab_name(&base, &results_dir.timestamp);
+        if used_tab_names.insert(with_timestamp.clone()) {
+            return with_timestamp;
+        }
+
+        let with_workload = fit_tab_name(&base, &results_dir.workload);
+        if used_tab_names.insert(with_workload.clone()) {
+            return with_workload;
+        }
+
+        let fallback = fit_tab_name(&base, &results_dir.path.to_string_lossy());
+        used_tab_names.insert(fallback.clone());
+        fallback
+    };
 
     for results_dir in results_dirs {
         println!("Processing: {:?}", results_dir.path);
@@ -441,7 +516,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add 01_preflight_results.tsv tab (new format)
         if let Some(ref tsv_path) = results_dir.preflight_results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "preflight".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (01_preflight_results.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -457,7 +532,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add 02_prepare_results.tsv tab (new format)
         if let Some(ref tsv_path) = results_dir.prepare_results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (02_prepare_results.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -473,7 +548,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add 03_execute_results.tsv tab (new format)
         if let Some(ref tsv_path) = results_dir.execute_results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "execute".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (03_execute_results.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -489,7 +564,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add 04_cleanup_results.tsv tab (new format)
         if let Some(ref tsv_path) = results_dir.cleanup_results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "cleanup".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (04_cleanup_results.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -505,7 +580,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add legacy results.tsv tab (old format)
         if let Some(ref tsv_path) = results_dir.results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "workload".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (results.tsv - legacy)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -521,7 +596,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add legacy prepare_results.tsv tab (old format)
         if let Some(ref tsv_path) = results_dir.legacy_prepare_results_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (prepare_results.tsv - legacy)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -537,7 +612,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add perf_log.tsv tab
         if let Some(ref tsv_path) = results_dir.perf_log_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "perf_log".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (perf_log.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -553,7 +628,7 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add workload_endpoint_stats.tsv tab
         if let Some(ref tsv_path) = results_dir.workload_endpoint_stats_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "workload_endpt".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (workload_endpoint_stats.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
@@ -569,11 +644,26 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
         // Add prepare_endpoint_stats.tsv tab
         if let Some(ref tsv_path) = results_dir.prepare_endpoint_stats_tsv {
             let stage_name = extract_stage_name(tsv_path).unwrap_or_else(|| "prepare_endpt".to_string());
-            let tab_name = results_dir.generate_tab_name(&stage_name);
+            let tab_name = unique_tab_name(results_dir.generate_tab_name(&stage_name), results_dir);
             println!("  Creating tab: {} (prepare_endpoint_stats.tsv)", tab_name);
 
             let rows = read_tsv_file(tsv_path)
                 .with_context(|| format!("Failed to read prepare_endpoint_stats.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add per-agent perf_log.tsv tabs
+        for (agent_name, perf_path) in &results_dir.agent_perf_logs {
+            let tab_name = unique_tab_name(agent_name.clone(), results_dir);
+            println!("  Creating tab: {} (agents/{}/perf_log.tsv)", tab_name, agent_name);
+
+            let rows = read_tsv_file(perf_path)
+                .with_context(|| format!("Failed to read agents/{}/perf_log.tsv from {:?}", agent_name, results_dir.path))?;
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
@@ -594,6 +684,19 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
     println!("\nSuccess! Created {} tabs in {:?}", tabs_created, output_path);
 
     Ok(())
+}
+
+fn default_output_path(results_dirs: &[ResultsDir], base_dir: &Path) -> Result<PathBuf> {
+    if results_dirs.len() == 1 {
+        let dir_name = results_dirs[0]
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("Invalid results directory name")?;
+        return Ok(base_dir.join(format!("{}.xlsx", dir_name)));
+    }
+
+    Ok(base_dir.join("sai3-multiple.xlsx"))
 }
 
 fn main() -> Result<()> {
@@ -648,9 +751,21 @@ fn main() -> Result<()> {
     }
     println!();
 
+    let output_path = match &args.output {
+        Some(path) => path.clone(),
+        None => default_output_path(&results_dirs, &args.base_dir)?,
+    };
+
+    if output_path.exists() && !args.overwrite {
+        anyhow::bail!(
+            "Output file already exists: {:?}. Use --overwrite to replace it.",
+            output_path
+        );
+    }
+
     // Create Excel workbook
     println!("Creating Excel workbook...\n");
-    create_excel_workbook(&results_dirs, &args.output)?;
+    create_excel_workbook(&results_dirs, &output_path)?;
 
     Ok(())
 }
@@ -685,6 +800,7 @@ mod tests {
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,
+            agent_perf_logs: Vec::new(),
         };
 
         let tab_name = results_dir.generate_tab_name("03_execute");
@@ -720,6 +836,7 @@ mod tests {
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,
+            agent_perf_logs: Vec::new(),
         };
 
         let tab_name = results_dir.generate_tab_name("R");

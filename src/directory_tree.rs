@@ -558,6 +558,60 @@ mod tests {
         assert_eq!(level2_with_files, 4, "Level 2 should have 4 dirs with files");
         assert_eq!(level3_with_files, 8, "Level 3 should have 8 dirs with files");
     }
+
+    #[test]
+    fn test_get_file_path_bottom_distribution_o1() {
+        let config = DirectoryStructureConfig {
+            width: 2,
+            depth: 2,
+            files_per_dir: 3,
+            distribution: "bottom".to_string(),
+            dir_mask: "d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(config).unwrap();
+        let manifest = TreeManifest::from_tree(&tree);
+
+        assert_eq!(manifest.max_depth, 2);
+        assert_eq!(manifest.leaf_start_index, 2);
+        assert_eq!(manifest.total_files, 12);
+
+        let path0 = manifest.get_file_path(0).unwrap();
+        assert_eq!(path0, "d1_w1.dir/d2_w1.dir/file_00000000.dat");
+
+        let path3 = manifest.get_file_path(3).unwrap();
+        assert_eq!(path3, "d1_w1.dir/d2_w2.dir/file_00000003.dat");
+
+        let path11 = manifest.get_file_path(11).unwrap();
+        assert_eq!(path11, "d1_w2.dir/d2_w2.dir/file_00000011.dat");
+    }
+
+    #[test]
+    fn test_get_file_path_all_distribution_o1() {
+        let config = DirectoryStructureConfig {
+            width: 2,
+            depth: 2,
+            files_per_dir: 2,
+            distribution: "all".to_string(),
+            dir_mask: "d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(config).unwrap();
+        let manifest = TreeManifest::from_tree(&tree);
+
+        assert_eq!(manifest.max_depth, 2);
+        assert_eq!(manifest.leaf_start_index, 2);
+        assert_eq!(manifest.total_files, 12);
+
+        let path0 = manifest.get_file_path(0).unwrap();
+        assert_eq!(path0, "d1_w1.dir/file_00000000.dat");
+
+        let path2 = manifest.get_file_path(2).unwrap();
+        assert_eq!(path2, "d1_w2.dir/file_00000002.dat");
+
+        let path4 = manifest.get_file_path(4).unwrap();
+        assert_eq!(path4, "d1_w1.dir/d2_w1.dir/file_00000004.dat");
+    }
 }
 
 /// Serializable tree manifest for coordination between agents
@@ -595,6 +649,14 @@ pub struct TreeManifest {
     /// Example: [("d1_w1.dir/d2_w1.dir", (0, 5)), ("d1_w1.dir/d2_w2.dir", (5, 10))]
     #[serde(default)]
     pub file_ranges: Vec<(String, (usize, usize))>,
+
+    /// Cached max depth for O(1) index mapping
+    #[serde(default)]
+    pub max_depth: usize,
+
+    /// Cached index where leaf directories start in all_directories
+    #[serde(default)]
+    pub leaf_start_index: usize,
 }
 
 impl TreeManifest {
@@ -612,10 +674,22 @@ impl TreeManifest {
             files_per_dir: tree.config.files_per_dir,
             distribution: tree.config.distribution.clone(),
             file_ranges: Vec::new(),
+            max_depth: 0,
+            leaf_start_index: 0,
         };
         
         // Compute file ranges immediately
         manifest.compute_file_ranges();
+
+        // Cache depth metadata for O(1) lookups
+        manifest.max_depth = manifest.by_level.keys().copied().max().unwrap_or(0);
+        let mut leaf_start = 0usize;
+        for level in 1..manifest.max_depth {
+            if let Some(paths) = manifest.by_level.get(&level) {
+                leaf_start += paths.len();
+            }
+        }
+        manifest.leaf_start_index = leaf_start;
         
         manifest
     }
@@ -676,14 +750,25 @@ impl TreeManifest {
     /// Returns: "d1_w1.dir/d2_w1.dir/file_00000000.dat"
     /// Returns None if global_idx is out of range
     pub fn get_file_path(&self, global_idx: usize) -> Option<String> {
-        // Iterate file_ranges in order (matches creation order)
-        for (dir_path, (start, end)) in &self.file_ranges {
-            if global_idx >= *start && global_idx < *end {
-                let file_name = self.get_file_name(global_idx);
-                return Some(format!("{}/{}", dir_path, file_name));
-            }
+        if self.files_per_dir == 0 || global_idx >= self.total_files {
+            return None;
         }
-        None
+
+        let file_name = self.get_file_name(global_idx);
+        match self.distribution.as_str() {
+            "bottom" => {
+                let leaf_index = global_idx / self.files_per_dir;
+                let dir_index = self.leaf_start_index + leaf_index;
+                let dir_path = self.all_directories.get(dir_index)?;
+                Some(format!("{}/{}", dir_path, file_name))
+            }
+            "all" => {
+                let dir_index = global_idx / self.files_per_dir;
+                let dir_path = self.all_directories.get(dir_index)?;
+                Some(format!("{}/{}", dir_path, file_name))
+            }
+            _ => None,
+        }
     }
     
     /// Get list of all files in a specific directory

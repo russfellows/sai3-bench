@@ -1819,6 +1819,22 @@ impl DistributedConfig {
         // Sort by order field
         let mut sorted = stages.clone();
         sorted.sort_by_key(|s| s.order);
+
+        // Apply barrier defaults from barrier_sync when stages omit per-stage config
+        if self.barrier_sync.enabled {
+            for stage in sorted.iter_mut() {
+                if stage.barrier.is_none() {
+                    let phase_name = match stage.config {
+                        StageSpecificConfig::Validation => "validation",
+                        StageSpecificConfig::Prepare { .. } => "prepare",
+                        StageSpecificConfig::Cleanup { .. } => "cleanup",
+                        StageSpecificConfig::Execute { .. } => "execute",
+                        StageSpecificConfig::Custom { .. } | StageSpecificConfig::Hybrid { .. } => "execute",
+                    };
+                    stage.barrier = Some(self.barrier_sync.get_phase_config(phase_name));
+                }
+            }
+        }
         
         Ok(sorted)
     }

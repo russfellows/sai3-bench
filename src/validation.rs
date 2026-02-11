@@ -1,11 +1,14 @@
 // Configuration validation and summary display
 // Used by both standalone binary (sai3-bench) and controller (sai3bench-ctl)
 
-use crate::config::{Config, PageCacheMode, ProcessScaling};
+use crate::config::{Config, EnsureSpec, PageCacheMode, ProcessScaling};
+use crate::directory_tree::{DirectoryStructureConfig, DirectoryTree, TreeManifest};
 use crate::size_generator::SizeGenerator;
 use crate::workload::BackendType;
-use anyhow::{Context, Result};
+use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use num_format::{Locale, ToFormattedString};
+use std::time::Instant;
 
 /// Format a u64 with thousand separators using system locale
 /// Example: 64032768 → "64,032,768" (US locale)
@@ -18,10 +21,121 @@ fn format_usize(n: usize) -> String {
     (n as u64).to_formatted_string(&Locale::en)
 }
 
+fn estimate_directory_tree_totals(dir_config: &DirectoryStructureConfig) -> Result<(u64, u64)> {
+    if dir_config.width == 0 {
+        anyhow::bail!("Directory width must be at least 1");
+    }
+    if dir_config.depth == 0 {
+        anyhow::bail!("Directory depth must be at least 1");
+    }
+
+    let width = dir_config.width as u64;
+    let depth = dir_config.depth as u64;
+    let files_per_dir = dir_config.files_per_dir as u64;
+
+    let mut total_dirs: u64 = 0;
+    let mut dirs_at_level: u64 = 1;
+    for _ in 0..depth {
+        dirs_at_level = dirs_at_level
+            .checked_mul(width)
+            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (width/depth too large)"))?;
+        total_dirs = total_dirs
+            .checked_add(dirs_at_level)
+            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (too many directories)"))?;
+    }
+
+    let total_files = match dir_config.distribution.as_str() {
+        "bottom" => dirs_at_level
+            .checked_mul(files_per_dir)
+            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (too many files)"))?,
+        "all" => total_dirs
+            .checked_mul(files_per_dir)
+            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (too many files)"))?,
+        other => anyhow::bail!("Invalid distribution strategy: '{}'. Must be 'bottom' or 'all'", other),
+    };
+
+    Ok((total_dirs, total_files))
+}
+
+fn estimate_objects_bytes(ensure_objects: &[EnsureSpec]) -> Result<u64> {
+    let mut total_bytes: u128 = 0;
+
+    for spec in ensure_objects {
+        let avg_bytes = if let Some(ref size_spec) = spec.size_spec {
+            let mut generator = SizeGenerator::new(size_spec)?;
+            generator.expected_mean() as u128
+        } else if let (Some(min), Some(max)) = (spec.min_size, spec.max_size) {
+            ((min + max) / 2) as u128
+        } else {
+            1024u128
+        };
+
+        let count = spec.count as u128;
+        total_bytes = total_bytes
+            .checked_add(count.saturating_mul(avg_bytes))
+            .ok_or_else(|| anyhow::anyhow!("Estimated data size overflow (counts too large)"))?;
+    }
+
+    if total_bytes > u64::MAX as u128 {
+        anyhow::bail!("Estimated data size exceeds u64::MAX");
+    }
+
+    Ok(total_bytes as u64)
+}
+
+fn read_rss_kb() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let value = rest.trim().split_whitespace().next()?;
+            if let Ok(kb) = value.parse::<u64>() {
+                return Some(kb);
+            }
+        }
+    }
+    None
+}
+
+pub fn apply_directory_tree_counts(config: &mut Config) -> Result<()> {
+    let prepare = match config.prepare.as_mut() {
+        Some(prepare) => prepare,
+        None => return Ok(()),
+    };
+
+    let dir_config = match prepare.directory_structure.as_ref() {
+        Some(dir_config) => dir_config,
+        None => return Ok(()),
+    };
+
+    let (_total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
+
+    if prepare.ensure_objects.is_empty() {
+        anyhow::bail!("directory_structure requires at least one ensure_objects entry");
+    }
+
+    for spec in prepare.ensure_objects.iter_mut() {
+        if spec.count == 0 {
+            spec.count = total_files;
+        } else if spec.count != total_files {
+            anyhow::bail!(
+                "ensure_objects.count ({}) does not match directory tree total files ({}). Set count to {} or 0 to auto-calculate",
+                spec.count,
+                total_files,
+                total_files
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Display comprehensive configuration validation summary
 /// This function is used by both the standalone binary and the controller
 /// to provide consistent, detailed output for --dry-run mode
 pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
+    let mut config = config.clone();
+    apply_directory_tree_counts(&mut config)?;
+
     println!("╔═══════════════════════════════════════════════════════════════════════╗");
     println!("║           CONFIGURATION VALIDATION & TEST SUMMARY                    ║");
     println!("╚═══════════════════════════════════════════════════════════════════════╝");
@@ -363,8 +477,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!("│   → Cleanup stage WILL execute                                       │");
                             println!("│   → All {} objects WILL be deleted                                   │", 
                                 if let Some(ref dir_struct) = prepare.directory_structure {
-                                    let total_files = (dir_struct.width as u64).pow(dir_struct.depth as u32) * dir_struct.files_per_dir as u64;
-                                    format_with_thousands(total_files)
+                                    match estimate_directory_tree_totals(dir_struct) {
+                                        Ok((_dirs, total_files)) => format_with_thousands(total_files),
+                                        Err(_) => "prepared".to_string(),
+                                    }
                                 } else {
                                     "prepared".to_string()
                                 });
@@ -398,8 +514,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!("│   → NO cleanup stage will execute                                    │");
                             println!("│   → All {} objects WILL be kept                                      │", 
                                 if let Some(ref dir_struct) = prepare.directory_structure {
-                                    let total_files = (dir_struct.width as u64).pow(dir_struct.depth as u32) * dir_struct.files_per_dir as u64;
-                                    format_with_thousands(total_files)
+                                    match estimate_directory_tree_totals(dir_struct) {
+                                        Ok((_dirs, total_files)) => format_with_thousands(total_files),
+                                        Err(_) => "prepared".to_string(),
+                                    }
                                 } else {
                                     "prepared".to_string()
                                 });
@@ -460,8 +578,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!("│   Width × Depth:    {} × {} = {} leaf dirs", 
                                 dir_config.width, dir_config.depth, format_with_thousands(leaf_dirs));
                             println!("│   Files/Dir:        {} files per leaf", format_usize(dir_config.files_per_dir));
-                            let total_files = leaf_dirs * dir_config.files_per_dir as u64;
+                            let (total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
+                            println!("│   Total Dirs:       {} directories", format_with_thousands(total_dirs));
                             println!("│   Total Files:      {} files", format_with_thousands(total_files));
+
+                            let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
+                            let (size_val, size_unit) = format_bytes(total_bytes);
+                            println!("│   Total Data Size:  {} bytes ({:.2} {})",
+                                format_with_thousands(total_bytes), size_val, size_unit);
                         }
                         
                         println!("└──────────────────────────────────────────────────────────────────────┘");
@@ -515,8 +639,6 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         
         // Directory tree structure (if configured)
         if let Some(ref dir_config) = prepare.directory_structure {
-            use crate::directory_tree::{DirectoryTree, TreeManifest};
-            
             println!("│ 📁 Directory Tree Structure:");
             println!("│   Width:            {} subdirectories per level", dir_config.width);
             println!("│   Depth:            {} levels", dir_config.depth);
@@ -526,40 +648,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 else { "files at every level" });
             println!("│   Directory Mask:   {}", dir_config.dir_mask);
             println!("│");
-            
-            // Calculate totals using DirectoryTree
-            let tree = DirectoryTree::new(dir_config.clone())
-                .context("Failed to create directory tree for dry-run analysis")?;
-            let manifest = TreeManifest::from_tree(&tree);
-            
+
+            let (total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
             println!("│ 📊 Calculated Tree Metrics:");
-            println!("│   Total Directories:  {}", format_usize(manifest.total_dirs));
-            println!("│   Total Files:        {}", format_usize(manifest.total_files));
-            
-            // Calculate total data size
-            let total_bytes = if manifest.total_files > 0 {
-                // Use file size spec from ensure_objects if available
-                let avg_bytes = if let Some(obj_spec) = prepare.ensure_objects.first() {
-                    if let Some(ref size_spec) = obj_spec.size_spec {
-                        let mut generator = SizeGenerator::new(size_spec)?;
-                        generator.expected_mean()
-                    } else if let (Some(min), Some(max)) = (obj_spec.min_size, obj_spec.max_size) {
-                        (min + max) / 2
-                    } else {
-                        1024 // Default 1KB
-                    }
-                } else {
-                    1024 // Default 1KB
-                };
-                
-                manifest.total_files as u64 * avg_bytes
-            } else {
-                0
-            };
-            
-            // Format bytes in human-readable format
+            println!("│   Total Directories:  {}", format_with_thousands(total_dirs));
+            println!("│   Total Files:        {}", format_with_thousands(total_files));
+
+            let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
             let (size_val, size_unit) = format_bytes(total_bytes);
-            
             println!("│   Total Data Size:    {} bytes ({:.2} {})", 
                 format_with_thousands(total_bytes), size_val, size_unit);
             println!("│");
@@ -622,6 +718,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             if idx < prepare.ensure_objects.len() - 1 {
                 println!("│");
             }
+        }
+
+        if prepare.directory_structure.is_none() {
+            let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
+            let (size_val, size_unit) = format_bytes(total_bytes);
+            println!("│");
+            println!("│ Estimated Total Data Size: {} bytes ({:.2} {})",
+                format_with_thousands(total_bytes), size_val, size_unit);
         }
         
         println!("│");
@@ -772,6 +876,123 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         }
     }
     
+    println!("└──────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    // Dry-run sample generation (always executed)
+    println!("┌─ Dry-Run Sample Generation ──────────────────────────────────────────┐");
+    match config.prepare.as_ref() {
+        Some(prepare) if !prepare.ensure_objects.is_empty() => {
+            let sample_limit = crate::constants::DRY_RUN_SAMPLE_SIZE as u64;
+            let total_objects = if let Some(ref dir_config) = prepare.directory_structure {
+                estimate_directory_tree_totals(dir_config)?.1
+            } else {
+                prepare.ensure_objects.iter().map(|s| s.count).sum()
+            };
+            let sample_count = std::cmp::min(sample_limit, total_objects) as usize;
+
+            if sample_count == 0 {
+                println!("│ Sample:       0 objects (nothing to generate)");
+            } else {
+                let spec = &prepare.ensure_objects[0];
+                let (endpoints, base_uri_label) = if spec.use_multi_endpoint {
+                    if let Some(ref multi) = config.multi_endpoint {
+                        (multi.endpoints.clone(), "global multi-endpoint")
+                    } else if let Some(ref dist) = config.distributed {
+                        let first_agent = dist.agents.first().and_then(|a| a.multi_endpoint.as_ref());
+                        if let Some(agent_multi) = first_agent {
+                            (agent_multi.endpoints.clone(), "agent-1 multi-endpoint")
+                        } else {
+                            let base_uri = spec.get_base_uri(None)?;
+                            (vec![base_uri], "base_uri")
+                        }
+                    } else {
+                        let base_uri = spec.get_base_uri(None)?;
+                        (vec![base_uri], "base_uri")
+                    }
+                } else {
+                    let base_uri = spec.get_base_uri(None)?;
+                    (vec![base_uri], "base_uri")
+                };
+
+                let base_uri = endpoints.first().cloned().unwrap_or_else(|| "unknown://".to_string());
+                let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let size_spec = spec.get_size_spec();
+                let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)?;
+
+                let rss_before = read_rss_kb();
+                let start = Instant::now();
+
+                let pb = ProgressBar::new(sample_count as u64);
+                pb.set_style(ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
+                )?);
+                pb.set_message("generating sample");
+
+                let mut sample: Vec<(String, u64)> = Vec::with_capacity(sample_count);
+
+                let manifest = if let Some(ref dir_config) = prepare.directory_structure {
+                    let tree = DirectoryTree::new(dir_config.clone())?;
+                    Some(TreeManifest::from_tree(&tree))
+                } else {
+                    None
+                };
+
+                for idx in 0..sample_count {
+                    let size = size_generator.generate();
+                    let endpoint = &endpoints[idx % endpoints.len()];
+                    let uri = if let Some(ref tree_manifest) = manifest {
+                        if let Some(rel_path) = tree_manifest.get_file_path(idx) {
+                            if endpoint.ends_with('/') {
+                                format!("{}{}", endpoint, rel_path)
+                            } else {
+                                format!("{}/{}", endpoint, rel_path)
+                            }
+                        } else {
+                            let key = format!("prepared-{:08}.dat", idx);
+                            if endpoint.ends_with('/') {
+                                format!("{}{}", endpoint, key)
+                            } else {
+                                format!("{}/{}", endpoint, key)
+                            }
+                        }
+                    } else {
+                        let key = format!("prepared-{:08}.dat", idx);
+                        if endpoint.ends_with('/') {
+                            format!("{}{}", endpoint, key)
+                        } else {
+                            format!("{}/{}", endpoint, key)
+                        }
+                    };
+
+                    sample.push((uri, size));
+                    pb.inc(1);
+                }
+
+                pb.finish_with_message("sample generated");
+
+                let elapsed = start.elapsed();
+                let rss_after = read_rss_kb();
+
+                println!("│ Sample:       {} objects (first {} of {})", format_with_thousands(sample_count as u64), sample_count, format_with_thousands(total_objects));
+                println!("│ Source:       {}", base_uri_label);
+                println!("│ Time:         {:.2}s", elapsed.as_secs_f64());
+                match (rss_before, rss_after) {
+                    (Some(before), Some(after)) => {
+                        let delta_kb = after.saturating_sub(before);
+                        let (size_val, size_unit) = format_bytes(delta_kb * 1024);
+                        println!("│ RSS Delta:    {} KiB ({:.2} {})", format_with_thousands(delta_kb), size_val, size_unit);
+                    }
+                    _ => {
+                        println!("│ RSS Delta:    unavailable (/proc/self/status)");
+                    }
+                }
+            }
+        }
+        _ => {
+            println!("│ Sample:       skipped (no prepare.ensure_objects configured)");
+        }
+    }
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
     

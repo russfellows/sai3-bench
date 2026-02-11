@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.61-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.62-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-547%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-551%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.62)**: **Streaming prepare + dry-run memory sampling + stage-aligned perf-log timing** for safer large-scale runs.
 
 **🚀 NEW (v0.8.61)**: **Explicit distributed stages + numeric barrier indices** for consistent orchestration across multi-agent runs. Use the new `convert` command to upgrade legacy YAML files.
 
