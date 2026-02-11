@@ -8,6 +8,55 @@ All notable changes to sai3-bench are documented in this file.
 
 ---
 
+## [0.8.61] - 2026-02-11
+
+**Stage and Barrier Alignment + Test Reliability**
+
+This release tightens distributed stage orchestration requirements, standardizes barrier identifiers, and improves test reliability and store setup behavior.
+
+### Breaking
+
+- **Distributed stages are required**
+  - Implicit stage generation has been removed for distributed runs
+  - Use the built-in `convert` command to update legacy YAML files
+
+### Added
+
+- **Config conversion command for legacy YAML files**
+  - `sai3-bench convert --config <file.yaml>`
+  - `sai3-bench convert --files <glob>`
+  - `sai3bench-ctl convert --config <file.yaml>`
+  - `sai3bench-ctl convert --files <glob>`
+
+### Changed
+
+- **Distributed stages are now required**
+  - `distributed.stages` must be explicitly defined (empty list is invalid)
+  - Removes legacy default stage generation for distributed runs
+  - **Impact**: Configs must declare stage ordering explicitly for distributed mode
+
+- **Barrier identifiers are numeric stage indices**
+  - Barrier coordination uses stage order indices instead of string names
+  - Aligns controller barrier messaging with stage transition sequencing
+
+### Fixed
+
+- **Store cache pre-creation for PUT operations**
+  - Uses PUT-specific URI resolution to avoid metadata-only path handling
+  - Prevents runtime panic when pre-creating stores for PUT workloads
+
+- **Checkpoint tests made deterministic**
+  - Sequential checkpoint overwrite/restore flow avoids cross-test interference
+
+- **Performance test flakiness removed**
+  - Validation now asserts correctness instead of timing comparisons
+
+### Testing
+
+- **547 tests passing** (release profile)
+
+---
+
 ## [0.8.60] - 2026-02-10
 
 **KV Cache Checkpoint Restoration - Complete Resume Capability**

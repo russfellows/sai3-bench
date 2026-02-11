@@ -499,6 +499,22 @@ For complete multi-endpoint documentation including NFS examples, troubleshootin
 
 Define multi-stage test workflows beyond traditional prepare→execute→cleanup:
 
+**v0.8.61+**: `distributed.stages` is **required** for distributed runs. Empty or missing stage lists are invalid.
+
+### Legacy Config Conversion (v0.8.61+)
+
+Use the built-in converter to update older YAML files with implicit stages:
+
+```bash
+# Convert a single file
+sai3-bench convert --config legacy.yaml
+sai3bench-ctl convert --config legacy.yaml
+
+# Convert multiple files with a glob
+sai3-bench convert --files "tests/configs/*.yaml"
+sai3bench-ctl convert --files "tests/configs/*.yaml"
+```
+
 ### Basic Concept
 
 Instead of a single workload run, define **independent stages** with custom ordering:
@@ -560,6 +576,8 @@ For complete stage orchestration documentation including hybrid stages, custom c
 ## Barrier Synchronization (v0.8.25+)
 
 Ensure all agents reach coordination points before proceeding. Critical for multi-stage workflows with timing precision.
+
+**v0.8.61+**: Barriers are keyed by **numeric stage order** (stage index), not string names.
 
 ### Why Barriers Matter
 
