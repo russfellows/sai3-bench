@@ -1192,6 +1192,18 @@ impl EndpointCache {
                 Ok(location) => {
                     info!("✅ KV cache checkpoint created successfully (attempt {}/{}): {}", 
                         attempt, MAX_ATTEMPTS, location);
+                    
+                    // v0.8.62: Clean up /tmp cache directory AFTER successful checkpoint
+                    // Cache is now persisted to storage, safe to remove /tmp copy
+                    // If we crash before this, cache remains for recovery on next startup
+                    if let Err(e) = std::fs::remove_dir_all(&self.cache_location) {
+                        // Non-fatal: checkpoint succeeded, cleanup is best-effort
+                        warn!("⚠️  Failed to cleanup /tmp cache directory {}: {}", 
+                              self.cache_location.display(), e);
+                    } else {
+                        debug!("🧹 Cleaned up /tmp cache: {}", self.cache_location.display());
+                    }
+                    
                     return Ok(location);
                 }
                 Err(e) => {
