@@ -128,8 +128,9 @@ struct AgentState {
     shared_storage: Arc<Mutex<Option<bool>>>,
     /// v0.8.26: YAML-driven stage sequence (optional - uses hardcoded states if None)
     stages: Arc<Mutex<Option<Vec<sai3_bench::config::StageConfig>>>>,
-    /// v0.8.26: Barrier release channel - sends (barrier_name, barrier_sequence) when RELEASE_BARRIER received
-    barrier_release_tx: broadcast::Sender<(String, u32)>,
+    /// v0.8.61: Barrier release channel - sends (barrier_index, barrier_sequence) when RELEASE_BARRIER received
+    /// Uses NUMERIC stage index ONLY (u32) - NO string names
+    barrier_release_tx: broadcast::Sender<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -445,15 +446,17 @@ impl AgentState {
         self.stages.lock().await.clone()
     }
     
-    /// v0.8.26: Subscribe to barrier release notifications
-    fn subscribe_barrier_release(&self) -> broadcast::Receiver<(String, u32)> {
+    /// v0.8.61: Subscribe to barrier release notifications
+    /// Returns receiver for (barrier_index, barrier_sequence) tuples (both u32)
+    fn subscribe_barrier_release(&self) -> broadcast::Receiver<(u32, u32)> {
         self.barrier_release_tx.subscribe()
     }
     
-    /// v0.8.26: Notify that a barrier has been released by controller
-    fn notify_barrier_release(&self, barrier_name: String, barrier_sequence: u32) {
+    /// v0.8.61: Notify that a barrier has been released by controller
+    /// Uses NUMERIC barrier index (0, 1, 2...) ONLY - NO string names
+    fn notify_barrier_release(&self, barrier_index: u32, barrier_sequence: u32) {
         // Note: send() can fail if no receivers, but that's OK (agent may not be at barrier)
-        let _ = self.barrier_release_tx.send((barrier_name, barrier_sequence));
+        let _ = self.barrier_release_tx.send((barrier_index, barrier_sequence));
     }
 }
 
@@ -1539,6 +1542,8 @@ impl Agent for AgentSvc {
                 let agent_id = agent_state.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
                 
                 // Send READY status with agent timestamp for clock synchronization
+                // v0.8.61: Agent is at validation barrier (stage_index: 0) waiting for START
+                // CRITICAL: Must send at_barrier=true AND barrier_name to trigger controller release
                 let agent_timestamp_ns = get_agent_timestamp_ns();
                 let ready_msg = LiveStats {
                     agent_id: agent_id.clone(),
@@ -1562,10 +1567,12 @@ impl Agent for AgentSvc {
                     current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
                     // v0.8.14: Concurrency (not known yet - will be sent with RUNNING messages)
                     concurrency: 0,
-                    // v0.8.26: Barrier coordination
-                    at_barrier: false,
-                    barrier_name: String::new(),
-                    barrier_sequence: 0,
+                    // v0.8.61: Barrier coordination - NUMERIC index ONLY (NO strings!)
+                    // barrier_sequence is the stage index (0, 1, 2...) - controller uses this as barrier ID
+                    // barrier_name is LEGACY field - leave EMPTY, not used for coordination
+                    at_barrier: true,
+                    barrier_name: String::new(),  // EMPTY - not used, only barrier_sequence matters
+                    barrier_sequence: 0,  // Stage index 0 = validation stage 
                     stage_summary: None,
                 };
                 sequence += 1;
@@ -1576,15 +1583,47 @@ impl Agent for AgentSvc {
                 }
                 info!("Stats writer: Sent READY message with timestamp {} ns", agent_timestamp_ns);
                 
-                // Wait for workload to start (transition to Running or AtStage with ready_for_next: false)
-                // Block here - do NOT send any more messages until workload starts
-                // v0.8.28: Add timeout to prevent indefinite waits
-                // v0.8.29: Distinguish AtStage { ready_for_next: true } (waiting) from { ready_for_next: false } (running)
+                // v0.8.61: Keep sending periodic READY messages with at_barrier=true
+                // This allows the controller's barrier manager (created after startup loop)
+                // to detect the barrier and send RELEASE_BARRIER
                 const MAX_WAIT_SECS: u32 = 60;  // Timeout after 60 seconds
                 let mut wait_count: u32 = 0;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     wait_count += 1;
+                    
+                    // Re-send READY with at_barrier every second so controller can detect barrier
+                    let periodic_ready = LiveStats {
+                        agent_id: agent_id.clone(),
+                        timestamp_s: wait_count as f64,
+                        get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                        put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                        meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                        elapsed_s: wait_count as f64,
+                        completed: false,
+                        final_summary: None,
+                        status: 1,  // READY
+                        error_message: String::new(),
+                        in_prepare_phase: false,
+                        prepare_objects_created: 0,
+                        prepare_objects_total: 0,
+                        prepare_summary: None,
+                        cpu_user_percent: 0.0, cpu_system_percent: 0.0, cpu_iowait_percent: 0.0, cpu_total_percent: 0.0,
+                        agent_timestamp_ns: get_agent_timestamp_ns(),
+                        sequence,
+                        current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                        concurrency: 0,
+                        at_barrier: true,  // Keep signaling barrier
+                        barrier_name: String::new(),
+                        barrier_sequence: 0,  // Stage index 0
+                        stage_summary: None,
+                    };
+                    sequence += 1;
+                    
+                    if tx_stats.send(periodic_ready).await.is_err() {
+                        error!("Stats writer: Failed to send periodic READY (controller disconnected?)");
+                        return;
+                    }
                     
                     let state = agent_state.get_state().await;
                     // v0.8.29: AtStage with ready_for_next: false means actively executing
@@ -2163,9 +2202,7 @@ impl Agent for AgentSvc {
                                         debug!("Control reader: Sent ACKNOWLEDGE response to PING");
                                     }
                             Ok(Command::Start) => {
-                                let start_timestamp_ns = control_msg.start_timestamp_ns;
-                                
-                                // Determine if this is initial START (validation) or coordinated START (execution)
+                                // Determine if this is initial START (validation phase)
                                 let current_state = agent_state_reader.get_state().await;
                                 
                                 if current_state == WorkloadState::Idle {
@@ -2267,78 +2304,25 @@ impl Agent for AgentSvc {
                                     // Store stages in AgentState for use during execution
                                     agent_state_reader.set_stages(stages).await;
                                     
-                                    // v0.8.29: Transition to AtStage { ready_for_next: true } to signal READY
-                                    // This replaces deprecated PrepareReady state
-                                    let ready_state = WorkloadState::AtStage {
+                                    // v0.8.61: Transition to AtStage{0, ready_for_next: false} = "executing stage 0"
+                                    // The transition itself triggers execution - no separate START needed
+                                    let executing_state = WorkloadState::AtStage {
                                         stage_index: 0,
-                                        stage_name: "validated".to_string(),
-                                        ready_for_next: true,  // Signals "READY" to stats writer
+                                        stage_name: "preflight".to_string(),
+                                        ready_for_next: false,  // Executing NOW
                                     };
-                                    if let Err(e) = agent_state_reader.transition_to(ready_state, "validation passed").await {
-                                        error!("Control reader: Failed to transition to validated state: {}", e);
+                                    if let Err(e) = agent_state_reader.transition_to(executing_state, "starting stage 0").await {
+                                        error!("Control reader: Failed to transition to executing state: {}", e);
                                         let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
                                         return;
                                     }
                                     
-                                    info!("Control reader: Config validated - waiting for coordinated START");
+                                    info!("Control reader: Config validated - starting stage 0 execution immediately");
                                     
-                                    // Stats writer will send READY message with agent_timestamp_ns
-                                    // Controller will calculate clock offset and send second START with start_timestamp_ns
-                                    
-                                // v0.8.29: Check for AtStage { ready_for_next: true } instead of deprecated PrepareReady
-                                } else if matches!(current_state, WorkloadState::AtStage { ready_for_next: true, .. }) && start_timestamp_ns != 0 {
-                                    // Second START: Coordinated start with timestamp (controller released prepare barrier)
-                                    info!("Control reader: Received coordinated START (timestamp: {} ns)", start_timestamp_ns);
-                                    
-                                    // Calculate wait duration until coordinated start time
-                                    // Controller sends absolute Unix epoch timestamp (controller_now + delay)
-                                    // Agent waits until local clock reaches that timestamp
-                                    // NO clock offset adjustment needed - Unix timestamps are universal
-                                    let now_ns = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_nanos() as i64;
-                                    
-                                    let wait_ns = start_timestamp_ns - now_ns;
-                                    
-                                    if wait_ns > 0 {
-                                        let wait_duration = std::time::Duration::from_nanos(wait_ns as u64);
-                                        let wait_ms = wait_duration.as_millis();
-                                        info!("Control reader: Waiting {}ms until coordinated start", wait_ms);
-                                        tokio::time::sleep(wait_duration).await;
-                                        info!("Control reader: Coordinated start time reached - spawning workload");
-                                    } else {
-                                        warn!("Control reader: Start timestamp is in the past by {}ms - starting immediately", 
-                                              (-wait_ns) / 1_000_000);
-                                    }
-                                    
-                                    // v0.8.29: No transition to deprecated Preparing state
-                                    // The spawned workflow will immediately set its own AtStage state
-                                    
-                                    // Retrieve stored config from Phase 1 validation
-                                    let config_yaml = match agent_state_reader.get_config_yaml().await {
-                                        Some(yaml) => yaml,
-                                        None => {
-                                            error!("Control reader: No config_yaml found in state");
-                                            let _ = tx_done.send(Err("Missing config_yaml".to_string())).await;
-                                            return;
-                                        }
-                                    };
-                                    
-                                    // Parse config (already validated in Phase 1, should not fail)
-                                    let config: sai3_bench::config::Config = match serde_yaml::from_str(&config_yaml) {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            error!("Control reader: Failed to parse stored config: {}", e);
-                                            let _ = tx_done.send(Err(format!("Config parse error: {}", e))).await;
-                                            return;
-                                        }
-                                    };
-                                    
-                                    // Get agent_id from state
+                                    // Spawn workload execution task immediately (transition = implicit start)
                                     let agent_id = agent_state_reader.get_agent_id().await.unwrap_or_else(|| "unknown".to_string());
                                     
-                                    // Create live stats tracker with concurrency for total thread count display (v0.8.14)
+                                    // Create live stats tracker
                                     let tracker = Arc::new(sai3_bench::live_stats::LiveStatsTracker::new_with_concurrency(
                                         config.concurrency as u32
                                     ));
@@ -2360,7 +2344,7 @@ impl Agent for AgentSvc {
                                     let agent_id_exec = agent_id.clone();
                                     let tx_done_exec = tx_done.clone();
                                     let tx_prepare_exec = tx_prepare.clone();
-                                    let tx_stats_exec = tx_stats_for_control.clone();  // v0.8.26: For barrier coordination
+                                    let tx_stats_exec = tx_stats_for_control.clone();
                                     let agent_op_log_path_exec = agent_op_log_path_reader.clone();
                                     let tracker_for_prepare = tracker.clone();
                                     let agent_state_for_task = agent_state_reader.clone();
@@ -2372,13 +2356,13 @@ impl Agent for AgentSvc {
                                         // Get agent_index and num_agents for distributed prepare/cleanup
                                         let agent_index = agent_state_for_task.get_agent_index().await.unwrap_or(0) as usize;
                                         let num_agents = agent_state_for_task.get_num_agents().await.unwrap_or(1) as usize;
-                                        let shared_storage = agent_state_for_task.get_shared_storage().await.unwrap_or(true);  // v0.8.24: Default to shared for backward compat
+                                        let shared_storage = agent_state_for_task.get_shared_storage().await.unwrap_or(true);
                                         
-                                        // Phase 2b: Get YAML-driven stages (REQUIRED in v0.8.61+)
+                                        // Get YAML-driven stages
                                         let stages = agent_state_for_task.get_stages().await
                                             .expect("FATAL: No stages found - distributed mode requires YAML-driven stages");
                                         
-                                        info!("Using YAML-driven stage execution ({} stages)", stages.len());
+                                        info!("Starting YAML-driven stage execution ({} stages)", stages.len());
                                         
                                         // Execute stage-driven workflow
                                         let stage_result = execute_stages_workflow(
@@ -2388,7 +2372,7 @@ impl Agent for AgentSvc {
                                             tracker_for_prepare.clone(),
                                             tx_done_exec.clone(),
                                             tx_prepare_exec.clone(),
-                                            tx_stats_exec.clone(),  // v0.8.26: For barrier coordination
+                                            tx_stats_exec.clone(),
                                             final_op_log_path.clone(),
                                             agent_op_log_path_exec.clone(),
                                             agent_id_exec.clone(),
@@ -2397,12 +2381,11 @@ impl Agent for AgentSvc {
                                             shared_storage,
                                         ).await;
                                         
-                                        // Send result to stats writer
+                                        // Send completion signal
                                         let _ = tx_done_exec.send(stage_result).await;
-                                        
                                     });
                                     
-                                    info!("Control reader: Workload task spawned after coordinated start");
+                                    info!("Control reader: Stage 0 execution task spawned");
                                     
                                 } else {
                                     // Unexpected state or duplicate START
@@ -2603,16 +2586,17 @@ impl Agent for AgentSvc {
                                 // Controller acknowledged our message - could use this for reliability
                             }
                             Ok(Command::ReleaseBarrier) => {
-                                // v0.8.26: Controller releases barrier - agent may proceed to next stage
-                                info!(
-                                    "Control reader: Received RELEASE_BARRIER for '{}' (sequence {})",
-                                    control_msg.barrier_name,
-                                    control_msg.barrier_sequence
-                                );
-                                // Notify the stage execution loop that this barrier is released
+                                // v0.8.61: Controller releases barrier - notify workflow loop to proceed to next stage
+                                // barrier_sequence field in proto IS the stage index (0, 1, 2...)
+                                let barrier_index = control_msg.barrier_sequence;  // Stage index from controller
+                                info!("Control reader: Received RELEASE_BARRIER for stage {}", barrier_index);
+                                
+                                // Notify the execute_stages_workflow loop that this barrier is released
+                                // The running workflow will proceed to the next stage
+                                // Pass same value twice to match (barrier_index, barrier_sequence) tuple pattern
                                 agent_state_reader.notify_barrier_release(
-                                    control_msg.barrier_name.clone(),
-                                    control_msg.barrier_sequence,
+                                    barrier_index,  // Stage index
+                                    barrier_index,  // Same value (retry sequence not used in proto)
                                 );
                             }
                             Ok(Command::Goodbye) => {
@@ -3424,9 +3408,11 @@ async fn execute_stages_workflow(
               stage.name, stage_snapshot.get_ops, stage_snapshot.put_ops, 
               stage_snapshot.meta_ops, stage_snapshot.stage_elapsed_s);
         
-        // v0.8.26: Barrier coordination implementation
+        // v0.8.61: Barrier coordination implementation
         // Phase 3: Wait for controller to release barrier before proceeding to next stage
-        let barrier_name = format!("stage_{}", stage.name);
+        // CRITICAL: Use NUMERIC stage index ONLY for barrier coordination
+        // Stage names are cosmetic - indices drive the state machine
+        let barrier_index = stage_index as u32;  // Cast usize to u32 for proto field
         let mut barrier_sequence = 0u32;
         
         // Get configurable barrier timeout from stage config or use default
@@ -3443,8 +3429,8 @@ async fn execute_stages_workflow(
         let mut barrier_released = false;
         for retry in 0..=max_barrier_retries {
             if retry > 0 {
-                warn!("Barrier retry {}/{} for '{}' (sequence {})", 
-                      retry, max_barrier_retries, barrier_name, barrier_sequence);
+                warn!("Barrier retry {}/{} for stage {} (sequence {})", 
+                      retry, max_barrier_retries, barrier_index, barrier_sequence);
             }
             
             // Send barrier-ready notification to controller via LiveStats
@@ -3456,8 +3442,8 @@ async fn execute_stages_workflow(
                 elapsed_s: snapshot.elapsed.as_secs_f64(),
                 status: 2,  // RUNNING
                 at_barrier: true,
-                barrier_name: barrier_name.clone(),
-                barrier_sequence,
+                barrier_name: String::new(),  // EMPTY - not used, only barrier_sequence matters
+                barrier_sequence: barrier_index,  // Stage index IS the barrier ID
                 // Include current stats
                 get_ops: snapshot.get_ops,
                 get_bytes: snapshot.get_bytes,
@@ -3475,21 +3461,21 @@ async fn execute_stages_workflow(
                 // Don't fail immediately - controller might reconnect
             }
             
-            debug!("Sent barrier notification for '{}' (sequence {}), waiting for release...",
-                   barrier_name, barrier_sequence);
+            debug!("Sent barrier notification for stage {} (sequence {}), waiting for release...",
+                   barrier_index, barrier_sequence);
             
             // Wait for barrier release with timeout
             let wait_result = tokio::time::timeout(barrier_timeout, async {
                 loop {
                     match barrier_rx.recv().await {
-                        Ok((name, seq)) => {
-                            // Check if this release matches our barrier
-                            if name == barrier_name && seq >= barrier_sequence {
+                        Ok((released_index, seq)) => {
+                            // Check if this release matches our barrier (numeric index comparison)
+                            if released_index == barrier_index && seq >= barrier_sequence {
                                 return Ok(());
                             }
                             // Received release for different barrier - keep waiting
-                            debug!("Received barrier release for '{}' seq {} (waiting for '{}' seq {})",
-                                   name, seq, barrier_name, barrier_sequence);
+                            debug!("Received barrier release for stage {} seq {} (waiting for stage {} seq {})",
+                                   released_index, seq, barrier_index, barrier_sequence);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("Barrier receiver lagged by {} messages", n);
@@ -3504,8 +3490,8 @@ async fn execute_stages_workflow(
             
             match wait_result {
                 Ok(Ok(())) => {
-                    info!("Barrier '{}' released (sequence {}), proceeding to next stage",
-                          barrier_name, barrier_sequence);
+                    info!("Barrier for stage {} released (sequence {}), proceeding to next stage",
+                          barrier_index, barrier_sequence);
                     barrier_released = true;
                     break;
                 }
@@ -3517,19 +3503,19 @@ async fn execute_stages_workflow(
                 Err(_) => {
                     // Timeout - increment sequence and retry
                     barrier_sequence += 1;
-                    warn!("Barrier '{}' timeout ({}s), incrementing to sequence {}",
-                          barrier_name, barrier_timeout.as_secs(), barrier_sequence);
+                    warn!("Barrier for stage {} timeout ({}s), incrementing to sequence {}",
+                          barrier_index, barrier_timeout.as_secs(), barrier_sequence);
                 }
             }
         }
         
         if !barrier_released {
             // All retries exhausted - this is a critical failure
-            error!("Barrier '{}' not released after {} retries - aborting workload",
-                   barrier_name, max_barrier_retries);
+            error!("Barrier for stage {} not released after {} retries - aborting workload",
+                   barrier_index, max_barrier_retries);
             return Err(format!(
-                "Barrier coordination failed: '{}' not released after {}s x {} retries. Controller may be unresponsive.",
-                barrier_name, barrier_timeout.as_secs(), max_barrier_retries
+                "Barrier coordination failed: stage {} not released after {}s x {} retries. Controller may be unresponsive.",
+                barrier_index, barrier_timeout.as_secs(), max_barrier_retries
             ));
         }
     }

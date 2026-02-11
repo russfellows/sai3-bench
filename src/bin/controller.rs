@@ -1388,8 +1388,9 @@ struct BarrierManager {
     config: PhaseBarrierConfig,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
-    /// v0.8.26: Per-barrier tracking for named barriers (stage_X, etc.)
-    barrier_agents: HashMap<String, BarrierState>,
+    /// v0.8.61: Per-barrier tracking using NUMERIC stage indices (0, 1, 2...)
+    /// NO STRINGS - only numeric indices for barrier coordination
+    barrier_agents: HashMap<u32, BarrierState>,
 }
 
 /// v0.8.26: State tracking for a specific named barrier
@@ -1399,11 +1400,12 @@ struct BarrierState {
     released: bool,
 }
 
-/// v0.8.26: Information about a barrier ready for release
+/// v0.8.61: Information about a barrier ready for release
+/// Uses NUMERIC stage index ONLY - NO string names
+/// Note: barrier_sequence removed - retry counting is agent-local, not in proto
 #[derive(Debug)]
 struct BarrierReleaseInfo {
-    barrier_name: String,
-    barrier_sequence: u32,
+    barrier_index: u32,  // Numeric stage index (0, 1, 2...)
     ready_agents: Vec<String>,
 }
 
@@ -1758,10 +1760,10 @@ impl BarrierManager {
         }
     }
     
-    /// v0.8.26: Mark agent as ready at a specific named barrier
-    fn agent_at_barrier(&mut self, agent_id: &str, barrier_name: &str, barrier_sequence: u32) {
+    /// v0.8.61: Mark agent as ready at a specific barrier (NUMERIC index only)
+    fn agent_at_barrier(&mut self, agent_id: &str, barrier_index: u32, barrier_sequence: u32) {
         let barrier_state = self.barrier_agents
-            .entry(barrier_name.to_string())
+            .entry(barrier_index)
             .or_default();
         
         // Only update if this is a newer sequence number or agent not yet tracked
@@ -1772,16 +1774,17 @@ impl BarrierManager {
         
         if should_update {
             barrier_state.ready_agents.insert(agent_id.to_string(), barrier_sequence);
-            debug!("Barrier '{}': agent {} ready (sequence {}), total {}/{} ready",
-                   barrier_name, agent_id, barrier_sequence,
+            debug!("Barrier {}: agent {} ready (sequence {}), total {}/{} ready",
+                   barrier_index, agent_id, barrier_sequence,
                    barrier_state.ready_agents.len(), self.agents.len());
         }
     }
     
-    /// v0.8.26: Check if a barrier can be released based on barrier policy
+    /// v0.8.61: Check if a barrier can be released based on barrier policy
     /// Returns release info if barrier is ready, None otherwise
-    fn check_barrier_ready(&self, barrier_name: &str) -> Option<BarrierReleaseInfo> {
-        let barrier_state = self.barrier_agents.get(barrier_name)?;
+    /// Uses NUMERIC stage index only - NO string names
+    fn check_barrier_ready(&self, barrier_index: u32) -> Option<BarrierReleaseInfo> {
+        let barrier_state = self.barrier_agents.get(&barrier_index)?;
         
         // Don't release already-released barriers
         if barrier_state.released {
@@ -1809,14 +1812,10 @@ impl BarrierManager {
         };
         
         if can_release {
-            // Find the minimum barrier sequence among ready agents
-            let min_sequence = barrier_state.ready_agents.values().copied().min().unwrap_or(0);
-            
             let ready_agents: Vec<String> = barrier_state.ready_agents.keys().cloned().collect();
             
             Some(BarrierReleaseInfo {
-                barrier_name: barrier_name.to_string(),
-                barrier_sequence: min_sequence,
+                barrier_index,  // Stage index is the barrier ID
                 ready_agents,
             })
         } else {
@@ -1824,11 +1823,12 @@ impl BarrierManager {
         }
     }
     
-    /// v0.8.26: Clear a barrier after release (prevent re-release)
-    fn clear_barrier(&mut self, barrier_name: &str) {
-        if let Some(barrier_state) = self.barrier_agents.get_mut(barrier_name) {
+    /// v0.8.61: Clear a barrier after release (prevent re-release)
+    /// Uses NUMERIC stage index only
+    fn clear_barrier(&mut self, barrier_index: u32) {
+        if let Some(barrier_state) = self.barrier_agents.get_mut(&barrier_index) {
             barrier_state.released = true;
-            info!("Barrier '{}' cleared (will not release again)", barrier_name);
+            info!("Barrier {} cleared (will not release again)", barrier_index);
         }
     }
     
@@ -2958,22 +2958,28 @@ async fn run_distributed_workload(
                             };
                             bm.process_heartbeat(&stats.agent_id, phase_progress);
                             
-                            // v0.8.26: Check if agent is at barrier and track for barrier release
-                            if stats.at_barrier && !stats.barrier_name.is_empty() {
-                                debug!("Agent {} at barrier '{}' (sequence {})",
-                                       stats.agent_id, stats.barrier_name, stats.barrier_sequence);
+                            // v0.8.61: DEBUG - Show barrier status from all messages
+                            debug!("Agent {} stats: status={}, at_barrier={}, barrier_seq={}, barrier_name='{}'",
+                                   stats.agent_id, stats.status, stats.at_barrier, stats.barrier_sequence, stats.barrier_name);
+                            
+                            // v0.8.61: Check if agent is at barrier and track for barrier release
+                            // Uses NUMERIC stage index ONLY - barrier_sequence is the stage index
+                            if stats.at_barrier {
+                                let barrier_index = stats.barrier_sequence;  // Numeric stage index
+                                debug!("Agent {} at barrier {} (sequence {})",
+                                       stats.agent_id, barrier_index, stats.barrier_sequence);
                                 
                                 // Mark agent as ready for this specific barrier
                                 bm.agent_at_barrier(
                                     &stats.agent_id,
-                                    &stats.barrier_name,
+                                    barrier_index,
                                     stats.barrier_sequence
                                 );
                                 
                                 // Check if barrier can be released
-                                if let Some(barrier_info) = bm.check_barrier_ready(&stats.barrier_name) {
-                                    info!("Barrier '{}' satisfied with {} agents ready - sending RELEASE_BARRIER",
-                                          stats.barrier_name, barrier_info.ready_agents.len());
+                                if let Some(barrier_info) = bm.check_barrier_ready(barrier_index) {
+                                    info!("Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER",
+                                          barrier_index, barrier_info.ready_agents.len());
                                     
                                     // Send RELEASE_BARRIER to all agents via broadcast
                                     // Each agent task filters for messages matching its agent_id
@@ -2988,8 +2994,8 @@ async fn run_distributed_workload(
                                             start_timestamp_ns: 0,
                                             agent_index: 0,
                                             num_agents: 0,
-                                            barrier_name: barrier_info.barrier_name.clone(),
-                                            barrier_sequence: barrier_info.barrier_sequence,
+                                            barrier_name: String::new(),  // EMPTY - not used
+                                            barrier_sequence: barrier_info.barrier_index,  // Stage index (0, 1, 2...)
                                             target_stage_index: 0,    // v0.8.60: For SYNC_STATE
                                             target_stage_name: String::new(),
                                             ready_for_next: false,
@@ -3001,7 +3007,7 @@ async fn run_distributed_workload(
                                     }
                                     
                                     // Clear the barrier after releasing
-                                    bm.clear_barrier(&stats.barrier_name);
+                                    bm.clear_barrier(barrier_index);
                                 }
                             }
                             
