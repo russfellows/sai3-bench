@@ -1668,8 +1668,12 @@ impl Agent for AgentSvc {
                 let mut last_prepare_total: u64 = 0;
                 
                 // Send RUNNING stats every 1 second until completion
+                // v0.8.61: Use MissedTickBehavior::Burst to ensure stats are sent every second
+                // even if progress bar updates (blocking terminal I/O) cause delays.
+                // This matches controller's perf_log timer behavior and ensures accurate time-series.
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+                interval.tick().await; // First tick is immediate, consume it
                 
                 // Track prepare phase metrics
                 let mut prepare_proto: Option<PrepareSummary> = None;
