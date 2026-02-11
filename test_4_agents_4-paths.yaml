@@ -9,8 +9,8 @@
 # Base target (overridden by multi_endpoint)
 target: "file:///mnt/nvme_data/sai3-test/"
 
-concurrency: 4
-page_cache_mode: dontneed
+concurrency: 32
+page_cache_mode: auto
 
 perf_log:
   enabled: true
@@ -120,7 +120,7 @@ distributed:
     # Agent 1: localhost:7761 → /mnt/nvme_data paths 1 and 2
     - address: "127.0.0.1:7761"
       id: "agent-1"
-      concurrency_override: 8
+      concurrency_override: 16
       multi_endpoint:
         endpoints:
           - "file:///mnt/nvme_data/sai3-path1/"
@@ -130,7 +130,7 @@ distributed:
     # Agent 2: localhost:7762 → /mnt/nvme_data paths 3 and 4
     - address: "127.0.0.1:7762"
       id: "agent-2"
-      concurrency_override: 8
+      concurrency_override: 16
       multi_endpoint:
         endpoints:
           - "file:///mnt/nvme_data/sai3-path3/"

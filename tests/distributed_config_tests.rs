@@ -890,7 +890,11 @@ workload:
 
 #[test]
 fn test_serialize_deserialize_round_trip() -> Result<()> {
-    use sai3_bench::config::{DistributedConfig, TreeCreationMode, PathSelectionStrategy, AgentConfig, BarrierSyncConfig};
+    use sai3_bench::config::{
+      AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig,
+      PathSelectionStrategy, StageConfig, StageSpecificConfig, TreeCreationMode,
+    };
+    use std::time::Duration;
     
     let original_dist = DistributedConfig {
         agents: vec![
@@ -919,7 +923,28 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         grpc_keepalive_timeout: 10,
         agent_ready_timeout: 120,  // v0.8.51: Default timeout
         barrier_sync: BarrierSyncConfig::default(),
-        stages: None,
+        stages: vec![
+          StageConfig {
+            name: "preflight".to_string(),
+            order: 1,
+            completion: CompletionCriteria::ValidationPassed,
+            barrier: None,
+            timeout_secs: None,
+            optional: false,
+            config: StageSpecificConfig::Validation,
+          },
+          StageConfig {
+            name: "execute".to_string(),
+            order: 2,
+            completion: CompletionCriteria::Duration,
+            barrier: None,
+            timeout_secs: None,
+            optional: false,
+            config: StageSpecificConfig::Execute {
+              duration: Duration::from_secs(60),
+            },
+          },
+        ],
         kv_cache_dir: None,
     };
     
@@ -935,6 +960,9 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
     assert_eq!(deserialized.tree_creation_mode, TreeCreationMode::Concurrent);
     assert_eq!(deserialized.path_selection, PathSelectionStrategy::Partitioned);
     assert_eq!(deserialized.partition_overlap, 0.3);
+    assert_eq!(deserialized.stages.len(), 2);
+    assert_eq!(deserialized.stages[0].name, "preflight");
+    assert_eq!(deserialized.stages[1].name, "execute");
     
     Ok(())
 }

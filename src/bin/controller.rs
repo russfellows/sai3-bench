@@ -5781,12 +5781,12 @@ workload:
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
             
-            // Agent1 arrives at barrier "prepare_complete"
-            manager.agent_at_barrier("agent1", "prepare_complete", 1);
+            // Agent1 arrives at barrier index 1
+            manager.agent_at_barrier("agent1", 1, 1);
             
             // Verify barrier state exists
-            assert!(manager.barrier_agents.contains_key("prepare_complete"));
-            let state = manager.barrier_agents.get("prepare_complete").unwrap();
+            assert!(manager.barrier_agents.contains_key(&1));
+            let state = manager.barrier_agents.get(&1).unwrap();
             assert_eq!(state.ready_agents.len(), 1);
             assert!(state.ready_agents.contains_key("agent1"));
             assert_eq!(*state.ready_agents.get("agent1").unwrap(), 1);
@@ -5799,11 +5799,11 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // All agents arrive at barrier
-            manager.agent_at_barrier("agent1", "execute_ready", 1);
-            manager.agent_at_barrier("agent2", "execute_ready", 1);
-            manager.agent_at_barrier("agent3", "execute_ready", 1);
+            manager.agent_at_barrier("agent1", 2, 1);
+            manager.agent_at_barrier("agent2", 2, 1);
+            manager.agent_at_barrier("agent3", 2, 1);
             
-            let state = manager.barrier_agents.get("execute_ready").unwrap();
+            let state = manager.barrier_agents.get(&2).unwrap();
             assert_eq!(state.ready_agents.len(), 3);
             assert!(!state.released);
         }
@@ -5815,16 +5815,16 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Agent arrives at barrier with sequence 1
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 1);
+            manager.agent_at_barrier("agent1", 3, 1);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 1);
             
             // Agent sends updated heartbeat with sequence 5
-            manager.agent_at_barrier("agent1", "barrier", 5);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+            manager.agent_at_barrier("agent1", 3, 5);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
             
             // Older sequence should NOT update
-            manager.agent_at_barrier("agent1", "barrier", 3);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+            manager.agent_at_barrier("agent1", 3, 3);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
         }
 
         #[test]
@@ -5834,16 +5834,15 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Both agents at barrier
-            manager.agent_at_barrier("agent1", "cleanup_ready", 1);
-            manager.agent_at_barrier("agent2", "cleanup_ready", 1);
+            manager.agent_at_barrier("agent1", 4, 1);
+            manager.agent_at_barrier("agent2", 4, 1);
             
             // Should be ready to release
-            let release_info = manager.check_barrier_ready("cleanup_ready");
+            let release_info = manager.check_barrier_ready(4);
             assert!(release_info.is_some());
             
             let info = release_info.unwrap();
-            assert_eq!(info.barrier_name, "cleanup_ready");
-            assert_eq!(info.barrier_sequence, 1);
+            assert_eq!(info.barrier_index, 4);
             assert_eq!(info.ready_agents.len(), 2);
         }
 
@@ -5854,10 +5853,10 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Only one agent at barrier
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
             
             // Should NOT be ready (waiting for agent2)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
         }
 
@@ -5868,11 +5867,11 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // One agent ready, one failed
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
             manager.failed_agents.insert("agent2".to_string());
             
             // Should NOT be ready (AllOrNothing requires no failures)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
         }
 
@@ -5883,15 +5882,15 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // 2 of 3 agents ready (majority)
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            manager.agent_at_barrier("agent2", "barrier", 2);
+            manager.agent_at_barrier("agent1", 5, 1);
+            manager.agent_at_barrier("agent2", 5, 2);
             
             // Should be ready (2 > 3/2)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(5);
             assert!(release_info.is_some());
             
             let info = release_info.unwrap();
-            assert_eq!(info.barrier_sequence, 1);  // minimum sequence
+            assert_eq!(info.barrier_index, 5);
         }
 
         #[test]  
@@ -5902,10 +5901,10 @@ workload:
             
             // One agent failed, one ready at barrier
             manager.failed_agents.insert("agent2".to_string());
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 6, 1);
             
             // Should be ready (all alive agents ready)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(6);
             assert!(release_info.is_some());
         }
 
@@ -5916,20 +5915,20 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Both agents at barrier
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            manager.agent_at_barrier("agent2", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
+            manager.agent_at_barrier("agent2", 1, 1);
             
             // First check should succeed
-            assert!(manager.check_barrier_ready("barrier").is_some());
+            assert!(manager.check_barrier_ready(1).is_some());
             
             // Clear the barrier
-            manager.clear_barrier("barrier");
+            manager.clear_barrier(1);
             
             // Second check should return None (already released)
-            assert!(manager.check_barrier_ready("barrier").is_none());
+            assert!(manager.check_barrier_ready(1).is_none());
             
             // Verify released flag is set
-            assert!(manager.barrier_agents.get("barrier").unwrap().released);
+            assert!(manager.barrier_agents.get(&1).unwrap().released);
         }
 
         #[test]
@@ -5939,28 +5938,28 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Agents at different barriers
-            manager.agent_at_barrier("agent1", "prepare_ready", 1);
-            manager.agent_at_barrier("agent2", "prepare_ready", 1);
-            manager.agent_at_barrier("agent1", "execute_ready", 2);
+            manager.agent_at_barrier("agent1", 1, 1);
+            manager.agent_at_barrier("agent2", 1, 1);
+            manager.agent_at_barrier("agent1", 2, 2);
             // agent2 NOT at execute_ready yet
             
             // prepare_ready should be ready
-            assert!(manager.check_barrier_ready("prepare_ready").is_some());
+            assert!(manager.check_barrier_ready(1).is_some());
             
             // execute_ready should NOT be ready
-            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            assert!(manager.check_barrier_ready(2).is_none());
             
             // Clear prepare_ready
-            manager.clear_barrier("prepare_ready");
+            manager.clear_barrier(1);
             
             // execute_ready should still NOT be ready (independent)
-            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            assert!(manager.check_barrier_ready(2).is_none());
             
             // agent2 arrives at execute_ready
-            manager.agent_at_barrier("agent2", "execute_ready", 2);
+            manager.agent_at_barrier("agent2", 2, 2);
             
             // Now execute_ready should be ready
-            assert!(manager.check_barrier_ready("execute_ready").is_some());
+            assert!(manager.check_barrier_ready(2).is_some());
         }
 
         #[test]
@@ -5970,7 +5969,7 @@ workload:
             let manager = BarrierManager::new(agent_ids, config);
             
             // Query for a barrier no agent has reached
-            let release_info = manager.check_barrier_ready("nonexistent");
+            let release_info = manager.check_barrier_ready(999);
             assert!(release_info.is_none());
         }
     }

@@ -147,8 +147,8 @@ stages:
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    assert!(config.stages.is_some());
-    let stages = config.stages.as_ref().unwrap();
+    assert!(!config.stages.is_empty());
+    let stages = &config.stages;
     assert_eq!(stages.len(), 3);
     
     // Check order field (not YAML position)
@@ -207,7 +207,7 @@ stages:
 
 #[test]
 fn test_default_stages_generation() {
-    // Config without stages should generate defaults
+    // Config without stages should fail validation (stages are required)
     let yaml = r#"
 agents:
   - address: "node1:7761"
@@ -217,34 +217,10 @@ path_selection: partitioned
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
     
-    assert!(config.stages.is_none());
+    assert!(config.stages.is_empty());
     
-    let stages = config.get_sorted_stages().unwrap();
-    assert_eq!(stages.len(), 4);
-    
-    // Verify default stages
-    assert_eq!(stages[0].name, "preflight");
-    assert_eq!(stages[0].order, 1);
-    assert_eq!(stages[0].completion, CompletionCriteria::ValidationPassed);
-    
-    assert_eq!(stages[1].name, "prepare");
-    assert_eq!(stages[1].order, 2);
-    assert_eq!(stages[1].completion, CompletionCriteria::TasksDone);
-    
-    assert_eq!(stages[2].name, "execute");
-    assert_eq!(stages[2].order, 3);
-    assert_eq!(stages[2].completion, CompletionCriteria::Duration);
-    match &stages[2].config {
-        StageSpecificConfig::Execute { duration } => {
-            assert_eq!(*duration, Duration::from_secs(120));
-        }
-        _ => panic!("Expected Execute config"),
-    }
-    
-    assert_eq!(stages[3].name, "cleanup");
-    assert_eq!(stages[3].order, 4);
-    assert_eq!(stages[3].completion, CompletionCriteria::TasksDone);
-    assert_eq!(stages[3].optional, true);
+    let err = config.get_sorted_stages().unwrap_err();
+    assert!(err.contains("stages list cannot be empty"));
 }
 
 #[test]

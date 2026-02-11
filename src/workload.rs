@@ -1923,7 +1923,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     // Add PUT operation base URIs
     for wo in &cfg.workload {
         if let OpSpec::Put { .. } = &wo.spec {
-            let uri = cfg.get_meta_uri(&wo.spec);
+            let (uri, _spec) = cfg.get_put_size_spec(&wo.spec);
             unique_base_uris.insert(extract_base_uri(&uri));
         }
     }
