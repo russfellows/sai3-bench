@@ -200,7 +200,7 @@ mod tests {
                 grpc_keepalive_timeout: 10,
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: None,  // No YAML stages for tests
+                stages: Vec::new(),  // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -264,7 +264,7 @@ mod tests {
                 grpc_keepalive_timeout: 10,
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: None,  // No YAML stages for tests
+                stages: Vec::new(),  // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -323,7 +323,7 @@ mod tests {
                 grpc_keepalive_timeout: 10,
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: None,  // No YAML stages for tests
+                stages: Vec::new(),  // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -392,7 +392,7 @@ mod tests {
                 grpc_keepalive_timeout: 10,
                 agent_ready_timeout: 120,  // v0.8.51: Default timeout
                 barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: None,  // No YAML stages for tests
+                stages: Vec::new(),  // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {

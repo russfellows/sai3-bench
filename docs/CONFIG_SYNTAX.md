@@ -365,6 +365,13 @@ prepare:
 
 YAML-driven stage orchestration enables flexible, multi-stage test workflows beyond the traditional prepare→execute→cleanup pattern. Define custom stages with independent configurations, execution ordering, and synchronization barriers.
 
+**v0.8.61+**: `distributed.stages` is **required** for distributed runs. Use the built-in converter for legacy YAML files with implicit stages.
+
+```bash
+sai3-bench convert --config legacy.yaml
+sai3bench-ctl convert --config legacy.yaml
+```
+
 ### Why Stage Orchestration?
 
 **Traditional flow** (single execute stage):
@@ -383,6 +390,8 @@ Preflight Validation → Prepare Dataset → Warmup → Execute Benchmark → Co
 - **Complex workflows**: Data generation → Format conversion → Validation → Execution
 
 ### Stage Configuration
+
+**v0.8.61+**: `distributed.stages` is **required** for distributed runs. Empty or missing stage lists are invalid.
 
 Stages are defined in the `distributed.stages` array:
 
@@ -403,7 +412,6 @@ distributed:
       timeout_secs: 300
       config:
         type: validation
-        timeout_secs: 300
     
     - name: "prepare"
       order: 2
@@ -645,35 +653,9 @@ distributed:
         duration: "30m"
 ```
 
-### Default Stages (Backward Compatibility)
+### Default Stages (Removed)
 
-If `stages` is **not specified**, sai3-bench generates default stages:
-
-```yaml
-# Implicit default (v0.8.50+):
-stages:
-  - name: "preflight"
-    order: 1
-    completion: validation_passed
-    timeout_secs: 300
-  
-  - name: "prepare"
-    order: 2
-    completion: tasks_done
-    # (only if prepare config exists)
-  
-  - name: "execute"
-    order: 3
-    completion: duration
-  
-  - name: "cleanup"
-    order: 4
-    completion: tasks_done
-    optional: true
-    timeout_secs: 3600
-```
-
-**This ensures backward compatibility** with legacy configs (pre-v0.8.50).
+Legacy default-stage generation was removed in v0.8.61. Distributed configs must define explicit stages. Use the config converter for older YAML files.
 
 ### Stage Ordering
 
@@ -722,6 +704,8 @@ Barrier synchronization ensures all agents reach coordination points before proc
 - **Multi-stage workflows**: All agents must complete prepare before execute
 - **Distributed testing**: Prevent timing skew between agents
 - **Large-scale tests**: Coordinate 300k+ directory creation across hosts
+
+**v0.8.61+**: Barriers are keyed by numeric **stage order** (stage index), not stage name strings.
 
 ### Why Barriers?
 

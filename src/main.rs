@@ -287,6 +287,36 @@ enum Commands {
         #[arg(long, default_value_t = 10000)]
         window_size: usize,
     },
+    /// Convert legacy YAML configs to explicit stages format (v0.8.61+)
+    /// 
+    /// Converts old implicit-stage configs (top-level duration/workload) to new
+    /// explicit-stage format (distributed.stages array).
+    /// 
+    /// Creates backup files (.yaml.bak) before conversion.
+    /// Validates converted configs before replacing original.
+    /// 
+    /// Examples:
+    ///   sai3-bench convert --config mixed.yaml
+    ///   sai3-bench convert --config mixed.yaml --dry-run
+    ///   sai3-bench convert --files tests/configs/*.yaml
+    ///   sai3-bench convert --files tests/configs/*.yaml --no-validate
+    Convert {
+        /// Single config file to convert
+        #[arg(long, conflicts_with = "files")]
+        config: Option<std::path::PathBuf>,
+        
+        /// Multiple config files to convert
+        #[arg(long, conflicts_with = "config", num_args = 1..)]
+        files: Option<Vec<std::path::PathBuf>>,
+        
+        /// Show what would be converted without making changes
+        #[arg(long)]
+        dry_run: bool,
+        
+        /// Skip validation after conversion (faster but risky)
+        #[arg(long)]
+        no_validate: bool,
+    },
     /// Storage utility operations (for quick testing and validation)
     /// 
     /// These are helper commands for basic storage operations.
@@ -459,6 +489,9 @@ fn main() -> Result<()> {
         Commands::Sort { files, in_place, window_size } => {
             sort_oplog_files(&files, in_place, window_size)?
         }
+        Commands::Convert { config, files, dry_run, no_validate } => {
+            convert_configs_cmd(config, files, dry_run, !no_validate)?
+        }
         Commands::Util { command } => {
             match command {
                 UtilCommands::Health { uri } => health_cmd(&uri)?,
@@ -560,6 +593,109 @@ fn sort_oplog_files(files: &[std::path::PathBuf], in_place: bool, window_size: u
     }
     
     info!("Successfully sorted {} file(s)", files.len());
+    Ok(())
+}
+
+fn convert_configs_cmd(
+    config: Option<std::path::PathBuf>,
+    files: Option<Vec<std::path::PathBuf>>,
+    dry_run: bool,
+    validate: bool,
+) -> Result<()> {
+    use sai3_bench::config_converter::{convert_yaml_file, ConversionResult};
+    
+    // Determine files to process
+    let files_to_convert: Vec<std::path::PathBuf> = if let Some(single_config) = config {
+        vec![single_config]
+    } else if let Some(file_list) = files {
+        file_list
+    } else {
+        bail!("Must specify either --config or --files");
+    };
+    
+    if files_to_convert.is_empty() {
+        bail!("No files provided for conversion");
+    }
+    
+    println!("╔═══════════════════════════════════════════════════════════════════════╗");
+    println!("║        YAML Config Converter: Legacy → Explicit Stages              ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════╝");
+    println!();
+    
+    if dry_run {
+        println!("🔍 DRY RUN MODE - No changes will be made");
+    } else if !validate {
+        println!("⚠️  VALIDATION DISABLED - Configs will NOT be validated");
+    }
+    
+    println!();
+    println!("Processing {} file(s)...", files_to_convert.len());
+    println!();
+    
+    let mut success_count = 0;
+    let mut skip_count = 0;
+    let mut fail_count = 0;
+    
+    for file_path in &files_to_convert {
+        println!("📄 {}", file_path.display());
+        
+        if !file_path.exists() {
+            println!("  ❌ File does not exist");
+            fail_count += 1;
+            continue;
+        }
+        
+        match convert_yaml_file(file_path, validate, dry_run) {
+            Ok(ConversionResult::AlreadyHasStages) => {
+                println!("  ℹ️  Already has stages section - skipping");
+                skip_count += 1;
+            }
+            Ok(ConversionResult::NoConversionNeeded) => {
+                println!("  ℹ️  No distributed/workload section - skipping");
+                skip_count += 1;
+            }
+            Ok(ConversionResult::DryRun { stage_count }) => {
+                println!("  🔄 Would convert → {} stages", stage_count);
+                success_count += 1;
+            }
+            Ok(ConversionResult::Converted { stage_count, backup_path }) => {
+                println!("  ✅ Converted → {} stages", stage_count);
+                println!("  💾 Backup: {}", backup_path);
+                success_count += 1;
+            }
+            Err(e) => {
+                println!("  ❌ Conversion failed: {}", e);
+                if let Some(source) = e.source() {
+                    println!("     Cause: {}", source);
+                }
+                fail_count += 1;
+            }
+        }
+        
+        println!();
+    }
+    
+    // Summary
+    println!("╔═══════════════════════════════════════════════════════════════════════╗");
+    println!("║                     CONVERSION SUMMARY                               ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("✅ Converted: {}", success_count);
+    println!("ℹ️  Skipped:   {}", skip_count);
+    println!("❌ Failed:    {}", fail_count);
+    println!("📁 Total:     {}", files_to_convert.len());
+    println!();
+    
+    if !dry_run && success_count > 0 {
+        println!("💾 Backups saved with .yaml.bak extension");
+        println!("   To restore: mv <file>.yaml.bak <file>.yaml");
+        println!();
+    }
+    
+    if fail_count > 0 {
+        bail!("{} file(s) failed to convert", fail_count);
+    }
+    
     Ok(())
 }
 

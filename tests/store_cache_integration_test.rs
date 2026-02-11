@@ -6,10 +6,8 @@ use std::process::Command;
 
 #[test]
 fn test_store_cache_with_file_backend() {
-    // Create temp directory for test data
-    let temp_dir = TempDir::new().unwrap();
-    let test_dir = temp_dir.path().join("sai3-store-cache-test");
-    std::fs::create_dir_all(&test_dir).unwrap();
+    // Ensure target directory exists for pre-flight validation
+    std::fs::create_dir_all("/tmp/sai3-store-cache-test").unwrap();
     
     // Run workload with store caching enabled (default)
     let output = Command::new(env!("CARGO_BIN_EXE_sai3-bench"))

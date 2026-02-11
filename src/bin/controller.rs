@@ -748,6 +748,37 @@ enum Commands {
         #[arg(long)]
         shared_prepare: Option<bool>,
     },
+    
+    /// Convert legacy YAML configs to explicit stages format (v0.8.61+)
+    /// 
+    /// Converts old implicit-stage configs (top-level duration/workload) to new
+    /// explicit-stage format (distributed.stages array).
+    /// 
+    /// Creates backup files (.yaml.bak) before conversion.
+    /// Validates converted configs before replacing original.
+    /// 
+    /// Examples:
+    ///   sai3bench-ctl convert --config mixed.yaml
+    ///   sai3bench-ctl convert --config mixed.yaml --dry-run
+    ///   sai3bench-ctl convert --files tests/configs/*.yaml
+    ///   sai3bench-ctl convert --files tests/configs/*.yaml --no-validate
+    Convert {
+        /// Single config file to convert
+        #[arg(long, conflicts_with = "files")]
+        config: Option<PathBuf>,
+        
+        /// Multiple config files to convert
+        #[arg(long, conflicts_with = "config", num_args = 1..)]
+        files: Option<Vec<PathBuf>>,
+        
+        /// Show what would be converted without making changes
+        #[arg(long)]
+        dry_run: bool,
+        
+        /// Skip validation after conversion (faster but risky)
+        #[arg(long)]
+        no_validate: bool,
+    },
 }
 
 // v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
@@ -1101,6 +1132,102 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        
+        Commands::Convert { config, files, dry_run, no_validate } => {
+            use sai3_bench::config_converter::{convert_yaml_file, ConversionResult};
+            
+            // Determine files to process
+            let files_to_convert: Vec<PathBuf> = if let Some(single_config) = config {
+                vec![single_config.clone()]
+            } else if let Some(file_list) = files {
+                file_list.clone()
+            } else {
+                bail!("Must specify either --config or --files");
+            };
+            
+            if files_to_convert.is_empty() {
+                bail!("No files provided for conversion");
+            }
+            
+            println!("╔═══════════════════════════════════════════════════════════════════════╗");
+            println!("║        YAML Config Converter: Legacy → Explicit Stages              ║");
+            println!("╚═══════════════════════════════════════════════════════════════════════╝");
+            println!();
+            
+            if *dry_run {
+                println!("🔍 DRY RUN MODE - No changes will be made");
+            } else if *no_validate {
+                println!("⚠️  VALIDATION DISABLED - Configs will NOT be validated");
+            }
+            
+            println!();
+            println!("Processing {} file(s)...", files_to_convert.len());
+            println!();
+            
+            let mut success_count = 0;
+            let mut skip_count = 0;
+            let mut fail_count = 0;
+            
+            for file_path in &files_to_convert {
+                println!("📄 {}", file_path.display());
+                
+                if !file_path.exists() {
+                    println!("  ❌ File does not exist");
+                    fail_count += 1;
+                    continue;
+                }
+                
+                match convert_yaml_file(file_path, !no_validate, *dry_run) {
+                    Ok(ConversionResult::AlreadyHasStages) => {
+                        println!("  ℹ️  Already has stages section - skipping");
+                        skip_count += 1;
+                    }
+                    Ok(ConversionResult::NoConversionNeeded) => {
+                        println!("  ℹ️  No distributed/workload section - skipping");
+                        skip_count += 1;
+                    }
+                    Ok(ConversionResult::DryRun { stage_count }) => {
+                        println!("  🔄 Would convert → {} stages", stage_count);
+                        success_count += 1;
+                    }
+                    Ok(ConversionResult::Converted { stage_count, backup_path }) => {
+                        println!("  ✅ Converted → {} stages", stage_count);
+                        println!("  💾 Backup: {}", backup_path);
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        println!("  ❌ Conversion failed: {}", e);
+                        if let Some(source) = e.source() {
+                            println!("     Cause: {}", source);
+                        }
+                        fail_count += 1;
+                    }
+                }
+                
+                println!();
+            }
+            
+            // Summary
+            println!("╔═══════════════════════════════════════════════════════════════════════╗");
+            println!("║                     CONVERSION SUMMARY                               ║");
+            println!("╚═══════════════════════════════════════════════════════════════════════╝");
+            println!();
+            println!("✅ Converted: {}", success_count);
+            println!("ℹ️  Skipped:   {}", skip_count);
+            println!("❌ Failed:    {}", fail_count);
+            println!("📁 Total:     {}", files_to_convert.len());
+            println!();
+            
+            if !dry_run && success_count > 0 {
+                println!("💾 Backups saved with .yaml.bak extension");
+                println!("   To restore: mv <file>.yaml.bak <file>.yaml");
+                println!();
+            }
+            
+            if fail_count > 0 {
+                bail!("{} file(s) failed to convert", fail_count);
+            }
+        }
     }
 
     Ok(())
@@ -1261,8 +1388,9 @@ struct BarrierManager {
     config: PhaseBarrierConfig,
     ready_agents: HashSet<String>,
     failed_agents: HashSet<String>,
-    /// v0.8.26: Per-barrier tracking for named barriers (stage_X, etc.)
-    barrier_agents: HashMap<String, BarrierState>,
+    /// v0.8.61: Per-barrier tracking using NUMERIC stage indices (0, 1, 2...)
+    /// NO STRINGS - only numeric indices for barrier coordination
+    barrier_agents: HashMap<u32, BarrierState>,
 }
 
 /// v0.8.26: State tracking for a specific named barrier
@@ -1272,11 +1400,12 @@ struct BarrierState {
     released: bool,
 }
 
-/// v0.8.26: Information about a barrier ready for release
+/// v0.8.61: Information about a barrier ready for release
+/// Uses NUMERIC stage index ONLY - NO string names
+/// Note: barrier_sequence removed - retry counting is agent-local, not in proto
 #[derive(Debug)]
 struct BarrierReleaseInfo {
-    barrier_name: String,
-    barrier_sequence: u32,
+    barrier_index: u32,  // Numeric stage index (0, 1, 2...)
     ready_agents: Vec<String>,
 }
 
@@ -1631,10 +1760,10 @@ impl BarrierManager {
         }
     }
     
-    /// v0.8.26: Mark agent as ready at a specific named barrier
-    fn agent_at_barrier(&mut self, agent_id: &str, barrier_name: &str, barrier_sequence: u32) {
+    /// v0.8.61: Mark agent as ready at a specific barrier (NUMERIC index only)
+    fn agent_at_barrier(&mut self, agent_id: &str, barrier_index: u32, barrier_sequence: u32) {
         let barrier_state = self.barrier_agents
-            .entry(barrier_name.to_string())
+            .entry(barrier_index)
             .or_default();
         
         // Only update if this is a newer sequence number or agent not yet tracked
@@ -1645,16 +1774,17 @@ impl BarrierManager {
         
         if should_update {
             barrier_state.ready_agents.insert(agent_id.to_string(), barrier_sequence);
-            debug!("Barrier '{}': agent {} ready (sequence {}), total {}/{} ready",
-                   barrier_name, agent_id, barrier_sequence,
+            debug!("Barrier {}: agent {} ready (sequence {}), total {}/{} ready",
+                   barrier_index, agent_id, barrier_sequence,
                    barrier_state.ready_agents.len(), self.agents.len());
         }
     }
     
-    /// v0.8.26: Check if a barrier can be released based on barrier policy
+    /// v0.8.61: Check if a barrier can be released based on barrier policy
     /// Returns release info if barrier is ready, None otherwise
-    fn check_barrier_ready(&self, barrier_name: &str) -> Option<BarrierReleaseInfo> {
-        let barrier_state = self.barrier_agents.get(barrier_name)?;
+    /// Uses NUMERIC stage index only - NO string names
+    fn check_barrier_ready(&self, barrier_index: u32) -> Option<BarrierReleaseInfo> {
+        let barrier_state = self.barrier_agents.get(&barrier_index)?;
         
         // Don't release already-released barriers
         if barrier_state.released {
@@ -1682,14 +1812,10 @@ impl BarrierManager {
         };
         
         if can_release {
-            // Find the minimum barrier sequence among ready agents
-            let min_sequence = barrier_state.ready_agents.values().copied().min().unwrap_or(0);
-            
             let ready_agents: Vec<String> = barrier_state.ready_agents.keys().cloned().collect();
             
             Some(BarrierReleaseInfo {
-                barrier_name: barrier_name.to_string(),
-                barrier_sequence: min_sequence,
+                barrier_index,  // Stage index is the barrier ID
                 ready_agents,
             })
         } else {
@@ -1697,11 +1823,12 @@ impl BarrierManager {
         }
     }
     
-    /// v0.8.26: Clear a barrier after release (prevent re-release)
-    fn clear_barrier(&mut self, barrier_name: &str) {
-        if let Some(barrier_state) = self.barrier_agents.get_mut(barrier_name) {
+    /// v0.8.61: Clear a barrier after release (prevent re-release)
+    /// Uses NUMERIC stage index only
+    fn clear_barrier(&mut self, barrier_index: u32) {
+        if let Some(barrier_state) = self.barrier_agents.get_mut(&barrier_index) {
             barrier_state.released = true;
-            info!("Barrier '{}' cleared (will not release again)", barrier_name);
+            info!("Barrier {} cleared (will not release again)", barrier_index);
         }
     }
     
@@ -2002,10 +2129,68 @@ async fn run_distributed_workload(
     
     info!("Pre-flight validation passed - proceeding with workload execution");
     
+    // v0.8.61: Log concurrency configuration for each agent (CRITICAL for debugging performance)
+    info!("=== Concurrency Configuration ===");
+    if let Some(ref distributed) = config.distributed {
+        for (_idx, agent_cfg) in distributed.agents.iter().enumerate() {
+            let agent_id = agent_cfg.id.as_deref().unwrap_or("unknown");
+            
+            // Determine effective concurrency (override or global)
+            let effective_concurrency = agent_cfg.concurrency_override.unwrap_or(config.concurrency);
+            
+            // Count endpoints for this agent
+            let num_endpoints = agent_cfg.multi_endpoint.as_ref()
+                .map(|m| m.endpoints.len())
+                .unwrap_or(1);  // Single endpoint if no multi_endpoint
+            
+            // CRITICAL VALIDATION: Concurrency must be >= num_endpoints (1 thread per endpoint minimum)
+            if effective_concurrency < num_endpoints {
+                error!("Agent '{}': concurrency={} is LESS than endpoints={}", 
+                       agent_id, effective_concurrency, num_endpoints);
+                error!("  This will cause poor performance - some endpoints will be idle!");
+                error!("  RECOMMENDATION: Set concurrency >= {} (at least 1 thread per endpoint)", num_endpoints);
+                bail!("Agent '{}' has insufficient concurrency ({}) for {} endpoints. Minimum required: {}", 
+                      agent_id, effective_concurrency, num_endpoints, num_endpoints);
+            }
+            
+            // Log concurrency details
+            if agent_cfg.concurrency_override.is_some() {
+                info!("  Agent {}: {} threads (concurrency_override), {} endpoints → {:.1} threads/endpoint",
+                      agent_id, effective_concurrency, num_endpoints, 
+                      effective_concurrency as f64 / num_endpoints as f64);
+            } else {
+                info!("  Agent {}: {} threads (global concurrency), {} endpoints → {:.1} threads/endpoint",
+                      agent_id, effective_concurrency, num_endpoints,
+                      effective_concurrency as f64 / num_endpoints as f64);
+            }
+        }
+        
+        // Calculate total concurrency across all agents
+        let total_concurrency: usize = distributed.agents.iter()
+            .map(|a| a.concurrency_override.unwrap_or(config.concurrency))
+            .sum();
+        
+        info!("  TOTAL: {} threads across {} agents", total_concurrency, distributed.agents.len());
+    } else {
+        info!("  Single-node mode: {} threads", config.concurrency);
+    }
+    info!("=================================");
+    
     // v0.8.51: Extract ready_timeout from config before spawning tasks
     let agent_ready_timeout_secs = config.distributed.as_ref()
         .map(|d| d.agent_ready_timeout)
         .unwrap_or(120);
+    
+    // v0.8.61: Check if using YAML-driven stages (determines whether to send Phase 2 START)
+    let using_yaml_stages = config.distributed.as_ref()
+        .map(|d| !d.stages.is_empty())
+        .unwrap_or(false);
+    
+    if using_yaml_stages {
+        info!("Using YAML-driven stages - Phase 2 START will be skipped (barrier coordination mode)");
+    } else {
+        info!("Using legacy workload format - Phase 2 START will be sent");
+    }
     
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
@@ -2025,13 +2210,15 @@ async fn run_distributed_workload(
         
         // v0.8.22: Apply per-agent multi_endpoint and target overrides if specified
         // This allows static endpoint mapping: each agent uses specific subset of endpoints
+        // v0.8.61: Apply concurrency_override to set per-agent thread count
         let agent_specific_config = if let Some(ref distributed) = config.distributed {
             if idx < distributed.agents.len() {
                 let agent_cfg = &distributed.agents[idx];
                 let has_multi_ep = agent_cfg.multi_endpoint.is_some();
                 let has_target = agent_cfg.target_override.is_some();
+                let has_concurrency_override = agent_cfg.concurrency_override.is_some();
                 
-                if has_multi_ep || has_target {
+                if has_multi_ep || has_target || has_concurrency_override {
                     // Agent has overrides - apply them to config
                     let mut modified_config = config.clone();
                     
@@ -2046,11 +2233,17 @@ async fn run_distributed_workload(
                         modified_config.multi_endpoint = Some(agent_multi_ep.clone());
                     }
                     
+                    // v0.8.61: Apply concurrency_override (per-agent thread count)
+                    if let Some(override_concurrency) = agent_cfg.concurrency_override {
+                        modified_config.concurrency = override_concurrency;
+                        info!("Agent {}: Using concurrency_override: {} threads", agent_id, override_concurrency);
+                    }
+                    
                     // Serialize modified config to YAML
                     match serde_yaml::to_string(&modified_config) {
                         Ok(yaml) => {
-                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={})", 
-                                   agent_id, has_multi_ep, has_target);
+                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={}, concurrency={})", 
+                                   agent_id, has_multi_ep, has_target, has_concurrency_override);
                             yaml
                         }
                         Err(e) => {
@@ -2170,31 +2363,39 @@ async fn run_distributed_workload(
                 return Err(anyhow!("Agent {} did not send READY within {}s", agent_id, ready_timeout.as_secs()));
             }
             
-            // Phase 2: Send START command with coordinated timestamp
-            // This happens after ALL agents are READY (controlled by main loop)
-            // For now, send it immediately after READY for backward compatibility with test
-            let start_msg = ControlMessage {
-                command: control_message::Command::Start as i32,
-                config_yaml: String::new(),  // Already sent in Phase 1
-                agent_id: agent_id.clone(),
-                path_prefix: String::new(),
-                shared_storage: false,
-                start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
-                ack_sequence: 0,
-                agent_index: idx as u32,  // v0.8.7: Redundant but consistent
-                num_agents,               // v0.8.7: Redundant but consistent
-                barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
-                barrier_sequence: 0,
-                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
-                target_stage_name: String::new(),
-                ready_for_next: false,
-            };
+            // v0.8.61: Phase 2 START is ONLY for legacy (non-YAML-driven-stages) workflows
+            // When using YAML-driven stages, agents transition to preflight stage after Phase 1 START
+            // and wait at barrier. Controller releases barrier via RELEASE_BARRIER broadcast, not START.
             
-            if let Err(e) = tx_control.send(start_msg).await {
-                return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+            if !using_yaml_stages {
+                // LEGACY: Phase 2 START with coordinated timestamp for old-style workloads
+                // This happens after ALL agents are READY (controlled by main loop)
+                // For now, send it immediately after READY for backward compatibility with test
+                let start_msg = ControlMessage {
+                    command: control_message::Command::Start as i32,
+                    config_yaml: String::new(),  // Already sent in Phase 1
+                    agent_id: agent_id.clone(),
+                    path_prefix: String::new(),
+                    shared_storage: false,
+                    start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
+                    ack_sequence: 0,
+                    agent_index: idx as u32,  // v0.8.7: Redundant but consistent
+                    num_agents,               // v0.8.7: Redundant but consistent
+                    barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                    barrier_sequence: 0,
+                    target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                    target_stage_name: String::new(),
+                    ready_for_next: false,
+                };
+                
+                if let Err(e) = tx_control.send(start_msg).await {
+                    return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+                }
+                
+                debug!("Agent {} sent Phase 2 START timestamp {}ns (legacy mode)", addr, start_ns);
+            } else {
+                info!("Agent {} using YAML-driven stages - skipping Phase 2 START (barrier coordination mode)", agent_id);
             }
-            
-            debug!("Agent {} sent start timestamp {}ns via control channel", addr, start_ns);
             
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
@@ -2541,12 +2742,11 @@ async fn run_distributed_workload(
     // in the stats processing loop when all agents report at_barrier=true.
     // No explicit wait needed here - controller sends RELEASE_BARRIER via broadcast channel.
     if let Some(ref distributed_config) = config.distributed {
-        if let Some(ref stages) = distributed_config.stages {
-            if !stages.is_empty() {
-                let first_stage = &stages[0];
-                if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
-                    info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
-                }
+        let stages = &distributed_config.stages;
+        if !stages.is_empty() {
+            let first_stage = &stages[0];
+            if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
+                info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
             }
         }
     }
@@ -2758,22 +2958,28 @@ async fn run_distributed_workload(
                             };
                             bm.process_heartbeat(&stats.agent_id, phase_progress);
                             
-                            // v0.8.26: Check if agent is at barrier and track for barrier release
-                            if stats.at_barrier && !stats.barrier_name.is_empty() {
-                                debug!("Agent {} at barrier '{}' (sequence {})",
-                                       stats.agent_id, stats.barrier_name, stats.barrier_sequence);
+                            // v0.8.61: DEBUG - Show barrier status from all messages
+                            debug!("Agent {} stats: status={}, at_barrier={}, barrier_seq={}, barrier_name='{}'",
+                                   stats.agent_id, stats.status, stats.at_barrier, stats.barrier_sequence, stats.barrier_name);
+                            
+                            // v0.8.61: Check if agent is at barrier and track for barrier release
+                            // Uses NUMERIC stage index ONLY - barrier_sequence is the stage index
+                            if stats.at_barrier {
+                                let barrier_index = stats.barrier_sequence;  // Numeric stage index
+                                debug!("Agent {} at barrier {} (sequence {})",
+                                       stats.agent_id, barrier_index, stats.barrier_sequence);
                                 
                                 // Mark agent as ready for this specific barrier
                                 bm.agent_at_barrier(
                                     &stats.agent_id,
-                                    &stats.barrier_name,
+                                    barrier_index,
                                     stats.barrier_sequence
                                 );
                                 
                                 // Check if barrier can be released
-                                if let Some(barrier_info) = bm.check_barrier_ready(&stats.barrier_name) {
-                                    info!("Barrier '{}' satisfied with {} agents ready - sending RELEASE_BARRIER",
-                                          stats.barrier_name, barrier_info.ready_agents.len());
+                                if let Some(barrier_info) = bm.check_barrier_ready(barrier_index) {
+                                    info!("Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER",
+                                          barrier_index, barrier_info.ready_agents.len());
                                     
                                     // Send RELEASE_BARRIER to all agents via broadcast
                                     // Each agent task filters for messages matching its agent_id
@@ -2788,8 +2994,8 @@ async fn run_distributed_workload(
                                             start_timestamp_ns: 0,
                                             agent_index: 0,
                                             num_agents: 0,
-                                            barrier_name: barrier_info.barrier_name.clone(),
-                                            barrier_sequence: barrier_info.barrier_sequence,
+                                            barrier_name: String::new(),  // EMPTY - not used
+                                            barrier_sequence: barrier_info.barrier_index,  // Stage index (0, 1, 2...)
                                             target_stage_index: 0,    // v0.8.60: For SYNC_STATE
                                             target_stage_name: String::new(),
                                             ready_for_next: false,
@@ -2801,7 +3007,7 @@ async fn run_distributed_workload(
                                     }
                                     
                                     // Clear the barrier after releasing
-                                    bm.clear_barrier(&stats.barrier_name);
+                                    bm.clear_barrier(barrier_index);
                                 }
                             }
                             
@@ -5575,12 +5781,12 @@ workload:
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
             
-            // Agent1 arrives at barrier "prepare_complete"
-            manager.agent_at_barrier("agent1", "prepare_complete", 1);
+            // Agent1 arrives at barrier index 1
+            manager.agent_at_barrier("agent1", 1, 1);
             
             // Verify barrier state exists
-            assert!(manager.barrier_agents.contains_key("prepare_complete"));
-            let state = manager.barrier_agents.get("prepare_complete").unwrap();
+            assert!(manager.barrier_agents.contains_key(&1));
+            let state = manager.barrier_agents.get(&1).unwrap();
             assert_eq!(state.ready_agents.len(), 1);
             assert!(state.ready_agents.contains_key("agent1"));
             assert_eq!(*state.ready_agents.get("agent1").unwrap(), 1);
@@ -5593,11 +5799,11 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // All agents arrive at barrier
-            manager.agent_at_barrier("agent1", "execute_ready", 1);
-            manager.agent_at_barrier("agent2", "execute_ready", 1);
-            manager.agent_at_barrier("agent3", "execute_ready", 1);
+            manager.agent_at_barrier("agent1", 2, 1);
+            manager.agent_at_barrier("agent2", 2, 1);
+            manager.agent_at_barrier("agent3", 2, 1);
             
-            let state = manager.barrier_agents.get("execute_ready").unwrap();
+            let state = manager.barrier_agents.get(&2).unwrap();
             assert_eq!(state.ready_agents.len(), 3);
             assert!(!state.released);
         }
@@ -5609,16 +5815,16 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Agent arrives at barrier with sequence 1
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 1);
+            manager.agent_at_barrier("agent1", 3, 1);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 1);
             
             // Agent sends updated heartbeat with sequence 5
-            manager.agent_at_barrier("agent1", "barrier", 5);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+            manager.agent_at_barrier("agent1", 3, 5);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
             
             // Older sequence should NOT update
-            manager.agent_at_barrier("agent1", "barrier", 3);
-            assert_eq!(*manager.barrier_agents.get("barrier").unwrap().ready_agents.get("agent1").unwrap(), 5);
+            manager.agent_at_barrier("agent1", 3, 3);
+            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
         }
 
         #[test]
@@ -5628,16 +5834,15 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Both agents at barrier
-            manager.agent_at_barrier("agent1", "cleanup_ready", 1);
-            manager.agent_at_barrier("agent2", "cleanup_ready", 1);
+            manager.agent_at_barrier("agent1", 4, 1);
+            manager.agent_at_barrier("agent2", 4, 1);
             
             // Should be ready to release
-            let release_info = manager.check_barrier_ready("cleanup_ready");
+            let release_info = manager.check_barrier_ready(4);
             assert!(release_info.is_some());
             
             let info = release_info.unwrap();
-            assert_eq!(info.barrier_name, "cleanup_ready");
-            assert_eq!(info.barrier_sequence, 1);
+            assert_eq!(info.barrier_index, 4);
             assert_eq!(info.ready_agents.len(), 2);
         }
 
@@ -5648,10 +5853,10 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Only one agent at barrier
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
             
             // Should NOT be ready (waiting for agent2)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
         }
 
@@ -5662,11 +5867,11 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // One agent ready, one failed
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
             manager.failed_agents.insert("agent2".to_string());
             
             // Should NOT be ready (AllOrNothing requires no failures)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
         }
 
@@ -5677,15 +5882,15 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // 2 of 3 agents ready (majority)
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            manager.agent_at_barrier("agent2", "barrier", 2);
+            manager.agent_at_barrier("agent1", 5, 1);
+            manager.agent_at_barrier("agent2", 5, 2);
             
             // Should be ready (2 > 3/2)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(5);
             assert!(release_info.is_some());
             
             let info = release_info.unwrap();
-            assert_eq!(info.barrier_sequence, 1);  // minimum sequence
+            assert_eq!(info.barrier_index, 5);
         }
 
         #[test]  
@@ -5696,10 +5901,10 @@ workload:
             
             // One agent failed, one ready at barrier
             manager.failed_agents.insert("agent2".to_string());
-            manager.agent_at_barrier("agent1", "barrier", 1);
+            manager.agent_at_barrier("agent1", 6, 1);
             
             // Should be ready (all alive agents ready)
-            let release_info = manager.check_barrier_ready("barrier");
+            let release_info = manager.check_barrier_ready(6);
             assert!(release_info.is_some());
         }
 
@@ -5710,20 +5915,20 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Both agents at barrier
-            manager.agent_at_barrier("agent1", "barrier", 1);
-            manager.agent_at_barrier("agent2", "barrier", 1);
+            manager.agent_at_barrier("agent1", 1, 1);
+            manager.agent_at_barrier("agent2", 1, 1);
             
             // First check should succeed
-            assert!(manager.check_barrier_ready("barrier").is_some());
+            assert!(manager.check_barrier_ready(1).is_some());
             
             // Clear the barrier
-            manager.clear_barrier("barrier");
+            manager.clear_barrier(1);
             
             // Second check should return None (already released)
-            assert!(manager.check_barrier_ready("barrier").is_none());
+            assert!(manager.check_barrier_ready(1).is_none());
             
             // Verify released flag is set
-            assert!(manager.barrier_agents.get("barrier").unwrap().released);
+            assert!(manager.barrier_agents.get(&1).unwrap().released);
         }
 
         #[test]
@@ -5733,28 +5938,28 @@ workload:
             let mut manager = BarrierManager::new(agent_ids, config);
             
             // Agents at different barriers
-            manager.agent_at_barrier("agent1", "prepare_ready", 1);
-            manager.agent_at_barrier("agent2", "prepare_ready", 1);
-            manager.agent_at_barrier("agent1", "execute_ready", 2);
+            manager.agent_at_barrier("agent1", 1, 1);
+            manager.agent_at_barrier("agent2", 1, 1);
+            manager.agent_at_barrier("agent1", 2, 2);
             // agent2 NOT at execute_ready yet
             
             // prepare_ready should be ready
-            assert!(manager.check_barrier_ready("prepare_ready").is_some());
+            assert!(manager.check_barrier_ready(1).is_some());
             
             // execute_ready should NOT be ready
-            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            assert!(manager.check_barrier_ready(2).is_none());
             
             // Clear prepare_ready
-            manager.clear_barrier("prepare_ready");
+            manager.clear_barrier(1);
             
             // execute_ready should still NOT be ready (independent)
-            assert!(manager.check_barrier_ready("execute_ready").is_none());
+            assert!(manager.check_barrier_ready(2).is_none());
             
             // agent2 arrives at execute_ready
-            manager.agent_at_barrier("agent2", "execute_ready", 2);
+            manager.agent_at_barrier("agent2", 2, 2);
             
             // Now execute_ready should be ready
-            assert!(manager.check_barrier_ready("execute_ready").is_some());
+            assert!(manager.check_barrier_ready(2).is_some());
         }
 
         #[test]
@@ -5764,7 +5969,7 @@ workload:
             let manager = BarrierManager::new(agent_ids, config);
             
             // Query for a barrier no agent has reached
-            let release_info = manager.check_barrier_ready("nonexistent");
+            let release_info = manager.check_barrier_ready(999);
             assert!(release_info.is_none());
         }
     }

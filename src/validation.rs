@@ -166,6 +166,30 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             let id = agent.id.as_deref().unwrap_or("auto");
             println!("│   {}: {} (id: {})", idx + 1, agent.address, id);
             
+            // v0.8.61: Display concurrency configuration per agent
+            let effective_concurrency = agent.concurrency_override.unwrap_or(config.concurrency);
+            let num_endpoints = agent.multi_endpoint.as_ref()
+                .map(|m| m.endpoints.len())
+                .unwrap_or(1);
+            
+            if let Some(override_conc) = agent.concurrency_override {
+                println!("│      Concurrency:     {} threads (OVERRIDE)", override_conc);
+            } else {
+                println!("│      Concurrency:     {} threads (global config)", effective_concurrency);
+            }
+            
+            // v0.8.61: Critical validation - warn if concurrency < endpoints
+            if effective_concurrency < num_endpoints {
+                println!("│      ⚠️  WARNING: Only {:.1} threads per endpoint ({} threads / {} endpoints)",
+                         effective_concurrency as f64 / num_endpoints as f64,
+                         effective_concurrency, num_endpoints);
+                println!("│      ⚠️  Some endpoints will be idle! Recommend concurrency >= {}", num_endpoints);
+            } else {
+                println!("│      Threads/Endpoint: {:.1} ({} threads / {} endpoints)",
+                         effective_concurrency as f64 / num_endpoints as f64,
+                         effective_concurrency, num_endpoints);
+            }
+            
             // v0.8.22: Display per-agent multi-endpoint configuration if present
             if let Some(ref agent_multi) = agent.multi_endpoint {
                 println!("│      Multi-Endpoint:  {} strategy", agent_multi.strategy);
@@ -181,13 +205,28 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│");
             }
         }
+        
+        // v0.8.61: Show total concurrency summary
+        let total_concurrency: usize = dist.agents.iter()
+            .map(|a| a.concurrency_override.unwrap_or(config.concurrency))
+            .sum();
+        let total_endpoints: usize = dist.agents.iter()
+            .map(|a| a.multi_endpoint.as_ref().map(|m| m.endpoints.len()).unwrap_or(1))
+            .sum();
+        
+        println!("│");
+        println!("│ TOTAL: {} threads across {} agents, {} endpoints total",
+                 total_concurrency, dist.agents.len(), total_endpoints);
+        println!("│        (Average: {:.1} threads per endpoint)",
+                 total_concurrency as f64 / total_endpoints as f64);
+        
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
         
         // Stage execution plan (v0.8.24+)
         if let Some(ref dist_config) = config.distributed {
             // Try to parse stages - if successful, show stage execution plan
-            match dist_config.get_sorted_stages(config.duration) {
+            match dist_config.get_sorted_stages() {
                 Ok(stages) if !stages.is_empty() => {
                     println!("┌─ YAML-Driven Stage Execution Plan ──────────────────────────────────┐");
                     println!("│ {} stages will execute in order:", stages.len());
@@ -284,7 +323,20 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     }
                     
                     println!("│");
-                    println!("│ All agents will synchronize at barriers between stages");
+                    
+                    // Check if any barriers are actually enabled
+                    let has_any_barriers = dist_config.barrier_sync.enabled || 
+                        stages.iter().any(|s| s.barrier.is_some());
+                    
+                    if has_any_barriers {
+                        println!("│ ✅ Agents will synchronize at barriers between stages");
+                    } else {
+                        println!("│ ⚠️  WARNING: No barriers configured!");
+                        println!("│    Agents will NOT wait for each other between stages");
+                        println!("│    This may cause race conditions in distributed workloads");
+                        println!("│    Consider adding barrier configuration (see docs)");
+                    }
+                    
                     println!("└──────────────────────────────────────────────────────────────────────┘");
                     println!();
                     
@@ -381,7 +433,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         
                         // Show barrier timeout from prepare stage if available
                         if let Some(ref dist_config) = config.distributed {
-                            if let Ok(stages) = dist_config.get_sorted_stages(config.duration) {
+                            if let Ok(stages) = dist_config.get_sorted_stages() {
                                 if let Some(prepare_stage) = stages.iter().find(|s| matches!(s.config, crate::config::StageSpecificConfig::Prepare { .. })) {
                                     if let Some(ref barrier) = prepare_stage.barrier {
                                         let timeout_secs = barrier.agent_barrier_timeout;
@@ -444,7 +496,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     // Prepare configuration
     // Skip this section if using YAML-driven stages (prepare behavior defined in stages)
     let using_stages = config.distributed.as_ref()
-        .and_then(|d| d.get_sorted_stages(config.duration).ok())
+        .and_then(|d| d.get_sorted_stages().ok())
         .map(|stages| !stages.is_empty())
         .unwrap_or(false);
     
