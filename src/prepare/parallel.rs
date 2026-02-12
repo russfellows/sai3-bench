@@ -4,7 +4,7 @@
 //! suitable for large-scale datasets. Includes round-robin distribution for
 //! multi-endpoint configurations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use crate::constants::{
     DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS,
 };
 use crate::directory_tree::TreeManifest;
-use crate::size_generator::SizeGenerator;
+use crate::size_generator::{SizeGenerator, SizeSpec};
 use crate::workload::{MultiEndpointCache, create_store_for_uri, RetryConfig, retry_with_backoff, RetryResult};
 use super::error_tracking::PrepareErrorTracker;
 use super::retry::retry_failed_objects;
@@ -41,25 +41,13 @@ pub(crate) async fn prepare_parallel(
     metadata_cache: Option<Arc<tokio::sync::Mutex<crate::metadata_cache::MetadataCache>>>,  // v0.8.60: KV cache
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
+    
     
     // v0.8.60: Log cache status
     if metadata_cache.is_some() {
         info!("📊 Metadata cache ENABLED for parallel prepare");
     } else {
         info!("Metadata cache disabled for parallel prepare");
-    }
-    
-    // Structure to hold task information BEFORE URI assignment
-    struct TaskSpec {
-        size: u64,
-        store_uri: String,
-        fill: FillPattern,
-        dedup: usize,
-        compress: usize,
-        prefix: String,  // "prepared" or "deletable"
-        index: u64,      // v0.7.9: Specific index for gap-filling
     }
     
     // Structure to hold complete task with URI
@@ -72,12 +60,22 @@ pub(crate) async fn prepare_parallel(
         compress: usize,
     }
     
-    // Collect all task specs (without URIs) from all ensure_objects entries
-    let mut task_specs: Vec<TaskSpec> = Vec::new();
+    struct PreparePlan {
+        count: u64,
+        size_spec: SizeSpec,
+        fill: FillPattern,
+        dedup: usize,
+        compress: usize,
+        prefix: String,
+        endpoints: Vec<String>,
+        existing_indices: HashSet<u64>,
+        force_overwrite: bool,
+        skip_verification: bool,
+        seed: u64,
+    }
+
+    let mut plans: Vec<PreparePlan> = Vec::new();
     let mut total_to_create: u64 = 0;
-    let mut existing_count_per_pool: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
-    // v0.7.9: Track existing indices per pool for gap-filling
-    let mut existing_indices_per_pool: std::collections::HashMap<(String, String), std::collections::HashSet<u64>> = std::collections::HashMap::new();
     
     // Determine which pool(s) to create based on workload requirements
     let pools_to_create = if needs_separate_pools {
@@ -104,7 +102,7 @@ pub(crate) async fn prepare_parallel(
         };
         
         // Use first endpoint for listing (MultiEndpointStore will handle distribution during listing)
-        let base_uri = &endpoints[0];
+        let base_uri = endpoints[0].clone();
         
         for (prefix, is_readonly) in &pools_to_create {
             let pool_desc = if needs_separate_pools {
@@ -144,7 +142,7 @@ pub(crate) async fn prepare_parallel(
                     anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
                 }
             } else {
-                create_store_for_uri(base_uri)?
+                create_store_for_uri(&base_uri)?
             };
             
             // List existing objects with this prefix (unless skip_verification is enabled)
@@ -165,7 +163,7 @@ pub(crate) async fn prepare_parallel(
                 // v0.8.14: Use distributed listing with progress updates
                 let listing_result = list_existing_objects_distributed(
                     store.as_ref(),
-                    base_uri,
+                    &base_uri,
                     tree_manifest,
                     agent_id,
                     num_agents,
@@ -204,11 +202,6 @@ pub(crate) async fn prepare_parallel(
                 info!("  ✓ Listed {} existing {} objects (need {})", existing_count, prefix, spec.count);
             }
             
-            // Store existing count and indices for this pool
-            let pool_key = (base_uri.clone(), prefix.to_string());
-            existing_count_per_pool.insert(pool_key.clone(), existing_count);
-            existing_indices_per_pool.insert(pool_key.clone(), existing_indices.clone());
-            
             // Calculate how many to create
             let to_create = if existing_count >= spec.count {
                 info!("  Sufficient {} objects already exist", prefix);
@@ -216,82 +209,95 @@ pub(crate) async fn prepare_parallel(
             } else {
                 spec.count - existing_count
             };
-            
-            // Note: In parallel mode, we can't record existing objects here
-            // because all_prepared is created later after Phase 2 (URI assignment)
-            // The existing_count_per_pool tracking is sufficient for skipping creation
-            
-            // v0.7.9: Generate task specs with gap-aware index assignment
-            if to_create > 0 {
-                // Pre-generate ALL sizes with deterministic seeded generator
-                let size_spec = spec.get_size_spec();
-                let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
-                let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
-                    .context("Failed to create size generator")?;
-                
-                info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
-                let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
-                for _ in 0..spec.count {
-                    all_sizes.push(size_generator.generate());
+
+            let size_spec = spec.get_size_spec();
+            let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+            let (actual_to_create, sample_missing) = if config.skip_verification && !config.force_overwrite {
+                (0u64, Vec::new())
+            } else if config.force_overwrite {
+                let count = if shared_storage && num_agents > 1 {
+                    let total = spec.count as usize;
+                    let assigned = (total + num_agents - 1 - agent_id) / num_agents;
+                    assigned as u64
+                } else {
+                    spec.count
+                };
+
+                let mut sample = Vec::new();
+                for idx in 0..spec.count {
+                    if sample.len() >= 10 {
+                        break;
+                    }
+                    if !shared_storage || num_agents <= 1 || (idx as usize % num_agents) == agent_id {
+                        sample.push(idx);
+                    }
                 }
-                
-                // Identify missing indices (gaps to fill)
-                let mut missing_indices: Vec<u64> = (0..spec.count)
-                    .filter(|i| !existing_indices.contains(i))
-                    .collect();
-                
-                // v0.8.24: Only filter by agent_id in SHARED storage mode
-                // In isolated mode, each agent creates ALL files on its own storage
+
+                (count, sample)
+            } else {
+                let mut count: u64 = 0;
+                let mut sample = Vec::new();
+
+                for idx in 0..spec.count {
+                    if existing_indices.contains(&idx) {
+                        continue;
+                    }
+
+                    if shared_storage && num_agents > 1 && (idx as usize % num_agents) != agent_id {
+                        continue;
+                    }
+
+                    count += 1;
+                    if sample.len() < 10 {
+                        sample.push(idx);
+                    }
+                }
+
+                (count, sample)
+            };
+
+            if actual_to_create > 0 {
                 if shared_storage && num_agents > 1 {
-                    missing_indices.retain(|&idx| (idx as usize % num_agents) == agent_id);
                     info!("  [Distributed prepare, shared storage] Agent {}/{} responsible for {} of {} missing objects",
-                        agent_id, num_agents, missing_indices.len(), to_create);
+                        agent_id, num_agents, actual_to_create, to_create);
                 } else if num_agents > 1 {
                     info!("  [Distributed prepare, isolated storage] Agent {}/{} creating all {} objects on own storage",
-                        agent_id, num_agents, missing_indices.len());
+                        agent_id, num_agents, actual_to_create);
                 }
-                
-                // v0.8.7: After filtering, update to_create to reflect actual count for this agent
-                let actual_to_create = missing_indices.len() as u64;
-                
+
                 info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})",
-                    missing_indices.len(),
-                    &missing_indices[..std::cmp::min(10, missing_indices.len())]);
-                
+                    actual_to_create, sample_missing);
+
                 if actual_to_create != to_create && num_agents == 1 {
                     warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
                         actual_to_create, to_create);
                 }
-                
+
                 info!("  Will create {} additional {} objects (sizes: {}, fill: {:?}, dedup: {}, compress: {})",
-                    actual_to_create, prefix, size_generator.description(), spec.fill,
+                    actual_to_create, prefix, SizeGenerator::new(&size_spec)?.description(), spec.fill,
                     spec.dedup_factor, spec.compress_factor);
-                
-                // Generate task specs for missing indices with pre-generated sizes
-                // v0.8.24: Round-robin across endpoints for multi-endpoint mode
-                for &missing_idx in &missing_indices {
-                    let size = all_sizes[missing_idx as usize];
-                    
-                    // Select endpoint using round-robin distribution
-                    let endpoint = &endpoints[missing_idx as usize % endpoints.len()];
-                    
-                    task_specs.push(TaskSpec {
-                        size,
-                        store_uri: endpoint.clone(),
-                        fill: spec.fill,
-                        dedup: spec.dedup_factor,
-                        compress: spec.compress_factor,
-                        prefix: prefix.to_string(),
-                        index: missing_idx,  // Store the specific missing index
-                    });
-                }
-                
+
+                plans.push(PreparePlan {
+                    count: spec.count,
+                    size_spec,
+                    fill: spec.fill,
+                    dedup: spec.dedup_factor,
+                    compress: spec.compress_factor,
+                    prefix: prefix.to_string(),
+                    endpoints: endpoints.clone(),
+                    existing_indices,
+                    force_overwrite: config.force_overwrite,
+                    skip_verification: config.skip_verification,
+                    seed,
+                });
+
                 total_to_create += actual_to_create;
             }
         }
     }
-    
-    if task_specs.is_empty() {
+
+    if total_to_create == 0 {
         info!("All objects already exist - reconstructing PreparedObject list from existing files");
         let mut all_prepared = Vec::new();
         
@@ -361,142 +367,8 @@ pub(crate) async fn prepare_parallel(
         return Ok(all_prepared);
     }
     
-    // Phase 2: Shuffle task specs to mix sizes across directories
-    // Use StdRng which is Send-safe for async contexts
-    // v0.8.24: Skip shuffle for very large task counts (>1M) to avoid blocking
-    // Shuffling 16M entries can take 20+ seconds and block the async runtime,
-    // causing gRPC connection timeouts. Size distribution is already good enough
-    // from lognormal sampling without shuffling.
-    if task_specs.len() > 1_000_000 {
-        info!("Skipping shuffle for {} tasks (>1M threshold) to avoid blocking", task_specs.len());
-    } else {
-        info!("Shuffling {} tasks to distribute sizes evenly across directories", task_specs.len());
-        let mut rng = rand::rngs::StdRng::seed_from_u64(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
-        task_specs.shuffle(&mut rng);
-    }
-    
-    // Phase 3: Assign URIs to shuffled tasks using their specific indices (gap-aware)
-    // v0.7.9: Tasks already have specific indices assigned during creation
-    
-    let mut all_tasks: Vec<PrepareTask> = Vec::with_capacity(task_specs.len());
-    for spec in task_specs {
-        // v0.7.9: Use the specific index stored in TaskSpec (no sequential assignment)
-        let idx = spec.index;
-        
-        // Use tree manifest for file paths if available
-        let uri = if let Some(manifest) = tree_manifest {
-            // Create files in directory structure at specific index
-            let global_idx = idx as usize;
-            if let Some(rel_path) = manifest.get_file_path(global_idx) {
-                if spec.store_uri.ends_with('/') {
-                    format!("{}{}", spec.store_uri, rel_path)
-                } else {
-                    format!("{}/{}", spec.store_uri, rel_path)
-                }
-            } else {
-                // Fallback to flat naming if manifest doesn't have this index
-                let key = format!("{}-{:08}.dat", spec.prefix, idx);
-                if spec.store_uri.ends_with('/') {
-                    format!("{}{}", spec.store_uri, key)
-                } else {
-                    format!("{}/{}", spec.store_uri, key)
-                }
-            }
-        } else {
-            // Flat file naming at specific index
-            let key = format!("{}-{:08}.dat", spec.prefix, idx);
-            if spec.store_uri.ends_with('/') {
-                format!("{}{}", spec.store_uri, key)
-            } else {
-                format!("{}/{}", spec.store_uri, key)
-            }
-        };
-        
-        all_tasks.push(PrepareTask {
-            uri,
-            size: spec.size,
-            store_uri: spec.store_uri,
-            fill: spec.fill,
-            dedup: spec.dedup,
-            compress: spec.compress,
-        });
-    }
-    
-    // Phase 3.5: Handle case where all objects already exist (total_to_create == 0)
-    if total_to_create == 0 {
-        info!("All objects already exist - reconstructing PreparedObject list");
-        let mut all_prepared = Vec::new();
-        
-        // Reconstruct existing objects from specs
-        for spec in &config.ensure_objects {
-            // Get endpoints for file distribution (same logic as above)
-            // v0.8.24: Use all endpoints for multi-endpoint mode
-            let endpoints: Vec<String> = if spec.use_multi_endpoint {
-                if let Some(multi_ep) = multi_endpoint_config {
-                    multi_ep.endpoints.clone()
-                } else {
-                    vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
-                }
-            } else {
-                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-                vec![spec.get_base_uri(multi_endpoint_uris)
-                    .context("Failed to determine base_uri for assigning URIs to existing objects")?]
-            };
-            
-            let pools_to_create = if needs_separate_pools {
-                vec![("prepared", true), ("deletable", false)]
-            } else {
-                vec![("prepared", false)]
-            };
-            
-            for (prefix, _is_readonly) in &pools_to_create {
-                let size_spec = spec.get_size_spec();
-                let mut size_generator = SizeGenerator::new(&size_spec)
-                    .context("Failed to create size generator")?;
-                
-                for i in 0..spec.count {
-                    // Round-robin across endpoints
-                    let base_uri = &endpoints[i as usize % endpoints.len()];
-                    
-                    let uri = if let Some(manifest) = tree_manifest {
-                        // Tree mode: use manifest paths
-                        if let Some(rel_path) = manifest.get_file_path(i as usize) {
-                            if base_uri.ends_with('/') {
-                                format!("{}{}", base_uri, rel_path)
-                            } else {
-                                format!("{}/{}", base_uri, rel_path)
-                            }
-                        } else {
-                            continue;  // Skip if manifest doesn't have this index
-                        }
-                    } else {
-                        // Flat mode: traditional naming
-                        let key = format!("{}-{:08}.dat", prefix, i);
-                        if base_uri.ends_with('/') {
-                            format!("{}{}", base_uri, key)
-                        } else {
-                            format!("{}/{}", base_uri, key)
-                        }
-                    };
-                    
-                    let size = size_generator.generate();
-                    all_prepared.push(PreparedObject {
-                        uri,
-                        size,
-                        created: false,  // All existed
-                    });
-                }
-            }
-        }
-        
-        return Ok(all_prepared);
-    }
-    
-    // Phase 4: Execute all tasks in parallel with unified progress bar
-    info!("Creating {} total objects in parallel (sizes shuffled for even distribution)", total_to_create);
+    // Phase 2: Execute all tasks in parallel with unified progress bar
+    info!("Creating {} total objects in parallel (streaming task generation)", total_to_create);
     
     // Use workload concurrency for prepare phase (passed from config)
     // Note: concurrency parameter comes from Config.concurrency
@@ -561,182 +433,403 @@ pub(crate) async fn prepare_parallel(
     });
     
     let sem = Arc::new(Semaphore::new(concurrency));
-    let mut futs = FuturesUnordered::new();
     let pb_clone = pb.clone();
     let tracker_clone = live_stats_tracker.clone();
-    
+
     // v0.8.13: Error tracking for resilient prepare phase
     let error_tracker = Arc::new(PrepareErrorTracker::new());
-    
+
     // v0.8.9: Create store cache to avoid creating per-object (was causing massive overhead)
-    // Build cache of unique store_uris before entering the loop
-    let mut store_cache: std::collections::HashMap<String, Arc<Box<dyn s3dlio::ObjectStore>>> = std::collections::HashMap::new();
-    for task in &all_tasks {
-        if !store_cache.contains_key(&task.store_uri) {
-            let store = create_store_for_uri(&task.store_uri)
-                .with_context(|| format!("Failed to create store for {}", task.store_uri))?;
-            store_cache.insert(task.store_uri.clone(), Arc::new(store));
+    let mut store_cache: HashMap<String, Arc<Box<dyn s3dlio::ObjectStore>>> = HashMap::new();
+    for plan in &plans {
+        for endpoint in &plan.endpoints {
+            if !store_cache.contains_key(endpoint) {
+                let store = create_store_for_uri(endpoint)
+                    .with_context(|| format!("Failed to create store for {}", endpoint))?;
+                store_cache.insert(endpoint.clone(), Arc::new(store));
+            }
         }
     }
     let store_cache = Arc::new(store_cache);
     info!("Created {} cached object store(s) for prepare phase", store_cache.len());
-    
-    for task in all_tasks {
-        let sem2 = sem.clone();
-        let pb2 = pb_clone.clone();
-        let ops_counter = live_ops.clone();
-        let bytes_counter = live_bytes.clone();
-        let tracker = tracker_clone.clone();
-        let stores = store_cache.clone();
-        let err_tracker = error_tracker.clone();
-        
-        futs.push(tokio::spawn(async move {
-            let _permit = sem2.acquire_owned().await.unwrap();
-            
-            // Generate data using s3dlio's controlled data generation
-            // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
-            let data = match task.fill {
-                FillPattern::Zero => {
-                    let buf = bytes::BytesMut::zeroed(task.size as usize);
-                    buf.freeze()  // Zero-copy: BytesMut→Bytes
-                }
-                FillPattern::Random => {
-                    // Already returns Bytes - zero-copy
-                    crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
-                }
-                FillPattern::Prand => {
-                    #[allow(unused_mut)]  // Suppress false warning - mut required for fill_controlled_data
-                    let mut buf = bytes::BytesMut::zeroed(task.size as usize);
-                    s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
-                    buf.freeze()
-                }
-            };
-            
-            // Get cached store instance
-            let store = stores.get(&task.store_uri)
-                .ok_or_else(|| anyhow::anyhow!("Store not found in cache for {}", task.store_uri))?;
-            
-            // v0.8.13: PUT object with retry and exponential backoff
-            let retry_config = RetryConfig::default();
-            let uri_for_retry = task.uri.clone();
-            let put_start = Instant::now();
-            
-            let put_result = retry_with_backoff(
-                &format!("PUT {}", &task.uri),
-                &retry_config,
-                || {
-                    let store_ref = store.clone();
-                    let uri_ref = uri_for_retry.clone();
-                    let data_ref = data.clone();  // Cheap: Bytes is Arc-like
-                    async move {
-                        store_ref.put(&uri_ref, data_ref).await  // Zero-copy: Bytes passed directly
-                            .map_err(|e| anyhow::anyhow!("{}", e))
-                    }
-                }
-            ).await;
-            
-            match put_result {
-                RetryResult::Success(_) => {
-                    let latency = put_start.elapsed();
-                    let latency_us = latency.as_micros() as u64;
-                    
-                    // Record success - resets consecutive error counter
-                    err_tracker.record_success();
-                    
-                    // Record stats for live streaming (if tracker provided)
-                    if let Some(ref t) = tracker {
-                        t.record_put(task.size as usize, latency);
-                    }
-                    
-                    // Update live counters
-                    ops_counter.fetch_add(1, Ordering::Relaxed);
-                    bytes_counter.fetch_add(task.size, Ordering::Relaxed);
-                    
-                    pb2.inc(1);
-                    
-                    // v0.7.9: Update prepare progress in live stats tracker
-                    if let Some(ref t) = tracker {
-                        let created = pb2.position();
-                        let total = pb2.length().unwrap_or(total_to_create);
-                        t.set_prepare_progress(created, total);
-                    }
-                    
-                    // Return success with latency
-                    Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
-                }
-                RetryResult::Failed(e) => {
-                    // v0.8.13: All retries failed - record error and check thresholds
-                    let error_msg = format!("{}", e);
-                    let (should_abort, total_errors, consecutive_errors) = 
-                        err_tracker.record_error(&task.uri, task.size, &error_msg);
-                    
-                    // Log at debug level (visible with -vv) - individual errors are expected
-                    tracing::debug!("❌ PUT failed for {} after retries: {} [total: {}, consecutive: {}]",
-                        task.uri, error_msg, total_errors, consecutive_errors);
-                    
-                    // Still increment progress bar (object skipped)
-                    pb2.inc(1);
-                    if let Some(ref t) = tracker {
-                        let created = pb2.position();
-                        let total = pb2.length().unwrap_or(total_to_create);
-                        t.set_prepare_progress(created, total);
-                    }
-                    
-                    if should_abort {
-                        // Threshold exceeded - abort entire prepare
-                        Err(anyhow::anyhow!(
-                            "Prepare aborted: {} total errors (max: {}) or {} consecutive errors (max: {})",
-                            total_errors, DEFAULT_PREPARE_MAX_ERRORS,
-                            consecutive_errors, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS
-                        ))
-                    } else {
-                        // Error logged but continue with other objects
-                        Ok(None)
-                    }
-                }
-            }
-        }));
-    }
-    
-    // Collect results as they complete - v0.8.13: Handle errors gracefully
+
     let mut all_prepared = Vec::with_capacity(total_to_create as usize);
     let mut error_result: Option<anyhow::Error> = None;
     let mut yield_counter = 0u64;  // v0.8.51: Counter for periodic yields
-    
-    while let Some(result) = futs.next().await {
-        // v0.8.51: Yield every 100 operations to prevent executor starvation
-        yield_counter += 1;
-        if yield_counter.is_multiple_of(100) {
-            tokio::task::yield_now().await;
+
+    const TASK_CHUNK_SIZE: usize = 100_000;
+
+    struct PlanState<'a> {
+        plan: &'a PreparePlan,
+        next_idx: u64,
+        size_generator: SizeGenerator,
+    }
+
+    let mut plan_states: Vec<PlanState> = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        let size_generator = SizeGenerator::new_with_seed(&plan.size_spec, plan.seed)
+            .context("Failed to create size generator")?;
+        plan_states.push(PlanState {
+            plan,
+            next_idx: 0,
+            size_generator,
+        });
+    }
+
+    let mut chunk_tasks: Vec<PrepareTask> = Vec::with_capacity(TASK_CHUNK_SIZE);
+
+    loop {
+        if error_result.is_some() {
+            break;
         }
-        
-        match result {
-            Ok(Ok(Some((uri, size, latency_us)))) => {
-                // Successful PUT
-                metrics.put.bytes += size;
-                metrics.put.ops += 1;
-                metrics.put_bins.add(size);
-                let bucket = crate::metrics::bucket_index(size as usize);
-                metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
-                
-                all_prepared.push(PreparedObject {
-                    uri,
-                    size,
-                    created: true,
-                });
+
+        let mut made_progress = false;
+
+        for state in plan_states.iter_mut() {
+            if state.next_idx >= state.plan.count {
+                continue;
             }
-            Ok(Ok(None)) => {
-                // PUT failed but below threshold - object skipped, continue
+
+            made_progress = true;
+            let idx = state.next_idx;
+            state.next_idx += 1;
+
+            let size = state.size_generator.generate();
+            let should_create = if state.plan.skip_verification && !state.plan.force_overwrite {
+                false
+            } else if state.plan.force_overwrite {
+                true
+            } else {
+                !state.plan.existing_indices.contains(&idx)
+            };
+
+            if !should_create {
+                continue;
             }
-            Ok(Err(e)) => {
-                // Threshold exceeded - record error but continue draining futures
-                if error_result.is_none() {
-                    error_result = Some(e);
+
+            if shared_storage && num_agents > 1 && (idx as usize % num_agents) != agent_id {
+                continue;
+            }
+
+            let plan = state.plan;
+            let endpoint = &plan.endpoints[idx as usize % plan.endpoints.len()];
+            let uri = if let Some(manifest) = tree_manifest {
+                if let Some(rel_path) = manifest.get_file_path(idx as usize) {
+                    if endpoint.ends_with('/') {
+                        format!("{}{}", endpoint, rel_path)
+                    } else {
+                        format!("{}/{}", endpoint, rel_path)
+                    }
+                } else {
+                    let key = format!("{}-{:08}.dat", plan.prefix, idx);
+                    if endpoint.ends_with('/') {
+                        format!("{}{}", endpoint, key)
+                    } else {
+                        format!("{}/{}", endpoint, key)
+                    }
+                }
+            } else {
+                let key = format!("{}-{:08}.dat", plan.prefix, idx);
+                if endpoint.ends_with('/') {
+                    format!("{}{}", endpoint, key)
+                } else {
+                    format!("{}/{}", endpoint, key)
+                }
+            };
+
+            chunk_tasks.push(PrepareTask {
+                uri,
+                size,
+                store_uri: endpoint.clone(),
+                fill: plan.fill,
+                dedup: plan.dedup,
+                compress: plan.compress,
+            });
+
+            if chunk_tasks.len() >= TASK_CHUNK_SIZE {
+                let tasks = std::mem::take(&mut chunk_tasks);
+                let mut futs = FuturesUnordered::new();
+
+                for task in tasks {
+                    let sem2 = sem.clone();
+                    let pb2 = pb_clone.clone();
+                    let ops_counter = live_ops.clone();
+                    let bytes_counter = live_bytes.clone();
+                    let tracker = tracker_clone.clone();
+                    let stores = store_cache.clone();
+                    let err_tracker = error_tracker.clone();
+
+                    futs.push(tokio::spawn(async move {
+                        let _permit = sem2.acquire_owned().await.unwrap();
+
+                        let data = match task.fill {
+                            FillPattern::Zero => {
+                                let buf = bytes::BytesMut::zeroed(task.size as usize);
+                                buf.freeze()
+                            }
+                            FillPattern::Random => {
+                                crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
+                            }
+                            FillPattern::Prand => {
+                                #[allow(unused_mut)]
+                                let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                                s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
+                                buf.freeze()
+                            }
+                        };
+
+                        let store = stores.get(&task.store_uri)
+                            .ok_or_else(|| anyhow::anyhow!("Store not found in cache for {}", task.store_uri))?;
+
+                        let retry_config = RetryConfig::default();
+                        let uri_for_retry = task.uri.clone();
+                        let put_start = Instant::now();
+
+                        let put_result = retry_with_backoff(
+                            &format!("PUT {}", &task.uri),
+                            &retry_config,
+                            || {
+                                let store_ref = store.clone();
+                                let uri_ref = uri_for_retry.clone();
+                                let data_ref = data.clone();
+                                async move {
+                                    store_ref.put(&uri_ref, data_ref).await
+                                        .map_err(|e| anyhow::anyhow!("{}", e))
+                                }
+                            }
+                        ).await;
+
+                        match put_result {
+                            RetryResult::Success(_) => {
+                                let latency = put_start.elapsed();
+                                let latency_us = latency.as_micros() as u64;
+
+                                err_tracker.record_success();
+
+                                if let Some(ref t) = tracker {
+                                    t.record_put(task.size as usize, latency);
+                                }
+
+                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                bytes_counter.fetch_add(task.size, Ordering::Relaxed);
+
+                                pb2.inc(1);
+
+                                if let Some(ref t) = tracker {
+                                    let created = pb2.position();
+                                    let total = pb2.length().unwrap_or(total_to_create);
+                                    t.set_prepare_progress(created, total);
+                                }
+
+                                Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
+                            }
+                            RetryResult::Failed(e) => {
+                                let error_msg = format!("{}", e);
+                                let (should_abort, total_errors, consecutive_errors) =
+                                    err_tracker.record_error(&task.uri, task.size, &error_msg);
+
+                                tracing::debug!("❌ PUT failed for {} after retries: {} [total: {}, consecutive: {}]",
+                                    task.uri, error_msg, total_errors, consecutive_errors);
+
+                                pb2.inc(1);
+                                if let Some(ref t) = tracker {
+                                    let created = pb2.position();
+                                    let total = pb2.length().unwrap_or(total_to_create);
+                                    t.set_prepare_progress(created, total);
+                                }
+
+                                if should_abort {
+                                    Err(anyhow::anyhow!(
+                                        "Prepare aborted: {} total errors (max: {}) or {} consecutive errors (max: {})",
+                                        total_errors, DEFAULT_PREPARE_MAX_ERRORS,
+                                        consecutive_errors, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS
+                                    ))
+                                } else {
+                                    Ok(None)
+                                }
+                            }
+                        }
+                    }));
+                }
+
+                while let Some(result) = futs.next().await {
+                    yield_counter += 1;
+                    if yield_counter.is_multiple_of(100) {
+                        tokio::task::yield_now().await;
+                    }
+
+                    match result {
+                        Ok(Ok(Some((uri, size, latency_us)))) => {
+                            metrics.put.bytes += size;
+                            metrics.put.ops += 1;
+                            metrics.put_bins.add(size);
+                            let bucket = crate::metrics::bucket_index(size as usize);
+                            metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+
+                            all_prepared.push(PreparedObject {
+                                uri,
+                                size,
+                                created: true,
+                            });
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(e)) => {
+                            if error_result.is_none() {
+                                error_result = Some(e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Prepare task failed: {}", e);
+                        }
+                    }
+                }
+
+                if error_result.is_some() {
+                    break;
                 }
             }
-            Err(e) => {
-                // Task panic or join error
-                warn!("Prepare task failed: {}", e);
+        }
+
+        if !made_progress {
+            break;
+        }
+    }
+
+    if !chunk_tasks.is_empty() {
+        let tasks = std::mem::take(&mut chunk_tasks);
+        let mut futs = FuturesUnordered::new();
+
+        for task in tasks {
+            let sem2 = sem.clone();
+            let pb2 = pb_clone.clone();
+            let ops_counter = live_ops.clone();
+            let bytes_counter = live_bytes.clone();
+            let tracker = tracker_clone.clone();
+            let stores = store_cache.clone();
+            let err_tracker = error_tracker.clone();
+
+            futs.push(tokio::spawn(async move {
+                let _permit = sem2.acquire_owned().await.unwrap();
+
+                let data = match task.fill {
+                    FillPattern::Zero => {
+                        let buf = bytes::BytesMut::zeroed(task.size as usize);
+                        buf.freeze()
+                    }
+                    FillPattern::Random => {
+                        crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
+                    }
+                    FillPattern::Prand => {
+                        #[allow(unused_mut)]
+                        let mut buf = bytes::BytesMut::zeroed(task.size as usize);
+                        s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
+                        buf.freeze()
+                    }
+                };
+
+                let store = stores.get(&task.store_uri)
+                    .ok_or_else(|| anyhow::anyhow!("Store not found in cache for {}", task.store_uri))?;
+
+                let retry_config = RetryConfig::default();
+                let uri_for_retry = task.uri.clone();
+                let put_start = Instant::now();
+
+                let put_result = retry_with_backoff(
+                    &format!("PUT {}", &task.uri),
+                    &retry_config,
+                    || {
+                        let store_ref = store.clone();
+                        let uri_ref = uri_for_retry.clone();
+                        let data_ref = data.clone();
+                        async move {
+                            store_ref.put(&uri_ref, data_ref).await
+                                .map_err(|e| anyhow::anyhow!("{}", e))
+                        }
+                    }
+                ).await;
+
+                match put_result {
+                    RetryResult::Success(_) => {
+                        let latency = put_start.elapsed();
+                        let latency_us = latency.as_micros() as u64;
+
+                        err_tracker.record_success();
+
+                        if let Some(ref t) = tracker {
+                            t.record_put(task.size as usize, latency);
+                        }
+
+                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                        bytes_counter.fetch_add(task.size, Ordering::Relaxed);
+
+                        pb2.inc(1);
+
+                        if let Some(ref t) = tracker {
+                            let created = pb2.position();
+                            let total = pb2.length().unwrap_or(total_to_create);
+                            t.set_prepare_progress(created, total);
+                        }
+
+                        Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
+                    }
+                    RetryResult::Failed(e) => {
+                        let error_msg = format!("{}", e);
+                        let (should_abort, total_errors, consecutive_errors) =
+                            err_tracker.record_error(&task.uri, task.size, &error_msg);
+
+                        tracing::debug!("❌ PUT failed for {} after retries: {} [total: {}, consecutive: {}]",
+                            task.uri, error_msg, total_errors, consecutive_errors);
+
+                        pb2.inc(1);
+                        if let Some(ref t) = tracker {
+                            let created = pb2.position();
+                            let total = pb2.length().unwrap_or(total_to_create);
+                            t.set_prepare_progress(created, total);
+                        }
+
+                        if should_abort {
+                            Err(anyhow::anyhow!(
+                                "Prepare aborted: {} total errors (max: {}) or {} consecutive errors (max: {})",
+                                total_errors, DEFAULT_PREPARE_MAX_ERRORS,
+                                consecutive_errors, DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS
+                            ))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+            }));
+        }
+
+        while let Some(result) = futs.next().await {
+            yield_counter += 1;
+            if yield_counter.is_multiple_of(100) {
+                tokio::task::yield_now().await;
+            }
+
+            match result {
+                Ok(Ok(Some((uri, size, latency_us)))) => {
+                    metrics.put.bytes += size;
+                    metrics.put.ops += 1;
+                    metrics.put_bins.add(size);
+                    let bucket = crate::metrics::bucket_index(size as usize);
+                    metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+
+                    all_prepared.push(PreparedObject {
+                        uri,
+                        size,
+                        created: true,
+                    });
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
+                    if error_result.is_none() {
+                        error_result = Some(e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Prepare task failed: {}", e);
+                }
             }
         }
     }

@@ -254,3 +254,119 @@ mod base_uri_tests {
         assert_eq!(result.unwrap(), "file:///old/path/");
     }
 }
+
+#[cfg(test)]
+mod barrier_defaults_tests {
+    use std::collections::HashMap;
+
+    use crate::config::{
+        AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig, PathSelectionStrategy,
+        StageConfig, StageSpecificConfig, TreeCreationMode,
+    };
+
+    fn build_distributed_config(
+        stages: Vec<StageConfig>,
+        barrier_sync: BarrierSyncConfig,
+    ) -> DistributedConfig {
+        DistributedConfig {
+            agents: vec![AgentConfig {
+                address: "127.0.0.1:7761".to_string(),
+                id: Some("agent-1".to_string()),
+                target_override: None,
+                concurrency_override: None,
+                env: HashMap::new(),
+                volumes: Vec::new(),
+                path_template: None,
+                listen_port: 7761,
+                multi_endpoint: None,
+                kv_cache_dir: None,
+            }],
+            ssh: None,
+            deployment: None,
+            start_delay: 2,
+            path_template: "agent-{id}/".to_string(),
+            shared_filesystem: true,
+            tree_creation_mode: TreeCreationMode::Isolated,
+            path_selection: PathSelectionStrategy::Random,
+            partition_overlap: 0.3,
+            grpc_keepalive_interval: 30,
+            grpc_keepalive_timeout: 10,
+            agent_ready_timeout: 120,
+            barrier_sync,
+            stages,
+            kv_cache_dir: None,
+        }
+    }
+
+    #[test]
+    fn test_barrier_defaults_applied_when_enabled() {
+        let barrier_sync = BarrierSyncConfig {
+            enabled: true,
+            default_heartbeat_interval: 12,
+            default_missed_threshold: 7,
+            default_query_timeout: 9,
+            default_query_retries: 4,
+            validation: None,
+            prepare: None,
+            execute: None,
+            cleanup: None,
+        };
+        let stages = vec![StageConfig {
+            name: "prepare".to_string(),
+            order: 1,
+            completion: CompletionCriteria::TasksDone,
+            barrier: None,
+            timeout_secs: None,
+            optional: false,
+            config: StageSpecificConfig::Prepare {
+                expected_objects: None,
+            },
+        }];
+
+        let config = build_distributed_config(stages, barrier_sync);
+        let sorted = config.get_sorted_stages().expect("stages should validate");
+        let barrier = sorted[0]
+            .barrier
+            .as_ref()
+            .expect("barrier defaults should be applied");
+        let expected = config.barrier_sync.get_phase_config("prepare");
+
+        assert_eq!(barrier.barrier_type, expected.barrier_type);
+        assert_eq!(barrier.heartbeat_interval, expected.heartbeat_interval);
+        assert_eq!(barrier.missed_threshold, expected.missed_threshold);
+        assert_eq!(barrier.query_timeout, expected.query_timeout);
+        assert_eq!(barrier.query_retries, expected.query_retries);
+        assert_eq!(barrier.agent_barrier_timeout, expected.agent_barrier_timeout);
+    }
+
+    #[test]
+    fn test_barrier_defaults_not_applied_when_disabled() {
+        let barrier_sync = BarrierSyncConfig {
+            enabled: false,
+            default_heartbeat_interval: 12,
+            default_missed_threshold: 7,
+            default_query_timeout: 9,
+            default_query_retries: 4,
+            validation: None,
+            prepare: None,
+            execute: None,
+            cleanup: None,
+        };
+        let stages = vec![StageConfig {
+            name: "prepare".to_string(),
+            order: 1,
+            completion: CompletionCriteria::TasksDone,
+            barrier: None,
+            timeout_secs: None,
+            optional: false,
+            config: StageSpecificConfig::Prepare {
+                expected_objects: None,
+            },
+        }];
+
+        let config = build_distributed_config(stages, barrier_sync);
+        let sorted = config.get_sorted_stages().expect("stages should validate");
+
+        assert!(sorted[0].barrier.is_none());
+    }
+}

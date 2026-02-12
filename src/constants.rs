@@ -174,6 +174,10 @@ pub const PROGRESS_UPDATE_INTERVAL_MS: u64 = 100;
 /// Live stats (ops/sec, MiB/sec, latency) update at this frequency
 pub const PROGRESS_STATS_UPDATE_INTERVAL_SECS: f64 = 0.5;
 
+/// Dry-run sample size for path/size generation (v0.8.62+)
+/// Used to validate large configs before running
+pub const DRY_RUN_SAMPLE_SIZE: usize = 100_000;
+
 // =============================================================================
 // Performance Log Defaults (v0.8.15+)
 // =============================================================================

@@ -213,20 +213,13 @@ pub(crate) async fn prepare_sequential(
             if to_create > 0 {
                 use futures::stream::{FuturesUnordered, StreamExt};
                 
-                // v0.7.9: Pre-generate ALL sizes with deterministic seeded generator
-                // This ensures: (1) deterministic sizes, (2) gap-filling uses correct sizes
+                // v0.7.9: Stream deterministic sizes instead of pre-generating all
                 let size_spec = spec.get_size_spec();
                 let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)
                     .context("Failed to create size generator")?;
                 
-                info!("  [v0.7.9] Pre-generating all {} sizes with seed {} for deterministic gap-filling", spec.count, seed);
-                let mut all_sizes: Vec<u64> = Vec::with_capacity(spec.count as usize);
-                for i in 0..spec.count {
-                    all_sizes.push(size_generator.generate());
-                    if i == 0 {
-                    }
-                }
+                info!("  [v0.7.9] Streaming size generation with seed {} for deterministic gap-filling", seed);
                 
                 // Identify missing indices (gaps to fill)
                 let mut missing_indices: Vec<u64> = (0..spec.count)
@@ -320,35 +313,44 @@ pub(crate) async fn prepare_sequential(
                     }
                 });
                 
-                // v0.7.9: Generate tasks for missing indices with pre-generated sizes
+                // v0.7.9: Generate tasks for missing indices with streamed sizes
                 let mut tasks: Vec<(String, u64)> = Vec::with_capacity(missing_indices.len());
                 
-                // Use tree manifest for file paths if available
                 if let Some(manifest) = tree_manifest {
-                    // Create files at specific missing indices in directory structure
-                    for &missing_idx in &missing_indices {
-                        if let Some(rel_path) = manifest.get_file_path(missing_idx as usize) {
+                    for idx in 0..spec.count {
+                        let size = size_generator.generate();
+                        if existing_indices.contains(&idx) {
+                            continue;
+                        }
+                        if num_agents > 1 && (idx as usize % num_agents) != agent_id {
+                            continue;
+                        }
+                        if let Some(rel_path) = manifest.get_file_path(idx as usize) {
                             let uri = if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, rel_path)
                             } else {
                                 format!("{}/{}", base_uri, rel_path)
                             };
-                            let size = all_sizes[missing_idx as usize];
                             tasks.push((uri, size));
                         } else {
-                            warn!("No file path for missing index {} in tree manifest", missing_idx);
+                            warn!("No file path for missing index {} in tree manifest", idx);
                         }
                     }
                 } else {
-                    // Flat file mode: create at specific missing indices
-                    for &missing_idx in &missing_indices {
-                        let key = format!("{}-{:08}.dat", prefix, missing_idx);
+                    for idx in 0..spec.count {
+                        let size = size_generator.generate();
+                        if existing_indices.contains(&idx) {
+                            continue;
+                        }
+                        if num_agents > 1 && (idx as usize % num_agents) != agent_id {
+                            continue;
+                        }
+                        let key = format!("{}-{:08}.dat", prefix, idx);
                         let uri = if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, key)
                         } else {
                             format!("{}/{}", base_uri, key)
                         };
-                        let size = all_sizes[missing_idx as usize];
                         tasks.push((uri, size));
                     }
                 }

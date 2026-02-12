@@ -295,6 +295,15 @@ impl PerfLogDeltaTracker {
         self.warmup_end = warmup_duration.map(|d| now + d);
         // Note: We don't reset prev_* counters - those track cumulative deltas
     }
+
+    /// Reset elapsed time tracking for a new stage without changing counters
+    ///
+    /// This preserves cumulative counters while restarting elapsed_s timing.
+    pub fn reset_for_stage(&mut self) {
+        let now = Instant::now();
+        self.workload_start = Some(now);
+        self.prev_timestamp = Some(now);
+    }
     
     /// Compute delta entry from current cumulative stats
     /// 

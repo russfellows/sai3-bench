@@ -6,6 +6,47 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.62] - 2026-02-11
+
+**Prepare Streaming + Perf Log Timing + Dry-Run Memory Sampling**
+
+This release removes the large precompute memory spike in prepare, restores parallel size mixing while streaming, and adds visibility into dry-run sample memory. It also aligns perf-log timing with stage transitions and improves the analyze tooling.
+
+### Added
+
+- **Dry-run sample generation with memory/time reporting**
+  - Always generates a fixed sample (100k) of prepare paths/sizes
+  - Reports elapsed time and RSS delta to surface scaling risks
+
+- **Per-agent perf-log export in analyze tool**
+  - Adds worksheets for `agents/*/perf_log.tsv`
+  - Ensures unique worksheet names and safe 31-char limits
+  - Adds `--overwrite` flag and smarter default output naming
+
+### Changed
+
+- **Parallel prepare now streams and interleaves**
+  - Interleaves `ensure_objects` entries to preserve mixed sizes
+  - Uses deterministic on-the-fly size generation with bounded chunking
+  - Keeps memory flat by dropping per-chunk task vectors
+
+- **Sequential prepare no longer precomputes sizes**
+  - Deterministic streaming generation for large datasets
+
+- **Directory tree path resolution is now O(1)**
+  - Avoids linear scans in `TreeManifest::get_file_path()`
+
+- **Perf-log elapsed timing resets on stage transitions**
+  - Controller and per-agent perf-log writers reset stage elapsed time on transitions
+  - Ensures stage timing alignment without resetting counters
+
+- **Directory tree counts applied to parsed configs**
+  - `sai3-bench` and `sai3bench-ctl` now apply directory tree counts before dry-run and controller dispatch
+
+### Testing
+
+- **551 tests passing** (release profile)
+
 ---
 
 ## [0.8.61] - 2026-02-11

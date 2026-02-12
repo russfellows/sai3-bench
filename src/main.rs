@@ -1129,6 +1129,9 @@ fn run_workload(
     
     let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+
+    sai3_bench::validation::apply_directory_tree_counts(&mut config)
+        .context("Directory tree count validation failed")?;
     
     // Dry-run mode: display config summary and exit
     if dry_run {

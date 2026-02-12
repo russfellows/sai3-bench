@@ -73,6 +73,23 @@ This will:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Dry-Run Sample Generation (Memory Sanity Check)
+
+`--dry-run` always generates a fixed-size sample of prepare object paths and sizes to validate deterministic generation and estimate memory impact.
+
+**What it does**:
+- Generates the first N objects (default: 100,000) using the same deterministic size and path rules as the real prepare phase
+- Uses directory tree logic (if configured) to resolve file paths
+- Reports elapsed time and RSS delta (Linux only, from `/proc/self/status`)
+
+**Why it matters**:
+- Validates that large configs can be iterated without precomputing the full dataset
+- Gives a quick memory and time estimate before running the full workload
+
+**Important**:
+- The sample is bounded by a fixed limit and does not scale with total object count
+- RSS may not drop immediately after sample generation because the allocator keeps freed pages for reuse
+
 ## Basic Structure
 
 **Note: Human-Readable Time Units (v0.8.52+)**
@@ -2069,6 +2086,16 @@ prepare:
       size_spec: {uniform: {min: 1KB, max: 1MB}}
 ```
 Creates: Mixes sizes from both entries, avoiding all 32KB objects followed by all 1MB objects.
+
+#### Streaming Task Generation (Large-Scale Prepare)
+
+For large datasets, prepare uses streaming task generation instead of precomputing all sizes and tasks:
+
+- Objects are generated in fixed-size chunks (100,000 at a time)
+- Sizes are generated deterministically on the fly using a seeded generator
+- Per-chunk task vectors are dropped after completion to keep memory bounded
+
+This prevents memory use from growing with total object count during prepare. The one expected growth is the list of prepared object metadata retained for later workload phases.
 
 ### Live Performance Monitoring (v0.7.2+)
 
