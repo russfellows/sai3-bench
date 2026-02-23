@@ -75,7 +75,7 @@ fn test_stuck_agent_identification() {
     
     use std::collections::HashSet;
     
-    let all_agents = vec!["agent-1", "agent-2", "agent-3", "agent-4"];
+    let all_agents = ["agent-1", "agent-2", "agent-3", "agent-4"];
     let ready_agents: HashSet<&str> = ["agent-1", "agent-3"].iter().copied().collect();
     let failed_agents: HashSet<&str> = HashSet::new();
     

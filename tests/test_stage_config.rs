@@ -62,7 +62,7 @@ expected_objects: 10000
     assert_eq!(stage.name, "cleanup");
     assert_eq!(stage.order, 4);
     assert_eq!(stage.completion, CompletionCriteria::TasksDone);
-    assert_eq!(stage.optional, true);
+    assert!(stage.optional);
     
     match stage.config {
         StageSpecificConfig::Cleanup { expected_objects } => {

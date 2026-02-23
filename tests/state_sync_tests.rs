@@ -57,7 +57,7 @@ fn test_sync_state_forces_stage_transition() {
         WorkloadState::AtStage { stage_index, stage_name, ready_for_next: ready } => {
             assert_eq!(*stage_index, 3, "Should be at stage 3 after sync");
             assert_eq!(stage_name, "epoch-3-execute", "Should have correct stage name");
-            assert_eq!(*ready, false, "Should be executing, not ready");
+            assert!(!(*ready), "Should be executing, not ready");
         }
         _ => panic!("Expected AtStage state"),
     }
