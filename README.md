@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.62-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.63-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-551%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-569%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.63)**: **Multi-endpoint checkpoint race condition fix** - Eliminates fatal workload aborts at 99% completion for shared storage. **s3dlio optimization support** - +76% GET throughput for large objects (≥64MB).
 
 **🚀 NEW (v0.8.62)**: **Streaming prepare + dry-run memory sampling + stage-aligned perf-log timing** for safer large-scale runs.
 
@@ -323,6 +325,7 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 - **[Config Examples](tests/configs/README.md)** - Annotated test configurations
 - **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation
 - **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication
+- **[s3dlio Performance Tuning](docs/S3DLIO_PERFORMANCE_TUNING.md)** - Range downloads & multipart upload optimization ✨ NEW
 - **[Data Generation Guide](docs/DATA_GENERATION.md)** - Deduplication and compression testing
 - **[Results Analysis Tool](docs/ANALYZE_TOOL.md)** - Consolidating multiple results into Excel ✨ NEW
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history

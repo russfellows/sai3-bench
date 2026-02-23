@@ -17,7 +17,7 @@ use sai3_bench::cpu_monitor::CpuMonitor;
 use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
 use sai3_bench::workload;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as RtBuilder;
@@ -1111,6 +1111,51 @@ fn display_config_summary(config: &Config, config_path: &str) -> Result<()> {
     sai3_bench::validation::display_config_summary(config, config_path)
 }
 
+/// Run sai3-analyze to generate Excel summary of results
+/// 
+/// This function attempts to find and execute the sai3-analyze binary to create
+/// a consolidated Excel file in the results directory. If it fails, a warning
+/// is logged but the overall benchmark is considered successful.
+fn run_sai3_analyze(results_dir: &Path) -> Result<()> {
+    use std::process::Command;
+    
+    // Try to find sai3-analyze binary in the same directory as current executable
+    let analyze_binary = if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let analyze_path = parent.join("sai3-analyze");
+            if analyze_path.exists() {
+                analyze_path
+            } else {
+                // Fall back to PATH
+                PathBuf::from("sai3-analyze")
+            }
+        } else {
+            PathBuf::from("sai3-analyze")
+        }
+    } else {
+        PathBuf::from("sai3-analyze")
+    };
+    
+    let output_file = results_dir.join("Summary-Results.xlsx");
+    
+    // Execute sai3-analyze with the results directory
+    let output = Command::new(&analyze_binary)
+        .arg("--dirs")
+        .arg(results_dir)
+        .arg("--output")
+        .arg(&output_file)
+        .arg("--overwrite")  // Overwrite if file already exists
+        .output()
+        .context("Failed to execute sai3-analyze")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("sai3-analyze failed: {}", stderr);
+    }
+    
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_workload(
     config_path: &str, 
@@ -1129,6 +1174,12 @@ fn run_workload(
     
     let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+
+    // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+    if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+        s3dlio_opt.apply();
+        info!("Applied s3dlio optimization configuration from YAML");
+    }
 
     sai3_bench::validation::apply_directory_tree_counts(&mut config)
         .context("Directory tree count validation failed")?;
@@ -2075,6 +2126,25 @@ fn run_workload(
     
     // Finalize results directory with metadata
     results_dir.finalize(summary.wall_seconds)?;
+    
+    // Generate Excel summary using sai3-analyze
+    let analyze_msg = "\nGenerating Excel summary...";
+    println!("{}", analyze_msg);
+    results_dir.write_console(analyze_msg)?;
+    
+    match run_sai3_analyze(results_dir.path()) {
+        Ok(()) => {
+            let output_file = results_dir.path().join("Summary-Results.xlsx");
+            let success_msg = format!("✅ Excel summary: {}", output_file.display());
+            println!("{}", success_msg);
+            results_dir.write_console(&success_msg)?;
+        }
+        Err(e) => {
+            let warn_msg = format!("⚠️  Warning: Failed to generate Excel summary: {}", e);
+            println!("{}", warn_msg);
+            results_dir.write_console(&warn_msg)?;
+        }
+    }
     
     let final_msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", final_msg);

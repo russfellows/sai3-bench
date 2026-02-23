@@ -633,6 +633,51 @@ fn format_bandwidth(bytes: u64, seconds: f64) -> String {
     }
 }
 
+/// Run sai3-analyze to generate Excel summary of results
+/// 
+/// This function attempts to find and execute the sai3-analyze binary to create
+/// a consolidated Excel file in the results directory. If it fails, a warning
+/// is logged but the overall benchmark is considered successful.
+fn run_sai3_analyze(results_dir: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+    
+    // Try to find sai3-analyze binary in the same directory as current executable
+    let analyze_binary = if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let analyze_path = parent.join("sai3-analyze");
+            if analyze_path.exists() {
+                analyze_path
+            } else {
+                // Fall back to PATH
+                std::path::PathBuf::from("sai3-analyze")
+            }
+        } else {
+            std::path::PathBuf::from("sai3-analyze")
+        }
+    } else {
+        std::path::PathBuf::from("sai3-analyze")
+    };
+    
+    let output_file = results_dir.join("Summary-Results.xlsx");
+    
+    // Execute sai3-analyze with the results directory
+    let output = Command::new(&analyze_binary)
+        .arg("--dirs")
+        .arg(results_dir)
+        .arg("--output")
+        .arg(&output_file)
+        .arg("--overwrite")  // Overwrite if file already exists
+        .output()
+        .context("Failed to execute sai3-analyze")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("sai3-analyze failed: {}", stderr);
+    }
+    
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(name = "sai3bench-ctl", version, about = "SAI3 Benchmark Controller (gRPC)")]
 struct Cli {
@@ -2140,7 +2185,7 @@ async fn run_distributed_workload(
     // v0.8.61: Log concurrency configuration for each agent (CRITICAL for debugging performance)
     info!("=== Concurrency Configuration ===");
     if let Some(ref distributed) = config.distributed {
-        for (_idx, agent_cfg) in distributed.agents.iter().enumerate() {
+        for agent_cfg in distributed.agents.iter() {
             let agent_id = agent_cfg.id.as_deref().unwrap_or("unknown");
             
             // Determine effective concurrency (override or global)
@@ -3809,6 +3854,25 @@ async fn run_distributed_workload(
     let status_summary = check_test_status(&agent_trackers, &agent_summaries);
     write_test_status(&results_dir, &status_summary)?;
     print_test_status(&status_summary, &mut results_dir)?;
+    
+    // Generate Excel summary using sai3-analyze
+    let analyze_msg = "\nGenerating Excel summary...";
+    println!("{}", analyze_msg);
+    results_dir.write_console(analyze_msg)?;
+    
+    match run_sai3_analyze(results_dir.path()) {
+        Ok(()) => {
+            let output_file = results_dir.path().join("Summary-Results.xlsx");
+            let success_msg = format!("✅ Excel summary: {}", output_file.display());
+            println!("{}", success_msg);
+            results_dir.write_console(&success_msg)?;
+        }
+        Err(e) => {
+            let warn_msg = format!("⚠️  Warning: Failed to generate Excel summary: {}", e);
+            println!("{}", warn_msg);
+            results_dir.write_console(&warn_msg)?;
+        }
+    }
     
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
@@ -5503,7 +5567,7 @@ workload:
             // Verify heartbeat was recorded
             let heartbeat = manager.agents.get("agent1").unwrap();
             assert_eq!(heartbeat.missed_count, 0);
-            assert_eq!(heartbeat.is_alive, true);
+            assert!(heartbeat.is_alive);
             assert!(heartbeat.last_progress.is_some());
         }
 
@@ -5707,8 +5771,8 @@ workload:
             
             assert_eq!(progress.agent_id, "agent1");
             assert_eq!(progress.current_phase, WorkloadPhase::PhasePreparing as i32);
-            assert_eq!(progress.phase_completed, false);
-            assert_eq!(progress.at_barrier, false);
+            assert!(!progress.phase_completed);
+            assert!(!progress.at_barrier);
             assert_eq!(progress.objects_created, 100);
             assert_eq!(progress.operations_completed, 50);
         }

@@ -475,10 +475,8 @@ mod tests {
     #[test]
     fn test_multi_endpoint_round_robin_2_endpoints() {
         // Test that files are distributed evenly across 2 endpoints
-        let endpoints = vec![
-            "file:///mnt/filesys1/test/".to_string(),
-            "file:///mnt/filesys2/test/".to_string(),
-        ];
+        let endpoints = ["file:///mnt/filesys1/test/".to_string(),
+            "file:///mnt/filesys2/test/".to_string()];
         
         let file_count = 100;
         
@@ -522,11 +520,9 @@ mod tests {
     #[test]
     fn test_multi_endpoint_round_robin_non_multiple() {
         // Test distribution when file count is NOT a multiple of endpoint count
-        let endpoints = vec![
-            "file:///mnt/filesys1/test/".to_string(),
+        let endpoints = ["file:///mnt/filesys1/test/".to_string(),
             "file:///mnt/filesys2/test/".to_string(),
-            "file:///mnt/filesys3/test/".to_string(),
-        ];
+            "file:///mnt/filesys3/test/".to_string()];
         
         let file_count = 100;  // 100 / 3 = 33.33...
         
@@ -577,13 +573,11 @@ mod tests {
     #[test]
     fn test_multi_endpoint_distribution_variance() {
         // Verify that distribution variance is minimal across endpoints
-        let endpoints = vec![
-            "file:///mnt/ep1/".to_string(),
+        let endpoints = ["file:///mnt/ep1/".to_string(),
             "file:///mnt/ep2/".to_string(),
             "file:///mnt/ep3/".to_string(),
             "file:///mnt/ep4/".to_string(),
-            "file:///mnt/ep5/".to_string(),
-        ];
+            "file:///mnt/ep5/".to_string()];
         
         let file_count = 10_000_usize;
         
@@ -635,7 +629,7 @@ mod tests {
     #[test]
     fn test_multi_endpoint_single_endpoint_fallback() {
         // Verify that single-endpoint mode still works (all files to one endpoint)
-        let endpoints = vec!["file:///mnt/single/test/".to_string()];
+        let endpoints = ["file:///mnt/single/test/".to_string()];
         
         let file_count = 100;
         
@@ -653,11 +647,9 @@ mod tests {
     #[test]
     fn test_multi_endpoint_sequential_indices() {
         // Verify that sequential file indices map to round-robin endpoints correctly
-        let endpoints = vec![
-            "file:///mnt/ep0/".to_string(),
+        let endpoints = ["file:///mnt/ep0/".to_string(),
             "file:///mnt/ep1/".to_string(),
-            "file:///mnt/ep2/".to_string(),
-        ];
+            "file:///mnt/ep2/".to_string()];
         
         // Index 0 → ep0, Index 1 → ep1, Index 2 → ep2, Index 3 → ep0, ...
         assert_eq!(&endpoints[0 % endpoints.len()], "file:///mnt/ep0/");
@@ -1091,7 +1083,7 @@ mod tests {
         assert_eq!(existing_indices.len(), 0, "force_overwrite should have empty indices set");
         
         // Calculate files to create
-        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        let to_create = spec_count.saturating_sub(existing_count);
         assert_eq!(to_create, 1000, "force_overwrite should create all 1000 files");
     }
     
@@ -1116,7 +1108,7 @@ mod tests {
         // Without force_overwrite, skip_verification assumes all exist
         assert_eq!(existing_count, 1000, "skip_verification should assume all files exist");
         
-        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        let to_create = spec_count.saturating_sub(existing_count);
         assert_eq!(to_create, 0, "skip_verification without force_overwrite should create 0 files");
     }
     
@@ -1158,7 +1150,7 @@ mod tests {
             if skip && !force { (spec_count, std::collections::HashSet::new()) }
             else if force { (0, std::collections::HashSet::new()) }
             else { (0, std::collections::HashSet::new()) };
-        let to_create = if existing >= spec_count { 0 } else { spec_count - existing };
+        let to_create = spec_count.saturating_sub(existing);
         assert_eq!(to_create, 64_000_000, 
             "force_overwrite should create all 64M files regardless of skip_verification");
         
@@ -1169,7 +1161,7 @@ mod tests {
             if skip && !force { (spec_count, std::collections::HashSet::new()) }
             else if force { (0, std::collections::HashSet::new()) }
             else { (0, std::collections::HashSet::new()) };
-        let to_create = if existing >= spec_count { 0 } else { spec_count - existing };
+        let to_create = spec_count.saturating_sub(existing);
         assert_eq!(to_create, 0, 
             "skip_verification without force_overwrite creates nothing (assumes all exist)");
     }
@@ -1199,7 +1191,7 @@ mod tests {
         assert_eq!(existing_count, 0, "force_overwrite ignores partial data, sets existing to 0");
         assert_eq!(existing_indices.len(), 0, "force_overwrite clears existing indices");
         
-        let to_create = if existing_count >= spec_count { 0 } else { spec_count - existing_count };
+        let to_create = spec_count.saturating_sub(existing_count);
         assert_eq!(to_create, 1000, "force_overwrite creates all 1000 files (overwrites existing 500)");
     }
 

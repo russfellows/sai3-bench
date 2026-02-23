@@ -119,6 +119,25 @@ pub struct Config {
     /// ```
     #[serde(default = "default_cache_checkpoint_interval")]
     pub cache_checkpoint_interval_secs: u64,
+    
+    /// Optional s3dlio optimization configuration (v0.8.63+, requires s3dlio v0.9.50+)
+    /// Controls advanced s3dlio features via environment variables.
+    /// These settings are applied automatically when the config is loaded.
+    /// 
+    /// **Key Features:**
+    /// - Range download optimization: 76% faster for large objects (≥64 MB)
+    /// - Multipart upload improvements: Automatic zero-copy optimizations
+    /// 
+    /// Default: None (s3dlio defaults apply - range optimization DISABLED)
+    /// 
+    /// Example:
+    /// ```yaml
+    /// s3dlio_optimization:
+    ///   enable_range_downloads: true
+    ///   range_threshold_mb: 64
+    /// ```
+    #[serde(default)]
+    pub s3dlio_optimization: Option<S3dlioOptimizationConfig>,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -1001,6 +1020,155 @@ fn default_min_split_size() -> u64 {
 
 fn default_range_timeout_secs() -> u64 {
     crate::constants::DEFAULT_RANGE_TIMEOUT_SECS
+}
+
+/// s3dlio optimization configuration (v0.8.63+, requires s3dlio v0.9.50+)
+/// 
+/// Controls advanced s3dlio performance features via environment variables.
+/// These settings are converted to environment variables (S3DLIO_*) when the config is loaded,
+/// allowing you to configure s3dlio optimizations directly in your YAML files.
+/// 
+/// **Key Features**:
+/// - **Range downloads**: Parallel range requests for large objects (76% faster for ≥64 MB)
+/// - **Multipart uploads**: Zero-copy chunking (automatic, no configuration needed)
+/// 
+/// **Performance Benchmark** (16× 148 MB objects, MinIO):
+/// - Without optimization: 429 MB/s (5.52s)
+/// - With optimization (64 MB threshold): 755 MB/s (3.14s) - **76% faster**
+/// 
+/// **When to Enable Range Downloads**:
+/// - ✅ Large objects (≥64 MB typical, ≥128 MB for very large)
+/// - ✅ Cross-region downloads (high latency)
+/// - ✅ Throttled connections
+/// - ✅ Workloads dominated by large file GET operations
+/// 
+/// **When to Disable**:
+/// - ❌ Small files (< 64 MB) - adds HEAD request overhead
+/// - ❌ Same-region high-bandwidth (coordination overhead may dominate)
+/// - ❌ PUT-heavy workloads
+/// - ❌ HEAD requests are rate-limited
+/// 
+/// **Example YAML**:
+/// ```yaml
+/// target: "s3://my-bucket/large-files/"
+/// duration: 300s
+/// concurrency: 16
+/// 
+/// # Enable s3dlio optimizations
+/// s3dlio_optimization:
+///   enable_range_downloads: true   # Enable parallel range requests
+///   range_threshold_mb: 64          # Only for objects ≥64 MB (recommended)
+///   # range_concurrency: 16         # Optional: Override auto-calculated concurrency
+///   # chunk_size_mb: 4              # Optional: Override auto-calculated chunk size
+/// 
+/// workload:
+///   - op: get
+///     path: "data/*"
+///     weight: 80
+/// ```
+/// 
+/// **Environment Variables Set**:
+/// - `S3DLIO_ENABLE_RANGE_OPTIMIZATION`: "1" if enable_range_downloads is true
+/// - `S3DLIO_RANGE_THRESHOLD_MB`: Threshold in MB (default: 64)
+/// - `S3DLIO_RANGE_CONCURRENCY`: Number of parallel requests (optional, auto-calculated by default)
+/// - `S3DLIO_CHUNK_SIZE`: Chunk size in bytes (optional, auto-calculated by default)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct S3dlioOptimizationConfig {
+    /// Enable parallel range downloads for large objects (v0.9.50+)
+    /// 
+    /// When enabled, objects ≥ range_threshold_mb are downloaded using concurrent range requests
+    /// instead of a single sequential GET. This provides significant speedups (50-76%) for
+    /// large objects, especially in high-latency or cross-region scenarios.
+    /// 
+    /// **Performance Impact**:
+    /// - 64 MB threshold: +76% throughput (429 → 755 MB/s)
+    /// - 32 MB threshold: +71% throughput
+    /// - 16 MB threshold: +69% throughput
+    /// 
+    /// **Overhead**: Adds one HEAD request per object to determine size.
+    /// Only enable if your workload includes many objects ≥ threshold size.
+    /// 
+    /// Default: false (disabled to avoid HEAD overhead on typical workloads)
+    #[serde(default)]
+    pub enable_range_downloads: bool,
+    
+    /// Threshold in MB for when to use parallel range downloads
+    /// Objects smaller than this use simple sequential downloads.
+    /// 
+    /// **Recommended values**:
+    /// - 64 MB: Best balance (76% improvement, low overhead risk)
+    /// - 128 MB: Very conservative (only huge files)
+    /// - 32 MB: Moderate (71% improvement, some overhead for 32-64 MB files)
+    /// - 16 MB: Aggressive (69% improvement, higher overhead for 16-32 MB files)
+    /// 
+    /// Default: 64 MB (optimal for most workloads)
+    #[serde(default = "default_s3dlio_range_threshold_mb")]
+    pub range_threshold_mb: u64,
+    
+    /// Optional: Number of concurrent range requests
+    /// If not specified, s3dlio auto-calculates based on object size (8-32 typical).
+    /// 
+    /// **Tuning**:
+    /// - Higher values (32+): Better for high-bandwidth, low-latency networks
+    /// - Lower values (8-16): Better for bandwidth-limited or high-latency scenarios
+    /// 
+    /// Default: None (auto-calculated by s3dlio)
+    #[serde(default)]
+    pub range_concurrency: Option<usize>,
+    
+    /// Optional: Chunk size in MB for each range request
+    /// If not specified, s3dlio auto-calculates based on object size (1-8 MB typical).
+    /// 
+    /// **Tuning**:
+    /// - Larger chunks (8+ MB): Fewer requests, less coordination overhead
+    /// - Smaller chunks (1-2 MB): More parallelism, better for very high latency
+    /// 
+    /// Default: None (auto-calculated by s3dlio)
+    #[serde(default)]
+    pub chunk_size_mb: Option<u64>,
+}
+
+fn default_s3dlio_range_threshold_mb() -> u64 {
+    64  // 64 MB - optimal balance per benchmarks (76% improvement)
+}
+
+impl S3dlioOptimizationConfig {
+    /// Apply this configuration by setting corresponding environment variables
+    /// Called automatically when config is loaded
+    pub fn apply(&self) {
+        // Set range optimization enable flag
+        if self.enable_range_downloads {
+            std::env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "1");
+            tracing::info!("Enabled s3dlio range download optimization (S3DLIO_ENABLE_RANGE_OPTIMIZATION=1)");
+        } else {
+            std::env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "0");
+            tracing::debug!("s3dlio range download optimization disabled (default)");
+        }
+        
+        // Set threshold
+        std::env::set_var("S3DLIO_RANGE_THRESHOLD_MB", self.range_threshold_mb.to_string());
+        tracing::info!("Set s3dlio range threshold: {} MB (S3DLIO_RANGE_THRESHOLD_MB={})", 
+                      self.range_threshold_mb, self.range_threshold_mb);
+        
+        // Set optional concurrency
+        if let Some(concurrency) = self.range_concurrency {
+            std::env::set_var("S3DLIO_RANGE_CONCURRENCY", concurrency.to_string());
+            tracing::info!("Set s3dlio range concurrency: {} (S3DLIO_RANGE_CONCURRENCY={})", 
+                          concurrency, concurrency);
+        } else {
+            tracing::debug!("Using s3dlio auto-calculated range concurrency");
+        }
+        
+        // Set optional chunk size (convert MB to bytes)
+        if let Some(chunk_mb) = self.chunk_size_mb {
+            let chunk_bytes = chunk_mb * 1024 * 1024;
+            std::env::set_var("S3DLIO_CHUNK_SIZE", chunk_bytes.to_string());
+            tracing::info!("Set s3dlio chunk size: {} MB ({} bytes) (S3DLIO_CHUNK_SIZE={})", 
+                          chunk_mb, chunk_bytes, chunk_bytes);
+        } else {
+            tracing::debug!("Using s3dlio auto-calculated chunk size");
+        }
+    }
 }
 
 /// Page cache behavior modes for file system operations (Linux/Unix posix_fadvise hints)
@@ -1894,7 +2062,7 @@ impl DistributedConfig {
                         return Err(format!("Hybrid stage '{}' must use DurationOrTasks completion", stage.name));
                     }
                 }
-                StageSpecificConfig::Validation { .. } => {
+                StageSpecificConfig::Validation => {
                     if !matches!(stage.completion, CompletionCriteria::ValidationPassed) {
                         return Err(format!("Validation stage '{}' should use ValidationPassed completion", stage.name));
                     }

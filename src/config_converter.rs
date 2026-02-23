@@ -328,9 +328,9 @@ fn generate_minimal_stages_yaml(stages: &[StageConfig]) -> Result<String> {
 /// Format duration in human-readable format
 fn format_duration(duration: &std::time::Duration) -> String {
     let secs = duration.as_secs();
-    if secs % 60 == 0 && secs >= 60 {
+    if secs.is_multiple_of(60) && secs >= 60 {
         format!("{}m", secs / 60)
-    } else if secs % 3600 == 0 && secs >= 3600 {
+    } else if secs.is_multiple_of(3600) && secs >= 3600 {
         format!("{}h", secs / 3600)
     } else {
         format!("{}s", secs)
@@ -515,6 +515,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            s3dlio_optimization: None,
         }
     }
 
@@ -650,6 +651,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            s3dlio_optimization: None,
         };
 
         let original_duration = config.duration;
@@ -725,6 +727,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            s3dlio_optimization: None,
         };
 
         convert_config(&mut config).expect("Should convert config");

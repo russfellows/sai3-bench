@@ -20,9 +20,7 @@ where
         }
         serde_yaml::Value::String(s) => {
             // String representation - might have separators
-            let cleaned = s.replace(',', "")
-                .replace('_', "")
-                .replace(' ', "");
+            let cleaned = s.replace([',', '_', ' '], "");
             
             cleaned.parse::<u64>()
                 .map_err(|e| serde::de::Error::custom(format!("Invalid u64: {} (from '{}')", e, s)))
@@ -46,9 +44,7 @@ where
                 .ok_or_else(|| serde::de::Error::custom("Expected usize"))
         }
         serde_yaml::Value::String(s) => {
-            let cleaned = s.replace(',', "")
-                .replace('_', "")
-                .replace(' ', "");
+            let cleaned = s.replace([',', '_', ' '], "");
             
             cleaned.parse::<usize>()
                 .map_err(|e| serde::de::Error::custom(format!("Invalid usize: {} (from '{}')", e, s)))
@@ -81,7 +77,7 @@ where
         }
         serde_yaml::Value::String(s) => {
             parse_duration_string(&s)
-                .map_err(|e| serde::de::Error::custom(e))
+                .map_err(serde::de::Error::custom)
         }
         _ => Err(serde::de::Error::custom("Expected number or string for duration")),
     }
@@ -103,14 +99,14 @@ fn parse_duration_string(s: &str) -> Result<u64, String> {
     }
     
     // Extract numeric part and unit
-    let (num_str, unit) = if trimmed.ends_with('s') {
-        (&trimmed[..trimmed.len()-1], 's')
-    } else if trimmed.ends_with('m') {
-        (&trimmed[..trimmed.len()-1], 'm')
-    } else if trimmed.ends_with('h') {
-        (&trimmed[..trimmed.len()-1], 'h')
-    } else if trimmed.ends_with('d') {
-        (&trimmed[..trimmed.len()-1], 'd')
+    let (num_str, unit) = if let Some(stripped) = trimmed.strip_suffix('s') {
+        (stripped, 's')
+    } else if let Some(stripped) = trimmed.strip_suffix('m') {
+        (stripped, 'm')
+    } else if let Some(stripped) = trimmed.strip_suffix('h') {
+        (stripped, 'h')
+    } else if let Some(stripped) = trimmed.strip_suffix('d') {
+        (stripped, 'd')
     } else {
         return Err(format!("Invalid duration format '{}': must be a number or end with s/m/h/d", s));
     };

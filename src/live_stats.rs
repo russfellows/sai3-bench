@@ -722,9 +722,9 @@ mod tests {
         
         // Empty histograms should still produce valid (but small) serialized data
         // HdrHistogram serialization includes header even for empty, usually ~40 bytes
-        assert!(get_bytes.len() > 0, "GET histogram should have header");
-        assert!(put_bytes.len() > 0, "PUT histogram should have header");
-        assert!(meta_bytes.len() > 0, "META histogram should have header");
+        assert!(!get_bytes.is_empty(), "GET histogram should have header");
+        assert!(!put_bytes.is_empty(), "PUT histogram should have header");
+        assert!(!meta_bytes.is_empty(), "META histogram should have header");
     }
 
     #[test]
@@ -791,9 +791,9 @@ mod tests {
         let p99 = hist.value_at_quantile(0.99);
         
         // p50 should be around 500 (50 + 50*10)
-        assert!(p50 >= 400 && p50 <= 600, "p50 should be around 500, got {}", p50);
+        assert!((400..=600).contains(&p50), "p50 should be around 500, got {}", p50);
         // p99 should be around 1040 (50 + 99*10)
-        assert!(p99 >= 900 && p99 <= 1100, "p99 should be around 1040, got {}", p99);
+        assert!((900..=1100).contains(&p99), "p99 should be around 1040, got {}", p99);
     }
 
     #[test]

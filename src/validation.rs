@@ -87,7 +87,7 @@ fn read_rss_kb() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let value = rest.trim().split_whitespace().next()?;
+            let value = rest.split_whitespace().next()?;
             if let Ok(kb) = value.parse::<u64>() {
                 return Some(kb);
             }
@@ -354,7 +354,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             crate::config::StageSpecificConfig::Cleanup { .. } => "CLEANUP",
                             crate::config::StageSpecificConfig::Custom { .. } => "CUSTOM",
                             crate::config::StageSpecificConfig::Hybrid { .. } => "HYBRID",
-                            crate::config::StageSpecificConfig::Validation { .. } => "VALIDATION",
+                            crate::config::StageSpecificConfig::Validation => "VALIDATION",
                         };
                         
                         let completion = match stage.completion {

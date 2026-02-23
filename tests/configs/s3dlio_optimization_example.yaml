@@ -1,0 +1,53 @@
+# Example: s3dlio Optimization Configuration (v0.8.63+)
+# Demonstrates range download optimization for large object workloads
+# Requires s3dlio v0.9.50+
+
+target: "s3://my-bucket/large-files/"
+duration: "300s"
+concurrency: 16
+
+# Enable s3dlio performance optimizations
+s3dlio_optimization:
+  # Enable parallel range downloads (76% faster for ≥64 MB objects)
+  enable_range_downloads: true
+  
+  # Threshold: Only objects ≥64 MB use parallel ranges
+  # Recommended values:
+  #   64 MB: Best balance (76% improvement, minimal overhead)
+  #   128 MB: Very conservative (only huge files)
+  #   32 MB: Moderate (71% improvement, good for mixed sizes)
+  #   16 MB: Aggressive (69% improvement, some overhead)
+  range_threshold_mb: 64
+  
+  # Optional: Override auto-calculated concurrency
+  # Higher values (32+): Better for high-bandwidth networks
+  # Lower values (8-16): Better for high-latency or throttled scenarios
+  # range_concurrency: 16
+  
+  # Optional: Override auto-calculated chunk size (in MB)
+  # Larger chunks (8+ MB): Fewer requests, less overhead
+  # Smaller chunks (1-2 MB): More parallelism for high latency
+  # chunk_size_mb: 4
+
+prepare:
+  ensure_objects:
+    - base_uri: "data/"
+      count: 1000
+      min_size: 67108864   # 64 MB
+      max_size: 157286400  # 150 MB
+      fill: random         # Or zero_bytes for faster prepare
+
+workload:
+  # GET operations benefit from range optimization
+  - op: get
+    path: "data/*"
+    weight: 80
+  
+  # PUT operations benefit from multipart upload improvements (automatic)
+  - op: put
+    path: "data/"
+    weight: 20
+    size_distribution:
+      type: uniform
+      min: 67108864      # 64 MB
+      max: 157286400     # 150 MB

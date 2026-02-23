@@ -102,7 +102,7 @@ prepare:
     let config: BarrierSyncConfig = serde_yaml::from_str(yaml)
         .expect("Should parse barrier sync config");
     
-    assert_eq!(config.enabled, true);
+    assert!(config.enabled);
     assert_eq!(config.default_heartbeat_interval, 60);
     assert_eq!(config.default_missed_threshold, 5);
     assert_eq!(config.default_query_timeout, 30);
@@ -321,7 +321,7 @@ agents:
         .expect("Should parse distributed config");
     
     assert_eq!(config.agents.len(), 4, "Should have 4 agents");
-    assert_eq!(config.shared_filesystem, false);
+    assert!(!config.shared_filesystem);
     assert_eq!(config.tree_creation_mode, TreeCreationMode::Isolated);
     
     // Verify each agent has 4 endpoints
