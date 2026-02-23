@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.62"
+version = "0.8.63"
 edition = "2021"
 build   = "build.rs"
 
@@ -24,8 +24,8 @@ url = "^2.5"
 num_cpus = "^1.16"
 
 # s3dlio: Use git tag for releases (switch to local path for development)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.39" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.39" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.50" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.50" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }
