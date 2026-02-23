@@ -557,6 +557,12 @@ impl Agent for AgentSvc {
                 Status::invalid_argument(format!("Invalid YAML config: {}", e))
             })?;
         
+        // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+        if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+            s3dlio_opt.apply();
+            info!("Applied s3dlio optimization configuration from YAML (pre-flight)");
+        }
+        
         // Run filesystem validation only if target is file:// or direct://
         let fs_path = extract_filesystem_path_from_config(&config);
         let fs_summary = if let Some(path) = fs_path {
@@ -955,6 +961,12 @@ impl Agent for AgentSvc {
                 error!("Failed to parse YAML config: {}", e);
                 Status::invalid_argument(format!("Invalid YAML config: {}", e))
             })?;
+
+        // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+        if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+            s3dlio_opt.apply();
+            info!("Applied s3dlio optimization configuration from YAML (prepare)");
+        }
 
         debug!("YAML config parsed successfully");
         debug!("Config has multi_endpoint: {}", config.multi_endpoint.is_some());
@@ -2250,6 +2262,12 @@ impl Agent for AgentSvc {
                                         }
                                     };
                                     
+                                    // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+                                    if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+                                        s3dlio_opt.apply();
+                                        info!("Applied s3dlio optimization configuration from YAML (workload)");
+                                    }
+                                    
                                     if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
                                         error!("Control reader: Failed to apply agent prefix: {}", e);
                                         agent_state_reader.set_error(format!("Failed to apply path prefix: {}", e)).await;
@@ -2282,7 +2300,7 @@ impl Agent for AgentSvc {
                                                                 sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
                                                                 sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
                                                                 sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
-                                                                sai3_bench::config::StageSpecificConfig::Validation { .. } => "validation",
+                                                                sai3_bench::config::StageSpecificConfig::Validation => "validation",
                                                             }
                                                         );
                                                     }
@@ -3039,7 +3057,7 @@ async fn execute_stages_workflow(
             sai3_bench::config::StageSpecificConfig::Cleanup { .. } => sai3_bench::live_stats::WorkloadStage::Cleanup,
             sai3_bench::config::StageSpecificConfig::Custom { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
             sai3_bench::config::StageSpecificConfig::Hybrid { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
-            sai3_bench::config::StageSpecificConfig::Validation { .. } => sai3_bench::live_stats::WorkloadStage::Custom,
+            sai3_bench::config::StageSpecificConfig::Validation => sai3_bench::live_stats::WorkloadStage::Custom,
         };
         tracker.reset_for_stage(&stage.name, live_stage);
         
@@ -3310,7 +3328,7 @@ async fn execute_stages_workflow(
             sai3_bench::config::StageSpecificConfig::Cleanup { .. } => "cleanup",
             sai3_bench::config::StageSpecificConfig::Custom { .. } => "custom",
             sai3_bench::config::StageSpecificConfig::Hybrid { .. } => "hybrid",
-            sai3_bench::config::StageSpecificConfig::Validation { .. } => "validation",
+            sai3_bench::config::StageSpecificConfig::Validation => "validation",
         };
         
         // v0.8.28: Serialize per-bucket histograms for accurate aggregation
