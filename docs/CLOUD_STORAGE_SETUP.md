@@ -131,7 +131,8 @@ sai3-bench util health --uri "s3://my-bucket/"
 - **Latency**: 50-200ms (region/network dependent)
 - **Throughput**: High (100+ ops/sec with sufficient concurrency)
 - **Best concurrency**: 16-64 for mixed workloads
-- **Large file optimization**: RangeEngine can improve throughput for files ≥64MB
+- **Large file optimization**: Range download optimization (s3dlio v0.9.50+) can improve throughput by 76% for files ≥64MB
+  - **See**: [S3DLIO Performance Tuning Guide](S3DLIO_PERFORMANCE_TUNING.md) for configuration details
 
 ---
 

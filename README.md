@@ -323,6 +323,7 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 - **[Config Examples](tests/configs/README.md)** - Annotated test configurations
 - **[Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host load generation
 - **[Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md)** - S3, Azure, and GCS authentication
+- **[s3dlio Performance Tuning](docs/S3DLIO_PERFORMANCE_TUNING.md)** - Range downloads & multipart upload optimization ✨ NEW
 - **[Data Generation Guide](docs/DATA_GENERATION.md)** - Deduplication and compression testing
 - **[Results Analysis Tool](docs/ANALYZE_TOOL.md)** - Consolidating multiple results into Excel ✨ NEW
 - **[Changelog](docs/CHANGELOG.md)** - Complete version history
