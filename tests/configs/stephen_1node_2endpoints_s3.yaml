@@ -1,0 +1,187 @@
+# Distributed 4-Node Multi-Endpoint S3 Prepare-Only Test
+# 1 test clients × 2 S3 endpoints each = 8 total endpoints
+# Each agent tests a unique subset of 2 endpoint IPs with load balancing
+# Directory structure: width=8, depth=3 → 512 leaf directories
+# Files per leaf: 125 → 512 × 125 = 64,000 total objects at 8 MiB 
+# Total capacity: ~512 GB (64k objects × 8 MB average)
+#
+# PREREQUISITES:
+# 1. Configure S3 credentials (one of):
+#    export AWS_ACCESS_KEY_ID=<key>
+#    export AWS_SECRET_ACCESS_KEY=<secret>
+#    OR use ~/.aws/credentials
+#
+# 2. Update endpoint IPs below (192.168.1.1-8) to match your storage IPs
+#
+# 3. Create bucket (or let prepare phase create it):
+#    aws s3 mb s3://benchmark --endpoint-url http://192.168.1.1:9000
+#
+# 4. Recommended: Use s3dlio v0.9.50+ range optimization for large objects:
+#    s3dlio_optimization:
+#      enable_range_downloads: true
+#      range_threshold_mb: 64
+
+target: s3://benchmark/
+concurrency: 16
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# Global multi-endpoint (fallback - not used since all agents have overrides)
+
+# OPTIONAL: Enable s3dlio v0.9.50+ range optimization (76% faster for ≥64 MB objects)
+s3dlio_optimization:
+  enable_range_downloads: true
+  range_threshold_mb: 64
+
+# Prepare phase: Create 512 GB of test data 
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+  
+  # Create nested directory tree:
+  # Directory structure: width=8, depth=3 → 512 leaf directories
+  # Files per leaf: 125 → 512 × 125 = 64,000 total objects at 8 MiB 
+  # Total capacity: ~512 GB (64k objects × 8 MB average)
+  directory_structure:
+    width: 8                     # 8 subdirectories per level
+    depth: 3                     # 3 levels deep
+    files_per_dir: 125           # 125 objects per leaf directory
+    distribution: "bottom"       # Objects only in leaf directories
+    dir_mask: "d%d_w%d.dir"
+  
+  # Total objects calculation: 331,776 leaf dirs × 193 objects/dir = 64,032,768 objects
+  ensure_objects:
+    - base_uri: "data/"
+      count: 0                 # 0 means auto calculate based on directory structure 
+      fill: random
+      size_distribution:
+        type: lognormal
+        mean: 8MiB             # 8 MB mean
+        std_dev: 1MiB          # 1 MB standard deviation
+        min: 1MiB              # 1 MB min
+        max: 16MiB             # 16 MB max
+      use_multi_endpoint: true
+  
+  cleanup: false  # Keep data for later use
+
+# Minimal workload (runs after prepare)
+workload:
+  - op: get
+    path: "data/d*_w*.dir/**/*"
+    weight: 100
+    use_multi_endpoint: true
+
+duration: 30s
+
+# Distributed configuration with per-agent endpoint assignments
+distributed:
+  shared_filesystem: true        # Storage is shared (S3), but each agent has unique endpoint assignments
+  tree_creation_mode: coordinator # Coordinator creates S3 key prefixes
+  path_selection: random
+  
+  # v0.8.27: Extended gRPC keep-alive for very slow operations (tree generation takes ~90s)
+  # Default 30s interval + 10s timeout = 40s total can drop connection during slow LIST
+  grpc_keepalive_interval: 60  # PING every 60s (2x default)
+  grpc_keepalive_timeout: 20   # Wait 20s for PONG (2x default)
+  
+  # v0.8.26+: Barrier synchronization for coordinated phase transitions
+  # CRITICAL: Required for large-scale testing (331k dirs, 64M objects)
+  barrier_sync:
+    enabled: true
+    
+    # Default timeouts (apply to validation, execute, cleanup if not overridden)
+    default_heartbeat_interval: 30    # 30s heartbeat
+    default_missed_threshold: 3       # 3 missed = 90s
+    default_query_timeout: 10         # 10s query timeout
+    default_query_retries: 2          # 2 retries
+    
+    # Prepare phase: Extended timeouts for large-scale tree generation
+    # 331k directories takes ~90s to generate, default 110s total timeout is insufficient
+    # Safe calculation: 90s operation × 2 safety margin = 180s minimum
+    # Production recommendation: 3x-5x safety = 270s-450s
+    # Using 1500s (25 min) for maximum robustness in distributed environment
+    prepare:
+      type: all_or_nothing
+      heartbeat_interval: 120      # 2 minute heartbeat (1200s)
+      missed_threshold: 1           # Query after 1 missed (120s)
+      query_timeout: 300            # 5 minute query timeout
+      query_retries: 3              # 1 retry
+      agent_barrier_timeout: 1500   # 25 minute agent wait (total: 1500s)
+    
+    # Validation phase: Quick preflight checks
+    validation:
+      type: all_or_nothing
+      heartbeat_interval: 10        # 10s heartbeat
+      missed_threshold: 3           # 30s total
+      query_timeout: 5              # 5s query
+      query_retries: 2              # 10s retries
+      agent_barrier_timeout: 60     # 1 minute agent wait
+  
+  #############################################################################
+  # Explicit Stage Ordering (v0.8.24+)
+  # Note: Cleanup stage intentionally EXCLUDED to keep data (respects prepare.cleanup: false)
+  #############################################################################
+  stages:
+    - name: "preflight"
+      order: 1
+      completion: validation_passed
+      type: validation
+      timeout_secs: 300
+    
+    - name: "prepare"  
+      order: 2
+      completion: tasks_done
+      type: prepare
+    
+    - name: "execute"
+      order: 3
+      completion: duration
+      type: execute
+      duration: 30s
+  
+  start_delay: 2
+
+  agents:
+    # Agent 1: 172.21.4.10 → S3 Endpoints 1-2
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 16
+      multi_endpoint:
+        endpoints:
+          - "s3://10.9.0.21/benchmark/"
+          - "s3://10.9.0.25/benchmark/"
+        strategy: round_robin
+    
+#    # Agent 2: 172.21.4.11 → S3 Endpoints 3-4
+#    - address: "172.21.4.11:7761"
+#      id: "agent-2"
+#      concurrency_override: 16
+#      multi_endpoint:
+#        endpoints:
+#          - "s3://192.168.1.3:9000/benchmark/"
+#          - "s3://192.168.1.4:9000/benchmark/"
+#        strategy: round_robin
+#    
+#    # Agent 3: 172.21.4.12 → S3 Endpoints 5-6
+#    - address: "172.21.4.12:7761"
+#      id: "agent-3"
+#      concurrency_override: 16
+#      multi_endpoint:
+#        endpoints:
+#          - "s3://192.168.1.5:9000/benchmark/"
+#          - "s3://192.168.1.6:9000/benchmark/"
+#        strategy: round_robin
+#    
+#    # Agent 4: 172.21.4.13 → S3 Endpoints 7-8
+#    - address: "172.21.4.13:7761"
+#      id: "agent-4"
+#      concurrency_override: 16
+#      multi_endpoint:
+#        endpoints:
+#          - "s3://192.168.1.7:9000/benchmark/"
+#          - "s3://192.168.1.8:9000/benchmark/"
+#        strategy: round_robin
+  
