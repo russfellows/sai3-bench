@@ -17,6 +17,7 @@ use tracing::{debug, info, warn}; // v0.8.60: Added debug/warn for cache handlin
 
 use crate::config::{PrepareConfig, PrepareStrategy};
 use crate::directory_tree::TreeManifest;
+use crate::metadata_cache::endpoints_share_storage;  // v0.8.62: Shared storage detection
 
 // Module declarations
 mod error_tracking;
@@ -189,10 +190,44 @@ pub async fn prepare_objects(
             info!("⏰ Periodic checkpointing ENABLED: {} second interval", checkpoint_interval);
             info!("   Protects against data loss in long-running prepares");
             
-            for (idx, endpoint_cache) in cache.endpoints() {
-                let handle = endpoint_cache.spawn_periodic_checkpoint(checkpoint_interval, agent_id_opt);
-                checkpoint_handles.push(handle);
-                debug!("Spawned periodic checkpoint task for endpoint {}", idx);
+            // v0.8.62: Detect if endpoints share storage to avoid checkpoint race conditions
+            let num_endpoints = cache.endpoints().len();
+            let endpoint_uris: Vec<String> = cache.endpoints()
+                .values()
+                .map(|ep| ep.endpoint_uri().to_string())
+                .collect();
+            
+            let shared_storage = if num_endpoints > 1 && !endpoint_uris.is_empty() {
+                endpoints_share_storage(&endpoint_uris)
+            } else {
+                false  // Single endpoint can't have sharing issues
+            };
+            
+            if num_endpoints > 1 {
+                info!("   Multi-endpoint configuration ({} endpoints)", num_endpoints);
+                if shared_storage {
+                    info!("   ✓ Shared storage detected - using single checkpoint (endpoint 0)");
+                    info!("     All endpoints can restore from same checkpoint");
+                } else {
+                    info!("   ✓ Independent storage detected - checkpointing each endpoint");
+                    info!("     Each endpoint maintains separate checkpoint for its data");
+                }
+            }
+            
+            if shared_storage {
+                // Shared storage: Only checkpoint first endpoint
+                if let Some((_idx, first_endpoint)) = cache.endpoints().iter().next() {
+                    let handle = first_endpoint.spawn_periodic_checkpoint(checkpoint_interval, agent_id_opt);
+                    checkpoint_handles.push(handle);
+                    debug!("Spawned periodic checkpoint task for endpoint 0 (shared storage mode)");
+                }
+            } else {
+                // Independent storage: Checkpoint each endpoint separately
+                for (idx, endpoint_cache) in cache.endpoints() {
+                    let handle = endpoint_cache.spawn_periodic_checkpoint(checkpoint_interval, agent_id_opt);
+                    checkpoint_handles.push(handle);
+                    debug!("Spawned periodic checkpoint task for endpoint {}", idx);
+                }
             }
         }
     } else {
@@ -325,26 +360,71 @@ pub async fn prepare_objects(
         info!("║  CRITICAL: Persisting KV cache checkpoint to storage        ║");
         info!("╚══════════════════════════════════════════════════════════════╝");
         
-        // Write checkpoint for each endpoint cache
-        for (idx, endpoint_cache) in cache.endpoints() {
-            match endpoint_cache.write_checkpoint(agent_id_opt).await {
-                Ok(checkpoint_location) => {
-                    info!("✅ Endpoint {} checkpoint created: {}", idx, checkpoint_location);
+        // v0.8.62: Detect shared vs independent storage for checkpoint strategy
+        let num_endpoints = cache.endpoints().len();
+        let endpoint_uris: Vec<String> = cache.endpoints()
+            .values()
+            .map(|ep| ep.endpoint_uri().to_string())
+            .collect();
+        
+        let shared_storage = if num_endpoints > 1 && !endpoint_uris.is_empty() {
+            endpoints_share_storage(&endpoint_uris)
+        } else {
+            false
+        };
+        
+        if num_endpoints > 1 {
+            if shared_storage {
+                info!("   Shared storage: checkpointing via endpoint 0 only");
+            } else {
+                info!("   Independent storage: checkpointing all {} endpoints", num_endpoints);
+            }
+        }
+        
+        let mut checkpoint_success_count = 0;
+        let mut checkpoint_failure_count = 0;
+        
+        if shared_storage {
+            // Shared storage: Only checkpoint first endpoint
+            if let Some((_idx, first_endpoint)) = cache.endpoints().iter().next() {
+                match first_endpoint.write_checkpoint(agent_id_opt).await {
+                    Ok(checkpoint_location) => {
+                        info!("✅ Checkpoint created: {}", checkpoint_location);
+                        info!("   All {} endpoints can restore from this checkpoint", num_endpoints);
+                        checkpoint_success_count += 1;
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Failed to create final checkpoint: {}", e);
+                        warn!("   Prepare completed successfully but resume capability unavailable");
+                        checkpoint_failure_count += 1;
+                    }
                 }
-                Err(e) => {
-                    // For ALL URIs (including cloud), checkpoint failure is CRITICAL
-                    // Cloud URIs now supported via tar.zst upload
-                    return Err(e.context(format!(
-                        "CRITICAL: Failed to create endpoint {} KV cache checkpoint",
-                        idx
-                    )));
+            }
+        } else {
+            // Independent storage: Checkpoint each endpoint separately
+            for (idx, endpoint_cache) in cache.endpoints() {
+                match endpoint_cache.write_checkpoint(agent_id_opt).await {
+                    Ok(checkpoint_location) => {
+                        info!("✅ Endpoint {} checkpoint created: {}", idx, checkpoint_location);
+                        checkpoint_success_count += 1;
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Endpoint {} checkpoint failed: {}", idx, e);
+                        warn!("   Resume capability unavailable for endpoint {}", idx);
+                        checkpoint_failure_count += 1;
+                    }
                 }
             }
         }
         
         info!("");
-        info!("✅ All KV cache checkpoints successfully created");
-        info!("   Resume capability enabled - prepare can be safely restarted");
+        info!("✅ Prepare phase complete - all objects created successfully");
+        if checkpoint_success_count > 0 {
+            info!("   Resume capability: enabled ({} checkpoint(s) created)", checkpoint_success_count);
+        }
+        if checkpoint_failure_count > 0 {
+            warn!("   ⚠️  {} checkpoint(s) failed (non-fatal - prepared objects are intact)", checkpoint_failure_count);
+        }
         info!("");
     }
     

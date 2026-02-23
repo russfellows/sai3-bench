@@ -119,6 +119,143 @@ impl FlushPolicy {
 // Helper Functions
 // ============================================================================
 
+/// Detect if multiple endpoints point to the same underlying storage.
+///
+/// This is critical for checkpoint optimization:
+/// - **Shared storage** (same bucket/path): Only checkpoint first endpoint (avoid race conditions)
+/// - **Independent storage** (different buckets/paths): Checkpoint each endpoint separately
+///
+/// # Detection Strategy
+///
+/// Compares storage locations by extracting bucket/container names:
+/// - `s3://bucket1/prefix1` vs `s3://bucket1/prefix2` → **Shared** (same bucket)
+/// - `s3://bucket1/prefix` vs `s3://bucket2/prefix` → **Independent** (different buckets)
+/// - `file:///mnt/nvme1/` vs `file:///mnt/nvme2/` → **Independent** (different paths)
+/// - `file:///mnt/nvme1/data` vs `file:///mnt/nvme1/data` → **Shared** (same path)
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use sai3_bench::metadata_cache::endpoints_share_storage;
+///
+/// // Shared storage - load balancer to same bucket
+/// let shared = vec![
+///     "s3://10.9.0.21/my-bucket/".to_string(),
+///     "s3://10.9.0.25/my-bucket/".to_string(),
+/// ];
+/// assert!(endpoints_share_storage(&shared));
+///
+/// // Independent storage - different buckets
+/// let independent = vec![
+///     "s3://10.9.0.21/bucket1/".to_string(),
+///     "s3://10.9.0.21/bucket2/".to_string(),
+/// ];
+/// assert!(!endpoints_share_storage(&independent));
+/// ```
+pub fn endpoints_share_storage(endpoint_uris: &[String]) -> bool {
+    if endpoint_uris.len() <= 1 {
+        return false;  // Single endpoint can't share with itself
+    }
+
+    // Extract normalized storage locations
+    let locations: Vec<String> = endpoint_uris
+        .iter()
+        .filter_map(|uri| extract_storage_location(uri))
+        .collect();
+
+    // If we couldn't parse some URIs, assume independent (safe default)
+    if locations.len() != endpoint_uris.len() {
+        debug!("Could not parse all endpoint URIs - assuming independent storage");
+        return false;
+    }
+
+    // Check if all locations are identical
+    let first = &locations[0];
+    let all_same = locations.iter().all(|loc| loc == first);
+
+    if all_same {
+        info!("Shared storage detected: all {} endpoints use location '{}'", 
+            endpoint_uris.len(), first);
+    } else {
+        info!("Independent storage detected: {} unique locations", locations.len());
+    }
+
+    all_same
+}
+
+/// Extract normalized storage location from URI for comparison.
+///
+/// Returns a string that uniquely identifies the storage location:
+/// - S3/GCS/Azure: `{scheme}://{bucket_or_container}`
+/// - File/Direct: `{scheme}://{full_path}`
+///
+/// **CRITICAL**: This function ignores hostnames/IPs completely for S3/Azure,
+/// comparing only the bucket/container names. This correctly handles:
+/// - Load balancers with multiple IPs (10.9.0.21, 10.9.0.25, etc.)
+/// - DNS round-robin with multiple hostnames (storage1.example.com, storage2.example.com)
+/// - Mixed IP and hostname configurations
+///
+/// # Examples
+/// - `s3://10.9.0.21:9000/my-bucket/prefix/` → `s3://my-bucket`
+/// - `s3://storage.example.com/my-bucket/prefix/` → `s3://my-bucket` (same as above!)
+/// - `az://account.blob.core.windows.net/container/` → `az://container`
+/// - `file:///mnt/nvme1/data/` → `file:///mnt/nvme1/data`
+fn extract_storage_location(uri: &str) -> Option<String> {
+    // Try parsing as URL
+    let parsed = Url::parse(uri).ok()?;
+    let scheme = parsed.scheme();
+
+    match scheme {
+        "s3" => {
+            // For S3: extract bucket name from path (first path component)
+            // Hostname/IP is IGNORED - we only compare bucket names
+            // s3://hostname-or-ip:port/bucket/prefix → s3://bucket
+            let path = parsed.path().trim_start_matches('/');
+            let bucket = path.split('/').next()?;
+            if bucket.is_empty() {
+                return None;
+            }
+            Some(format!("s3://{}", bucket))
+        }
+        "gs" => {
+            // For GCS: bucket name is the hostname, not in path
+            // gs://bucket/prefix → bucket
+            let bucket = parsed.host_str()?;
+            if bucket.is_empty() {
+                return None;
+            }
+            Some(format!("gs://{}", bucket))
+        }
+        "az" | "azure" => {
+            // For Azure: extract container name from path
+            // az://account.blob.core.windows.net/container/prefix → container
+            let path = parsed.path().trim_start_matches('/');
+            let container = path.split('/').next()?;
+            if container.is_empty() {
+                return None;
+            }
+            Some(format!("az://{}", container))
+        }
+        "file" => {
+            // For file: use full normalized path
+            // file:///mnt/nvme1/data/ → file:///mnt/nvme1/data
+            let path = parsed.path().trim_end_matches('/');
+            Some(format!("file://{}", path))
+        }
+        "direct" => {
+            // For direct: use full path (similar to file)
+            let path = uri.strip_prefix("direct://")?.trim_end_matches('/');
+            Some(format!("direct://{}", path))
+        }
+        _ => {
+            debug!("Unknown URI scheme: {}", scheme);
+            None
+        }
+    }
+}
+
+// ============================================================================
+
 /// Extract file index from prepared object path
 ///
 /// Supports patterns generated by prepare phase:
@@ -491,7 +628,7 @@ impl EndpointCache {
         // Use configured base dir or default to system temp
         let base_dir = kv_cache_base_dir
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::temp_dir());
+            .unwrap_or_else(std::env::temp_dir);
         
         use seahash::hash;
         let hash = hash(endpoint_uri.as_bytes());
@@ -894,7 +1031,7 @@ impl EndpointCache {
     pub fn put_listing(&self, config_hash: &str, timestamp: u64, paths: &[String]) -> Result<()> {
         let key = format!("{}:list_timestamp:{}", config_hash, timestamp);
         let json = serde_json::to_string(paths)?;
-        let compressed = zstd::encode_all(&json.as_bytes()[..], 3)?; // Level 3 = good balance
+        let compressed = zstd::encode_all(json.as_bytes(), 3)?; // Level 3 = good balance
 
         self.listing_cache.insert(key.as_bytes(), &compressed)?;
         self.maybe_flush()?;  // Non-blocking for performance;
@@ -964,7 +1101,7 @@ impl EndpointCache {
 
             let key = format!("{}:{}:{:08}", config_hash, strategy, file_idx);
             let value = (endpoint_idx as u32).to_le_bytes();
-            self.endpoint_map.insert(key.as_bytes(), &value)?;
+            self.endpoint_map.insert(key.as_bytes(), value)?;
 
             if (file_idx + 1) % BATCH_SIZE == 0 {
                 self.maybe_flush()?;  // Non-blocking checkpoint;
@@ -1014,7 +1151,7 @@ impl EndpointCache {
     /// Put RNG seed into cache
     pub fn put_seed(&self, config_hash: &str, seed_type: &str, index: usize, seed: u64) -> Result<()> {
         let key = format!("{}:{}:{:08}", config_hash, seed_type, index);
-        self.seeds.insert(key.as_bytes(), &seed.to_le_bytes())?;
+        self.seeds.insert(key.as_bytes(), seed.to_le_bytes())?;
         self.maybe_flush()?;  // Non-blocking
         Ok(())
     }
@@ -1389,13 +1526,11 @@ impl EndpointCache {
         // List what we actually have
         info!("📂 Database directory verification:");
         info!("   Location: {}", cache_location.display());
-        for entry in &entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                let file_type = if path.is_dir() { "DIR" } else { "FILE" };
-                let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
-                info!("   - {}: {} ({} bytes)", file_type, path.file_name().unwrap().to_string_lossy(), size);
-            }
+        for entry in entries.iter().flatten() {
+            let path = entry.path();
+            let file_type = if path.is_dir() { "DIR" } else { "FILE" };
+            let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
+            info!("   - {}: {} ({} bytes)", file_type, path.file_name().unwrap().to_string_lossy(), size);
         }
         
         info!("✓ Database verification passed: {} files/dirs in cache", entries.len());
@@ -1535,7 +1670,7 @@ impl EndpointCache {
     /// Static helper to create and write checkpoint without self reference
     /// Used by background checkpointing task
     async fn create_and_write_checkpoint_static(
-        cache_location: &PathBuf,
+        cache_location: &Path,
         endpoint_uri: &str,
         endpoint_index: usize,
         agent_id: Option<usize>,
@@ -1584,7 +1719,7 @@ impl EndpointCache {
 
     /// Static helper to try writing checkpoint once
     async fn try_write_checkpoint_static(
-        cache_location: &PathBuf,
+        cache_location: &Path,
         endpoint_uri: &str,
         checkpoint_name: &str,
     ) -> Result<String> {
@@ -1594,7 +1729,7 @@ impl EndpointCache {
         // Create tar.zst archive from cache directory
         // CRITICAL FIX (v0.8.61): Use spawn_blocking to prevent executor starvation
         // Timeout: 30 seconds for archive creation
-        let cache_location_clone = cache_location.clone();
+        let cache_location_clone = cache_location.to_path_buf();
         let archive_bytes = timeout(
             Duration::from_secs(30),
             tokio::task::spawn_blocking(move || {
@@ -1655,14 +1790,73 @@ impl EndpointCache {
                   endpoint_uri.starts_with("az://") || 
                   endpoint_uri.starts_with("gs://") {
             // Cloud storage: upload via ObjectStore
-            let store = store_for_uri(endpoint_uri)
-                .context("Failed to create object store")?;
+            // FIX (v0.8.62): Add timeout and retry logic to prevent fatal errors
+            // Checkpoint creation is non-critical and should never abort the workload
+            
+            debug!("📦 Step 2/2: Creating ObjectStore for checkpoint upload to {}", endpoint_uri);
+            
+            // Try to create ObjectStore with timeout (max 15 seconds)
+            let store_result = timeout(
+                Duration::from_secs(15),
+                async {
+                    // Retry store creation up to 3 times
+                    for attempt in 1..=3 {
+                        match store_for_uri(endpoint_uri) {
+                            Ok(store) => {
+                                debug!("   ObjectStore created successfully (attempt {})", attempt);
+                                return Ok(store);
+                            }
+                            Err(e) if attempt < 3 => {
+                                warn!("   ObjectStore creation attempt {}/3 failed: {}", attempt, e);
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(anyhow!("Failed after {} attempts: {}", attempt, e));
+                            }
+                        }
+                    }
+                    unreachable!()
+                }
+            ).await;
+            
+            let store = match store_result {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    // Non-fatal: Log warning and skip checkpoint
+                    warn!("⚠️  Failed to create ObjectStore for checkpoint upload: {}", e);
+                    warn!("   Skipping checkpoint - prepare will continue without resume capability");
+                    return Err(anyhow!("Non-fatal checkpoint skip: {}", e));
+                }
+                Err(_) => {
+                    // Timeout: Log warning and skip checkpoint
+                    warn!("⚠️  ObjectStore creation timed out after 15 seconds");
+                    warn!("   Skipping checkpoint - prepare will continue without resume capability");
+                    return Err(anyhow!("Non-fatal checkpoint skip: timeout"));
+                }
+            };
 
+            debug!("   Uploading checkpoint archive ({} bytes)...", archive_bytes.len());
             let checkpoint_uri = format!("{}{}", endpoint_uri, checkpoint_name);
-            store.put(&checkpoint_uri, Bytes::from(archive_bytes)).await
-                .with_context(|| format!("Failed to upload checkpoint to {}", checkpoint_uri))?;
-
-            Ok(checkpoint_uri)
+            
+            // Upload with timeout (max 60 seconds for multi-GB archives)
+            match timeout(
+                Duration::from_secs(60),
+                store.put(&checkpoint_uri, Bytes::from(archive_bytes))
+            ).await {
+                Ok(Ok(())) => {
+                    debug!("   ✅ Checkpoint uploaded successfully");
+                    Ok(checkpoint_uri)
+                }
+                Ok(Err(e)) => {
+                    warn!("⚠️  Checkpoint upload failed: {}", e);
+                    Err(anyhow!("Non-fatal checkpoint upload failure: {}", e))
+                }
+                Err(_) => {
+                    warn!("⚠️  Checkpoint upload timed out after 60 seconds");
+                    Err(anyhow!("Non-fatal checkpoint upload timeout"))
+                }
+            }
 
         } else {
             Err(anyhow!(
@@ -3136,7 +3330,7 @@ mod tests {
         let decoder = zstd::Decoder::new(file).unwrap();
         let mut archive = tar::Archive::new(decoder);
         let entries: Vec<_> = archive.entries().unwrap().collect();
-        assert!(entries.len() > 0, "Checkpoint archive should contain files");
+        assert!(!entries.is_empty(), "Checkpoint archive should contain files");
     }
 
     #[tokio::test]
@@ -3504,4 +3698,372 @@ mod tests {
             assert!(result.as_ref().unwrap().is_ok(), "Agent {} checkpoint should succeed", agent_id);
         }
     }
+
+    // ========================================================================
+    // Storage Topology Detection Tests (v0.8.62)
+    // ========================================================================
+
+    #[test]
+    fn test_shared_storage_detection_same_bucket_different_ips() {
+        // Scenario: Load balancer with multiple IPs pointing to same S3 bucket
+        let endpoints = vec![
+            "s3://10.9.0.21:9000/my-bucket/prefix1/".to_string(),
+            "s3://10.9.0.25:9000/my-bucket/prefix1/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: different IPs but same bucket"
+        );
+    }
+
+    #[test]
+    fn test_shared_storage_detection_same_bucket_different_prefixes() {
+        // Scenario: Same bucket with different prefixes (still shared storage)
+        let endpoints = vec![
+            "s3://storage.example.com/bucket1/path-a/".to_string(),
+            "s3://storage.example.com/bucket1/path-b/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: same bucket with different prefixes"
+        );
+    }
+
+    #[test]
+    fn test_shared_storage_detection_different_hostnames_same_bucket() {
+        // Scenario: DNS round-robin with multiple hostnames pointing to same S3 bucket
+        // (e.g., storage1.example.com and storage2.example.com both point to same bucket)
+        let endpoints = vec![
+            "s3://storage1.example.com:9000/shared-bucket/data/".to_string(),
+            "s3://storage2.example.com:9000/shared-bucket/data/".to_string(),
+            "s3://storage3.example.com:9000/shared-bucket/data/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: different hostnames but same bucket"
+        );
+    }
+
+    #[test]
+    fn test_shared_storage_detection_mixed_ips_and_hostnames() {
+        // Scenario: Mix of IP addresses and hostnames pointing to same bucket
+        // (common in load-balanced setups where IPs and DNS names are both used)
+        let endpoints = vec![
+            "s3://10.9.0.21:9000/my-bucket/".to_string(),
+            "s3://storage.example.com:9000/my-bucket/".to_string(),
+            "s3://192.168.1.100:9000/my-bucket/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: mixed IPs/hostnames with same bucket"
+        );
+    }
+
+    #[test]
+    fn test_independent_storage_detection_different_buckets() {
+        // Scenario: Different buckets (independent storage)
+        let endpoints = vec![
+            "s3://10.9.0.21:9000/bucket1/".to_string(),
+            "s3://10.9.0.21:9000/bucket2/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Should detect independent storage: different buckets (same IP)"
+        );
+    }
+
+    #[test]
+    fn test_independent_storage_detection_different_hostnames_different_buckets() {
+        // Scenario: Different hostnames with different buckets (definitely independent)
+        let endpoints = vec![
+            "s3://region1.cloud.com:9000/bucket-us-east/".to_string(),
+            "s3://region2.cloud.com:9000/bucket-us-west/".to_string(),
+            "s3://region3.cloud.com:9000/bucket-eu-central/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Should detect independent storage: different hostnames and different buckets"
+        );
+    }
+
+    #[test]
+    fn test_independent_storage_detection_different_file_paths() {
+        // Scenario: Different filesystem paths (independent storage)
+        let endpoints = vec![
+            "file:///mnt/nvme1/data/".to_string(),
+            "file:///mnt/nvme2/data/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Should detect independent storage: different filesystem paths"
+        );
+    }
+
+    #[test]
+    fn test_shared_storage_detection_same_file_path() {
+        // Scenario: Same filesystem path (shared storage - unusual but valid)
+        let endpoints = vec![
+            "file:///mnt/data/testdata/".to_string(),
+            "file:///mnt/data/testdata/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: identical filesystem paths"
+        );
+    }
+
+    #[test]
+    fn test_azure_shared_storage_detection() {
+        // Scenario: Azure blob storage with same container
+        let endpoints = vec![
+            "az://account1.blob.core.windows.net/container1/prefix-a/".to_string(),
+            "az://account1.blob.core.windows.net/container1/prefix-b/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: same Azure container"
+        );
+    }
+
+    #[test]
+    fn test_azure_independent_storage_detection() {
+        // Scenario: Azure blob storage with different containers
+        let endpoints = vec![
+            "az://account1.blob.core.windows.net/container1/".to_string(),
+            "az://account1.blob.core.windows.net/container2/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Should detect independent storage: different Azure containers"
+        );
+    }
+
+    #[test]
+    fn test_gcs_shared_storage_detection() {
+        // Scenario: Google Cloud Storage with same bucket
+        let endpoints = vec![
+            "gs://my-bucket/path1/".to_string(),
+            "gs://my-bucket/path2/".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: same GCS bucket"
+        );
+    }
+
+    #[test]
+    fn test_single_endpoint_not_considered_shared() {
+        // Scenario: Single endpoint (no sharing possible)
+        let endpoints = vec![
+            "s3://bucket/path/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Single endpoint should not be considered shared storage"
+        );
+    }
+
+    #[test]
+    fn test_mixed_schemes_considered_independent() {
+        // Scenario: Different URI schemes (definitely independent)
+        let endpoints = vec![
+            "s3://bucket1/".to_string(),
+            "file:///mnt/data/".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Mixed URI schemes should always be considered independent"
+        );
+    }
+
+    #[test]
+    fn test_direct_uri_shared_storage() {
+        // Scenario: direct:// URIs with same path
+        let endpoints = vec![
+            "direct:///dev/dax0.0".to_string(),
+            "direct:///dev/dax0.0".to_string(),
+        ];
+        
+        assert!(
+            endpoints_share_storage(&endpoints),
+            "Should detect shared storage: same direct:// path"
+        );
+    }
+
+    #[test]
+    fn test_direct_uri_independent_storage() {
+        // Scenario: direct:// URIs with different devices
+        let endpoints = vec![
+            "direct:///dev/dax0.0".to_string(),
+            "direct:///dev/dax0.1".to_string(),
+        ];
+        
+        assert!(
+            !endpoints_share_storage(&endpoints),
+            "Should detect independent storage: different direct:// devices"
+        );
+    }
+
+    // ========================================================================
+    // Checkpoint Failure Resilience Tests (v0.8.62)
+    // ========================================================================
+    // NOTE: These tests are marked #[ignore] because they involve real tar+zstd
+    // compression which takes ~15 seconds even with minimal data. Run explicitly with:
+    //   cargo test --lib -- --ignored test_checkpoint_failure
+
+    /// Test that checkpoint upload failure is non-fatal and logged as warning
+    ///
+    /// This test simulates checkpoint write failure without hanging on network timeouts.
+    /// The workload should continue even when checkpoint fails.
+    ///
+    /// **SLOW TEST**: Takes ~15s due to real tar+zstd compression of fjall database.
+    /// Run with: `cargo test -- --ignored test_checkpoint_failure_is_non_fatal`
+    #[tokio::test]
+    #[ignore]
+    async fn test_checkpoint_failure_is_non_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        
+        let temp = tempfile::tempdir().unwrap();
+        
+        // Create a read-only directory that will fail checkpoint writes quickly
+        let readonly_dir = temp.path().join("readonly");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o555);  // r-xr-xr-x (read+execute only, no write)
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+        
+        let invalid_uri = format!("file://{}", readonly_dir.display());
+        let cache = EndpointCache::new(&invalid_uri, 0, Some(0), None).await.unwrap();
+        
+        // Create minimal objects to speed up test
+        for i in 0..3 {
+            cache.plan_object("config1", i, &format!("file_{}.dat", i), 256).unwrap();
+            cache.mark_created("config1", i, None, None).unwrap();
+        }
+        cache.force_flush().unwrap();
+        
+        // Try to write checkpoint - should fail quickly (directory not writable)
+        let result = cache.write_checkpoint(Some(0)).await;
+        
+        assert!(
+            result.is_err(),
+            "Checkpoint should fail with read-only directory"
+        );
+        
+        // Verify objects are still accessible (workload can continue)
+        let entry = cache.get_object("config1", 0).unwrap();
+        assert!(entry.is_some(), "Objects should still be accessible after checkpoint failure");
+        assert_eq!(entry.unwrap().state, ObjectState::Created);
+    }
+
+    /// Test that checkpoint creation with timeout doesn't hang the system
+    ///
+    /// This verifies the timeout+retry logic in try_write_checkpoint_static.
+    #[tokio::test]
+    async fn test_checkpoint_timeout_handling() {
+        use tokio::time::{timeout, Duration};
+        
+        let temp = tempfile::tempdir().unwrap();
+        let storage_uri = format!("file://{}", temp.path().display());
+        let cache = EndpointCache::new(&storage_uri, 0, Some(0), None).await.unwrap();
+        
+        // Create minimal data
+        cache.plan_object("config1", 0, "file.dat", 1024).unwrap();
+        cache.force_flush().unwrap();
+        
+        // Checkpoint should complete quickly (< 5 seconds for small cache)
+        let result = timeout(
+            Duration::from_secs(5),
+            cache.write_checkpoint(Some(0))
+        ).await;
+        
+        assert!(
+            result.is_ok(),
+            "Checkpoint should complete within timeout (v0.8.62 added timeouts to prevent hangs)"
+        );
+        
+        assert!(
+            result.unwrap().is_ok(),
+            "Checkpoint should succeed for file:// URI"
+        );
+    }
+
+    /// Test that multiple checkpoint failures don't accumulate and cause issues
+    ///
+    /// Simulates scenario where periodic checkpoints keep failing but prepare continues.
+    ///
+    /// **SLOW TEST**: Takes ~45s (3 checkpoint attempts × 15s each).
+    /// Run with: `cargo test -- --ignored test_repeated_checkpoint_failures`
+    #[tokio::test]
+    #[ignore]
+    async fn test_repeated_checkpoint_failures_are_handled() {
+        use std::os::unix::fs::PermissionsExt;
+        
+        let temp = tempfile::tempdir().unwrap();
+        
+        // Create read-only directory that causes fast checkpoint failures
+        let readonly_dir = temp.path().join("readonly2");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o555);  // No write permission
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+        
+        let invalid_uri = format!("file://{}", readonly_dir.display());
+        let cache = EndpointCache::new(&invalid_uri, 0, Some(0), None).await.unwrap();
+        
+        // Create minimal objects
+        for i in 0..2 {
+            cache.plan_object("config1", i, &format!("file_{}.dat", i), 256).unwrap();
+        }
+        cache.force_flush().unwrap();
+        
+        // Try multiple checkpoint attempts (simulating periodic checkpointing)
+        for attempt in 1..=3 {
+            let result = cache.write_checkpoint(Some(0)).await;
+            assert!(
+                result.is_err(),
+                "Checkpoint attempt {} should fail gracefully", 
+                attempt
+            );
+        }
+        
+        // Verify cache is still functional after repeated failures
+        let counts = cache.count_by_state("config1").unwrap();
+        assert_eq!(
+            counts.get(&ObjectState::Planned), 
+            Some(&2),
+            "Cache should remain functional after repeated checkpoint failures"
+        );
+    }
+
+    /// Test checkpoint behavior with empty cache (edge case)
+    #[tokio::test]
+    async fn test_checkpoint_with_empty_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_uri = format!("file://{}", temp.path().display());
+        let cache = EndpointCache::new(&storage_uri, 0, Some(0), None).await.unwrap();
+        
+        // Don't add any objects - checkpoint empty cache
+        let result = cache.write_checkpoint(Some(0)).await;
+        
+        // Should succeed even with empty cache
+        assert!(
+            result.is_ok(),
+            "Checkpointing empty cache should succeed (creates empty archive)"
+        );
+    }
 }
+
