@@ -932,38 +932,15 @@ impl Config {
             .as_ref()
             .and_then(|o| o.gcs_channel_count);
 
-        match explicit_channels {
-            Some(n_channels) => {
-                // Channel count was already forwarded to s3dlio in apply().
-                // Scale up total task count: treat YAML concurrency as per-channel.
-                let per_channel = self.concurrency;
-                let desired = per_channel.saturating_mul(n_channels);
-                let cpu_cap = num_cpus::get();
-                let effective = desired.min(cpu_cap);
-                if effective > self.concurrency {
-                    if effective < desired {
-                        tracing::warn!(
-                            "GCS: concurrency scaled {} → {} ({} channels × {} per-channel), \
-                             capped at {} available CPUs",
-                            self.concurrency, effective, n_channels, per_channel, cpu_cap
-                        );
-                    } else {
-                        tracing::warn!(
-                            "GCS: concurrency scaled up {} → {} ({} channels × {} per-channel)",
-                            self.concurrency, effective, n_channels, per_channel
-                        );
-                    }
-                    self.concurrency = effective;
-                }
-            }
-            None => {
-                // Smart default: one gRPC subchannel per concurrent task.
-                s3dlio::set_gcs_channel_count(self.concurrency);
-                tracing::info!(
-                    "GCS smart default: gRPC channel count = concurrency ({})",
-                    self.concurrency
-                );
-            }
+        if explicit_channels.is_none() {
+            // Smart default: one gRPC subchannel per concurrent task.
+            // If gcs_channel_count was explicitly set it was already forwarded
+            // to s3dlio in apply(), so nothing to do in that case.
+            s3dlio::set_gcs_channel_count(self.concurrency);
+            tracing::info!(
+                "GCS smart default: gRPC channel count = concurrency ({})",
+                self.concurrency
+            );
         }
     }
 }
