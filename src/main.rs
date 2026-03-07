@@ -1181,6 +1181,11 @@ fn run_workload(
         info!("Applied s3dlio optimization configuration from YAML");
     }
 
+    // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+    // For gs:// targets: sets gRPC subchannel count and optionally scales config.concurrency.
+    // Must run after apply() (which sets explicit channel count) but before workload starts.
+    config.apply_gcs_defaults();
+
     sai3_bench::validation::apply_directory_tree_counts(&mut config)
         .context("Directory tree count validation failed")?;
     

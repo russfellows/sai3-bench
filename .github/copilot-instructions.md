@@ -1,5 +1,15 @@
 # sai3-bench AI Agent Guide
 
+---
+
+## 🚨 Prime Directive
+
+**Prime Directive**: If told to investigate something, I will ONLY investigate, and then report and possibly document my findings. I will NEVER assume to proceed to making ANY code changes, unless SPECIFICALLY asked to do so.
+
+**Secondary Directive**: Whenever given a task, first check that I am not violating my Prime Directive before proceeding.
+
+---
+
 ## Critical Testing Philosophy
 
 **⚠️ CRITICAL PRINCIPLE**: Tests MUST verify intended behavior, NOT implementation details.

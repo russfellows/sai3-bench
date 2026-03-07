@@ -967,6 +967,8 @@ impl Agent for AgentSvc {
             s3dlio_opt.apply();
             info!("Applied s3dlio optimization configuration from YAML (prepare)");
         }
+        // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+        config.apply_gcs_defaults();
 
         debug!("YAML config parsed successfully");
         debug!("Config has multi_endpoint: {}", config.multi_endpoint.is_some());
@@ -2267,6 +2269,8 @@ impl Agent for AgentSvc {
                                         s3dlio_opt.apply();
                                         info!("Applied s3dlio optimization configuration from YAML (workload)");
                                     }
+                                    // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+                                    config.apply_gcs_defaults();
                                     
                                     if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
                                         error!("Control reader: Failed to apply agent prefix: {}", e);
