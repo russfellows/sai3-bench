@@ -251,6 +251,10 @@ EOF
 # Test storage connectivity
 ./target/release/sai3-bench util health --uri "s3://my-bucket/"
 
+# Distributed autotune with YAML matrix
+./target/release/sai3bench-ctl --agents host1:7761,host2:7761 \
+  autotune --config examples/distributed-autotune-minimal.yaml
+
 # Capture workload for replay
 ./target/release/sai3-bench --op-log trace.tsv.zst run --config my-test.yaml
 
@@ -260,6 +264,8 @@ EOF
 # Analyze results (generate Excel report)
 ./target/release/sai3-analyze --pattern "sai3-*" --output results.xlsx
 ```
+
+Minimal autotune YAML example: `examples/distributed-autotune-minimal.yaml`
 
 See [Usage Guide](docs/USAGE.md) for detailed examples and [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) for multi-host patterns.
 

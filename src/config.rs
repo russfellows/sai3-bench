@@ -1277,8 +1277,14 @@ impl S3dlioOptimizationConfig {
 
         // GCS: RAPID mode override
         if let Some(rapid) = self.gcs_rapid_mode {
+            // Mirror YAML choice to env so inherited shell environment cannot
+            // override explicit config intent (s3dlio resolves env first).
+            std::env::set_var("S3DLIO_GCS_RAPID", if rapid { "true" } else { "false" });
             s3dlio::set_gcs_rapid_mode(Some(rapid));
-            tracing::info!("Set GCS RAPID mode: {} (via set_gcs_rapid_mode)", rapid);
+            tracing::info!(
+                "Set GCS RAPID mode: {} (via YAML -> S3DLIO_GCS_RAPID + set_gcs_rapid_mode)",
+                rapid
+            );
         } else {
             tracing::debug!("GCS RAPID mode: auto-detect per bucket (default)");
         }

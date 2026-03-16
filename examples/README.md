@@ -4,6 +4,27 @@ This directory contains example configurations demonstrating various sai3-bench 
 
 ## Quick Start Examples
 
+### `distributed-autotune-minimal.yaml`
+**Purpose**: Minimal tuning matrix for `sai3bench-ctl autotune`
+
+**Features**:
+- Protocol-agnostic URI target (`s3://`, `az://`, `gs://`, `file://`, `direct://`)
+- Small size/thread matrix for fast recommendation loops
+- Optional per-request tuning sweep for GCS channels/chunk size and range optimization
+
+**Usage**:
+```bash
+./target/release/sai3bench-ctl \
+  --agents host1:7761,host2:7761 \
+  autotune --config examples/distributed-autotune-minimal.yaml
+```
+
+**When to use**:
+- First-pass tuning before running long distributed workloads
+- Verifying controller↔agent tuning RPC fields are wired correctly
+
+---
+
 ### `mixed-workload-cloud.yaml`
 **Purpose**: Production-ready mixed workload for cloud storage benchmarking
 

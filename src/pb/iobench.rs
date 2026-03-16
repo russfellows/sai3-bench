@@ -14,6 +14,17 @@ pub struct RunGetRequest {
     /// concurrency per-agent
     #[prost(uint32, tag = "2")]
     pub jobs: u32,
+    /// Optional per-request tuning overrides (UNSPECIFIED/0 => do not override)
+    #[prost(enumeration = "TriStateToggle", tag = "3")]
+    pub gcs_rapid_mode: i32,
+    #[prost(uint32, tag = "4")]
+    pub gcs_channel_count: u32,
+    #[prost(enumeration = "TriStateToggle", tag = "5")]
+    pub enable_range_downloads: i32,
+    #[prost(uint32, tag = "6")]
+    pub range_threshold_mb: u32,
+    #[prost(uint32, tag = "7")]
+    pub gcs_write_chunk_size_bytes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RunPutRequest {
@@ -31,6 +42,13 @@ pub struct RunPutRequest {
     /// per-agent parallel uploads
     #[prost(uint32, tag = "5")]
     pub concurrency: u32,
+    /// Optional per-request tuning overrides (UNSPECIFIED/0 => do not override)
+    #[prost(enumeration = "TriStateToggle", tag = "6")]
+    pub gcs_rapid_mode: i32,
+    #[prost(uint32, tag = "7")]
+    pub gcs_channel_count: u32,
+    #[prost(uint32, tag = "8")]
+    pub gcs_write_chunk_size_bytes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpSummary {
@@ -820,6 +838,35 @@ pub struct AgentQueryResponse {
     /// Human-readable status
     #[prost(string, tag = "3")]
     pub status_message: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TriStateToggle {
+    Unspecified = 0,
+    Off = 1,
+    On = 2,
+}
+impl TriStateToggle {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "TRI_STATE_TOGGLE_UNSPECIFIED",
+            Self::Off => "TRI_STATE_TOGGLE_OFF",
+            Self::On => "TRI_STATE_TOGGLE_ON",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TRI_STATE_TOGGLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "TRI_STATE_TOGGLE_OFF" => Some(Self::Off),
+            "TRI_STATE_TOGGLE_ON" => Some(Self::On),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

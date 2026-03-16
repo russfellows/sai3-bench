@@ -199,6 +199,56 @@ rm -rf /tmp/results/.sai3-coordinator-cache/
 
 ---
 
+## Controller Autotune YAML (v0.8.70+)
+
+Use `sai3bench-ctl autotune --config <yaml>` to sweep a bounded matrix and print recommended settings.
+
+Minimal example:
+
+```yaml
+autotune:
+  uri: "gs://my-bucket/bench/autotune/obj*.dat"
+  size_range: "32MiB-64MiB"
+  size_steps: 3
+  threads: "16,32"
+
+  channels: "16,32"
+  range_enabled: "false,true"
+  range_thresholds_mb: "32"
+  gcs_write_chunk_sizes: "2097152"
+  gcs_rapid_mode: auto
+
+  objects: 64
+  trials: 1
+  optimize_for: throughput
+  ops: both
+```
+
+Reference file: `examples/distributed-autotune-minimal.yaml`
+
+Run it:
+
+```bash
+./target/release/sai3bench-ctl \
+  --agents host1:7761,host2:7761 \
+  autotune --config examples/distributed-autotune-minimal.yaml
+```
+
+### Dry-Run Validation Checks
+
+Use these commands to validate YAML parsing and distributed preflight before execution:
+
+```bash
+# Single-node validation
+./target/release/sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run
+
+# Distributed validation through controller
+./target/release/sai3bench-ctl --agents 127.0.0.1:7761 \
+  run --config tests/configs/custom_stage_test.yaml --dry-run
+```
+
+---
+
 ## Configuration Syntax
 
 For detailed YAML configuration syntax, see:

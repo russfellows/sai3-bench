@@ -8,7 +8,32 @@ use crate::workload::BackendType;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use num_format::{Locale, ToFormattedString};
+use serde::Deserialize;
 use std::time::Instant;
+
+#[derive(Debug, Deserialize)]
+struct DryRunAutotuneConfig {
+    uri: Option<String>,
+    sizes: Option<String>,
+    size_range: Option<String>,
+    size_steps: Option<usize>,
+    threads: Option<String>,
+    channels: Option<String>,
+    channels_per_thread: Option<String>,
+    range_enabled: Option<String>,
+    range_thresholds_mb: Option<String>,
+    gcs_write_chunk_sizes: Option<String>,
+    gcs_rapid_mode: Option<String>,
+    objects: Option<u32>,
+    trials: Option<usize>,
+    optimize_for: Option<String>,
+    ops: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DryRunConfigRoot {
+    autotune: Option<DryRunAutotuneConfig>,
+}
 
 /// Format a u64 with thousand separators using system locale
 /// Example: 64032768 → "64,032,768" (US locale)
@@ -187,6 +212,167 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
+
+    // Explicit autotune configuration block (if present in YAML)
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(root) = serde_yaml::from_str::<DryRunConfigRoot>(&content) {
+            if let Some(at) = root.autotune {
+                // ── Compute the actual sweep dimensions ──────────────────────────────
+
+                // Sizes: explicit list OR log-spaced range
+                let size_values: Vec<u64> = if let Some(ref sizes_str) = at.sizes {
+                    sizes_str.split(',').map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| crate::size_parser::parse_size(s).ok())
+                        .collect()
+                } else {
+                    let range = at.size_range.as_deref().unwrap_or("32MiB-64MiB");
+                    let steps = at.size_steps.unwrap_or(4).max(1);
+                    let mut parts = range.splitn(2, '-').map(|s| s.trim());
+                    let s0 = parts.next().and_then(|s| crate::size_parser::parse_size(s).ok()).unwrap_or(32 * 1024 * 1024);
+                    let s1 = parts.next().and_then(|s| crate::size_parser::parse_size(s).ok()).unwrap_or(s0);
+                    let (lo, hi) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
+                    if steps == 1 || lo == hi {
+                        vec![lo]
+                    } else {
+                        let mut out = Vec::new();
+                        for i in 0..steps {
+                            let ratio = i as f64 / (steps - 1) as f64;
+                            let v = (lo as f64) * ((hi as f64) / (lo as f64)).powf(ratio);
+                            out.push(((v / 1024.0).round() as u64) * 1024);
+                        }
+                        out.sort_unstable();
+                        out.dedup();
+                        out
+                    }
+                };
+
+                let thread_values: Vec<usize> = at.threads.as_deref().unwrap_or("16,32,64")
+                    .split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse().ok()).collect();
+
+                let uri_str = at.uri.as_deref().unwrap_or("");
+                let is_gcs = uri_str.starts_with("gs://") || uri_str.starts_with("gcs://");
+
+                // Channel dimension count
+                let chan_count: usize = if is_gcs {
+                    if let Some(ref cpt) = at.channels_per_thread {
+                        cpt.split(',').filter(|s| !s.trim().is_empty()).count()
+                    } else if let Some(ref ch) = at.channels {
+                        ch.split(',').filter(|s| !s.trim().is_empty()).count()
+                    } else {
+                        1 // default: channels_per_thread=1
+                    }
+                } else {
+                    1
+                };
+
+                let range_enabled_count = at.range_enabled.as_deref().unwrap_or("false,true")
+                    .split(',').filter(|s| !s.trim().is_empty()).count();
+                let range_thresh_count = at.range_thresholds_mb.as_deref().unwrap_or("32,64")
+                    .split(',').filter(|s| !s.trim().is_empty()).count();
+                let gcs_chunk_count: usize = if is_gcs {
+                    at.gcs_write_chunk_sizes.as_deref().unwrap_or("2097152,4128768")
+                        .split(',').filter(|s| !s.trim().is_empty()).count()
+                } else {
+                    1
+                };
+
+                let total_cases = size_values.len() * thread_values.len() * chan_count
+                    * range_enabled_count * range_thresh_count * gcs_chunk_count;
+                let trials = at.trials.unwrap_or(1);
+                let objects = at.objects.unwrap_or(64);
+                let total_runs = total_cases * trials;
+                let op_multiplier: usize = match at.ops.as_deref().unwrap_or("both") {
+                    "put" | "get" => 1,
+                    _ => 2, // both
+                };
+
+                // ── Print the block ──────────────────────────────────────────────────
+                println!("┌─ Autotune Configuration ────────────────────────────────────────────┐");
+                println!("│ Source:       ✅ explicit 'autotune:' block");
+                println!("│ URI:          {}",
+                    at.uri.as_deref().unwrap_or("(not set)"));
+
+                // Sizes with computed values
+                let size_labels: Vec<String> = size_values.iter().map(|&b| {
+                    let (v, u) = format_bytes(b); format!("{:.1} {}", v, u)
+                }).collect();
+
+                if let Some(ref sizes_str) = at.sizes {
+                    println!("│ Sizes:        {} → {} value(s): {:?}",
+                        sizes_str, size_values.len(), size_labels);
+                } else {
+                    let range_display = at.size_range.as_deref().unwrap_or("32MiB-64MiB (default)");
+                    let steps = at.size_steps.unwrap_or(4);
+                    println!("│ Size Range:   {} (log-spaced, {} step{}) → {} size(s): {:?}",
+                        range_display, steps, if steps == 1 { "" } else { "s" },
+                        size_values.len(), size_labels);
+                }
+
+                // Thread sweep
+                println!("│ Threads:      {} → {} value(s): {:?}",
+                    at.threads.as_deref().unwrap_or("16,32,64 (default)"),
+                    thread_values.len(), thread_values);
+
+                // Channel sweep
+                if let Some(ref cpt) = at.channels_per_thread {
+                    let cpts: Vec<usize> = cpt.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    println!("│ Channels/Thr: {} → {} value(s)  [effective = threads × cpt]",
+                        cpt, cpts.len());
+                    println!("│               e.g. {} threads × {:?} = {:?} channels",
+                        thread_values.first().copied().unwrap_or(0),
+                        cpts,
+                        cpts.iter().map(|&c| thread_values.first().copied().unwrap_or(0) * c).collect::<Vec<_>>());
+                } else if let Some(ref ch) = at.channels {
+                    let ch_vals: Vec<usize> = ch.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    println!("│ Channels:     {} → {} value(s) (absolute)", ch, ch_vals.len());
+                } else if is_gcs {
+                    println!("│ Channels/Thr: 1 (default — effective = threads × 1)");
+                }
+
+                if let Some(ref range_enabled) = at.range_enabled {
+                    println!("│ Range Enabled: {} → {} value(s)",
+                        range_enabled,
+                        range_enabled.split(',').filter(|s| !s.trim().is_empty()).count());
+                }
+                if let Some(ref range_thresholds) = at.range_thresholds_mb {
+                    println!("│ Range Thresh: {} MB → {} value(s)",
+                        range_thresholds,
+                        range_thresholds.split(',').filter(|s| !s.trim().is_empty()).count());
+                }
+                if let Some(ref chunks) = at.gcs_write_chunk_sizes {
+                    println!("│ GCS Chunks:   {} bytes → {} value(s)",
+                        chunks,
+                        chunks.split(',').filter(|s| !s.trim().is_empty()).count());
+                }
+                if let Some(ref rapid) = at.gcs_rapid_mode {
+                    println!("│ GCS RAPID:    {}", rapid);
+                }
+                println!("│ Objects:      {}", objects);
+                println!("│ Trials:       {}", trials);
+                println!("│ Optimize For: {}",
+                    at.optimize_for.as_deref().unwrap_or("throughput (default)"));
+                println!("│ Ops:          {}",
+                    at.ops.as_deref().unwrap_or("both (default)"));
+                println!("│");
+                println!("│ ── Sweep summary ─────────────────────────────────────────────────");
+                println!("│   Loop order  : sizes({}) × threads({}) × channels({}) × range_en({}) × thresh({}) × gcs_chunk({})",
+                    size_values.len(), thread_values.len(), chan_count,
+                    range_enabled_count, range_thresh_count, gcs_chunk_count);
+                println!("│   Total cases : {}", total_cases);
+                println!("│   Trials/case : {}", trials);
+                println!("│   Total runs  : {} case(s) × {} trial(s) = {} runs", total_cases, trials, total_runs);
+                println!("│   Object I/Os : {} runs × {} op(s) × {} objects = {} I/Os",
+                    total_runs, op_multiplier, objects, total_runs * op_multiplier * objects as usize);
+                if total_runs > 200 {
+                    println!("│   ⚠️  WARNING: {} runs is a large sweep — consider narrowing parameters", total_runs);
+                }
+                println!("└──────────────────────────────────────────────────────────────────────┘");
+                println!();
+            }
+        }
+    }
     
     // RangeEngine configuration
     if let Some(ref range_config) = config.range_engine {

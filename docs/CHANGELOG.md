@@ -6,6 +6,89 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [Unreleased]
+
+### Added
+
+- **`channels_per_thread` YAML parameter for autotune**
+  - New parameter in `AutotuneYaml` and `ControllerAutotuneConfig`
+  - Expresses GCS gRPC subchannel count as a multiplier of thread count: `effective_channels = threads × channels_per_thread`
+  - Example: `channels_per_thread: "1,2,4"` sweeps 1×, 2×, and 4× thread count as channel counts
+  - Mutually exclusive with the existing `channels` (absolute count) parameter; an error is raised if both are specified
+  - Both `TuneCase` and `CtTuneCase` gain a `channels_per_thread: Option<usize/u32>` field tracking the multiplier used
+  - Result output shows `channels_per_thread` info alongside the effective channel count
+
+- **Autotune dry-run mode** (`--dry-run` flag on `sai3-bench autotune`)
+  - Validates configuration and prints the complete sweep plan without executing any trials
+  - Shows: loop iteration order (outermost → innermost), dimension labels and values, total case count, total trial runs, estimated object I/O count, and a rough time estimate
+  - Warns if the total run count exceeds 200
+  - No trial count or time limit is enforced on actual runs; dry-run is the planning tool
+
+- **Unit tests for `channels_per_thread` and dry-run infrastructure** (11 new tests across `src/main.rs` and `src/bin/controller.rs`)
+
+### Changed
+
+- **`sai3-bench autotune` CLI flags removed** — all tuning parameters are now YAML-only
+  - Previously: individually specified via `--uri`, `--threads`, `--channels`, `--sizes`, etc.
+  - Now: all parameters live in the YAML config file; use `--config <file>`
+  - Retains `--config <path>` and adds `--dry-run`
+  - Eliminates the ambiguous CLI-overrides-YAML merge logic
+
+- **Autotune hard limit removed** — the previous 300-trial hard error is gone
+  - The dry-run plan display (case count, total runs, rough time estimate) serves as the planning check
+
+- **Distributed autotune example updated** (`examples/distributed-autotune-minimal.yaml`)
+  - Documents `channels` vs `channels_per_thread` mutual exclusion
+  - Adds commented-out `channels_per_thread` example
+
+- **Distributed autotune YAML example**
+  - Added `examples/distributed-autotune-minimal.yaml` for `sai3bench-ctl autotune`
+  - Includes minimal matrix and optional native tuning fields
+
+- **Native per-request tuning fields in controller↔agent RPCs**
+  - `RunGetRequest`: `gcs_rapid_mode`, `gcs_channel_count`, `enable_range_downloads`, `range_threshold_mb`, `gcs_write_chunk_size_bytes`
+  - `RunPutRequest`: `gcs_rapid_mode`, `gcs_channel_count`, `gcs_write_chunk_size_bytes`
+  - Added tri-state enum for optional boolean overrides (`UNSPECIFIED`, `OFF`, `ON`)
+
+### Changed
+
+- **Controller autotune now sends tuning settings over RPC**
+  - Tuning is no longer CLI-only/local for distributed sweeps
+  - Controller matrix can include channels, range optimization, threshold, and chunk size
+
+- **Controller autotune supports explicit `autotune:` YAML block**
+  - All tuneable fields are grouped under `autotune` for clarity
+  - Top-level autotune fields are not supported
+
+- **Agent applies tuning per request before GET/PUT execution**
+  - Maintains backward compatibility with `UNSPECIFIED`/zero values (no override)
+
+### Validation
+
+- Verified config dry-run paths still pass after RPC/schema changes:
+  - `sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run`
+  - `sai3bench-ctl --agents 127.0.0.1:7761 run --config tests/configs/custom_stage_test.yaml --dry-run`
+
+### Fixed
+
+- **YAML autotune config: invalid enum values now produce an error instead of silently falling back to defaults**
+  - `gcs_rapid_mode`, `optimize_for`, and `ops` fields in autotune YAML previously swallowed parse errors (`.ok()`)
+  - Invalid values (e.g., `gcs_rapid_mode: typo`) now propagate as fatal errors with a clear message
+
+### Tests
+
+- Added 35 unit tests in `src/main.rs` for `sai3-bench autotune` helpers:
+  - `resolve_util_uri`: flag-only, positional-only, both-same, both-different, neither
+  - `parse_csv_usize` / `parse_csv_bool`: valid, spaces, multi, empty, invalid
+  - `parse_sizes`: explicit list, dedup+sort, range (single/two/reversed/default steps)
+  - `mbps_from_output`: basic, integer, last-match-wins, absent, wrong unit
+  - `build_trial_uri`: glob, trailing-slash, bare URI, zero-padding
+  - `parse_rapid_mode_str` / `parse_optimize_for_str` / `parse_tune_ops_str`: all variants + invalid
+- Added 19 unit tests in `src/bin/controller.rs` for controller autotune helpers:
+  - `parse_csv_u32`, `parse_csv_bool` (controller copy), `to_pb_toggle`
+  - `split_put_uri`: trailing slash, no trailing slash, s3://, file://
+  - `parse_sizes_from_config`: explicit list, range with 1 step, default range
+
 ## [0.8.63] - 2026-02-23
 
 **Multi-Endpoint Checkpoint Race Condition Fix + s3dlio Performance Tuning**

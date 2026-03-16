@@ -29,7 +29,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase, StageSummary};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, TriStateToggle, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase, StageSummary};
 
 /// Helper function to get current timestamp with optional simulated clock skew.
 /// 
@@ -808,7 +808,23 @@ impl Agent for AgentSvc {
     }
 
     async fn run_get(&self, req: Request<RunGetRequest>) -> Result<Response<OpSummary>, Status> {
-        let RunGetRequest { uri, jobs } = req.into_inner();
+        let RunGetRequest {
+            uri,
+            jobs,
+            gcs_rapid_mode,
+            gcs_channel_count,
+            enable_range_downloads,
+            range_threshold_mb,
+            gcs_write_chunk_size_bytes,
+        } = req.into_inner();
+
+        apply_request_tuning(
+            gcs_rapid_mode,
+            gcs_channel_count,
+            Some(enable_range_downloads),
+            Some(range_threshold_mb),
+            Some(gcs_write_chunk_size_bytes),
+        );
         
         // Parse URI to extract base and pattern
         // For S3: s3://bucket/prefix/pattern
@@ -883,7 +899,18 @@ impl Agent for AgentSvc {
             object_size,
             objects,
             concurrency,
+            gcs_rapid_mode,
+            gcs_channel_count,
+            gcs_write_chunk_size_bytes,
         } = req.into_inner();
+
+        apply_request_tuning(
+            gcs_rapid_mode,
+            gcs_channel_count,
+            None,
+            None,
+            Some(gcs_write_chunk_size_bytes),
+        );
         
         // Build base URI from bucket (assume s3:// for backward compatibility)
         let base_uri = if bucket.starts_with("s3://") || bucket.starts_with("file://") || 
@@ -3859,6 +3886,52 @@ async fn create_agent_results(
 
 fn to_status<E: std::fmt::Display>(e: E) -> Status {
     Status::internal(e.to_string())
+}
+
+fn apply_request_tuning(
+    gcs_rapid_mode: i32,
+    gcs_channel_count: u32,
+    enable_range_downloads: Option<i32>,
+    range_threshold_mb: Option<u32>,
+    gcs_write_chunk_size_bytes: Option<u32>,
+) {
+    let rapid_mode = TriStateToggle::try_from(gcs_rapid_mode).unwrap_or(TriStateToggle::Unspecified);
+    match rapid_mode {
+        TriStateToggle::On => {
+            env::set_var("S3DLIO_GCS_RAPID", "true");
+            s3dlio::set_gcs_rapid_mode(Some(true));
+        }
+        TriStateToggle::Off => {
+            env::set_var("S3DLIO_GCS_RAPID", "false");
+            s3dlio::set_gcs_rapid_mode(Some(false));
+        }
+        TriStateToggle::Unspecified => {}
+    }
+
+    if gcs_channel_count > 0 {
+        env::set_var("S3DLIO_GCS_GRPC_CHANNELS", gcs_channel_count.to_string());
+    }
+
+    if let Some(toggle_raw) = enable_range_downloads {
+        let toggle = TriStateToggle::try_from(toggle_raw).unwrap_or(TriStateToggle::Unspecified);
+        match toggle {
+            TriStateToggle::On => env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "1"),
+            TriStateToggle::Off => env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "0"),
+            TriStateToggle::Unspecified => {}
+        }
+    }
+
+    if let Some(threshold_mb) = range_threshold_mb {
+        if threshold_mb > 0 {
+            env::set_var("S3DLIO_RANGE_THRESHOLD_MB", threshold_mb.to_string());
+        }
+    }
+
+    if let Some(chunk_size) = gcs_write_chunk_size_bytes {
+        if chunk_size > 0 {
+            env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", chunk_size.to_string());
+        }
+    }
 }
 
 fn glob_match(pattern: &str, key: &str) -> bool {
