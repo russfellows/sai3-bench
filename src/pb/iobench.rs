@@ -25,6 +25,9 @@ pub struct RunGetRequest {
     pub range_threshold_mb: u32,
     #[prost(uint32, tag = "7")]
     pub gcs_write_chunk_size_bytes: u32,
+    /// GCS project ID (overrides GOOGLE_CLOUD_PROJECT env var on agent)
+    #[prost(string, tag = "8")]
+    pub gcs_project: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RunPutRequest {
@@ -49,6 +52,9 @@ pub struct RunPutRequest {
     pub gcs_channel_count: u32,
     #[prost(uint32, tag = "8")]
     pub gcs_write_chunk_size_bytes: u32,
+    /// GCS project ID (overrides GOOGLE_CLOUD_PROJECT env var on agent)
+    #[prost(string, tag = "9")]
+    pub gcs_project: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpSummary {

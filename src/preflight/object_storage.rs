@@ -1,61 +1,119 @@
-//! Object storage validation with progressive access testing
+//! Object storage validation with quick bucket accessibility checks
 //!
-//! Tests proceed from least to most invasive:
-//! 1. head - Check if bucket exists (HEAD bucket)
-//! 2. list - Test listing objects (requires s3:ListBucket)
-//! 3. get - Test getting an object (requires s3:GetObject)
-//! 4. put - Test putting a test object (requires s3:PutObject)
-//! 5. delete - Test deleting the test object (requires s3:DeleteObject)
+//! Performs a minimal sanity check using a streaming list (max 1 result) to
+//! confirm bucket reachability, authentication, and read permission — without
+//! enumerating all objects even for buckets with billions of keys.
 //!
 //! Also checks:
-//! - Permission source detection (env vars vs instance-level)
+//! - Permission source detection (env vars vs instance-level IAM)
 //! - EC2 IAM role, GCP service account, Azure managed identity
-//! - Multi-endpoint validation (test ALL endpoints)
 
 use super::{ErrorType, ValidationResult, ValidationSummary};
 use anyhow::Result;
+use futures::StreamExt;
+use s3dlio::object_store::store_for_uri;
 
-/// Validate object storage access with progressive testing
+/// Validate object storage access with a quick bucket accessibility check.
+///
+/// Performs a streaming list (reads at most 1 key) against each endpoint to
+/// verify connectivity and credentials without loading all objects into memory.
 ///
 /// # Arguments
-/// * `endpoints` - List of object storage endpoints to validate
-/// * `check_write` - Whether to check write permissions (PUT/DELETE)
-///
-/// # Returns
-/// ValidationSummary with all test results
+/// * `endpoints` - List of object storage URIs to validate (e.g. `gs://bucket/prefix`)
+/// * `_check_write` - Reserved for future write-permission testing; currently unused
 pub async fn validate_object_storage(
     endpoints: &[String],
-    check_write: bool,
+    _check_write: bool,
 ) -> Result<ValidationSummary> {
     let mut results = Vec::new();
 
     // Detect permission source (env vars vs instance-level)
     results.push(detect_permission_source().await?);
 
-    // Validate each endpoint
     for (idx, endpoint) in endpoints.iter().enumerate() {
         tracing::info!(
-            "Validating endpoint {}/{}: {}",
+            "Validating object storage endpoint {}/{}: {}",
             idx + 1,
             endpoints.len(),
             endpoint
         );
 
-        // Progressive testing for this endpoint
-        // TODO: Implement actual S3/Azure/GCS API calls
-        // For now, just return placeholder results
-        let write_msg = if check_write {
-            "Read and write validation not yet implemented"
-        } else {
-            "Read-only validation not yet implemented"
+        // Build an ObjectStore for this URI
+        let store = match store_for_uri(endpoint) {
+            Ok(s) => s,
+            Err(e) => {
+                results.push(ValidationResult::error(
+                    ErrorType::Configuration,
+                    "init",
+                    format!("Cannot initialize storage for {}: {}", endpoint, e),
+                    "Check URI format: s3://bucket/prefix  gs://bucket/prefix  az://account/container/prefix",
+                ));
+                continue;
+            }
         };
-        
-        results.push(ValidationResult::info(
-            ErrorType::System,
-            "endpoint",
-            format!("Endpoint {}/{}: {}", idx + 1, endpoints.len(), endpoint),
-            write_msg,
-        ));
+
+        // Stream at most 1 key — fast even for buckets with billions of objects.
+        // A network/auth error manifests as Some(Err(…)); an empty bucket as None.
+        let mut stream = store.list_stream(endpoint, false);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.next(),
+        ).await {
+            Err(_elapsed) => {
+                results.push(ValidationResult::error(
+                    ErrorType::Network,
+                    "list",
+                    format!("Timed out connecting to {}", endpoint),
+                    "Check network connectivity, DNS resolution, and storage endpoint configuration",
+                ));
+            }
+            Ok(Some(Err(e))) => {
+                let err_str = e.to_string().to_lowercase();
+                let (error_type, suggestion) = if err_str.contains("403")
+                    || err_str.contains("forbidden")
+                    || err_str.contains("accessdenied")
+                    || err_str.contains("access denied")
+                {
+                    (ErrorType::Permission,
+                     "Check that the service account/IAM role has storage.objects.list permission")
+                } else if err_str.contains("401")
+                    || err_str.contains("unauthorized")
+                    || err_str.contains("unauthenticated")
+                {
+                    (ErrorType::Authentication,
+                     "Credentials invalid or expired; check GOOGLE_APPLICATION_CREDENTIALS or IAM role")
+                } else if err_str.contains("404")
+                    || err_str.contains("nosuchbucket")
+                    || err_str.contains("no such bucket")
+                    || err_str.contains("not found")
+                {
+                    (ErrorType::Configuration,
+                     "Bucket does not exist or the endpoint path is incorrect")
+                } else {
+                    (ErrorType::Network,
+                     "Check network connectivity and storage backend availability")
+                };
+                results.push(ValidationResult::error(
+                    error_type,
+                    "list",
+                    format!("Failed to list {}: {}", endpoint, e),
+                    suggestion,
+                ));
+            }
+            Ok(None) => {
+                // Bucket is accessible but empty at this prefix
+                results.push(ValidationResult::success(
+                    "list",
+                    format!("Bucket accessible (no objects at prefix): {}", endpoint),
+                ));
+            }
+            Ok(Some(Ok(_first_key))) => {
+                results.push(ValidationResult::success(
+                    "list",
+                    format!("Bucket accessible: {}", endpoint),
+                ));
+            }
+        }
     }
 
     Ok(ValidationSummary::new(results))
@@ -138,13 +196,16 @@ async fn check_ec2_iam_role() -> Result<String> {
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
 
-    let role_name = client
+    let response = client
         .get("http://169.254.169.254/latest/meta-data/iam/security-credentials/")
         .send()
-        .await?
-        .text()
         .await?;
 
+    if !response.status().is_success() {
+        anyhow::bail!("EC2 metadata returned HTTP {}", response.status());
+    }
+
+    let role_name = response.text().await?;
     if role_name.is_empty() {
         anyhow::bail!("No IAM role attached to instance");
     }
@@ -160,19 +221,22 @@ async fn check_gcp_service_account() -> Result<String> {
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
 
-    let response = client
+    let resp = client
         .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email")
         .header("Metadata-Flavor", "Google")
         .send()
-        .await?
-        .text()
         .await?;
 
-    if response.is_empty() {
+    if !resp.status().is_success() {
+        anyhow::bail!("GCP metadata returned HTTP {}", resp.status());
+    }
+
+    let email = resp.text().await?;
+    if email.is_empty() {
         anyhow::bail!("No service account attached to instance");
     }
 
-    Ok(response.trim().to_string())
+    Ok(email.trim().to_string())
 }
 
 /// Check for Azure managed identity via IMDS endpoint
@@ -197,9 +261,4 @@ async fn check_azure_managed_identity() -> Result<String> {
     }
 }
 
-// TODO: Implement actual S3/Azure/GCS validation tests:
-// - test_head_bucket
-// - test_list_bucket
-// - test_get_object
-// - test_put_object
-// - test_delete_object
+

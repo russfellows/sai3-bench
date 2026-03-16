@@ -884,6 +884,10 @@ struct ControllerAutotuneConfig {
     range_thresholds_mb: Option<String>,
     gcs_write_chunk_sizes: Option<String>,
     gcs_rapid_mode: Option<CtRapidMode>,
+    /// GCS project ID forwarded to agents (overrides GOOGLE_CLOUD_PROJECT env var on agent).
+    /// Falls back to the agent's own GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GCS_PROJECT
+    /// environment variable when absent.
+    gcs_project: Option<String>,
     objects: Option<u32>,
     trials: Option<usize>,
     optimize_for: Option<CtOptimizeFor>,
@@ -1127,6 +1131,7 @@ async fn controller_autotune(
                         gcs_rapid_mode: rapid_toggle,
                         gcs_channel_count: case.channels,
                         gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
                     }).await?.into_inner();
                     total_bytes += r.total_bytes as f64;
                     total_secs += r.seconds;
@@ -1153,6 +1158,7 @@ async fn controller_autotune(
                         enable_range_downloads: to_pb_toggle(Some(case.range_enabled)),
                         range_threshold_mb: case.range_threshold_mb,
                         gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
                     }).await?.into_inner();
                     total_bytes += r.total_bytes as f64;
                     total_secs += r.seconds;
@@ -1467,6 +1473,7 @@ async fn main() -> Result<()> {
                         enable_range_downloads: TriStateToggle::Unspecified as i32,
                         range_threshold_mb: 0,
                         gcs_write_chunk_size_bytes: 0,
+                        gcs_project: String::new(),
                     })
                     .await?
                     .into_inner();
@@ -1500,6 +1507,7 @@ async fn main() -> Result<()> {
                         gcs_rapid_mode: TriStateToggle::Unspecified as i32,
                         gcs_channel_count: 0,
                         gcs_write_chunk_size_bytes: 0,
+                        gcs_project: String::new(),
                     })
                     .await?
                     .into_inner();
@@ -3223,14 +3231,21 @@ async fn run_distributed_workload(
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
     // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
+    // v0.8.71: Also auto-enable when any YAML-driven stage has a barrier: config block
     let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
-        if distributed_config.barrier_sync.enabled {
+        let has_stage_barriers = distributed_config.stages.iter().any(|s| s.barrier.is_some());
+        if distributed_config.barrier_sync.enabled || has_stage_barriers {
             let agent_ids: Vec<String> = agent_addrs.to_vec();
             // Use default phase config (prepare) for initialization
             // Specific phase configs will be used in wait_for_barrier() calls
             let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
-            eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
-                     default_config.heartbeat_interval, default_config.missed_threshold);
+            if distributed_config.barrier_sync.enabled {
+                eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
+                         default_config.heartbeat_interval, default_config.missed_threshold);
+            } else {
+                let stage_count = distributed_config.stages.iter().filter(|s| s.barrier.is_some()).count();
+                eprintln!("🔄 Barrier synchronization auto-enabled ({} stage barrier(s) detected)", stage_count);
+            }
             Some(BarrierManager::new(agent_ids, default_config))
         } else {
             None
@@ -6647,6 +6662,7 @@ workload:
                 range_thresholds_mb: None,
                 gcs_write_chunk_sizes: None,
                 gcs_rapid_mode: None,
+                gcs_project: None,
                 objects: None,
                 trials: None,
                 optimize_for: None,
@@ -6670,6 +6686,7 @@ workload:
                 range_thresholds_mb: None,
                 gcs_write_chunk_sizes: None,
                 gcs_rapid_mode: None,
+                gcs_project: None,
                 objects: None,
                 trials: None,
                 optimize_for: None,
@@ -6694,6 +6711,7 @@ workload:
                 range_thresholds_mb: None,
                 gcs_write_chunk_sizes: None,
                 gcs_rapid_mode: None,
+                gcs_project: None,
                 objects: None,
                 trials: None,
                 optimize_for: None,

@@ -199,40 +199,135 @@ rm -rf /tmp/results/.sai3-coordinator-cache/
 
 ---
 
-## Controller Autotune YAML (v0.8.70+)
+## Controller Autotune (v0.8.70+)
 
-Use `sai3bench-ctl autotune --config <yaml>` to sweep a bounded matrix and print recommended settings.
+`sai3bench-ctl autotune` sweeps a parameter matrix across distributed agents and prints ranked results showing which combination gives the best throughput (or lowest latency).
 
-Minimal example:
+All tuning parameters live in the YAML config file — there are **no CLI flags** for individual parameters. The only flags are `--config <file>` and `--dry-run`.
+
+### Quick Start
+
+```bash
+# Preview the sweep plan without running any trials
+./target/release/sai3bench-ctl autotune \
+  --config examples/distributed-autotune-minimal.yaml --dry-run
+
+# Run the full sweep
+./target/release/sai3bench-ctl autotune \
+  --config examples/distributed-autotune-minimal.yaml
+```
+
+### Autotune YAML Reference
+
+All parameters go under an `autotune:` key in the config file alongside the normal `distributed:` block (agent list, stages, etc.).
 
 ```yaml
 autotune:
-  uri: "gs://my-bucket/bench/autotune/obj*.dat"
-  size_range: "32MiB-64MiB"
-  size_steps: 3
-  threads: "16,32"
+  # ── Target ─────────────────────────────────────────────────────
+  uri: "gs://my-bucket/bench/autotune/obj*.dat"  # glob; must match real objects
 
-  channels: "16,32"
-  range_enabled: "false,true"
-  range_thresholds_mb: "32"
-  gcs_write_chunk_sizes: "2097152"
+  # ── Size sweep ─────────────────────────────────────────────────
+  # Option A: log-spaced range (lo-hi, N steps)
+  size_range: "32MiB-64MiB"   # inclusive range
+  size_steps: 3                # number of log-spaced points (3 → 32, ~45, 64 MiB)
+
+  # Option B: explicit list (mutually exclusive with size_range/size_steps)
+  # sizes: "32MiB,64MiB,128MiB"
+
+  # ── Thread sweep ───────────────────────────────────────────────
+  threads: "16,32"             # comma-separated thread counts to try
+
+  # ── GCS gRPC channel sweep (choose ONE of the two options) ─────
+  # Option A: channels_per_thread — scales with thread count (recommended for GCS RAPID)
+  channels_per_thread: "1,2"   # effective = threads × multiplier; valid range 1-8; default 1
+  # Option B: channels — absolute counts (mutually exclusive with channels_per_thread)
+  # channels: "16,32"
+
+  # ── Range-download tuning ──────────────────────────────────────
+  range_enabled: "false,true"  # sweep range-download on/off
+  range_thresholds_mb: "32"    # comma list of threshold values in MB
+
+  # ── GCS write-chunk tuning ─────────────────────────────────────
+  gcs_write_chunk_sizes: "2097152"   # bytes; e.g. "2097152,4194304"
+
+  # ── GCS RAPID mode ─────────────────────────────────────────────
+  # Controls s3dlio's gRPC transport selection for GCS.
+  #   auto   — use RAPID if available, fall back to standard gRPC (default)
+  #   on     — force RAPID gRPC (fails if not supported)
+  #   off    — force standard gRPC even if RAPID is available
   gcs_rapid_mode: auto
 
-  objects: 64
-  trials: 1
-  optimize_for: throughput
-  ops: both
+  # ── Trial settings ─────────────────────────────────────────────
+  objects: 64            # objects issued per trial run
+  trials: 1              # repetitions per configuration (increase for stability)
+  optimize_for: throughput  # "throughput" or "latency"
+  ops: both              # "get", "put", or "both"
 ```
 
-Reference file: `examples/distributed-autotune-minimal.yaml`
+### Sweep Dimensions and Log-Spacing
 
-Run it:
+When `size_range` + `size_steps` is used, sizes are computed with **log-spacing**:
+
+```
+size[i] = lo × (hi / lo) ^ (i / (steps - 1))   for i = 0 … steps-1
+```
+
+Each value is rounded to the nearest 1 KiB boundary. Example with `size_range: "32MiB-64MiB"` and `size_steps: 3`:
+- Step 0: 32.0 MiB
+- Step 1: 45.3 MiB  ← geometric mean
+- Step 2: 64.0 MiB
+
+### `channels_per_thread` vs `channels`
+
+For GCS workloads the number of gRPC subchannels significantly affects throughput. Two ways to express the channel sweep:
+
+| Parameter | Meaning | Example |
+|---|---|---|
+| `channels_per_thread: "1,2"` | Multiplier; effective = threads × value | 16 threads → tries 16 and 32 channels |
+| `channels: "16,32"` | Absolute count regardless of thread count | Always uses 16 or 32 channels |
+
+`channels_per_thread` is preferred for GCS RAPID workloads because the optimal subchannel count tends to scale with parallelism.
+
+> **Note**: `channels` and `channels_per_thread` are mutually exclusive. Specifying both is an error. `channels_per_thread: 0` is rejected.
+
+### Dry-Run: Planning Before Running
+
+Always use `--dry-run` first to verify the sweep before committing to a long run:
 
 ```bash
-./target/release/sai3bench-ctl \
-  --agents host1:7761,host2:7761 \
-  autotune --config examples/distributed-autotune-minimal.yaml
+./target/release/sai3bench-ctl autotune \
+  --config examples/distributed-autotune-minimal.yaml --dry-run
 ```
+
+Example output:
+```
+┌─ Autotune Configuration ──────────────────────────────────────────┐
+│ URI:          gs://my-bucket/bench/autotune/obj*.dat
+│ Size Range:   32MiB-64MiB (log-spaced, 3 steps) → 3 size(s): ["32.0 MiB", "45.3 MiB", "64.0 MiB"]
+│ Threads:      16,32 → 2 value(s): [16, 32]
+│ Channels/Thr: 1,2 → 2 value(s)  [effective = threads × cpt]
+│               e.g. 16 threads × [1, 2] = [16, 32] channels
+│ Range Enabled: false,true → 2 value(s)
+│ Range Thresh: 32 MB → 1 value(s)
+│ GCS Chunks:   2097152 bytes → 1 value(s)
+│ GCS RAPID:    auto
+│ Objects:      64
+│ Trials:       1
+│
+│ ── Sweep summary ─────────────────────────────────────────────────
+│   Loop order  : sizes(3) × threads(2) × channels(2) × range_en(2) × thresh(1) × gcs_chunk(1)
+│   Total cases : 24
+│   Trials/case : 1
+│   Total runs  : 24 case(s) × 1 trial(s) = 24 runs
+│   Object I/Os : 24 runs × 2 op(s) × 64 objects = 3,072 I/Os
+└───────────────────────────────────────────────────────────────────┘
+```
+
+There is **no hard limit** on trial count. The dry-run sweep summary is the planning tool — it warns if the total run count exceeds 200. Narrow your parameter ranges if the run count is too large.
+
+### Reference Example
+
+See `examples/distributed-autotune-minimal.yaml` for a fully commented example including the `distributed:` block with agent addresses.
 
 ### Dry-Run Validation Checks
 
@@ -243,7 +338,7 @@ Use these commands to validate YAML parsing and distributed preflight before exe
 ./target/release/sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run
 
 # Distributed validation through controller
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761 \
+./target/release/sai3bench-ctl \
   run --config tests/configs/custom_stage_test.yaml --dry-run
 ```
 

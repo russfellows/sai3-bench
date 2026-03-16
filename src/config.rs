@@ -1224,6 +1224,22 @@ pub struct S3dlioOptimizationConfig {
     /// Only meaningful for `gs://` write operations; ignored for reads.
     #[serde(default)]
     pub gcs_write_chunk_size_bytes: Option<u64>,
+
+    /// GCS: Google Cloud project ID (v0.9.70+)
+    ///
+    /// Sets the GCS project ID used for listing buckets. When set, takes
+    /// precedence over the `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, and
+    /// `GCS_PROJECT` environment variables.
+    ///
+    /// Set this in YAML so you don't have to export the variable on every
+    /// agent host separately.  Only needed for `sai3bench-ctl list-buckets`
+    /// and bucket-creation operations; individual object reads/writes resolve
+    /// the project from the bucket's own metadata.
+    ///
+    /// If absent, falls back to `GOOGLE_CLOUD_PROJECT` → `GCLOUD_PROJECT` →
+    /// `GCS_PROJECT` environment variables (existing behaviour).
+    #[serde(default)]
+    pub gcs_project: Option<String>,
 }
 
 fn default_s3dlio_range_threshold_mb() -> u64 {
@@ -1293,6 +1309,14 @@ impl S3dlioOptimizationConfig {
         if let Some(bytes) = self.gcs_write_chunk_size_bytes {
             std::env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", bytes.to_string());
             tracing::info!("Set GCS write chunk size: {} bytes (S3DLIO_GRPC_WRITE_CHUNK_SIZE={})", bytes, bytes);
+        }
+
+        // GCS: project ID — YAML takes precedence over environment variable
+        if let Some(ref project) = self.gcs_project {
+            std::env::set_var("GOOGLE_CLOUD_PROJECT", project);
+            tracing::info!("Set GCS project: {} (via YAML -> GOOGLE_CLOUD_PROJECT)", project);
+        } else {
+            tracing::debug!("GCS project: using GOOGLE_CLOUD_PROJECT env var fallback");
         }
     }
 }

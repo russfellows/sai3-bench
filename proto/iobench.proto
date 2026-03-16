@@ -17,6 +17,7 @@ message RunGetRequest {
   TriStateToggle enable_range_downloads = 5;
   uint32 range_threshold_mb = 6;
   uint32 gcs_write_chunk_size_bytes = 7;
+  string gcs_project = 8;   // GCS project ID (overrides GOOGLE_CLOUD_PROJECT env var on agent)
 }
 
 message RunPutRequest {
@@ -30,6 +31,7 @@ message RunPutRequest {
   TriStateToggle gcs_rapid_mode = 6;
   uint32 gcs_channel_count = 7;
   uint32 gcs_write_chunk_size_bytes = 8;
+  string gcs_project = 9;   // GCS project ID (overrides GOOGLE_CLOUD_PROJECT env var on agent)
 }
 
 enum TriStateToggle {

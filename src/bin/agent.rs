@@ -470,7 +470,60 @@ impl AgentSvc {
     }
 }
 
-/// Extract filesystem path from Config.target or multi_endpoint, return None if not a file:// or direct:// URI
+/// Extract all object storage URIs from config (s3://, gs://, az://)
+fn extract_object_storage_endpoints_from_config(config: &sai3_bench::config::Config) -> Vec<String> {
+    let mut endpoints = Vec::new();
+    let object_storage_schemes = ["s3://", "gs://", "az://"];
+    let is_object_storage = |uri: &str| object_storage_schemes.iter().any(|s| uri.starts_with(s));
+
+    // config.target (standalone mode)
+    if let Some(ref target) = config.target {
+        if is_object_storage(target) {
+            endpoints.push(target.clone());
+        }
+    }
+
+    // multi_endpoint.endpoints
+    if let Some(ref multi) = config.multi_endpoint {
+        for ep in &multi.endpoints {
+            if is_object_storage(ep) {
+                endpoints.push(ep.clone());
+            }
+        }
+    }
+
+    // prepare.ensure_objects[].base_uri
+    if let Some(ref prepare) = config.prepare {
+        for ensure in &prepare.ensure_objects {
+            if let Some(ref uri) = ensure.base_uri {
+                if is_object_storage(uri) && !endpoints.contains(uri) {
+                    endpoints.push(uri.clone());
+                }
+            }
+        }
+    }
+
+    // distributed.agents[].target_override / multi_endpoint
+    if let Some(ref distributed) = config.distributed {
+        for agent in &distributed.agents {
+            if let Some(ref target) = agent.target_override {
+                if is_object_storage(target) && !endpoints.contains(target) {
+                    endpoints.push(target.clone());
+                }
+            }
+            if let Some(ref multi) = agent.multi_endpoint {
+                for ep in &multi.endpoints {
+                    if is_object_storage(ep) && !endpoints.contains(ep) {
+                        endpoints.push(ep.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    endpoints
+}
+
 fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> Option<std::path::PathBuf> {
     // First try config.target (standalone mode)
     if let Some(target) = config.target.as_ref() {
@@ -575,21 +628,30 @@ impl Agent for AgentSvc {
                 Status::internal(format!("Filesystem validation error: {}", e))
             })?
         } else {
-            // Not a filesystem target - skip filesystem validation
-            sai3_bench::preflight::ValidationSummary::new(vec![
-                sai3_bench::preflight::ValidationResult {
-                    level: sai3_bench::preflight::ResultLevel::Info,
-                    error_type: None,
-                    message: "Skipping filesystem validation (target is object storage)".to_string(),
-                    suggestion: String::new(),
-                    details: None,
-                    test_phase: "filesystem".to_string(),
-                }
-            ])
+            // Object storage target — do a quick bucket accessibility check
+            let obj_endpoints = extract_object_storage_endpoints_from_config(&config);
+            if !obj_endpoints.is_empty() {
+                sai3_bench::preflight::object_storage::validate_object_storage(
+                    &obj_endpoints,
+                    false,  // read-only check
+                ).await.map_err(|e| {
+                    error!("Object storage validation failed: {}", e);
+                    Status::internal(format!("Object storage validation error: {}", e))
+                })?
+            } else {
+                // No recognizable target found — report as info
+                sai3_bench::preflight::ValidationSummary::new(vec![
+                    sai3_bench::preflight::ValidationResult {
+                        level: sai3_bench::preflight::ResultLevel::Info,
+                        error_type: None,
+                        message: "Skipping filesystem validation (target is object storage)".to_string(),
+                        suggestion: String::new(),
+                        details: None,
+                        test_phase: "filesystem".to_string(),
+                    }
+                ])
+            }
         };
-        
-        // TODO Phase 2: Add object storage validation
-        // let obj_summary = sai3_bench::preflight::object_storage::validate_object_storage(&config).await;
         
         // Convert ValidationSummary to proto response
         let results: Vec<ValidationResult> = fs_summary.results.iter().map(|r| {
@@ -816,6 +878,7 @@ impl Agent for AgentSvc {
             enable_range_downloads,
             range_threshold_mb,
             gcs_write_chunk_size_bytes,
+            gcs_project,
         } = req.into_inner();
 
         apply_request_tuning(
@@ -824,6 +887,7 @@ impl Agent for AgentSvc {
             Some(enable_range_downloads),
             Some(range_threshold_mb),
             Some(gcs_write_chunk_size_bytes),
+            &gcs_project,
         );
         
         // Parse URI to extract base and pattern
@@ -902,6 +966,7 @@ impl Agent for AgentSvc {
             gcs_rapid_mode,
             gcs_channel_count,
             gcs_write_chunk_size_bytes,
+            gcs_project,
         } = req.into_inner();
 
         apply_request_tuning(
@@ -910,6 +975,7 @@ impl Agent for AgentSvc {
             None,
             None,
             Some(gcs_write_chunk_size_bytes),
+            &gcs_project,
         );
         
         // Build base URI from bucket (assume s3:// for backward compatibility)
@@ -3894,6 +3960,7 @@ fn apply_request_tuning(
     enable_range_downloads: Option<i32>,
     range_threshold_mb: Option<u32>,
     gcs_write_chunk_size_bytes: Option<u32>,
+    gcs_project: &str,
 ) {
     let rapid_mode = TriStateToggle::try_from(gcs_rapid_mode).unwrap_or(TriStateToggle::Unspecified);
     match rapid_mode {
@@ -3931,6 +3998,11 @@ fn apply_request_tuning(
         if chunk_size > 0 {
             env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", chunk_size.to_string());
         }
+    }
+
+    // GCS: project ID — forwarded from YAML config, overrides env var on agent
+    if !gcs_project.is_empty() {
+        env::set_var("GOOGLE_CLOUD_PROJECT", gcs_project);
     }
 }
 

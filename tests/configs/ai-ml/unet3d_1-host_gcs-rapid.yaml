@@ -1,6 +1,13 @@
-# unet3d_gcs_test.yaml - 1 agent matching rdf-bench parameters
-# GCS version of unet3d workload with nested directory structure
-# 
+# unet3d_1-host_gcs-rapid.yaml - 1 agent, GCS RAPID (Hyperdisk ML) storage
+# Derived from unet3d_1-host.yaml; bucket changed to sig65-rapid1 and
+# GCS RAPID mode forced on with optimal gRPC settings.
+#
+# RAPID Storage bucket: gs://sig65-rapid1
+# Requires GCLOUD_PROJECT (or GOOGLE_CLOUD_PROJECT) to be set in the
+# environment on the controller and each agent host:
+#
+#   export GCLOUD_PROJECT=signal65-testing
+#
 # Matches rdf-bench config: width=28, depth=2, files=64 per host
 # Size distribution matches: sizes=(1m,10,2m,20,4m,30,8m,25,16m,10,32m,5)
 #
@@ -8,12 +15,11 @@
 # Directory Structure:
 #   width=28, depth=2 → 28 × 28 = 784 leaf directories
 #   784 dirs × 64 files = 50,176 files per host
-#   1 host × 50,176 = 50,176 total files
 #
 # Average file size: ~6.9 MB (weighted average from rdf-bench distribution)
-# Total dataset: ~338 GB (1 host × 338 GB)
+# Total dataset: ~338 GB
 
-target: "gs://signal65-ai-ac/unet3d/"
+target: "gs://sig65-rapid1/unet3d/"
 duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
 concurrency: 32      # Matches rdf-bench threads=32
 
@@ -21,11 +27,39 @@ perf_log:
   enabled: true
   interval: 1s
 
+# ── GCS RAPID / gRPC tuning ────────────────────────────────────────────────
+# These settings activate the RAPID (bidi-streaming gRPC) transport and tune
+# the channel + write-chunk parameters for maximum RAPID throughput.
+s3dlio_optimization:
+  # GCS project ID — set here instead of exporting GOOGLE_CLOUD_PROJECT on every host.
+  # Falls back to GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GCS_PROJECT env vars if absent.
+  gcs_project: signal65-testing
+
+  # Force GCS RAPID mode ON (skip auto-detection for this known RAPID bucket).
+  # Set to false (or remove) to revert to standard GCS gRPC for comparison.
+  gcs_rapid_mode: true
+
+  # gRPC subchannel count.
+  # RAPID throughput scales with subchannel count × thread count.
+  # Rule of thumb: start with concurrency (32) and tune up in powers of 2.
+  # Typical sweet spot for RAPID: 1–2× the thread count.
+  gcs_channel_count: 32        # = 1× concurrency (start here)
+
+  # gRPC write-chunk size in bytes (bidi-streaming PUT path).
+  # 4128768 = 4 MiB − 64 KiB (maximum safe gRPC frame payload).
+  # Use 2097152 (2 MiB, the default) if you see gRPC frame errors.
+  gcs_write_chunk_size_bytes: 4128768
+
+  # Range-download optimization for large reads (GET path).
+  # RAPID benefits from concurrent range GETs: enable with a low threshold.
+  enable_range_downloads: true
+  range_threshold_mb: 8        # Files ≥ 8 MB use parallel range requests
+
 prepare:
   prepare_strategy: parallel
   skip_verification: true
   force_overwrite: true
-  
+
   # Create nested directory tree matching rdf-bench FSD:
   # width=28, depth=2, files=64 (per host in rdf-bench)
   # rdf-bench: 1 host creates 784×64=50,176 files
@@ -36,11 +70,10 @@ prepare:
     files_per_dir: 64        # 64 files/host × 1 host = 64 files per directory
     distribution: "bottom"   # Files only in leaf directories
     dir_mask: "scan.d%d_w%d.dir"
-  
+
   # Total files calculation: 784 leaf dirs × 64 files/dir = 50,176 files
-  # This matches rdf-bench: 1 host × 50,176 files/host = 50,176 files
   ensure_objects:
-    - base_uri: "gs://signal65-ai-ac/unet3d/"
+    - base_uri: "gs://sig65-rapid1/unet3d/"
       count: 50176  # 784 dirs × 64 files = 1 host × 50,176 files/host
       fill: random
       size_spec:
@@ -51,14 +84,14 @@ prepare:
         max: 33554432      # 32 MB maximum (matches rdf-bench)
       dedup_factor: 1
       compress_factor: 1
-  
+
   cleanup: false  # Keep data between runs
 
 workload:
   # Sequential reads matching rdf-bench:
   # operation=read, fileio=sequential, xfersize=1m
   # Each worker will select files uniformly at random
-  
+
   - op: get
     path: "scan.d*_w*.dir/**/*"  # Match actual directory structure
     weight: 100

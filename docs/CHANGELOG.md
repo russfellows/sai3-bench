@@ -6,7 +6,7 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
-## [Unreleased]
+## [0.8.70] - 2026-03-16
 
 ### Added
 
@@ -88,6 +88,19 @@ All notable changes to sai3-bench are documented in this file.
   - `parse_csv_u32`, `parse_csv_bool` (controller copy), `to_pb_toggle`
   - `split_put_uri`: trailing slash, no trailing slash, s3://, file://
   - `parse_sizes_from_config`: explicit list, range with 1 step, default range
+
+- **`distributed.stages` with `barrier` blocks added to all AI/ML test configs**
+  - All 7 files in `tests/configs/ai-ml/` now include explicit `stages:` with 3 stages
+    (preflight, prepare, execute), each with `barrier: { type: all_or_nothing }`
+  - Added `perf_log: { enabled: true, interval: 1s }` to every config
+  - Added `force_overwrite: true` inside `prepare:` of every config
+  - Files updated: `resnet50_1-host.yaml`, `resnet50_4-hosts.yaml`, `resnet50_8-hosts.yaml`,
+    `unet3d_1-host.yaml`, `unet3d_2-hosts_quick-test.yaml`, `unet3d_4-hosts.yaml`,
+    `unet3d_8-hosts.yaml`
+
+### Tests
+
+- **638 tests passing, 0 failing, 0 warnings** (final verified count for this release)
 
 ## [0.8.63] - 2026-02-23
 

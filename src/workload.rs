@@ -789,10 +789,18 @@ async fn get_object_cached(
 ) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let bytes = store.get(uri).await
-        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout — prevents workers from hanging indefinitely when
+    // a gRPC channel stalls (e.g. GCS load-balancer reset, RAPID transport issue).
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.get(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("GET timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+
     trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes)  // Zero-copy: return Bytes directly
 }
@@ -812,10 +820,17 @@ async fn put_object_cached(
 ) -> anyhow::Result<()> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    store.put(uri, data).await  // Zero-copy: Bytes passed directly
-        .with_context(|| format!("Failed to put object to URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.put(uri, data),
+    )
+    .await
+    .map_err(|_| anyhow!("PUT timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to put object to URI: {}", uri))?;
+
     trace!("PUT operation completed successfully for URI: {}", uri);
     Ok(())
 }
@@ -834,10 +849,17 @@ async fn delete_object_cached(
 ) -> anyhow::Result<()> {
     trace!("DELETE operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    store.delete(uri).await
-        .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.delete(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("DELETE timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
+
     trace!("DELETE operation completed successfully for URI: {}", uri);
     Ok(())
 }
@@ -878,10 +900,17 @@ async fn stat_object_cached(
 ) -> anyhow::Result<u64> {
     trace!("STAT operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let metadata = store.stat(uri).await
-        .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let metadata = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.stat(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("STAT timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
+
     let size = metadata.size;
     trace!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
     Ok(size)
@@ -2574,39 +2603,74 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let mut meta_bins = SizeBins::default();
 
     let mut workload_error: Option<anyhow::Error> = None;
-    
-    for h in handles {
-        match h.await {
-            Ok(Ok(ws)) => {
-                // Worker completed successfully
-                merged_get.merge(&ws.hist_get);
-                merged_put.merge(&ws.hist_put);
-                merged_meta.merge(&ws.hist_meta);
-                get_bytes += ws.get_bytes;
-                get_ops += ws.get_ops;
-                put_bytes += ws.put_bytes;
-                put_ops += ws.put_ops;
-                meta_bytes += ws.meta_bytes;
-                meta_ops += ws.meta_ops;
-                get_bins.merge_from(&ws.get_bins);
-                put_bins.merge_from(&ws.put_bins);
-                meta_bins.merge_from(&ws.meta_bins);
+
+    // v0.8.71: Bounded drain — don't wait forever for workers that are stuck
+    // inside a store.get/put that didn't respect the per-op timeout.
+    // After DEFAULT_WORKER_DRAIN_TIMEOUT_SECS, abort remaining handles and move on.
+    // Workers still in-flight will be detached; their per-op timeouts (120s) will
+    // eventually unblock them so Tokio won't leak them indefinitely.
+    let drain_budget = Duration::from_secs(crate::constants::DEFAULT_WORKER_DRAIN_TIMEOUT_SECS);
+    let drain_deadline = tokio::time::Instant::now() + drain_budget;
+    let mut drained = 0usize;
+    let total_handles = handles.len();
+
+    for mut h in handles {
+        // Use &mut h so we retain ownership on timeout and can call h.abort().
+        // timeout_at returns:  Result<Result<anyhow::Result<WorkerStats>, JoinError>, Elapsed>
+        match tokio::time::timeout_at(drain_deadline, &mut h).await {
+            Ok(join_result) => {
+                drained += 1;
+                match join_result {
+                    Ok(Ok(ws)) => {
+                        // Worker completed successfully — merge stats
+                        merged_get.merge(&ws.hist_get);
+                        merged_put.merge(&ws.hist_put);
+                        merged_meta.merge(&ws.hist_meta);
+                        get_bytes += ws.get_bytes;
+                        get_ops += ws.get_ops;
+                        put_bytes += ws.put_bytes;
+                        put_ops += ws.put_ops;
+                        meta_bytes += ws.meta_bytes;
+                        meta_ops += ws.meta_ops;
+                        get_bins.merge_from(&ws.get_bins);
+                        put_bins.merge_from(&ws.put_bins);
+                        meta_bins.merge_from(&ws.meta_bins);
+                    }
+                    Ok(Err(e)) => {
+                        // Worker returned Err (error threshold exceeded)
+                        error!("Worker task failed: {}", e);
+                        workload_error = Some(e);
+                        break;
+                    }
+                    Err(e) => {
+                        // Worker task panicked
+                        error!("Worker task panicked: {}", e);
+                        workload_error = Some(anyhow!("Worker task panicked: {}", e));
+                        break;
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                // Worker hit error threshold
-                error!("Worker task failed: {}", e);
-                workload_error = Some(e);
-                break;  // Stop processing remaining workers
-            }
-            Err(e) => {
-                // Worker panicked
-                error!("Worker task panicked: {}", e);
-                workload_error = Some(anyhow!("Worker task panicked: {}", e));
+            Err(_elapsed) => {
+                // Drain budget exhausted — abort this worker, skip the rest.
+                // Remaining handles from the for-loop iterator will be detached
+                // (Drop on JoinHandle does NOT cancel the task) but their in-flight
+                // store.get/put calls will time out within DEFAULT_OP_TIMEOUT_SECS (120s).
+                h.abort();
+                let stuck = total_handles - drained;
+                warn!(
+                    "⚠️  Worker drain timed out after {}s ({}/{} workers completed); \
+                     {} stuck worker(s) aborted. Their partial stats are discarded.",
+                    drain_budget.as_secs(), drained, total_handles, stuck
+                );
+                workload_error = Some(anyhow!(
+                    "Worker drain timeout: {} of {} worker(s) did not finish within {}s",
+                    stuck, total_handles, drain_budget.as_secs()
+                ));
                 break;
             }
         }
     }
-    
+
     // v0.7.13: If error occurred, cancel progress bar before returning
     if let Some(err) = workload_error {
         let _ = tx_cancel_progress.send(());

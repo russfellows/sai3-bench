@@ -24,6 +24,7 @@ struct DryRunAutotuneConfig {
     range_thresholds_mb: Option<String>,
     gcs_write_chunk_sizes: Option<String>,
     gcs_rapid_mode: Option<String>,
+    gcs_project: Option<String>,
     objects: Option<u32>,
     trials: Option<usize>,
     optimize_for: Option<String>,
@@ -210,8 +211,39 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!("│ Perf Log:     ❌ DISABLED");
     }
     
-    println!("└──────────────────────────────────────────────────────────────────────┘");
+        println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
+
+    // GCS storage optimization settings (shown when s3dlio_optimization block is present)
+    if let Some(ref opt) = config.s3dlio_optimization {
+        let is_gcs = config.target.as_deref()
+            .map(|t| t.starts_with("gs://") || t.starts_with("gcs://"))
+            .unwrap_or(false);
+        if is_gcs || opt.gcs_project.is_some() || opt.gcs_rapid_mode.is_some() ||
+           opt.gcs_channel_count.is_some() || opt.gcs_write_chunk_size_bytes.is_some() {
+            println!("┌─ GCS Storage Optimization ─────────────────────────────────────────────┤");
+            if let Some(ref project) = opt.gcs_project {
+                println!("│ GCS Project:    {} (→ GOOGLE_CLOUD_PROJECT)", project);
+            } else {
+                println!("│ GCS Project:    (not set — using GOOGLE_CLOUD_PROJECT env var)");
+            }
+            if let Some(rapid) = opt.gcs_rapid_mode {
+                println!("│ RAPID mode:     {}", if rapid { "✅ FORCED ON" } else { "❌ FORCED OFF" });
+            } else {
+                println!("│ RAPID mode:     auto-detect per bucket (default)");
+            }
+            if let Some(n) = opt.gcs_channel_count {
+                println!("│ gRPC channels:  {} (explicit)", n);
+            } else {
+                println!("│ gRPC channels:  auto (= concurrency)");
+            }
+            if let Some(bytes) = opt.gcs_write_chunk_size_bytes {
+                println!("│ Write chunk:    {} bytes ({:.1} MiB)", bytes, bytes as f64 / 1_048_576.0);
+            }
+            println!("└───────────────────────────────────────────────────────────────────────┤");
+            println!();
+        }
+    }
 
     // Explicit autotune configuration block (if present in YAML)
     if let Ok(content) = std::fs::read_to_string(config_path) {
@@ -348,6 +380,9 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 }
                 if let Some(ref rapid) = at.gcs_rapid_mode {
                     println!("│ GCS RAPID:    {}", rapid);
+                }
+                if let Some(ref project) = at.gcs_project {
+                    println!("│ GCS Project:  {}", project);
                 }
                 println!("│ Objects:      {}", objects);
                 println!("│ Trials:       {}", trials);
