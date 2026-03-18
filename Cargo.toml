@@ -1,11 +1,11 @@
 [package]
 name = "sai3-bench"
-version = "0.8.70"
+version = "0.8.72"
 edition = "2021"
 build   = "build.rs"
 
 [dependencies]
-# AWS SDK - aligned with s3dlio v0.9.70
+# AWS SDK - aligned with s3dlio v0.9.76
 aws-config = "=1.8.14"
 aws-sdk-s3 = "=1.124.0"
 anyhow = "^1"
@@ -26,8 +26,10 @@ num_cpus = "^1.16"
 # s3dlio: git-tagged release dependency for portable builds on any machine.
 # Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
 # az:// and gs:// support even though s3dlio's own default profile is S3-focused.
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.70", features = ["full-backends"] }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.70" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.76", features = ["full-backends"] }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.76" }
+# Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
+# Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

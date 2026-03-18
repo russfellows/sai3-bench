@@ -801,6 +801,13 @@ async fn get_object_cached(
     .map_err(|_| anyhow!("GET timed out after {}s: {}", timeout_secs, uri))?
     .with_context(|| format!("Failed to get object from URI: {}", uri))?;
 
+    // v0.8.71: Detect zero-byte returns from stalled/reset gRPC subchannels.
+    // GCS sometimes returns Ok(empty) instead of an error on degraded connections.
+    // Treat as a retriable error so it goes through ErrorHandlingConfig logic.
+    if bytes.is_empty() {
+        return Err(anyhow!("GET returned empty body (0 bytes): {}", uri));
+    }
+
     trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes)  // Zero-copy: return Bytes directly
 }
@@ -878,9 +885,16 @@ async fn list_objects_cached(
 ) -> anyhow::Result<Vec<String>> {
     trace!("LIST operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let keys = store.list(uri, true).await
-        .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
+
+    // v0.8.71: per-op timeout (same as GET/PUT/STAT/DELETE)
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let keys = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.list(uri, true),
+    )
+    .await
+    .map_err(|_| anyhow!("LIST timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
     
     trace!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
     Ok(keys)
@@ -1774,18 +1788,23 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let weights: Vec<u32> = cfg.workload.iter().map(|w| w.weight).collect();
     let chooser = WeightedIndex::new(weights).context("invalid weights")?;
 
-    // Concurrency: Create per-operation semaphores
-    // If an operation has a concurrency override, use that; otherwise use global
-    let mut op_semaphores: Vec<Arc<Semaphore>> = Vec::new();
+    // v0.8.71: Per-op concurrency limiting — only when an operation has an
+    // explicit concurrency override LOWER than the global concurrency.
+    // The common case (no override) uses None to skip semaphore overhead entirely.
+    // Previously every operation acquired a semaphore permit even when permits
+    // could never be exhausted — pure overhead on the hot path.
+    let mut op_semaphores: Vec<Option<Arc<Semaphore>>> = Vec::new();
     for wo in &cfg.workload {
-        let concurrency = wo.concurrency.unwrap_or(cfg.concurrency);
-        op_semaphores.push(Arc::new(Semaphore::new(concurrency)));
-    }
-    
-    // Log per-op concurrency settings
-    for (idx, wo) in cfg.workload.iter().enumerate() {
         if let Some(conc) = wo.concurrency {
-            info!("Operation {} has custom concurrency: {}", idx, conc);
+            if conc < cfg.concurrency {
+                info!("Operation has custom concurrency limit: {} (global: {})", conc, cfg.concurrency);
+                op_semaphores.push(Some(Arc::new(Semaphore::new(conc))));
+            } else {
+                info!("Operation concurrency {} >= global {} — no semaphore needed", conc, cfg.concurrency);
+                op_semaphores.push(None);
+            }
+        } else {
+            op_semaphores.push(None);
         }
     }
 
@@ -2023,13 +2042,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         }
     }
     
+    // v0.8.71: Wrap Config in Arc to eliminate expensive deep clones in the
+    // worker hot path.  Every operation previously did cfg.clone() to satisfy
+    // the retry closure's ownership requirement — now it's a cheap Arc bump.
+    let cfg = Arc::new(cfg.clone());
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
         let workload = cfg.workload.clone();
         let chooser = chooser.clone();
         let pre = pre.clone();
-        let cfg = cfg.clone();
+        let cfg = Arc::clone(&cfg);
         let separate_pools = needs_separate_pools;  // Clone flag for workers
         let path_selector = path_selector.clone();  // Clone PathSelector for this worker
         let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
@@ -2042,6 +2066,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
             let mut ws: WorkerStats = Default::default();
+
+            // v0.8.71 P3: Per-worker local counters to reduce cache-line bouncing
+            // on the shared AtomicU64 progress counters.  Flushed every 64 ops.
+            let mut local_ops: u64 = 0;
+            let mut local_bytes: u64 = 0;
+            const FLUSH_INTERVAL: u64 = 64;
 
             loop {
                 if Instant::now() >= deadline {
@@ -2059,8 +2089,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 // to ensure we're controlling the rate of operation STARTS, not queued operations
                 rate_controller.wait().await;
 
-                // Acquire permit for this specific operation
-                let _p = op_sems[idx].acquire().await.unwrap();
+                // Acquire permit only if this operation has a per-op concurrency limit.
+                // v0.8.71: Common case (None) skips semaphore entirely — zero overhead.
+                let _p = if let Some(ref sem) = op_sems[idx] {
+                    Some(sem.acquire().await.unwrap())
+                } else {
+                    None
+                };
                 
                 let op = &workload[idx].spec;
 
@@ -2139,8 +2174,14 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_get(bytes.len(), duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
-                                bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                local_ops += 1;
+                                local_bytes += bytes.len() as u64;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error - continue to next operation
@@ -2243,8 +2284,14 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_put(sz as usize, duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
-                                bytes_counter.fetch_add(sz, Ordering::Relaxed);
+                                local_ops += 1;
+                                local_bytes += sz;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2292,7 +2339,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2371,7 +2424,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2450,7 +2509,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2509,7 +2574,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2570,7 +2641,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2581,6 +2658,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         }
                     }
                 }
+            }
+
+            // Flush remaining local counters before worker exits
+            if local_ops > 0 {
+                ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
             }
 
             Ok::<WorkerStats, anyhow::Error>(ws)
