@@ -31,10 +31,6 @@ perf_log:
 # These settings activate the RAPID (bidi-streaming gRPC) transport and tune
 # the channel + write-chunk parameters for maximum RAPID throughput.
 s3dlio_optimization:
-  # GCS project ID — set here instead of exporting GOOGLE_CLOUD_PROJECT on every host.
-  # Falls back to GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GCS_PROJECT env vars if absent.
-  gcs_project: signal65-testing
-
   # Force GCS RAPID mode ON (skip auto-detection for this known RAPID bucket).
   # Set to false (or remove) to revert to standard GCS gRPC for comparison.
   gcs_rapid_mode: true
@@ -51,7 +47,11 @@ s3dlio_optimization:
   gcs_write_chunk_size_bytes: 4128768
 
   # Range-download optimization for large reads (GET path).
-  # RAPID benefits from concurrent range GETs: enable with a low threshold.
+  # sai3-bench bridges this field into GcsConfig.enable_range_engine so that
+  # objects ≥ range_threshold_mb are split into concurrent parallel ReadObject
+  # RPCs.  Note: each chunk uses ReadObject (not BidiReadObject), so RAPID
+  # bidi-streaming transport is bypassed per chunk.  Benchmark to verify
+  # net benefit for your object sizes before using in production.
   enable_range_downloads: true
   range_threshold_mb: 8        # Files ≥ 8 MB use parallel range requests
 
@@ -102,7 +102,7 @@ distributed:
   tree_creation_mode: coordinator  # Controller creates directory tree once
   path_selection: random  # Random file selection for workload
   agents:
-    - address: "10.138.0.42:7761"
+    - address: "10.128.0.11:7761"
       id: "agent-1"
 
   stages:
@@ -120,8 +120,16 @@ distributed:
     barrier:
       type: all_or_nothing
     expected_objects: 50176
-  - name: execute
+  - name: consistency-wait
     order: 3
+    completion: script_exit
+    type: custom
+    barrier:
+      type: all_or_nothing
+    command: sleep
+    args: ["60"]
+  - name: execute
+    order: 4
     completion: duration
     type: execute
     barrier:

@@ -35,7 +35,7 @@ concurrency: 32
 
 s3dlio_optimization:
   gcs_rapid_mode: true
-  enable_range_downloads: false   # RAPID uses bidi streaming, not byte ranges
+  enable_range_downloads: false   # default; see "Range Downloads with RAPID" section below
 ```
 
 RAPID mode can also be auto-detected per bucket. Omit `gcs_rapid_mode` and
@@ -65,11 +65,32 @@ concurrency: 32
 s3dlio_optimization:
   gcs_channel_count: 4    # total gRPC subchannels = 4
   gcs_rapid_mode: true
-  enable_range_downloads: false
+  enable_range_downloads: false   # default; see "Range Downloads with RAPID" section below
 ```
 
 When `gcs_channel_count` is absent (the usual case), sai3-bench sets one
 channel per concurrent task automatically.
+
+## Range Downloads with RAPID
+
+`enable_range_downloads: true` splits large GETs into concurrent partial reads.
+sai3-bench bridges this field directly into `GcsConfig.enable_range_engine` so it
+works for GCS (which does not read the underlying `S3DLIO_ENABLE_RANGE_OPTIMIZATION`
+env var itself — that bridge lives in a future s3dlio release).
+
+**Trade-off for RAPID buckets**: each range chunk issues a `ReadObject` RPC with a
+byte-range header, **not** a `BidiReadObject`.  RAPID's bidi-streaming transport is
+therefore bypassed per chunk.  Parallelism is real, but RAPID transport efficiency
+is sacrificed.  Whether this is a net win depends on object sizes and network
+conditions — benchmark before enabling in production.
+
+```yaml
+# Enable parallel range GETs for large objects (experimental on RAPID)
+s3dlio_optimization:
+  gcs_rapid_mode: true
+  enable_range_downloads: true
+  range_threshold_mb: 64   # only split objects ≥ 64 MB
+```
 
 ## Environment Variables
 

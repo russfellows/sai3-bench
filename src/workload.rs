@@ -199,12 +199,28 @@ pub fn create_store_for_uri_with_config(
         }
     }
     
-    // For GCS URIs, apply RangeEngine configuration
+    // For GCS URIs, apply RangeEngine configuration.
+    //
+    // Priority order (highest wins):
+    //   1. Explicit `range_engine:` YAML block (range_config parameter)
+    //   2. S3DLIO_ENABLE_RANGE_OPTIMIZATION env var — set by apply_request_tuning()
+    //      from `s3dlio_optimization.enable_range_downloads` in the YAML.
+    //      Bridge note: GcsObjectStore does not read this env var itself
+    //      (an s3dlio limitation to be fixed in a future s3dlio release).
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
-        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
-        
+        // Read env vars that apply_request_tuning() may have already set.
+        let env_range_enabled = std::env::var("S3DLIO_ENABLE_RANGE_OPTIMIZATION")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off" | "disable" | "disabled"))
+            .unwrap_or(false);
+        let env_threshold_bytes: u64 = std::env::var("S3DLIO_RANGE_THRESHOLD_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE);
+
         let config = if let Some(cfg) = range_config {
+            // Explicit range_engine: block always takes highest priority.
+            debug!("GCS RangeEngine: enabled via range_engine: config block for {}", uri);
             GcsConfig {
                 enable_range_engine: cfg.enabled,
                 range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
@@ -213,21 +229,38 @@ pub fn create_store_for_uri_with_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
+            }
+        } else if env_range_enabled {
+            // Bridge: honour s3dlio_optimization.enable_range_downloads for GCS.
+            // GcsObjectStore does not read S3DLIO_ENABLE_RANGE_OPTIMIZATION itself,
+            // so sai3-bench propagates it here into the struct config.
+            info!(
+                "GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads \
+                 (threshold {} MiB) for {}",
+                env_threshold_bytes / (1024 * 1024), uri
+            );
+            GcsConfig {
+                enable_range_engine: true,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    min_split_size: env_threshold_bytes,
+                    ..Default::default()
+                },
+                size_cache_ttl_secs: 60,
             }
         } else {
-            // No config provided - use disabled default
+            debug!("GCS RangeEngine: disabled for {}", uri);
             GcsConfig {
                 enable_range_engine: false,
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
                 ..Default::default()
             }
         };
-        
+
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
-    
+
     // For other backends, use standard creation
     // TODO: Add Azure/S3 config support here when needed
     store_for_uri(uri).context("Failed to create object store")
@@ -382,12 +415,20 @@ pub fn create_store_with_logger_and_config(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For GCS URIs, apply RangeEngine configuration
+    // For GCS URIs, apply RangeEngine configuration (same priority logic as
+    // create_store_for_uri_with_config — see that function for full comments).
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
-        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
-        
+        let env_range_enabled = std::env::var("S3DLIO_ENABLE_RANGE_OPTIMIZATION")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off" | "disable" | "disabled"))
+            .unwrap_or(false);
+        let env_threshold_bytes: u64 = std::env::var("S3DLIO_RANGE_THRESHOLD_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE);
+
         let config = if let Some(cfg) = range_config {
+            debug!("GCS RangeEngine: enabled via range_engine: config block for {}", uri);
             GcsConfig {
                 enable_range_engine: cfg.enabled,
                 range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
@@ -396,20 +437,35 @@ pub fn create_store_with_logger_and_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
+            }
+        } else if env_range_enabled {
+            info!(
+                "GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads \
+                 (threshold {} MiB) for {}",
+                env_threshold_bytes / (1024 * 1024), uri
+            );
+            GcsConfig {
+                enable_range_engine: true,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    min_split_size: env_threshold_bytes,
+                    ..Default::default()
+                },
+                size_cache_ttl_secs: 60,
             }
         } else {
+            debug!("GCS RangeEngine: disabled for {}", uri);
             GcsConfig {
                 enable_range_engine: false,
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
                 ..Default::default()
             }
         };
-        
+
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
-    
+
     // For other backends, use logger if available
     let logger = global_logger();
     if logger.is_some() {

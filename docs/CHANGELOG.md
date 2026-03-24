@@ -10,6 +10,40 @@ All notable changes to sai3-bench are documented in this file.
 
 ### Fixed
 
+- **GCS `enable_range_downloads` was a no-op for GCS/Azure backends (bug + doc)**
+  - `s3dlio_optimization.enable_range_downloads: true` set the env var
+    `S3DLIO_ENABLE_RANGE_OPTIMIZATION=1`, but `GcsObjectStore` (and `AzureObjectStore`)
+    never read that env var — only the S3 backend does.  Range parallelism was silently
+    disabled for all GCS workloads regardless of the YAML setting.
+  - Fixed in `src/workload.rs`: both `create_store_for_uri_with_config()` and
+    `create_store_with_logger_and_config()` now read `S3DLIO_ENABLE_RANGE_OPTIMIZATION`
+    and `S3DLIO_RANGE_THRESHOLD_MB` from the process environment (already set by
+    `apply_request_tuning()` before any store is constructed) and bridge them into
+    `GcsConfig { enable_range_engine: true, range_engine: { min_split_size: threshold } }`.
+  - Priority order for GCS store creation:
+    1. Explicit `range_engine:` YAML block (highest — unchanged)
+    2. `s3dlio_optimization.enable_range_downloads` / `range_threshold_mb` (new fallback)
+    3. Range disabled (default when neither is present)
+  - An `info!` log confirms when the bridge activates:
+    `GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads (threshold N MiB)`
+  - Root cause: `S3DLIO_ENABLE_RANGE_OPTIMIZATION` is an S3-specific mechanism;
+    GCS/Azure use per-store struct config.  A future s3dlio release will make
+    `GcsConfig::default()` read these env vars directly, making this bridge redundant.
+
+- **Misleading range-download comment in `tests/configs/ai-ml/unet3d_1-host_gcs-rapid.yaml`**
+  - Old comment: `# RAPID benefits from concurrent range GETs: enable with a low threshold`
+    — implied the `s3dlio_optimization` block was wiring range downloads correctly for RAPID.
+  - New comment accurately describes the sai3-bench bridge mechanism, and notes the
+    ReadObject-per-chunk trade-off (RAPID bidi transport is bypassed per chunk).
+
+- **Incorrect examples in `docs/GCS_INTEGRATION.md`**
+  - Both RAPID quick-start examples showed `enable_range_downloads: false` with comment
+    `# RAPID uses bidi streaming, not byte ranges`, which was misleading on two counts:
+    the setting is a valid option (not forbidden), and its prior silently-broken behaviour
+    was not documented.
+  - Comments updated; a new **"Range Downloads with RAPID"** section added explaining the
+    mechanism, GET-per-chunk trade-off, and a working configuration example.
+
 - **Worker drain deadline anchored incorrectly (CRITICAL)**
   - `drain_deadline` was computed as `Instant::now() + drain_budget` at the moment workers
     were spawned, so the drain fired 150 s into execute while workers still had time remaining
