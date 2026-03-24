@@ -4130,10 +4130,20 @@ async fn run_distributed_workload(
     // v0.8.25: Wait for execute barrier if enabled
     // v0.8.28: Skip legacy barrier wait when using YAML-driven stages
     // (stage barriers are already handled during the main loop)
+    // v0.8.86: Fix: use !stages.is_empty() (same as line ~2695), not barrier_sync.enabled.
+    // barrier_sync.enabled is false when using auto-detected stage barriers, causing the legacy
+    // execute barrier to run AFTER GOODBYE is sent, finding 0 agents → "insufficient agents".
     let using_yaml_stages = config.distributed.as_ref()
-        .map(|d| d.barrier_sync.enabled)
+        .map(|d| !d.stages.is_empty())
         .unwrap_or(false);
-    
+    info!("Post-GOODBYE barrier check: using_yaml_stages={} (stages-based={}, barrier_sync.enabled={})",
+        using_yaml_stages,
+        config.distributed.as_ref().map(|d| !d.stages.is_empty()).unwrap_or(false),
+        config.distributed.as_ref().map(|d| d.barrier_sync.enabled).unwrap_or(false));
+    if using_yaml_stages {
+        info!("YAML-driven stages active — skipping legacy execute barrier (all barriers handled in main loop)");
+    }
+
     if !using_yaml_stages {
         if let Some(ref mut bm) = barrier_manager {
             if let Some(ref distributed_config) = config.distributed {
