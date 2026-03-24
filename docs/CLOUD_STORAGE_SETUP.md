@@ -258,10 +258,10 @@ workload:
 ```
 
 ### Performance Characteristics
-- **Latency**: 300-700ms (network/region dependent)
-- **Throughput**: Lower than S3/GCS (2-5 ops/sec typical)
-- **Best concurrency**: 4-16 for mixed workloads
-- **Rate limits**: More restrictive than S3/GCS
+- **Latency**: Network/region dependent; expect single-digit ms on same-region or LAN, higher over WAN
+- **Throughput**: Comparable to S3/GCS on same-region deployments
+- **Best concurrency**: 16-64 for mixed workloads (tune to your network)
+- **Note**: Performance figures vary significantly based on network topology. Always benchmark in your target environment.
 
 ---
 
@@ -274,25 +274,68 @@ workload:
 
 ### Authentication Setup
 
-#### Option 1: Application Default Credentials (Recommended)
+s3dlio requires two things before any `gs://` operation will succeed:
+1. Valid GCP credentials (via one of the options below)
+2. The `GCLOUD_PROJECT` environment variable set to your GCP project ID
+
+**Quick debug checklist** — if GCS access is failing, run through these steps:
+
 ```bash
-# Login with user account
+# Step 1: authenticate
+gcloud auth login
+
+# Step 2: export your project ID (required by s3dlio)
+export GCLOUD_PROJECT=your-project-id   # e.g. signal65-testing
+
+# Step 3: verify access with s3-cli (ships with s3dlio)
+s3-cli list-buckets gs://
+```
+
+Expected output:
+```
+Listing containers for 'gs://'...
+
+Found N container(s):
+Name                    URI                    Creation Date
+-----------------------------------------------------------
+my-bucket               gs://my-bucket         ...
+```
+
+If `list-buckets` succeeds, sai3-bench will work.
+
+> **On GCE VMs**: `gcloud auth login` warns that personal credentials may be
+> visible to others on the VM and recommends service accounts instead.
+> Either path works — service accounts are preferred for production.
+
+#### Option 1: Interactive user login (GCE or local)
+
+```bash
+gcloud auth login
+# Follow the browser/code flow, then:
+export GCLOUD_PROJECT=your-project-id
+```
+
+#### Option 2: Application Default Credentials (scripts / CI)
+
+```bash
 gcloud auth application-default login
-
-# This creates ~/.config/gcloud/application_default_credentials.json
+export GCLOUD_PROJECT=your-project-id
+# ADC credentials written to ~/.config/gcloud/application_default_credentials.json
 ```
 
-#### Option 2: Service Account Key File
+#### Option 3: Service Account Key File (recommended for production)
+
 ```bash
-# Download service account key from GCP Console
-# Then set environment variable:
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+export GCLOUD_PROJECT=your-project-id
 ```
 
-#### Option 3: Environment File (.env)
+#### Option 4: Environment File (.env)
+
 ```bash
 # Google Cloud Storage configuration
 GOOGLE_APPLICATION_CREDENTIALS=/home/user/.config/gcloud/service-account-key.json
+GCLOUD_PROJECT=your-project-id
 ```
 
 ### URI Format
@@ -318,8 +361,8 @@ gcs://my-gcs-bucket/test-data/
 
 #### Health Check
 ```bash
-# Ensure credentials are set
-export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
+# Ensure credentials and project are set (see Authentication Setup above)
+export GCLOUD_PROJECT=your-project-id
 
 sai3-bench util health --uri "gs://my-gcs-bucket/"
 ```
@@ -385,9 +428,12 @@ workload:
 
 ### Performance Characteristics
 - **Latency**: 50-150ms (region/network dependent)
-- **Throughput**: High (similar to S3, 100+ ops/sec)
+- **Throughput**: High (similar to S3, 100+ ops/sec standard; RAPID buckets achieve multi-GB/s)
 - **Best concurrency**: 16-64 for mixed workloads
-- **Large file optimization**: RangeEngine can improve throughput for files ≥64MB
+- **RAPID (Hyperdisk ML)**: Fully supported as of sai3-bench v0.8.86 / s3dlio v0.9.84.
+  Uses `BidiWriteObject` for PUTs and `BidiReadObject` for GETs.
+  Auto-detected per bucket, or force via `gcs_rapid_mode: true` in `s3dlio_optimization`.
+  See [GCS_INTEGRATION.md](GCS_INTEGRATION.md) for YAML examples.
 
 ---
 
@@ -396,12 +442,12 @@ workload:
 | Feature | S3 | Azure Blob | GCS |
 |---------|----|-----------|----|
 | **URI Scheme** | `s3://bucket/path` | `az://account/container/path` | `gs://bucket/path` |
-| **Typical Latency** | 50-200ms | 300-700ms | 50-150ms |
-| **Throughput** | High (100+ ops/s) | Low (2-5 ops/s) | High (100+ ops/s) |
-| **Best Concurrency** | 16-64 | 4-16 | 16-64 |
+| **Typical Latency** | 50-200ms | Network-dependent | 50-150ms |
+| **Throughput** | High (100+ ops/s) | Network-dependent | High (100+ ops/s) |
+| **Best Concurrency** | 16-64 | 16-64 | 16-64 |
 | **Auth Method** | AWS credentials | Account key | Service account / ADC |
 | **Rate Limits** | Generous | Restrictive | Generous |
-| **RangeEngine Benefit** | Yes (≥64MB) | Yes (≥64MB) | Yes (≥64MB) |
+| **RangeEngine Benefit** | Yes (≥64MB) | Yes (≥64MB) | No (RAPID uses bidi streaming) |
 
 ---
 
@@ -415,7 +461,7 @@ workload:
 **Solutions**:
 - **S3**: Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set
 - **Azure**: Check `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_ACCOUNT_KEY`
-- **GCS**: Verify `GOOGLE_APPLICATION_CREDENTIALS` points to valid JSON file
+- **GCS**: Verify `GOOGLE_APPLICATION_CREDENTIALS` points to valid JSON file, or run `gcloud auth login`; also confirm `GCLOUD_PROJECT` is exported
 
 #### 2. Bucket/Container Not Found
 **Symptoms**: "NoSuchBucket", "Container not found", "404 Not Found"
@@ -477,6 +523,7 @@ echo $AZURE_STORAGE_ACCOUNT_KEY
 
 # GCS
 echo $GOOGLE_APPLICATION_CREDENTIALS
+echo $GCLOUD_PROJECT
 cat $GOOGLE_APPLICATION_CREDENTIALS | jq .type  # Should show "service_account"
 ```
 

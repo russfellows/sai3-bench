@@ -6,6 +6,43 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.86] - 2026-03-24
+
+### Fixed
+
+- **Worker drain deadline anchored incorrectly (CRITICAL)**
+  - `drain_deadline` was computed as `Instant::now() + drain_budget` at the moment workers
+    were spawned, so the drain fired 150 s into execute while workers still had time remaining
+  - Fixed: `drain_deadline = tokio::time::Instant::from_std(deadline) + drain_budget`
+    anchors the drain window to the workers' actual end-of-workload deadline
+  - **Impact**: Execute stage now runs for its full configured duration (e.g. 300 s)
+    instead of being killed after `drain_budget` seconds (default 150 s)
+
+### Added
+
+- **Timer lifecycle info logs** (`⏱` prefix) in `src/workload.rs`, `src/bin/agent.rs`,
+  and `src/bin/controller.rs`
+  - Workload start: duration, drain budget, total max wall time
+  - Worker join phase: worker count, drain deadline offset
+  - Agent execute stage: elapsed vs configured duration on both success and error paths
+  - Controller barrier release and Prepare→Workload transition events
+  - Enables post-mortem analysis without requiring trace-level logging
+
+### Changed
+
+- **s3dlio dependency**: v0.9.84 (already in place from v0.8.84 work)
+  - GCS RAPID storage is fully functional with s3dlio v0.9.84
+  - Both `BidiWriteObject` (PUT) and `BidiReadObject` (GET) verified working
+    against Hyperdisk ML RAPID buckets at ~1.7–1.8 GiB/s sustained throughput
+  - RAPID mode is auto-detected per bucket or can be forced via
+    `s3dlio_optimization.gcs_rapid_mode: true` in the workload YAML
+
+### Version
+
+- Aligned with s3dlio v0.9.**86** (last-two-digits convention: sai3-bench 0.8.**86**)
+
+---
+
 ## [0.8.70] - 2026-03-16
 
 ### Added
