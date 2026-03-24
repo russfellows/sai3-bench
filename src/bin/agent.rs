@@ -3253,12 +3253,23 @@ async fn execute_stages_workflow(
                 }
                 
                 // Override config.duration with stage duration
+                // NOTE: This is stage-local — the timer will be reset fresh inside workload::run()
+                // using Instant::now() at call time, independent of any previous stage elapsed time.
                 config.duration = *duration;
+                let exec_drain_budget = sai3_bench::constants::DEFAULT_WORKER_DRAIN_TIMEOUT_SECS;
+                info!("⏱  Execute stage timer reset: duration={:.1}s, drain_budget={}s, \
+                       total_max_wall={:.1}s (timer starts NOW inside workload::run)",
+                    duration.as_secs_f64(),
+                    exec_drain_budget,
+                    duration.as_secs_f64() + exec_drain_budget as f64,
+                );
                 
                 // Run workload
+                let exec_start = std::time::Instant::now();
                 match sai3_bench::workload::run(&config, tree_manifest.clone()).await {
                     Ok(summary) => {
-                        info!("Execute stage complete");
+                        info!("Execute stage complete in {:.1}s (configured: {:.1}s)",
+                            exec_start.elapsed().as_secs_f64(), duration.as_secs_f64());
                         
                         // v0.8.28: Capture per-bucket histogram data for stage summary
                         // EXECUTE has GET, PUT, and META ops
@@ -3277,6 +3288,8 @@ async fn execute_stages_workflow(
                         }
                     }
                     Err(e) => {
+                        error!("Execute stage '{}' failed after {:.1}s: {}",
+                            stage.name, exec_start.elapsed().as_secs_f64(), e);
                         return Err(format!("Execute stage '{}' failed: {}", stage.name, e));
                     }
                 }

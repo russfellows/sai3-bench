@@ -1580,6 +1580,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     
     let start = Instant::now();
     let deadline = start + cfg.duration;
+    info!("⏱  Workload timer: start={:?}, duration={:.1}s, workers will exit at deadline (now + {:.1}s)",
+        start, cfg.duration.as_secs_f64(), cfg.duration.as_secs_f64());
 
     // Detect if we need separate object pools for mixed DELETE + (GET|STAT) workloads
     let (has_delete, has_readonly) = detect_pool_requirements(&cfg.workload);
@@ -2689,13 +2691,25 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
     // v0.8.71: Bounded drain — don't wait forever for workers that are stuck
     // inside a store.get/put that didn't respect the per-op timeout.
-    // After DEFAULT_WORKER_DRAIN_TIMEOUT_SECS, abort remaining handles and move on.
+    // After DEFAULT_WORKER_DRAIN_TIMEOUT_SECS past the workload deadline, abort remaining.
     // Workers still in-flight will be detached; their per-op timeouts (120s) will
     // eventually unblock them so Tokio won't leak them indefinitely.
+    //
+    // IMPORTANT: drain_deadline is anchored to the workers' deadline (start + duration),
+    // NOT to Instant::now() at join time.  The drain is a grace window AFTER the workload
+    // duration expires, not a wall-clock limit from spawn.  Using Instant::now() here
+    // caused the drain to fire while workers were still doing legitimate work (bug fix).
     let drain_budget = Duration::from_secs(crate::constants::DEFAULT_WORKER_DRAIN_TIMEOUT_SECS);
-    let drain_deadline = tokio::time::Instant::now() + drain_budget;
+    let drain_deadline = tokio::time::Instant::from_std(deadline) + drain_budget;
+    info!("⏱  Worker drain: deadline anchored to workload end + {}s drain window \
+           (workers had {:.1}s to run, drain fires at most {}s after that)",
+        drain_budget.as_secs(),
+        cfg.duration.as_secs_f64(),
+        drain_budget.as_secs());
     let mut drained = 0usize;
     let total_handles = handles.len();
+    info!("⏱  Entering worker join phase: {} workers spawned, drain deadline = workload_end + {}s",
+        total_handles, drain_budget.as_secs());
 
     for mut h in handles {
         // Use &mut h so we retain ownership on timeout and can call h.abort().
@@ -2740,14 +2754,19 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 // store.get/put calls will time out within DEFAULT_OP_TIMEOUT_SECS (120s).
                 h.abort();
                 let stuck = total_handles - drained;
+                let elapsed_since_start = start.elapsed();
                 warn!(
                     "⚠️  Worker drain timed out after {}s ({}/{} workers completed); \
-                     {} stuck worker(s) aborted. Their partial stats are discarded.",
-                    drain_budget.as_secs(), drained, total_handles, stuck
+                     {} stuck worker(s) aborted. Their partial stats are discarded. \
+                     [workload elapsed: {:.1}s of {:.1}s configured duration]",
+                    drain_budget.as_secs(), drained, total_handles, stuck,
+                    elapsed_since_start.as_secs_f64(), cfg.duration.as_secs_f64(),
                 );
                 workload_error = Some(anyhow!(
-                    "Worker drain timeout: {} of {} worker(s) did not finish within {}s",
-                    stuck, total_handles, drain_budget.as_secs()
+                    "Worker drain timeout: {} of {} worker(s) did not finish within {}s \
+                     (total elapsed: {:.1}s)",
+                    stuck, total_handles, drain_budget.as_secs(),
+                    elapsed_since_start.as_secs_f64(),
                 ));
                 break;
             }

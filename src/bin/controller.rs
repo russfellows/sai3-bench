@@ -3500,7 +3500,7 @@ async fn run_distributed_workload(
                                 
                                 // Check if barrier can be released
                                 if let Some(barrier_info) = bm.check_barrier_ready(barrier_index) {
-                                    info!("Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER",
+                                    info!("⏱  Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER (stage transition)",
                                           barrier_index, barrier_info.ready_agents.len());
                                     
                                     // Send RELEASE_BARRIER to all agents via broadcast
@@ -3701,6 +3701,9 @@ async fn run_distributed_workload(
                             aggregator.reset_stats();
                             // Reset workload timer to measure actual workload duration (not including prepare)
                             workload_start = std::time::Instant::now();
+                            info!("⏱  Controller: agent '{}' transitioned Prepare→Workload (execute stage started). \
+                                   Workload timer reset to zero.",
+                                stats.agent_id);
                             
                             // v0.8.16: Reset perf_log warmup timers for workload phase
                             // Warmup should be measured from workload start, not prepare start
@@ -3755,7 +3758,11 @@ async fn run_distributed_workload(
                                 tracker.reset_for_stage();
                             }
                             stage_elapsed_s = stats.stage_elapsed_s;
-                            debug!("Stage transition detected ({} -> {}): reset perf_log elapsed timing", prev_stage_name, current_stage_name);
+                            info!("⏱  Controller: stage transition ({} '{}' → {} '{}') for agent '{}' - \
+                                   perf_log elapsed timer reset to zero",
+                                prev_stage_name, prev_stage_name,
+                                current_stage_name, current_stage_name,
+                                stats.agent_id);
                         } else {
                             stage_elapsed_s = stage_elapsed_s.max(stats.stage_elapsed_s);
                         }

@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.72"
+version = "0.8.86"
 edition = "2021"
 build   = "build.rs"
 
@@ -26,8 +26,8 @@ num_cpus = "^1.16"
 # s3dlio: git-tagged release dependency for portable builds on any machine.
 # Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
 # az:// and gs:// support even though s3dlio's own default profile is S3-focused.
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.76", features = ["full-backends"] }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.76" }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.84", features = ["full-backends"] }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.84" }
 # Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
 # Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
