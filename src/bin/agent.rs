@@ -3122,7 +3122,54 @@ async fn execute_stages_workflow(
     // Storage for prepared objects (needed for cleanup stages)
     let mut prepared_objects: Vec<sai3_bench::prepare::PreparedObject> = Vec::new();
     let mut tree_manifest = None;  // Type inferred from prepare_objects return
-    
+
+    // v0.8.87: Pre-synthesize TreeManifest from directory_structure config when there is no
+    // prepare stage in the stage list.  This enables "GET-only" runs after data has already
+    // been written by a previous prepare+execute run — without performing any object listing.
+    //
+    // Why this is safe:
+    //   • Object names are deterministic: they follow the dir_mask / file naming pattern
+    //     in directory_structure, so we can compute every path with pure arithmetic.
+    //   • DirectoryTree::new() is O(1) relative to storage — pure in-memory computation
+    //     that completes in milliseconds even for 50 M objects.
+    //   • workload::run() selects files via PathSelector when tree_manifest.is_some(),
+    //     which means prefetch_uris_multi_backend (the GCS listing call) is bypassed
+    //     entirely during the execute stage.
+    //
+    // Without this fix: tree_manifest stays None → workload falls back to listing GCS
+    // using the full glob URI (e.g. "gs://bucket/prefix/scan.d*_w*.dir/**/*") → listing
+    // with a wildcard prefix returns 0 results in < 100 ms → "No URIs found" error,
+    // even though the objects exist.  For very large datasets a listing would take hours.
+    let has_prepare_stage = stages.iter().any(|s| {
+        matches!(&s.config, sai3_bench::config::StageSpecificConfig::Prepare { .. })
+    });
+    if !has_prepare_stage {
+        if let Some(ref prepare_cfg) = config.prepare {
+            if let Some(ref dir_config) = prepare_cfg.directory_structure {
+                info!("No prepare stage in workflow — synthesizing TreeManifest from \
+                       directory_structure config (no object listing needed)");
+                match sai3_bench::directory_tree::DirectoryTree::new(dir_config.clone()) {
+                    Ok(tree) => {
+                        let manifest = sai3_bench::directory_tree::TreeManifest::from_tree(&tree);
+                        info!("TreeManifest synthesized: {} dirs, {} files \
+                               (width={}, depth={}, files_per_dir={})",
+                              manifest.total_dirs, manifest.total_files,
+                              dir_config.width, dir_config.depth, dir_config.files_per_dir);
+                        tree_manifest = Some(manifest);
+                    }
+                    Err(e) => {
+                        // Non-fatal: log the warning and continue; workload::run() will
+                        // attempt GCS listing as the fallback (which may fail for large
+                        // buckets with wildcard patterns, but gives a clear error).
+                        warn!("Failed to synthesize TreeManifest from directory_structure: {} \
+                               — falling back to object listing (may be slow or fail for \
+                               large buckets)", e);
+                    }
+                }
+            }
+        }
+    }
+
     // Iterate through stages in order
     for (stage_index, stage) in stages.iter().enumerate() {
         // Check for abort before starting next stage

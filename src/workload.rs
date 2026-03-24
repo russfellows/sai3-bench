@@ -2976,24 +2976,22 @@ async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
     let store = create_store_with_logger(base_uri)?;
     
     if base_uri.contains('*') {
-        // Glob pattern: list directory and filter with regex
-        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
-        let list_prefix = &base_uri[..base_end];
-        
-        let uris = store.list(list_prefix, false).await?;
-        
+        let (list_prefix, recursive) = glob_list_params(base_uri);
+        info!("Resolving glob '{}': list_prefix='{}', recursive={}", base_uri, list_prefix, recursive);
+        let uris = store.list(list_prefix, recursive).await?;
+
         // Handle URI scheme normalization: s3dlio may return different schemes than input
         // For pattern matching, normalize both pattern and results to the same scheme
         let normalized_pattern = normalize_scheme_for_matching(base_uri);
         let re = glob_to_regex(&normalized_pattern)?;
-        
+
         let matched_uris: Vec<String> = uris.into_iter()
             .filter(|uri| {
                 let normalized_uri = normalize_scheme_for_matching(uri);
                 re.is_match(&normalized_uri)
             })
             .collect();
-            
+
         Ok(matched_uris)
     } else if base_uri.ends_with('/') {
         // Directory listing
@@ -3022,14 +3020,11 @@ async fn prefetch_uris_multi_endpoint(
     use s3dlio::ObjectStore;
     
     if base_uri.contains('*') {
-        // Glob pattern: list directory and filter with regex
-        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
-        let list_prefix = &base_uri[..base_end];
-        
-        debug!("Multi-endpoint list: prefix='{}' from base_uri='{}'", list_prefix, base_uri);
-        
+        let (list_prefix, recursive) = glob_list_params(base_uri);
+        debug!("Multi-endpoint list: prefix='{}' (recursive={}) from base_uri='{}'", list_prefix, recursive, base_uri);
+
         // Use regular list() - storage is shared, so any endpoint sees all files
-        let uris = multi_store.list(list_prefix, false).await?;
+        let uris = multi_store.list(list_prefix, recursive).await?;
         
         debug!("Multi-endpoint list returned {} URIs", uris.len());
         if !uris.is_empty() {
@@ -3065,6 +3060,41 @@ async fn prefetch_uris_multi_endpoint(
     }
 }
 
+
+/// Compute the safe listing prefix and recursion flag for a glob URI pattern.
+///
+/// Object-storage backends (GCS, S3, Azure) treat prefix bytes literally — a prefix
+/// that contains `*` returns 0 results immediately.  This function finds the last `/`
+/// *before* the first `*`, giving a clean wildcard-free prefix.  It also determines
+/// whether a recursive listing is required (when `*` appears inside a directory
+/// component, not just in the final filename segment).
+///
+/// # Returns
+/// `(list_prefix, recursive)` where `list_prefix` is a sub-slice of `uri`.
+///
+/// # Examples
+/// ```
+/// // Deep glob — star is inside a directory component
+/// let (prefix, rec) = glob_list_params("gs://b/unet3d/scan.d*_w*.dir/**/*");
+/// assert_eq!(prefix, "gs://b/unet3d/");
+/// assert!(rec);
+///
+/// // Simple filename glob — star is only in the final filename
+/// let (prefix, rec) = glob_list_params("s3://b/data/*.dat");
+/// assert_eq!(prefix, "s3://b/data/");
+/// assert!(!rec);
+/// ```
+pub(crate) fn glob_list_params(uri: &str) -> (&str, bool) {
+    debug_assert!(uri.contains('*'), "glob_list_params called on non-glob URI: {}", uri);
+    let star_pos  = uri.find('*').unwrap_or(uri.len());
+    let safe_end  = uri[..star_pos].rfind('/').map(|i| i + 1).unwrap_or(0);
+    // recursive=true only when a '/' exists AND the first '*' is at or before it
+    // (meaning the wildcard spans a directory component, not just the filename).
+    // Using rfind as an Option avoids the star_pos==0 / last_slash==0 collision
+    // that occurs when the pattern has no '/' at all (e.g. "*.dat").
+    let recursive = uri.rfind('/').map(|last| star_pos <= last).unwrap_or(false);
+    (&uri[..safe_end], recursive)
+}
 
 /// Convert glob pattern to regex
 /// Escapes all special regex chars except *, which becomes .*
@@ -3462,5 +3492,265 @@ mod error_handling_tests {
     }
 }
 
+// =============================================================================
+// glob_list_params Tests
+//
+// These tests document the bug that existed prior to the fix and prove that the
+// new helper produces correct (list_prefix, recursive) pairs for every pattern
+// shape encountered in real workloads.
+//
+// BUG (before fix):
+//   prefetch_uris_multi_backend used `rfind('/')` to compute list_prefix.
+//   For a deep-glob URI such as:
+//       "gs://bucket/unet3d/scan.d*_w*.dir/**/*"
+//   rfind('/') returns the position just before the trailing *, giving:
+//       list_prefix = "gs://bucket/unet3d/scan.d*_w*.dir/**/"  ← contains '*'!
+//   GCS/S3/Azure treat prefix bytes literally, so this returns 0 results in
+//   < 100 ms and the workload fails with "No URIs found for GET pattern".
+//   The same bug existed in prefetch_uris_multi_endpoint.
+//
+// FIX:
+//   glob_list_params finds the FIRST '*' in the URI, then strips back to the
+//   last '/' before that position, guaranteeing a wildcard-free prefix.
+//   It also sets recursive=true when '*' appears inside a directory component,
+//   which is required for backends that don't recurse by default.
+// =============================================================================
+#[cfg(test)]
+mod glob_list_params_tests {
+    use super::*;
+    use crate::directory_tree::{DirectoryStructureConfig, DirectoryTree, TreeManifest};
 
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /// Demonstrate what the OLD (broken) code produced for a given URI.
+    /// rfind('/') + 1 gives the "last-slash" prefix — broken for deep globs.
+    fn old_list_prefix(uri: &str) -> &str {
+        let base_end = uri.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &uri[..base_end]
+    }
+
+    // -------------------------------------------------------------------------
+    // 1.  The exact URI from the failing GCS RAPID workload
+    // -------------------------------------------------------------------------
+
+    /// Proves the old code produced a wildcard-contaminated prefix.
+    #[test]
+    fn old_code_produces_wildcard_prefix_for_deep_glob() {
+        let uri = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let prefix = old_list_prefix(uri);
+        // Old behaviour: prefix ends at the last slash, just before the trailing *
+        assert_eq!(
+            prefix,
+            "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/",
+            "OLD CODE regression: prefix contains '*' — object-storage listing \
+             returns 0 results immediately"
+        );
+        assert!(prefix.contains('*'), "OLD prefix still has '*' in it — this is the bug");
+    }
+
+    /// Proves the new code produces the correct (wildcard-free) prefix.
+    #[test]
+    fn new_code_produces_clean_prefix_for_deep_glob() {
+        let uri = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(
+            prefix, "gs://sig65-rapid1/unet3d/",
+            "NEW CODE: prefix is safe (no '*') so GCS will return all objects under unet3d/"
+        );
+        assert!(recursive,
+            "Deep glob ('*' inside directory component) requires recursive listing");
+        assert!(!prefix.contains('*'), "Prefix must be wildcard-free");
+    }
+
+    // -------------------------------------------------------------------------
+    // 2.  Simple filename glob — behaviour must NOT change
+    // -------------------------------------------------------------------------
+
+    /// For a simple filename-only wildcard the old and new code should agree.
+    #[test]
+    fn simple_filename_glob_unchanged() {
+        let uri = "s3://my-bucket/data/prepared-*.dat";
+        let old_prefix = old_list_prefix(uri);
+        let (new_prefix, recursive) = glob_list_params(uri);
+        // Both should strip to the directory
+        assert_eq!(old_prefix, "s3://my-bucket/data/",
+            "OLD: simple filename glob prefix");
+        assert_eq!(new_prefix, "s3://my-bucket/data/",
+            "NEW: simple filename glob prefix — must match old behaviour");
+        assert!(!recursive,
+            "Simple filename glob does NOT need recursive listing");
+    }
+
+    // -------------------------------------------------------------------------
+    // 3.  Additional pattern shapes
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn wildcard_only_in_first_dir_component() {
+        // The first '*' is in the first directory level after the bucket
+        let uri = "s3://bucket/dir*/subdir/file.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "s3://bucket/",
+            "Wildcard in first dir component — prefix must be just the bucket root");
+        assert!(recursive, "Wildcard before last slash → recursive");
+    }
+
+    #[test]
+    fn double_star_glob_unet3d_variant() {
+        // Pattern with both dir-level globs and trailing **/*
+        let uri = "gs://bucket/prefix/scan.d1_w1.dir/**/*";
+        let (prefix, recursive) = glob_list_params(uri);
+        // No '*' in "scan.d1_w1.dir/" — first '*' is inside "**"
+        assert_eq!(prefix, "gs://bucket/prefix/scan.d1_w1.dir/");
+        assert!(recursive);
+        assert!(!prefix.contains('*'));
+    }
+
+    #[test]
+    fn file_uri_flat_glob() {
+        let uri = "file:///tmp/bench/prepared-*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "file:///tmp/bench/");
+        assert!(!recursive);
+    }
+
+    #[test]
+    fn relative_path_glob() {
+        // No scheme — relative paths used with multi-endpoint local storage
+        let uri = "data/prepared-*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "data/");
+        assert!(!recursive);
+    }
+
+    #[test]
+    fn star_at_root_no_slash_before_it() {
+        // Pathological: glob starts with '*' (no safe parent directory)
+        let uri = "*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "", "No '/' before '*' → empty prefix (list everything)");
+        assert!(!recursive);
+    }
+
+    // -------------------------------------------------------------------------
+    // 4.  glob_to_regex: returned objects match the glob after listing
+    // -------------------------------------------------------------------------
+    //
+    // Even with the correct prefix the filter regex must match what the storage
+    // backend actually returns.  These tests verify that objects with the exact
+    // naming produced by DirectoryTree are matched by the normalized regex.
+
+    #[test]
+    fn regex_matches_objects_returned_by_deep_listing() {
+        // Simulated objects as returned by GCS list("gs://bucket/unet3d/", recursive=true)
+        // after our fix — one object per leaf directory.
+        let listed = vec![
+            "gs://sig65-rapid1/unet3d/scan.d1_w1.dir/scan.d2_w1.dir/file_00000000.dat",
+            "gs://sig65-rapid1/unet3d/scan.d1_w1.dir/scan.d2_w2.dir/file_00000001.dat",
+            "gs://sig65-rapid1/unet3d/scan.d1_w28.dir/scan.d2_w28.dir/file_00050175.dat",
+        ];
+
+        let pattern = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let normalized_pattern = normalize_scheme_for_matching(pattern);
+        let re = glob_to_regex(&normalized_pattern).expect("valid regex");
+
+        for uri in &listed {
+            let normalized = normalize_scheme_for_matching(uri);
+            assert!(
+                re.is_match(&normalized),
+                "Regex should match '{}' (normalized: '{}')",
+                uri, normalized
+            );
+        }
+    }
+
+    #[test]
+    fn regex_does_not_match_wrong_prefix() {
+        // Objects under a different bucket should NOT match
+        let listed = vec![
+            "gs://other-bucket/unet3d/scan.d1_w1.dir/scan.d2_w1.dir/file_00000000.dat",
+        ];
+
+        let pattern = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let normalized_pattern = normalize_scheme_for_matching(pattern);
+        let re = glob_to_regex(&normalized_pattern).expect("valid regex");
+
+        for uri in &listed {
+            let normalized = normalize_scheme_for_matching(uri);
+            assert!(
+                !re.is_match(&normalized),
+                "Regex must NOT match object from different bucket: '{}'", uri
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.  TreeManifest paths match the GET glob pattern
+    // -------------------------------------------------------------------------
+    //
+    // This proves the end-to-end chain for the "GET-only, no listing" fix:
+    //   a. DirectoryTree generates paths deterministically from config.
+    //   b. Each generated path matches the glob in the YAML workload section.
+    //   c. Therefore the PathSelector will select valid objects without any
+    //      GCS listing call.
+
+    #[test]
+    fn tree_manifest_paths_match_get_glob() {
+        // Mirror the unet3d_1-host_gcs-rapid.yaml directory_structure config
+        let dir_config = DirectoryStructureConfig {
+            width: 2,           // Small for test speed; shape identical to width=28
+            depth: 2,
+            files_per_dir: 3,
+            distribution: "bottom".to_string(),
+            dir_mask: "scan.d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(dir_config).expect("tree generation failed");
+        let manifest = TreeManifest::from_tree(&tree);
+
+        // Every file path from the manifest must match the workload GET pattern
+        let glob_pattern_suffix = "scan.d*_w*.dir/**/*";
+        // Build a regex that matches the relative path portion (no URI prefix)
+        let escaped = regex::escape(glob_pattern_suffix).replace(r"\*", ".*");
+        let re = regex::Regex::new(&format!("^{}$", escaped))
+            .expect("valid regex");
+
+        assert!(manifest.total_files > 0, "Manifest must have files");
+
+        for idx in 0..manifest.total_files {
+            let path = manifest.get_file_path(idx)
+                .unwrap_or_else(|| panic!("get_file_path({}) returned None", idx));
+            assert!(
+                re.is_match(&path),
+                "Manifest file path '{}' (index {}) does not match glob '{}'",
+                path, idx, glob_pattern_suffix
+            );
+        }
+    }
+
+    #[test]
+    fn tree_manifest_synthesised_without_io_matches_expected_count() {
+        // Reproduces the exact config from the failing YAML (scaled down for test speed)
+        // to prove that manifest synthesis is pure arithmetic with the correct total.
+        let dir_config = DirectoryStructureConfig {
+            width: 28,
+            depth: 2,
+            files_per_dir: 64,
+            distribution: "bottom".to_string(),
+            dir_mask: "scan.d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(dir_config).expect("tree generation is pure computation, never fails");
+        let manifest = TreeManifest::from_tree(&tree);
+
+        // 28×28 = 784 leaf directories, 784×64 = 50,176 files — no GCS listing needed
+        assert_eq!(manifest.total_dirs,  784 + 28,  // leaf dirs + level-1 dirs
+            "Total directory count (width=28, depth=2)");
+        assert_eq!(manifest.total_files, 50_176,
+            "Total file count must be 784 leaf dirs × 64 files");
+        assert_eq!(manifest.files_per_dir, 64);
+    }
+}
 

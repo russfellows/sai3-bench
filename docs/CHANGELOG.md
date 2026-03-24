@@ -54,8 +54,83 @@ All notable changes to sai3-bench are documented in this file.
 
 ### Added
 
-- **Timer lifecycle info logs** (`⏱` prefix) in `src/workload.rs`, `src/bin/agent.rs`,
-  and `src/bin/controller.rs`
+- **Object manifest source reported in `--dry-run` output**
+  - A new **"Object Manifest Source"** box is printed in `--dry-run` mode whenever
+    the workload contains GET operations or a prepare stage.  It shows exactly how
+    the agent will build the object-path manifest at runtime, so there are no surprises on
+    large buckets:
+
+  | Situation | What dry-run shows | Runtime behaviour |
+  |---|---|---|
+  | Prepare stage present | ✅ `prepare_objects()` builds manifest | Paths generated as objects are written |
+  | No prepare stage + `directory_structure:` present | ✅ Arithmetic synthesis | Paths computed in milliseconds — **no LIST call** |
+  | No prepare stage + no `directory_structure:` | ⚠️ Warning + guidance | Falls back to listing the bucket (may take hours for 50 M+ objects) |
+
+  - The warning case also explains the exact fix: add a `prepare:` section with
+    `directory_structure:` matching the layout of existing objects — a prepare **stage**
+    is not required.
+
+- **`glob_list_params()` — extracted safe listing helper**
+  - Both `prefetch_uris_multi_backend()` and `prefetch_uris_multi_endpoint()` now call a
+    shared `pub(crate) fn glob_list_params(uri) -> (&str, bool)` helper that computes
+    the correct `(list_prefix, recursive)` pair for any glob URI.
+  - Fixes the wildcard-contaminated-prefix bug (see Fixed section below).
+
+- **12 new unit tests for glob listing and manifest synthesis** (`src/workload.rs`)
+  - `old_code_produces_wildcard_prefix_for_deep_glob` — documents the pre-fix regression
+  - `new_code_produces_clean_prefix_for_deep_glob` — proves the fix
+  - `simple_filename_glob_unchanged` — proves no regression on simple `dir/*.dat` patterns
+  - `wildcard_only_in_first_dir_component`, `double_star_glob_unet3d_variant`,
+    `file_uri_flat_glob`, `relative_path_glob`, `star_at_root_no_slash_before_it`
+  - `regex_matches_objects_returned_by_deep_listing` — proves GCS-returned URIs match the glob
+  - `regex_does_not_match_wrong_prefix` — proves wrong-bucket URIs are rejected
+  - `tree_manifest_paths_match_get_glob` — proves every manifest path matches the YAML GET glob
+  - `tree_manifest_synthesised_without_io_matches_expected_count` — proves width=28 depth=2 files_per_dir=64 → 50,176 files with zero I/O
+
+- **New section in `docs/YAML_DRIVEN_STAGE_ORCHESTRATION.md`: "GET-Only / Read-Only Workflows"**
+  - Applies to **all object storage backends** (S3, GCS, Azure Blob, file, direct) — not
+    provider-specific.
+  - Explains the three manifest methods in priority order (prepare stage → arithmetic
+    synthesis → object-storage listing) with a cost/trigger/use-case comparison table.
+  - Documents how arithmetic synthesis works: `DirectoryTree::new()` is pure in-memory
+    math — no I/O, completes in milliseconds regardless of object count.
+  - Explains the critical rule: keep `prepare.directory_structure:` in the YAML even when
+    the prepare *stage* is removed; the section costs nothing to parse and enables zero-cost
+    manifest synthesis at startup.
+  - Shows the `--dry-run` "Object Manifest Source" box output so users can verify which
+    manifest method will be used before committing to a long benchmark run.
+  - Provides a complete annotated GET-only YAML pattern (2-stage: preflight + execute).
+  - Explains the listing fallback cost (2–4 hours for 50 M+ objects, per-call cloud charges)
+    so users understand why adding `directory_structure:` matters.
+
+### Fixed
+
+- **GET-only / read-only stage YAML fails with "No URIs found" despite `--dry-run` passing**
+  - When a `distributed.stages:` list has no prepare stage (e.g. a read-only re-run after
+    data has already been written), `tree_manifest` remained `None`.  `workload::run()`
+    then called `prefetch_uris_multi_backend()` with the full glob URI
+    (e.g. `gs://bucket/unet3d/scan.d*_w*.dir/**/*`).
+
+  - Two distinct bugs:
+    1. **Wildcard in list prefix** — `rfind('/')` gave `list_prefix =
+       "…/scan.d*_w*.dir/**/"` (contains `*`); GCS/S3/Azure treat prefix bytes literally
+       and return 0 results in < 100 ms → immediate "No URIs found" error.
+    2. **Non-recursive listing** — `store.list(prefix, false)` was used even for patterns
+       spanning directory boundaries; deep objects are never returned by a flat list.
+    3. **Listing never needed** — when `prepare.directory_structure` is present, object
+       paths are fully deterministic and can be computed arithmetically.
+
+  - **Fix 1 (avoid listing entirely)**: `src/bin/agent.rs` staged-workflow function now
+    synthesises `TreeManifest` from `prepare.directory_structure` config before the stage
+    loop when no prepare stage is present.  `DirectoryTree::new()` is pure in-memory
+    arithmetic — completes in milliseconds for any dataset size; no GCS calls are made.
+    `workload::run()` uses `PathSelector` (not listing) when `tree_manifest.is_some()`.
+
+  - **Fix 2 (correct listing if it does happen)**: `glob_list_params()` helper fixes both
+    listing bugs — safe prefix (strips to last `/` before first `*`) and `recursive=true`
+    when `*` appears inside a directory component.
+
+
   - Workload start: duration, drain budget, total max wall time
   - Worker join phase: worker count, drain deadline offset
   - Agent execute stage: elapsed vs configured duration on both success and error paths

@@ -601,6 +601,153 @@ transition_to(WorkloadState::Completed).await?;
 
 ---
 
+## GET-Only / Read-Only Workflows
+
+### Overview
+
+A **GET-only workflow** (or read-only workflow) is one where objects already exist in the
+storage backend and you only want to benchmark reads — no prepare stage is needed. This
+pattern applies to **all object storage backends** (S3, GCS, Azure Blob, file, direct)
+equally; it is not specific to any provider.
+
+The key challenge is that the execute stage must know *which objects exist* so it can
+build a `PathSelector` for random file selection. There are three ways the agent can
+obtain this information, in priority order:
+
+| Method | Trigger | Cost | Works when |
+|--------|---------|------|-----------|
+| **Prepare stage runs** | `type: prepare` stage is present in `stages:` | Objects are created during the run | Normal full workflow |
+| **Arithmetic synthesis** | No prepare stage, but `prepare.directory_structure` is present in YAML | Zero — pure math, no I/O | Objects already in bucket with known structure |
+| **Object-storage listing** | No prepare stage and no `directory_structure:` | Can take **hours** for 50M+ objects | Unknown layout or small datasets |
+
+> **Critical rule**: If you remove the prepare *stage* from a workflow YAML, keep the
+> `prepare:` *section* (with its `directory_structure:` block). The section is pure
+> configuration — it costs nothing to parse — and it lets the agent synthesise the file
+> manifest arithmetically at startup instead of issuing a recursive listing against the
+> storage backend.
+
+---
+
+### How Arithmetic Synthesis Works
+
+When an agent starts a staged workflow and the stage list contains **no prepare stage**,
+it checks whether `prepare.directory_structure` exists in the YAML. If it does, it runs
+`DirectoryTree::new(config)` which is **pure arithmetic** — it computes every directory
+and file path from `width`, `depth`, `files_per_dir`, and `dir_mask` and produces a
+`TreeManifest` in milliseconds, regardless of how many objects there are. No storage
+request is made.
+
+```
+width=28, depth=2, files_per_dir=64
+  → 28 × 28 = 784 leaf directories
+  → 784 × 64 = 50,176 files
+  → TreeManifest built in ~1 ms  (same result whether 50 or 50,000,000 files)
+```
+
+That manifest is then used by `PathSelector` during the execute stage for all file
+selection — exactly as if a prepare stage had built it.
+
+---
+
+### Verifying Manifest Source Before Running
+
+Use `--dry-run` to confirm which manifest method will be used **before** submitting a
+long benchmark run. The agent prints an **Object Manifest Source** box:
+
+```
+╔══════════════════════════════════════════════════════╗
+║          Object Manifest Source                      ║
+╠══════════════════════════════════════════════════════╣
+║  ✅ Arithmetic synthesis from directory_structure   ║
+║     width=28  depth=2  leaf_dirs=784  total=50,176  ║
+║  ✅ No object-storage LIST call is made             ║
+╚══════════════════════════════════════════════════════╝
+```
+
+If the box instead shows a `⚠️ WARNING: no directory_structure — will LIST`, do not
+proceed — add the `prepare.directory_structure:` block to avoid a multi-hour listing
+operation.
+
+---
+
+### YAML Pattern for GET-Only Runs
+
+Remove the `prepare` and `cleanup` entries from `distributed.stages` but **keep the
+top-level `prepare:` section** containing `directory_structure:`. Two stages are
+sufficient: preflight validation and execute.
+
+```yaml
+# GET-only workflow: objects already in bucket, read performance only.
+# Applies to ALL backends: S3 (s3://), GCS (gs://), Azure (az://), file://, direct://
+#
+# IMPORTANT: Keep the prepare: section even though the prepare stage is removed.
+#            The agent uses prepare.directory_structure to synthesise the file manifest
+#            arithmetically (zero listing cost) at startup.
+
+target: "s3://my-bucket/unet3d/"   # Change prefix to your backend of choice
+duration: "5m"
+concurrency: 32
+
+prepare:
+  # directory_structure is used ONLY for arithmetic manifest synthesis when
+  # there is no prepare stage in the stage list below.
+  directory_structure:
+    width: 28
+    depth: 2
+    files_per_dir: 64
+    distribution: "bottom"        # Files only in leaf directories
+    dir_mask: "scan.d%d_w%d.dir"
+
+workload:
+  - op: get
+    path: "scan.d*_w*.dir/**/*"   # Glob used for regex filtering on execute
+    weight: 100
+
+distributed:
+  shared_filesystem: true
+  path_selection: random
+  agents:
+    - address: "agent-host:7761"
+      id: "agent-1"
+
+  stages:
+    - name: preflight
+      order: 1
+      type: validation
+      completion: validation_passed
+      timeout_secs: 300
+      barrier:
+        type: all_or_nothing
+
+    # No prepare stage — manifest is synthesised from prepare.directory_structure above.
+
+    - name: execute
+      order: 2
+      type: execute
+      completion: duration
+      duration: 5m
+      barrier:
+        type: all_or_nothing
+```
+
+---
+
+### What Happens If `directory_structure` Is Missing
+
+If the stage list has no prepare stage **and** `prepare.directory_structure` is absent,
+the agent falls back to issuing a recursive object-storage listing to discover objects.
+This is correct for small buckets with an unknown layout, but for large datasets it is
+expensive:
+
+- **50 million objects**: listing can take **2–4 hours** before the benchmark starts
+- **Progress**: listing shows no progress bar — the job appears hung
+- **Cost**: cloud providers charge per LIST API call; millions of calls = real money
+
+Add `directory_structure:` whenever the layout is known. The `--dry-run` output will
+confirm which path the agent will take before you commit to a long run.
+
+---
+
 ## Example Configs
 
 ### Simple Benchmark (No Cleanup)

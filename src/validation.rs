@@ -757,6 +757,61 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         }
                     }
                     
+                    // v0.8.87: Show which method will be used to build the object manifest
+                    // at runtime, so the user can see if a listing will be triggered.
+                    {
+                        let has_prepare_stage = stages.iter().any(|s| {
+                            matches!(&s.config, crate::config::StageSpecificConfig::Prepare { .. })
+                        });
+                        let has_directory_structure = config.prepare.as_ref()
+                            .and_then(|p| p.directory_structure.as_ref())
+                            .is_some();
+                        let has_get_ops = config.workload.iter().any(|w| {
+                            matches!(w.spec, crate::config::OpSpec::Get { .. })
+                        });
+
+                        if has_get_ops || has_prepare_stage {
+                            println!("┌─ Object Manifest Source ─────────────────────────────────────────────┐");
+                            if has_prepare_stage {
+                                println!("│ ✅ PREPARE STAGE is present — manifest built by prepare_objects()    │");
+                                println!("│    Object paths are created on-demand as objects are written.        │");
+                            } else if has_directory_structure {
+                                println!("│ ✅ NO prepare stage — manifest synthesised from directory_structure  │");
+                                println!("│    Object paths are computed ARITHMETICALLY from the config.         │");
+
+                                if let Some(ref prepare) = config.prepare {
+                                    if let Some(ref dir_config) = prepare.directory_structure {
+                                        let leaf_dirs = (dir_config.width as u64).pow(dir_config.depth as u32);
+                                        let total_files = leaf_dirs * dir_config.files_per_dir as u64;
+                                        println!("│    Width={} × Depth={} → {} leaf dirs × {} files = {} objects",
+                                            dir_config.width, dir_config.depth,
+                                            format_with_thousands(leaf_dirs),
+                                            dir_config.files_per_dir,
+                                            format_with_thousands(total_files));
+                                    }
+                                }
+
+                                println!("│    ⏱  Synthesis takes milliseconds, even for 50 M+ objects.         │");
+                                println!("│    ✅ No object-storage LIST call is made.                           │");
+                            } else {
+                                println!("│ ⚠️  WARNING: NO prepare stage AND no directory_structure config!  │");
+                                println!("│                                                                      │");
+                                println!("│    At runtime, GET operations will fall back to listing the          │");
+                                println!("│    storage backend using the path glob from the workload.            │");
+                                println!("│                                                                      │");
+                                println!("│    🐌 For large buckets this MAY TAKE HOURS and may fail if the     │");
+                                println!("│       backend does not support wildcard prefixes.                    │");
+                                println!("│                                                                      │");
+                                println!("│    🔧 TO FIX: Add a prepare: section with directory_structure:      │");
+                                println!("│       matching the layout of the objects already in the bucket.      │");
+                                println!("│       You do NOT need to add a prepare STAGE — the section alone     │");
+                                println!("│       lets sai3-bench compute object paths without listing.          │");
+                            }
+                            println!("└──────────────────────────────────────────────────────────────────────┘");
+                            println!();
+                        }
+                    }
+
                     // v0.8.51: Display prepare configuration when using stages
                     // (since it's hidden in the main prepare section for stage-driven workflows)
                     if let Some(ref prepare) = config.prepare {
