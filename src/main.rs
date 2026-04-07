@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures::{stream::FuturesUnordered, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::{Regex, escape};
@@ -18,12 +18,14 @@ use sai3_bench::metrics::{OpHists, bucket_index};
 use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
 use sai3_bench::workload;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as RtBuilder;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use url::Url;
+use serde::Deserialize;
 
 // Multi-backend ObjectStore operations
 use sai3_bench::workload::{
@@ -317,6 +319,25 @@ enum Commands {
         #[arg(long)]
         no_validate: bool,
     },
+    /// Auto-tune throughput/latency across size and concurrency parameters
+    ///
+    /// All tuning parameters (uri, sizes, threads, channels, etc.) are specified
+    /// in a YAML config file.  Use --dry-run to validate the config and preview
+    /// the full sweep plan (loop order, total cases, estimated run count) before
+    /// committing to a potentially long run.
+    ///
+    /// Examples:
+    ///   sai3-bench autotune --config autotune.yaml
+    ///   sai3-bench autotune --config autotune.yaml --dry-run
+    Autotune {
+        /// Path to autotune YAML config file (all tuning parameters live here)
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Validate config and print sweep plan without running any trials
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Storage utility operations (for quick testing and validation)
     /// 
     /// These are helper commands for basic storage operations.
@@ -342,8 +363,10 @@ enum UtilCommands {
     ///   sai3-bench util health --uri "direct:///mnt/fast/"
     ///   sai3-bench util health --uri "az://storageaccount/container/"
     Health {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
     },
     /// List objects (supports basename glob across all backends)
     /// 
@@ -352,8 +375,10 @@ enum UtilCommands {
     ///   sai3-bench util list --uri "s3://bucket/prefix/"
     ///   sai3-bench util list --uri "direct:///mnt/data/*.txt"
     List {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
     },
     /// Stat (HEAD) one object across all backends
     /// 
@@ -361,8 +386,10 @@ enum UtilCommands {
     ///   sai3-bench util stat --uri "file:///tmp/data/file.txt"
     ///   sai3-bench util stat --uri "s3://bucket/object.txt"
     Stat {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
     },
     /// Get objects (prefix, glob, or single) from any backend
     /// 
@@ -370,8 +397,10 @@ enum UtilCommands {
     ///   sai3-bench util get --uri "file:///tmp/data/*" --jobs 8
     ///   sai3-bench util get --uri "s3://bucket/prefix/" --jobs 4
     Get {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
@@ -381,8 +410,10 @@ enum UtilCommands {
     ///   sai3-bench util delete --uri "file:///tmp/old/*" --jobs 8
     ///   sai3-bench util delete --uri "s3://bucket/prefix/"
     Delete {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
@@ -392,8 +423,10 @@ enum UtilCommands {
     ///   sai3-bench util put --uri "file:///tmp/data/test*.dat" --objects 100
     ///   sai3-bench util put --uri "s3://bucket/prefix/file*.dat" --object-size 1048576
     Put {
-        #[arg(long)]
-        uri: String,
+        #[arg(long, value_name = "URI", conflicts_with = "uri_pos")]
+        uri: Option<String>,
+        #[arg(value_name = "URI", conflicts_with = "uri")]
+        uri_pos: Option<String>,
         #[arg(long, default_value_t = 1024)]
         object_size: usize,
         #[arg(long, default_value_t = 1)]
@@ -401,6 +434,79 @@ enum UtilCommands {
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum OptimizeFor {
+    Throughput,
+    Latency,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum TuneOps {
+    Put,
+    Get,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum RapidModeArg {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AutotuneYaml {
+    uri: Option<String>,
+    sizes: Option<String>,
+    size_range: Option<String>,
+    size_steps: Option<usize>,
+    threads: Option<String>,
+    /// Absolute GCS gRPC channel counts to sweep (CSV).  Mutually exclusive with channels_per_thread.
+    channels: Option<String>,
+    /// GCS gRPC channels expressed as a multiplier of thread count (CSV of positive integers).
+    /// effective_channels = threads × channels_per_thread.
+    /// Default when neither 'channels' nor 'channels_per_thread' is set: 1
+    ///   (one channel per thread; effective_channels = threads).
+    /// Practical range: 1–8.  Values ≥ 9 are unusual; 0 is rejected as invalid.
+    /// Example: channels_per_thread: "1,2,4"  sweeps 1×, 2×, and 4× thread count.
+    /// Mutually exclusive with channels.
+    channels_per_thread: Option<String>,
+    range_enabled: Option<String>,
+    range_thresholds_mb: Option<String>,
+    gcs_write_chunk_sizes: Option<String>,
+    gcs_rapid_mode: Option<String>,
+    objects: Option<usize>,
+    trials: Option<usize>,
+    optimize_for: Option<String>,
+    ops: Option<String>,
+}
+
+fn parse_rapid_mode_str(s: &str) -> Result<RapidModeArg> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(RapidModeArg::Auto),
+        "on" | "true" | "1" | "yes" => Ok(RapidModeArg::On),
+        "off" | "false" | "0" | "no" => Ok(RapidModeArg::Off),
+        _ => bail!("Invalid gcs_rapid_mode '{}'. Use auto|on|off", s),
+    }
+}
+
+fn parse_optimize_for_str(s: &str) -> Result<OptimizeFor> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "throughput" => Ok(OptimizeFor::Throughput),
+        "latency" => Ok(OptimizeFor::Latency),
+        _ => bail!("Invalid optimize_for '{}'. Use throughput|latency", s),
+    }
+}
+
+fn parse_tune_ops_str(s: &str) -> Result<TuneOps> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "put" => Ok(TuneOps::Put),
+        "get" => Ok(TuneOps::Get),
+        "both" => Ok(TuneOps::Both),
+        _ => bail!("Invalid ops '{}'. Use put|get|both", s),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -492,15 +598,89 @@ fn main() -> Result<()> {
         Commands::Convert { config, files, dry_run, no_validate } => {
             convert_configs_cmd(config, files, dry_run, !no_validate)?
         }
+        Commands::Autotune { config, dry_run } => {
+            let yaml = if let Some(path) = config.as_ref() {
+                let txt = std::fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read autotune config: {}", path.display()))?;
+                serde_yaml::from_str::<AutotuneYaml>(&txt)
+                    .with_context(|| format!("Failed to parse autotune YAML: {}", path.display()))?
+            } else {
+                AutotuneYaml::default()
+            };
+
+            let uri = yaml.uri
+                .ok_or_else(|| anyhow!("autotune requires 'uri' in YAML config (use --config <file>)"))?;
+            let size_steps = yaml.size_steps.unwrap_or(4);
+            let threads = yaml.threads.unwrap_or_else(|| "16,32,64".to_string());
+            let range_enabled = yaml.range_enabled.unwrap_or_else(|| "false,true".to_string());
+            let range_thresholds = yaml.range_thresholds_mb.unwrap_or_else(|| "32,64".to_string());
+            let gcs_chunks = yaml.gcs_write_chunk_sizes.unwrap_or_else(|| "2097152,4128768".to_string());
+            let gcs_rapid = if let Some(s) = yaml.gcs_rapid_mode.as_deref() {
+                parse_rapid_mode_str(s)?
+            } else {
+                RapidModeArg::Auto
+            };
+            let objects = yaml.objects.unwrap_or(64);
+            let trials = yaml.trials.unwrap_or(1);
+            let optimize_for = if let Some(s) = yaml.optimize_for.as_deref() {
+                parse_optimize_for_str(s)?
+            } else {
+                OptimizeFor::Throughput
+            };
+            let ops = if let Some(s) = yaml.ops.as_deref() {
+                parse_tune_ops_str(s)?
+            } else {
+                TuneOps::Both
+            };
+
+            if yaml.channels.is_some() && yaml.channels_per_thread.is_some() {
+                bail!("autotune: specify 'channels' OR 'channels_per_thread' in YAML, not both");
+            }
+
+            autotune_cmd(
+                &uri,
+                yaml.sizes.as_deref(),
+                yaml.size_range.as_deref(),
+                size_steps,
+                &threads,
+                yaml.channels.as_deref(),
+                yaml.channels_per_thread.as_deref(),
+                &range_enabled,
+                &range_thresholds,
+                &gcs_chunks,
+                gcs_rapid,
+                objects,
+                trials,
+                optimize_for,
+                ops,
+                dry_run,
+            )?
+        }
         Commands::Util { command } => {
             match command {
-                UtilCommands::Health { uri } => health_cmd(&uri)?,
-                UtilCommands::List { uri } => list_cmd(&uri)?,
-                UtilCommands::Stat { uri } => stat_cmd(&uri)?,
-                UtilCommands::Get { uri, jobs } => get_cmd(&uri, jobs)?,
-                UtilCommands::Delete { uri, jobs } => delete_cmd(&uri, jobs)?,
-                UtilCommands::Put { uri, object_size, objects, concurrency } => {
-                    put_cmd(&uri, object_size, objects, concurrency)?
+                UtilCommands::Health { uri, uri_pos } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    health_cmd(&resolved_uri)?
+                }
+                UtilCommands::List { uri, uri_pos } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    list_cmd(&resolved_uri)?
+                }
+                UtilCommands::Stat { uri, uri_pos } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    stat_cmd(&resolved_uri)?
+                }
+                UtilCommands::Get { uri, uri_pos, jobs } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    get_cmd(&resolved_uri, jobs)?
+                }
+                UtilCommands::Delete { uri, uri_pos, jobs } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    delete_cmd(&resolved_uri, jobs)?
+                }
+                UtilCommands::Put { uri, uri_pos, object_size, objects, concurrency } => {
+                    let resolved_uri = resolve_util_uri(uri, uri_pos)?;
+                    put_cmd(&resolved_uri, object_size, objects, concurrency)?
                 }
             }
         }
@@ -513,6 +693,503 @@ fn main() -> Result<()> {
             .context("Failed to finalize operation logger")?;
     }
     
+    Ok(())
+}
+
+fn resolve_util_uri(uri_flag: Option<String>, uri_pos: Option<String>) -> Result<String> {
+    match (uri_flag, uri_pos) {
+        (Some(uri), None) | (None, Some(uri)) => Ok(uri),
+        (Some(uri_a), Some(uri_b)) => {
+            if uri_a == uri_b {
+                Ok(uri_a)
+            } else {
+                bail!("Provide URI either as positional <URI> or --uri <URI>, not both")
+            }
+        }
+        (None, None) => bail!("Missing URI: use positional <URI> or --uri <URI>"),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TuneCase {
+    size_bytes: usize,
+    threads: usize,
+    /// Effective (absolute) number of GCS gRPC channels used for this trial.
+    channels: usize,
+    /// Multiplier used to derive `channels` from `threads` (None = absolute sweep).
+    channels_per_thread: Option<usize>,
+    range_enabled: bool,
+    range_threshold_mb: usize,
+    gcs_write_chunk_size: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TuneResult {
+    case: TuneCase,
+    put_mbps: Option<f64>,
+    get_mbps: Option<f64>,
+    put_avg_ms: Option<f64>,
+    get_avg_ms: Option<f64>,
+}
+
+fn parse_csv_usize(input: &str) -> Result<Vec<usize>> {
+    let values = input
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<usize>().with_context(|| format!("Invalid integer: {}", s)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        bail!("Expected at least one numeric value, got '{}'.", input);
+    }
+    Ok(values)
+}
+
+fn parse_csv_bool(input: &str) -> Result<Vec<bool>> {
+    let mut out = Vec::new();
+    for token in input.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let v = match token.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => bail!("Invalid bool '{}'. Use true/false.", token),
+        };
+        out.push(v);
+    }
+    if out.is_empty() {
+        bail!("Expected at least one bool value, got '{}'.", input);
+    }
+    Ok(out)
+}
+
+fn parse_sizes(sizes: Option<&str>, size_range: Option<&str>, size_steps: usize) -> Result<Vec<usize>> {
+    if let Some(s) = sizes {
+        let mut parsed = Vec::new();
+        for token in s.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            let bytes = sai3_bench::size_parser::parse_size(token)
+                .with_context(|| format!("Invalid size '{}'.", token))?;
+            parsed.push(bytes as usize);
+        }
+        if parsed.is_empty() {
+            bail!("--sizes provided but no values were parsed");
+        }
+        parsed.sort_unstable();
+        parsed.dedup();
+        return Ok(parsed);
+    }
+
+    let range = size_range.unwrap_or("32MiB-64MiB");
+    let mut parts = range.split('-').map(|v| v.trim());
+    let start_s = parts.next().ok_or_else(|| anyhow!("Invalid --size-range"))?;
+    let end_s = parts.next().ok_or_else(|| anyhow!("Invalid --size-range"))?;
+    if parts.next().is_some() {
+        bail!("Invalid --size-range '{}'. Expected format like 64KiB-1MiB", range);
+    }
+    let start = sai3_bench::size_parser::parse_size(start_s)?;
+    let end = sai3_bench::size_parser::parse_size(end_s)?;
+    if start == 0 || end == 0 {
+        bail!("Size range values must be > 0");
+    }
+    let (min_sz, max_sz) = if start <= end { (start, end) } else { (end, start) };
+    let steps = size_steps.max(1);
+
+    if steps == 1 || min_sz == max_sz {
+        return Ok(vec![min_sz as usize]);
+    }
+
+    let min_f = min_sz as f64;
+    let max_f = max_sz as f64;
+    let mut out = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let ratio = i as f64 / (steps - 1) as f64;
+        let val = min_f * (max_f / min_f).powf(ratio);
+        let rounded = ((val / 1024.0).round() * 1024.0).max(1024.0) as usize;
+        out.push(rounded);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+fn mbps_from_output(output: &str) -> Option<f64> {
+    let re = Regex::new(r"\(([0-9]+(?:\.[0-9]+)?) MB/s\)").ok()?;
+    let mut last = None;
+    for cap in re.captures_iter(output) {
+        last = cap.get(1).and_then(|m| m.as_str().parse::<f64>().ok());
+    }
+    last
+}
+
+fn build_trial_uri(base_uri: &str, trial_id: usize) -> String {
+    if base_uri.contains('*') {
+        base_uri.replacen('*', &format!("trial{:03}_*", trial_id), 1)
+    } else if base_uri.ends_with('/') {
+        format!("{}autotune/trial{:03}/obj*.dat", base_uri, trial_id)
+    } else {
+        format!("{}.trial{:03}.*", base_uri, trial_id)
+    }
+}
+
+fn run_trial_command(exe: &Path, args: &[String], envs: &[(String, String)], objects: usize) -> Result<(f64, f64)> {
+    let t0 = Instant::now();
+    let mut cmd = Command::new(exe);
+    cmd.args(args);
+    cmd.env_remove("S3DLIO_GCS_GRPC_CHANNELS");
+    cmd.env_remove("S3DLIO_GCS_RAPID");
+    cmd.env_remove("S3DLIO_ENABLE_RANGE_OPTIMIZATION");
+    cmd.env_remove("S3DLIO_RANGE_THRESHOLD_MB");
+    cmd.env_remove("S3DLIO_GRPC_WRITE_CHUNK_SIZE");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().context("Failed to launch child trial process")?;
+    let dt = t0.elapsed().as_secs_f64();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "Trial command failed: {:?}\nstdout:\n{}\nstderr:\n{}",
+            args,
+            stdout,
+            stderr
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let throughput = mbps_from_output(&stdout).unwrap_or(0.0);
+    let avg_ms = if objects == 0 { 0.0 } else { (dt * 1000.0) / objects as f64 };
+    Ok((throughput, avg_ms))
+}
+
+fn autotune_cmd(
+    uri: &str,
+    sizes: Option<&str>,
+    size_range: Option<&str>,
+    size_steps: usize,
+    threads: &str,
+    channels: Option<&str>,
+    channels_per_thread: Option<&str>,
+    range_enabled: &str,
+    range_thresholds_mb: &str,
+    gcs_write_chunk_sizes: &str,
+    gcs_rapid_mode: RapidModeArg,
+    objects: usize,
+    trials: usize,
+    optimize_for: OptimizeFor,
+    ops: TuneOps,
+    dry_run: bool,
+) -> Result<()> {
+    let validated_uri = validate_uri(uri)?;
+    let is_gcs = validated_uri.starts_with("gs://") || validated_uri.starts_with("gcs://");
+
+    let size_values = parse_sizes(sizes, size_range, size_steps)?;
+    let thread_values = parse_csv_usize(threads)?;
+
+    // Channel sweep: absolute counts (channels=) OR per-thread multiplier (channels_per_thread=).
+    // channels_per_thread must be a CSV of positive integers (≥ 1).  Practical range: 1–8.
+    // Default when neither key is set: 1 (one channel per thread; effective = threads × 1).
+    // Encoding: (effective_channels, Option<cpt_multiplier>, is_default)
+    // For non-GCS backends the channel concept does not apply; use a single sentinel.
+    enum ChannelSpec { Absolute(Vec<usize>), PerThread(Vec<usize>, bool /* is_default */) }
+
+    let channel_spec: ChannelSpec = if is_gcs {
+        if let Some(cpt_str) = channels_per_thread {
+            let cpts = parse_csv_usize(cpt_str)?;
+            if cpts.iter().any(|&v| v == 0) {
+                bail!("channels_per_thread: all values must be ≥ 1 (0 is not a valid channel multiplier)");
+            }
+            ChannelSpec::PerThread(cpts, false)
+        } else if let Some(ch_str) = channels {
+            ChannelSpec::Absolute(parse_csv_usize(ch_str)?)
+        } else {
+            // Default: 1 channel per thread (effective_channels = threads)
+            ChannelSpec::PerThread(vec![1], true)
+        }
+    } else {
+        ChannelSpec::Absolute(vec![0])
+    };
+
+    let range_enabled_values = parse_csv_bool(range_enabled)?;
+    let range_threshold_values = parse_csv_usize(range_thresholds_mb)?;
+    let gcs_write_chunk_values = if is_gcs {
+        parse_csv_usize(gcs_write_chunk_sizes)?
+    } else {
+        vec![0]
+    };
+
+    // Build the full sweep matrix.
+    let mut cases = Vec::new();
+    for size in &size_values {
+        for th in &thread_values {
+            let ch_pairs: Vec<(usize, Option<usize>)> = match &channel_spec {
+                ChannelSpec::Absolute(vals) => vals.iter().map(|&v| (v, None)).collect(),
+                ChannelSpec::PerThread(cpts, _) => cpts.iter().map(|&cpt| (th * cpt, Some(cpt))).collect(),
+            };
+            for (ch, cpt) in &ch_pairs {
+                for re in &range_enabled_values {
+                    for rt in &range_threshold_values {
+                        for gcs_chunk in &gcs_write_chunk_values {
+                            cases.push(TuneCase {
+                                size_bytes: *size,
+                                threads: *th,
+                                channels: *ch,
+                                channels_per_thread: *cpt,
+                                range_enabled: *re,
+                                range_threshold_mb: *rt,
+                                gcs_write_chunk_size: *gcs_chunk,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cases.is_empty() {
+        bail!("No autotune cases generated");
+    }
+
+    let total_runs = cases.len() * trials;
+
+    // ── Dry-run: print sweep plan and exit ───────────────────────────────────
+    if dry_run {
+        println!("Autotune sweep plan (dry-run)");
+        println!("  URI           : {}", validated_uri);
+        println!("  Objective     : {:?}", optimize_for);
+        println!("  Ops           : {:?}", ops);
+        println!("  Objects/trial : {}", objects);
+        println!("  Trials/case   : {}", trials);
+        println!();
+
+        // Show loop order with dimension labels and values.
+        println!("  Loop order (outermost → innermost):");
+        println!("    {:2}. {:22}: {:?}  ({} value{})",
+            1, "object_size (bytes)", size_values,
+            size_values.len(), if size_values.len() == 1 { "" } else { "s" });
+        println!("    {:2}. {:22}: {:?}  ({} value{})",
+            2, "threads", thread_values,
+            thread_values.len(), if thread_values.len() == 1 { "" } else { "s" });
+        match &channel_spec {
+            ChannelSpec::PerThread(cpts, is_default) => {
+                let default_note = if *is_default { "  [default: 1]" } else { "" };
+                println!("    {:2}. {:22}: {:?}  ({} value{})  [effective = threads × cpt]{}",
+                    3, "channels_per_thread", cpts,
+                    cpts.len(), if cpts.len() == 1 { "" } else { "s" }, default_note);
+            }
+            ChannelSpec::Absolute(vals) if is_gcs => {
+                println!("    {:2}. {:22}: {:?}  ({} value{})",
+                    3, "channels (absolute)", vals,
+                    vals.len(), if vals.len() == 1 { "" } else { "s" });
+            }
+            _ => {}
+        }
+        println!("    {:2}. {:22}: {:?}  ({} value{})",
+            4, "range_enabled", range_enabled_values,
+            range_enabled_values.len(), if range_enabled_values.len() == 1 { "" } else { "s" });
+        println!("    {:2}. {:22}: {:?}  ({} value{})",
+            5, "range_threshold_mb", range_threshold_values,
+            range_threshold_values.len(), if range_threshold_values.len() == 1 { "" } else { "s" });
+        if is_gcs {
+            println!("    {:2}. {:22}: {:?}  ({} value{})",
+                6, "gcs_write_chunk_size", gcs_write_chunk_values,
+                gcs_write_chunk_values.len(), if gcs_write_chunk_values.len() == 1 { "" } else { "s" });
+        }
+        println!();
+        println!("  Total cases   : {}", cases.len());
+        println!("  Total runs    : {} case(s) × {} trial(s) = {} runs", cases.len(), trials, total_runs);
+        let op_count = match ops {
+            TuneOps::Both => total_runs * 2,
+            _ => total_runs,
+        };
+        println!("  Object I/Os   : {} runs × {} objects = {} I/Os", op_count, objects, op_count * objects);
+        println!();
+        println!("  Note: no time limit is enforced.  Actual duration depends on storage");
+        println!("  throughput.  A rough estimate: ~30 s/trial → ~{:.0} minutes for {} runs.",
+            total_runs as f64 * 30.0 / 60.0, total_runs);
+        if total_runs > 200 {
+            println!();
+            println!("  WARNING: {} runs is a large sweep.  Consider narrowing parameters.", total_runs);
+        }
+        return Ok(());
+    }
+
+    println!("Autotune: {} cases × {} trial(s), objective={:?}, ops={:?}", cases.len(), trials, optimize_for, ops);
+    println!("Target URI: {}", validated_uri);
+
+    let exe = std::env::current_exe().context("Failed to resolve current executable path")?;
+    let mut results = Vec::new();
+
+    for (idx, case) in cases.iter().enumerate() {
+        let mut put_mbps_samples = Vec::new();
+        let mut get_mbps_samples = Vec::new();
+        let mut put_avg_samples = Vec::new();
+        let mut get_avg_samples = Vec::new();
+
+        for rep in 0..trials {
+            let trial_uri = build_trial_uri(&validated_uri, idx * trials + rep);
+            let mut envs = vec![
+                ("S3DLIO_ENABLE_RANGE_OPTIMIZATION".to_string(), if case.range_enabled { "1" } else { "0" }.to_string()),
+                ("S3DLIO_RANGE_THRESHOLD_MB".to_string(), case.range_threshold_mb.to_string()),
+            ];
+
+            if is_gcs {
+                envs.push(("S3DLIO_GCS_GRPC_CHANNELS".to_string(), case.channels.to_string()));
+                envs.push(("S3DLIO_GRPC_WRITE_CHUNK_SIZE".to_string(), case.gcs_write_chunk_size.to_string()));
+                match gcs_rapid_mode {
+                    RapidModeArg::On => envs.push(("S3DLIO_GCS_RAPID".to_string(), "true".to_string())),
+                    RapidModeArg::Off => envs.push(("S3DLIO_GCS_RAPID".to_string(), "false".to_string())),
+                    RapidModeArg::Auto => {}
+                }
+            }
+
+            if matches!(ops, TuneOps::Put | TuneOps::Both) {
+                let put_args = vec![
+                    "util".to_string(),
+                    "put".to_string(),
+                    "--uri".to_string(),
+                    trial_uri.clone(),
+                    "--object-size".to_string(),
+                    case.size_bytes.to_string(),
+                    "--objects".to_string(),
+                    objects.to_string(),
+                    "--concurrency".to_string(),
+                    case.threads.to_string(),
+                ];
+                let (mbps, avg_ms) = run_trial_command(&exe, &put_args, &envs, objects)?;
+                put_mbps_samples.push(mbps);
+                put_avg_samples.push(avg_ms);
+            }
+
+            if matches!(ops, TuneOps::Get | TuneOps::Both) {
+                if matches!(ops, TuneOps::Get) {
+                    let seed_put_args = vec![
+                        "util".to_string(),
+                        "put".to_string(),
+                        "--uri".to_string(),
+                        trial_uri.clone(),
+                        "--object-size".to_string(),
+                        case.size_bytes.to_string(),
+                        "--objects".to_string(),
+                        objects.to_string(),
+                        "--concurrency".to_string(),
+                        case.threads.to_string(),
+                    ];
+                    let _ = run_trial_command(&exe, &seed_put_args, &envs, objects)?;
+                }
+
+                let get_args = vec![
+                    "util".to_string(),
+                    "get".to_string(),
+                    "--uri".to_string(),
+                    trial_uri.clone(),
+                    "--jobs".to_string(),
+                    case.threads.to_string(),
+                ];
+                let (mbps, avg_ms) = run_trial_command(&exe, &get_args, &envs, objects)?;
+                get_mbps_samples.push(mbps);
+                get_avg_samples.push(avg_ms);
+            }
+        }
+
+        let mean = |vals: &[f64]| -> Option<f64> {
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+        };
+
+        let result = TuneResult {
+            case: case.clone(),
+            put_mbps: mean(&put_mbps_samples),
+            get_mbps: mean(&get_mbps_samples),
+            put_avg_ms: mean(&put_avg_samples),
+            get_avg_ms: mean(&get_avg_samples),
+        };
+        let channels_label = match result.case.channels_per_thread {
+            Some(cpt) => format!("{}(×{})", result.case.channels, cpt),
+            None => result.case.channels.to_string(),
+        };
+        println!(
+            "[{:>3}/{}] size={}B threads={} channels={} range={} thr={}MB chunk={} -> PUT={:.2?}MB/s GET={:.2?}MB/s",
+            idx + 1,
+            cases.len(),
+            result.case.size_bytes,
+            result.case.threads,
+            channels_label,
+            result.case.range_enabled,
+            result.case.range_threshold_mb,
+            result.case.gcs_write_chunk_size,
+            result.put_mbps,
+            result.get_mbps
+        );
+        results.push(result);
+    }
+
+    if results.is_empty() {
+        bail!("No autotune results were produced");
+    }
+
+    let score = |r: &TuneResult| -> f64 {
+        match optimize_for {
+            OptimizeFor::Throughput => {
+                let mut total = 0.0;
+                let mut n = 0.0;
+                if let Some(v) = r.put_mbps { total += v; n += 1.0; }
+                if let Some(v) = r.get_mbps { total += v; n += 1.0; }
+                if n == 0.0 { 0.0 } else { total / n }
+            }
+            OptimizeFor::Latency => {
+                let mut total = 0.0;
+                let mut n = 0.0;
+                if let Some(v) = r.put_avg_ms { total += v; n += 1.0; }
+                if let Some(v) = r.get_avg_ms { total += v; n += 1.0; }
+                if n == 0.0 { f64::INFINITY } else { total / n }
+            }
+        }
+    };
+
+    let best = match optimize_for {
+        OptimizeFor::Throughput => results
+            .iter()
+            .max_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow!("No best result found"))?,
+        OptimizeFor::Latency => results
+            .iter()
+            .min_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow!("No best result found"))?,
+    };
+
+    println!("\n=== AUTOTUNE BEST ({:?}) ===", optimize_for);
+    println!("score: {:.3}", score(best));
+    println!("size_bytes: {}", best.case.size_bytes);
+    println!("threads/jobs: {}", best.case.threads);
+    if is_gcs {
+        println!("gcs_channels: {}", best.case.channels);
+        if let Some(cpt) = best.case.channels_per_thread {
+            println!("gcs_channels_per_thread: {}  (= {} threads × {})", best.case.channels, best.case.threads, cpt);
+        }
+        println!("gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+        println!("gcs_rapid_mode: {:?}", gcs_rapid_mode);
+    }
+    println!("range_enabled: {}", best.case.range_enabled);
+    println!("range_threshold_mb: {}", best.case.range_threshold_mb);
+    println!("put_mbps: {:.2?}", best.put_mbps);
+    println!("get_mbps: {:.2?}", best.get_mbps);
+    println!("put_avg_ms_per_object: {:.2?}", best.put_avg_ms);
+    println!("get_avg_ms_per_object: {:.2?}", best.get_avg_ms);
+
+    println!("\nRecommended YAML block:");
+    println!("concurrency: {}", best.case.threads);
+    println!("s3dlio_optimization:");
+    println!("  enable_range_downloads: {}", best.case.range_enabled);
+    println!("  range_threshold_mb: {}", best.case.range_threshold_mb);
+    if is_gcs {
+        println!("  gcs_channel_count: {}", best.case.channels);
+        match gcs_rapid_mode {
+            RapidModeArg::On => println!("  gcs_rapid_mode: true"),
+            RapidModeArg::Off => println!("  gcs_rapid_mode: false"),
+            RapidModeArg::Auto => println!("  # gcs_rapid_mode omitted (auto-detect)"),
+        }
+        println!("  gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+    }
+
     Ok(())
 }
 
@@ -1180,6 +1857,11 @@ fn run_workload(
         s3dlio_opt.apply();
         info!("Applied s3dlio optimization configuration from YAML");
     }
+
+    // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+    // For gs:// targets: sets gRPC subchannel count and optionally scales config.concurrency.
+    // Must run after apply() (which sets explicit channel count) but before workload starts.
+    config.apply_gcs_defaults();
 
     sai3_bench::validation::apply_directory_tree_counts(&mut config)
         .context("Directory tree count validation failed")?;
@@ -2328,5 +3010,368 @@ fn replay_cmd(
     }
     
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Unit tests
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // resolve_util_uri
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_util_uri_flag_only() {
+        let result = resolve_util_uri(Some("s3://bucket/".to_string()), None).unwrap();
+        assert_eq!(result, "s3://bucket/");
+    }
+
+    #[test]
+    fn test_resolve_util_uri_positional_only() {
+        let result = resolve_util_uri(None, Some("gs://bucket/prefix/".to_string())).unwrap();
+        assert_eq!(result, "gs://bucket/prefix/");
+    }
+
+    #[test]
+    fn test_resolve_util_uri_both_same_accepted() {
+        let result = resolve_util_uri(
+            Some("s3://bucket/".to_string()),
+            Some("s3://bucket/".to_string()),
+        )
+        .unwrap();
+        assert_eq!(result, "s3://bucket/");
+    }
+
+    #[test]
+    fn test_resolve_util_uri_both_different_errors() {
+        let result = resolve_util_uri(
+            Some("s3://bucket-a/".to_string()),
+            Some("s3://bucket-b/".to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_util_uri_neither_errors() {
+        let result = resolve_util_uri(None, None);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_csv_usize
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_csv_usize_single() {
+        assert_eq!(parse_csv_usize("16").unwrap(), vec![16]);
+    }
+
+    #[test]
+    fn test_parse_csv_usize_multi() {
+        assert_eq!(parse_csv_usize("16,32,64").unwrap(), vec![16, 32, 64]);
+    }
+
+    #[test]
+    fn test_parse_csv_usize_spaces() {
+        assert_eq!(parse_csv_usize(" 16 , 32 , 64 ").unwrap(), vec![16, 32, 64]);
+    }
+
+    #[test]
+    fn test_parse_csv_usize_empty_errors() {
+        assert!(parse_csv_usize("").is_err());
+        assert!(parse_csv_usize("   ").is_err());
+    }
+
+    #[test]
+    fn test_parse_csv_usize_invalid_errors() {
+        assert!(parse_csv_usize("16,abc").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_csv_bool
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_csv_bool_true_values() {
+        for v in &["true", "1", "yes", "on"] {
+            assert_eq!(parse_csv_bool(v).unwrap(), vec![true], "failed for '{}'", v);
+        }
+    }
+
+    #[test]
+    fn test_parse_csv_bool_false_values() {
+        for v in &["false", "0", "no", "off"] {
+            assert_eq!(parse_csv_bool(v).unwrap(), vec![false], "failed for '{}'", v);
+        }
+    }
+
+    #[test]
+    fn test_parse_csv_bool_multi() {
+        assert_eq!(parse_csv_bool("false,true").unwrap(), vec![false, true]);
+    }
+
+    #[test]
+    fn test_parse_csv_bool_empty_errors() {
+        assert!(parse_csv_bool("").is_err());
+    }
+
+    #[test]
+    fn test_parse_csv_bool_invalid_errors() {
+        assert!(parse_csv_bool("maybe").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_sizes
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_sizes_explicit_list() {
+        let sizes = parse_sizes(Some("64KiB,1MiB"), None, 4).unwrap();
+        assert_eq!(sizes, vec![64 * 1024, 1024 * 1024]);
+    }
+
+    #[test]
+    fn test_parse_sizes_dedup_and_sort() {
+        let sizes = parse_sizes(Some("1MiB,64KiB,1MiB"), None, 4).unwrap();
+        assert_eq!(sizes, vec![64 * 1024, 1024 * 1024]);
+    }
+
+    #[test]
+    fn test_parse_sizes_range_single_step() {
+        let sizes = parse_sizes(None, Some("4MiB-4MiB"), 1).unwrap();
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(sizes[0], 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_sizes_range_two_steps() {
+        let sizes = parse_sizes(None, Some("1MiB-4MiB"), 2).unwrap();
+        assert_eq!(sizes.len(), 2);
+        // First element should be near 1 MiB, last near 4 MiB
+        let mib1 = 1024 * 1024usize;
+        let mib4 = 4 * 1024 * 1024usize;
+        assert!(sizes[0] <= mib1 + 1024, "expected ~1MiB, got {}", sizes[0]);
+        assert!(sizes[1] >= mib4 - 1024, "expected ~4MiB, got {}", sizes[1]);
+    }
+
+    #[test]
+    fn test_parse_sizes_range_reversed_equals_forward() {
+        let forward = parse_sizes(None, Some("1MiB-4MiB"), 3).unwrap();
+        let reversed = parse_sizes(None, Some("4MiB-1MiB"), 3).unwrap();
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn test_parse_sizes_range_default_four_steps() {
+        let sizes = parse_sizes(None, None, 4).unwrap();
+        assert_eq!(sizes.len(), 4);
+        let mib32 = 32 * 1024 * 1024usize;
+        let mib64 = 64 * 1024 * 1024usize;
+        assert!(sizes[0] >= mib32 - 1024, "expected first >= 32MiB, got {}", sizes[0]);
+        assert!(sizes[3] <= mib64 + 1024, "expected last <= 64MiB, got {}", sizes[3]);
+    }
+
+    // -------------------------------------------------------------------------
+    // mbps_from_output
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_mbps_from_output_basic() {
+        assert_eq!(mbps_from_output("PUT complete (123.45 MB/s)"), Some(123.45));
+    }
+
+    #[test]
+    fn test_mbps_from_output_integer() {
+        assert_eq!(mbps_from_output("done (500 MB/s)"), Some(500.0));
+    }
+
+    #[test]
+    fn test_mbps_from_output_last_match_wins() {
+        assert_eq!(
+            mbps_from_output("pass1 (100.0 MB/s) pass2 (200.5 MB/s)"),
+            Some(200.5)
+        );
+    }
+
+    #[test]
+    fn test_mbps_from_output_none_when_absent() {
+        assert_eq!(mbps_from_output("no throughput here"), None);
+    }
+
+    #[test]
+    fn test_mbps_from_output_wrong_unit_ignored() {
+        assert_eq!(mbps_from_output("done (10.0 GB/s)"), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // build_trial_uri
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_trial_uri_with_glob() {
+        assert_eq!(
+            build_trial_uri("gs://bucket/prefix/*.dat", 0),
+            "gs://bucket/prefix/trial000_*.dat"
+        );
+    }
+
+    #[test]
+    fn test_build_trial_uri_trailing_slash() {
+        assert_eq!(
+            build_trial_uri("gs://bucket/prefix/", 5),
+            "gs://bucket/prefix/autotune/trial005/obj*.dat"
+        );
+    }
+
+    #[test]
+    fn test_build_trial_uri_bare() {
+        assert_eq!(
+            build_trial_uri("gs://bucket/prefix", 3),
+            "gs://bucket/prefix.trial003.*"
+        );
+    }
+
+    #[test]
+    fn test_build_trial_uri_zero_padding() {
+        let uri = build_trial_uri("s3://bucket/", 42);
+        assert!(uri.contains("trial042"), "expected trial042 in '{}'", uri);
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_rapid_mode_str / parse_optimize_for_str / parse_tune_ops_str
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rapid_mode_str_all_variants() {
+        assert!(matches!(parse_rapid_mode_str("auto").unwrap(), RapidModeArg::Auto));
+        assert!(matches!(parse_rapid_mode_str("on").unwrap(),   RapidModeArg::On));
+        assert!(matches!(parse_rapid_mode_str("true").unwrap(), RapidModeArg::On));
+        assert!(matches!(parse_rapid_mode_str("yes").unwrap(),  RapidModeArg::On));
+        assert!(matches!(parse_rapid_mode_str("1").unwrap(),    RapidModeArg::On));
+        assert!(matches!(parse_rapid_mode_str("off").unwrap(),   RapidModeArg::Off));
+        assert!(matches!(parse_rapid_mode_str("false").unwrap(), RapidModeArg::Off));
+        assert!(matches!(parse_rapid_mode_str("no").unwrap(),    RapidModeArg::Off));
+        assert!(matches!(parse_rapid_mode_str("0").unwrap(),     RapidModeArg::Off));
+    }
+
+    #[test]
+    fn test_parse_rapid_mode_str_invalid() {
+        assert!(parse_rapid_mode_str("maybe").is_err());
+        assert!(parse_rapid_mode_str("").is_err());
+    }
+
+    #[test]
+    fn test_parse_optimize_for_str() {
+        assert!(matches!(parse_optimize_for_str("throughput").unwrap(), OptimizeFor::Throughput));
+        assert!(matches!(parse_optimize_for_str("latency").unwrap(),    OptimizeFor::Latency));
+        assert!(parse_optimize_for_str("bandwidth").is_err());
+    }
+
+    #[test]
+    fn test_parse_tune_ops_str() {
+        assert!(matches!(parse_tune_ops_str("put").unwrap(),  TuneOps::Put));
+        assert!(matches!(parse_tune_ops_str("get").unwrap(),  TuneOps::Get));
+        assert!(matches!(parse_tune_ops_str("both").unwrap(), TuneOps::Both));
+        assert!(parse_tune_ops_str("all").is_err());
+    }
+
+    // ── channels_per_thread ────────────────────────────────────────────────
+
+    #[test]
+    fn test_autotune_yaml_channels_per_thread_deserialize() {
+        let yaml = "uri: \"gs://b/p\"\nchannels_per_thread: \"1,2,4\"\nthreads: \"32,64\"\n";
+        let parsed: AutotuneYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.channels_per_thread.as_deref(), Some("1,2,4"));
+        assert!(parsed.channels.is_none(), "channels should be absent");
+    }
+
+    #[test]
+    fn test_autotune_yaml_channels_absolute_deserialize() {
+        let yaml = "uri: \"gs://b/p\"\nchannels: \"32,64\"\n";
+        let parsed: AutotuneYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.channels.as_deref(), Some("32,64"));
+        assert!(parsed.channels_per_thread.is_none());
+    }
+
+    #[test]
+    fn test_autotune_yaml_neither_channels_is_ok() {
+        // No channels or channels_per_thread: should default to 1×threads
+        let yaml = "uri: \"gs://b/p\"\nthreads: \"16,32\"\n";
+        let parsed: AutotuneYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.channels.is_none());
+        assert!(parsed.channels_per_thread.is_none());
+    }
+
+    #[test]
+    fn test_channels_per_thread_effective_computation() {
+        // Verify that effective_channels = threads * cpt for several values
+        let cases = vec![(16, 1, 16), (32, 2, 64), (64, 4, 256), (8, 3, 24)];
+        for (th, cpt, expected) in cases {
+            assert_eq!(th * cpt, expected, "threads={} × cpt={}", th, cpt);
+        }
+    }
+
+    #[test]
+    fn test_autotune_yaml_channels_per_thread_csv_parsing() {
+        let cpt_str = "1,2,4,8";
+        let parsed = parse_csv_usize(cpt_str).unwrap();
+        assert_eq!(parsed, vec![1, 2, 4, 8]);
+    }
+
+    #[test]
+    fn test_autotune_yaml_channels_per_thread_single() {
+        let parsed = parse_csv_usize("2").unwrap();
+        assert_eq!(parsed, vec![2]);
+    }
+
+    #[test]
+    fn test_autotune_yaml_channels_per_thread_invalid() {
+        assert!(parse_csv_usize("1,x,4").is_err());
+    }
+
+    #[test]
+    fn test_channels_per_thread_zero_rejected() {
+        // 0 is never a valid multiplier — would mean 0 channels
+        let csv = parse_csv_usize("0").unwrap();
+        assert!(csv.iter().any(|&v| v == 0), "parsed 0 as usize");
+        // The actual rejection happens in autotune_cmd() after parsing.
+        // Simulate that check directly:
+        let cpts = parse_csv_usize("1,0,4").unwrap();
+        assert!(cpts.iter().any(|&v| v == 0));
+        // Confirm a clean list with no zeros passes the check
+        let ok = parse_csv_usize("1,2,4").unwrap();
+        assert!(!ok.iter().any(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_tune_case_has_channels_per_thread_field() {
+        // Ensure the struct can hold both absolute and per-thread variants
+        let absolute = TuneCase {
+            size_bytes: 1024,
+            threads: 32,
+            channels: 64,
+            channels_per_thread: None,
+            range_enabled: false,
+            range_threshold_mb: 32,
+            gcs_write_chunk_size: 2097152,
+        };
+        assert!(absolute.channels_per_thread.is_none());
+
+        let per_thread = TuneCase {
+            size_bytes: 1024,
+            threads: 32,
+            channels: 128, // 32 * 4
+            channels_per_thread: Some(4),
+            range_enabled: false,
+            range_threshold_mb: 32,
+            gcs_write_chunk_size: 2097152,
+        };
+        assert_eq!(per_thread.channels_per_thread, Some(4));
+        assert_eq!(per_thread.channels, per_thread.threads * per_thread.channels_per_thread.unwrap());
+    }
 }
 

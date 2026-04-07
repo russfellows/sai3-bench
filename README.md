@@ -1,10 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.63-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.86-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-569%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-638%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.86)**: **GCS RAPID storage fully working** (s3dlio v0.9.86) — `BidiWriteObject` PUTs and `BidiReadObject` GETs verified against Hyperdisk ML RAPID buckets. RAPID mode is auto-detected per bucket or forced via `gcs_rapid_mode: true`. Worker drain deadline bug fixed (execute stage now runs its full configured duration). Timer observability logs added.
+
+**🚀 NEW (v0.8.70)**: **GCS RAPID gRPC support** (s3dlio v0.9.70) — per-trial channel count, range-download control, and write-chunk-size control sent over RPC to agents. **Autotune redesign** — all tuning parameters are YAML-only; new `channels_per_thread` parameter scales gRPC subchannels with thread count; `--dry-run` prints the full sweep plan (computed sizes, loop order, total cases, I/O estimate) before executing.
 
 **🚀 NEW (v0.8.63)**: **Multi-endpoint checkpoint race condition fix** - Eliminates fatal workload aborts at 99% completion for shared storage. **s3dlio optimization support** - +76% GET throughput for large objects (≥64MB).
 
@@ -51,7 +55,7 @@ All operations work identically across protocols - just change the URI scheme:
 - **Direct I/O** (`direct://`) - High-performance direct I/O bypassing page cache (optimized chunked reads)
 - **Amazon S3** (`s3://`) - S3 and S3-compatible storage
 - **Azure Blob** (`az://`) - Microsoft Azure Blob Storage
-- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API
+- **Google Cloud Storage** (`gs://` or `gcs://`) - Google Cloud Storage with native GCS API, including RAPID (Hyperdisk ML) storage (v0.8.86+)
 
 See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides.
 
@@ -251,6 +255,10 @@ EOF
 # Test storage connectivity
 ./target/release/sai3-bench util health --uri "s3://my-bucket/"
 
+# Distributed autotune with YAML matrix (--dry-run to preview sweep plan)
+./target/release/sai3bench-ctl autotune --config examples/distributed-autotune-minimal.yaml --dry-run
+./target/release/sai3bench-ctl autotune --config examples/distributed-autotune-minimal.yaml
+
 # Capture workload for replay
 ./target/release/sai3-bench --op-log trace.tsv.zst run --config my-test.yaml
 
@@ -260,6 +268,8 @@ EOF
 # Analyze results (generate Excel report)
 ./target/release/sai3-analyze --pattern "sai3-*" --output results.xlsx
 ```
+
+Minimal autotune YAML example: `examples/distributed-autotune-minimal.yaml`
 
 See [Usage Guide](docs/USAGE.md) for detailed examples and [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) for multi-host patterns.
 

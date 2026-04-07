@@ -199,12 +199,28 @@ pub fn create_store_for_uri_with_config(
         }
     }
     
-    // For GCS URIs, apply RangeEngine configuration
+    // For GCS URIs, apply RangeEngine configuration.
+    //
+    // Priority order (highest wins):
+    //   1. Explicit `range_engine:` YAML block (range_config parameter)
+    //   2. S3DLIO_ENABLE_RANGE_OPTIMIZATION env var — set by apply_request_tuning()
+    //      from `s3dlio_optimization.enable_range_downloads` in the YAML.
+    //      Bridge note: GcsObjectStore does not read this env var itself
+    //      (an s3dlio limitation to be fixed in a future s3dlio release).
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
-        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
-        
+        // Read env vars that apply_request_tuning() may have already set.
+        let env_range_enabled = std::env::var("S3DLIO_ENABLE_RANGE_OPTIMIZATION")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off" | "disable" | "disabled"))
+            .unwrap_or(false);
+        let env_threshold_bytes: u64 = std::env::var("S3DLIO_RANGE_THRESHOLD_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE);
+
         let config = if let Some(cfg) = range_config {
+            // Explicit range_engine: block always takes highest priority.
+            debug!("GCS RangeEngine: enabled via range_engine: config block for {}", uri);
             GcsConfig {
                 enable_range_engine: cfg.enabled,
                 range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
@@ -213,21 +229,38 @@ pub fn create_store_for_uri_with_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
+            }
+        } else if env_range_enabled {
+            // Bridge: honour s3dlio_optimization.enable_range_downloads for GCS.
+            // GcsObjectStore does not read S3DLIO_ENABLE_RANGE_OPTIMIZATION itself,
+            // so sai3-bench propagates it here into the struct config.
+            info!(
+                "GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads \
+                 (threshold {} MiB) for {}",
+                env_threshold_bytes / (1024 * 1024), uri
+            );
+            GcsConfig {
+                enable_range_engine: true,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    min_split_size: env_threshold_bytes,
+                    ..Default::default()
+                },
+                size_cache_ttl_secs: 60,
             }
         } else {
-            // No config provided - use disabled default
+            debug!("GCS RangeEngine: disabled for {}", uri);
             GcsConfig {
                 enable_range_engine: false,
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
                 ..Default::default()
             }
         };
-        
+
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
-    
+
     // For other backends, use standard creation
     // TODO: Add Azure/S3 config support here when needed
     store_for_uri(uri).context("Failed to create object store")
@@ -382,12 +415,20 @@ pub fn create_store_with_logger_and_config(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For GCS URIs, apply RangeEngine configuration
+    // For GCS URIs, apply RangeEngine configuration (same priority logic as
+    // create_store_for_uri_with_config — see that function for full comments).
     if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        let enabled = range_config.map(|c| c.enabled).unwrap_or(false);
-        debug!("GCS URI detected - RangeEngine {}", if enabled { "enabled" } else { "disabled" });
-        
+        let env_range_enabled = std::env::var("S3DLIO_ENABLE_RANGE_OPTIMIZATION")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off" | "disable" | "disabled"))
+            .unwrap_or(false);
+        let env_threshold_bytes: u64 = std::env::var("S3DLIO_RANGE_THRESHOLD_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE);
+
         let config = if let Some(cfg) = range_config {
+            debug!("GCS RangeEngine: enabled via range_engine: config block for {}", uri);
             GcsConfig {
                 enable_range_engine: cfg.enabled,
                 range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
@@ -396,20 +437,35 @@ pub fn create_store_with_logger_and_config(
                     min_split_size: cfg.min_split_size,
                     range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
                 },
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
+            }
+        } else if env_range_enabled {
+            info!(
+                "GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads \
+                 (threshold {} MiB) for {}",
+                env_threshold_bytes / (1024 * 1024), uri
+            );
+            GcsConfig {
+                enable_range_engine: true,
+                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
+                    min_split_size: env_threshold_bytes,
+                    ..Default::default()
+                },
+                size_cache_ttl_secs: 60,
             }
         } else {
+            debug!("GCS RangeEngine: disabled for {}", uri);
             GcsConfig {
                 enable_range_engine: false,
-                size_cache_ttl_secs: 60,  // v0.9.10: Enable size cache with 60s TTL
+                size_cache_ttl_secs: 60,
                 ..Default::default()
             }
         };
-        
+
         let store = GcsObjectStore::with_config(config);
         return Ok(Box::new(store));
     }
-    
+
     // For other backends, use logger if available
     let logger = global_logger();
     if logger.is_some() {
@@ -789,10 +845,25 @@ async fn get_object_cached(
 ) -> anyhow::Result<bytes::Bytes> {
     trace!("GET operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let bytes = store.get(uri).await
-        .with_context(|| format!("Failed to get object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout — prevents workers from hanging indefinitely when
+    // a gRPC channel stalls (e.g. GCS load-balancer reset, RAPID transport issue).
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.get(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("GET timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to get object from URI: {}", uri))?;
+
+    // v0.8.71: Detect zero-byte returns from stalled/reset gRPC subchannels.
+    // GCS sometimes returns Ok(empty) instead of an error on degraded connections.
+    // Treat as a retriable error so it goes through ErrorHandlingConfig logic.
+    if bytes.is_empty() {
+        return Err(anyhow!("GET returned empty body (0 bytes): {}", uri));
+    }
+
     trace!("GET operation completed successfully for URI: {}, {} bytes retrieved", uri, bytes.len());
     Ok(bytes)  // Zero-copy: return Bytes directly
 }
@@ -812,10 +883,17 @@ async fn put_object_cached(
 ) -> anyhow::Result<()> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    store.put(uri, data).await  // Zero-copy: Bytes passed directly
-        .with_context(|| format!("Failed to put object to URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.put(uri, data),
+    )
+    .await
+    .map_err(|_| anyhow!("PUT timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to put object to URI: {}", uri))?;
+
     trace!("PUT operation completed successfully for URI: {}", uri);
     Ok(())
 }
@@ -834,10 +912,17 @@ async fn delete_object_cached(
 ) -> anyhow::Result<()> {
     trace!("DELETE operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    store.delete(uri).await
-        .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.delete(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("DELETE timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to delete object from URI: {}", uri))?;
+
     trace!("DELETE operation completed successfully for URI: {}", uri);
     Ok(())
 }
@@ -856,9 +941,16 @@ async fn list_objects_cached(
 ) -> anyhow::Result<Vec<String>> {
     trace!("LIST operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let keys = store.list(uri, true).await
-        .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
+
+    // v0.8.71: per-op timeout (same as GET/PUT/STAT/DELETE)
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let keys = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.list(uri, true),
+    )
+    .await
+    .map_err(|_| anyhow!("LIST timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to list objects from URI: {}", uri))?;
     
     trace!("LIST operation completed successfully for URI: {}, {} objects found", uri, keys.len());
     Ok(keys)
@@ -878,10 +970,17 @@ async fn stat_object_cached(
 ) -> anyhow::Result<u64> {
     trace!("STAT operation (cached store) starting for URI: {}", uri);
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
-    
-    let metadata = store.stat(uri).await
-        .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
-    
+
+    // v0.8.71: per-op timeout
+    let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+    let metadata = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        store.stat(uri),
+    )
+    .await
+    .map_err(|_| anyhow!("STAT timed out after {}s: {}", timeout_secs, uri))?
+    .with_context(|| format!("Failed to stat object from URI: {}", uri))?;
+
     let size = metadata.size;
     trace!("STAT operation completed successfully for URI: {}, size: {} bytes", uri, size);
     Ok(size)
@@ -1537,6 +1636,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     
     let start = Instant::now();
     let deadline = start + cfg.duration;
+    info!("⏱  Workload timer: start={:?}, duration={:.1}s, workers will exit at deadline (now + {:.1}s)",
+        start, cfg.duration.as_secs_f64(), cfg.duration.as_secs_f64());
 
     // Detect if we need separate object pools for mixed DELETE + (GET|STAT) workloads
     let (has_delete, has_readonly) = detect_pool_requirements(&cfg.workload);
@@ -1745,18 +1846,23 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let weights: Vec<u32> = cfg.workload.iter().map(|w| w.weight).collect();
     let chooser = WeightedIndex::new(weights).context("invalid weights")?;
 
-    // Concurrency: Create per-operation semaphores
-    // If an operation has a concurrency override, use that; otherwise use global
-    let mut op_semaphores: Vec<Arc<Semaphore>> = Vec::new();
+    // v0.8.71: Per-op concurrency limiting — only when an operation has an
+    // explicit concurrency override LOWER than the global concurrency.
+    // The common case (no override) uses None to skip semaphore overhead entirely.
+    // Previously every operation acquired a semaphore permit even when permits
+    // could never be exhausted — pure overhead on the hot path.
+    let mut op_semaphores: Vec<Option<Arc<Semaphore>>> = Vec::new();
     for wo in &cfg.workload {
-        let concurrency = wo.concurrency.unwrap_or(cfg.concurrency);
-        op_semaphores.push(Arc::new(Semaphore::new(concurrency)));
-    }
-    
-    // Log per-op concurrency settings
-    for (idx, wo) in cfg.workload.iter().enumerate() {
         if let Some(conc) = wo.concurrency {
-            info!("Operation {} has custom concurrency: {}", idx, conc);
+            if conc < cfg.concurrency {
+                info!("Operation has custom concurrency limit: {} (global: {})", conc, cfg.concurrency);
+                op_semaphores.push(Some(Arc::new(Semaphore::new(conc))));
+            } else {
+                info!("Operation concurrency {} >= global {} — no semaphore needed", conc, cfg.concurrency);
+                op_semaphores.push(None);
+            }
+        } else {
+            op_semaphores.push(None);
         }
     }
 
@@ -1994,13 +2100,18 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         }
     }
     
+    // v0.8.71: Wrap Config in Arc to eliminate expensive deep clones in the
+    // worker hot path.  Every operation previously did cfg.clone() to satisfy
+    // the retry closure's ownership requirement — now it's a cheap Arc bump.
+    let cfg = Arc::new(cfg.clone());
+    
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for _ in 0..cfg.concurrency {
         let op_sems = op_semaphores.clone();
         let workload = cfg.workload.clone();
         let chooser = chooser.clone();
         let pre = pre.clone();
-        let cfg = cfg.clone();
+        let cfg = Arc::clone(&cfg);
         let separate_pools = needs_separate_pools;  // Clone flag for workers
         let path_selector = path_selector.clone();  // Clone PathSelector for this worker
         let rate_controller = rate_controller.clone();  // Clone rate controller for this worker
@@ -2013,6 +2124,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         handles.push(tokio::spawn(async move {
             //let mut ws = WorkerStats::new();
             let mut ws: WorkerStats = Default::default();
+
+            // v0.8.71 P3: Per-worker local counters to reduce cache-line bouncing
+            // on the shared AtomicU64 progress counters.  Flushed every 64 ops.
+            let mut local_ops: u64 = 0;
+            let mut local_bytes: u64 = 0;
+            const FLUSH_INTERVAL: u64 = 64;
 
             loop {
                 if Instant::now() >= deadline {
@@ -2030,8 +2147,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 // to ensure we're controlling the rate of operation STARTS, not queued operations
                 rate_controller.wait().await;
 
-                // Acquire permit for this specific operation
-                let _p = op_sems[idx].acquire().await.unwrap();
+                // Acquire permit only if this operation has a per-op concurrency limit.
+                // v0.8.71: Common case (None) skips semaphore entirely — zero overhead.
+                let _p = if let Some(ref sem) = op_sems[idx] {
+                    Some(sem.acquire().await.unwrap())
+                } else {
+                    None
+                };
                 
                 let op = &workload[idx].spec;
 
@@ -2110,8 +2232,14 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_get(bytes.len(), duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
-                                bytes_counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                local_ops += 1;
+                                local_bytes += bytes.len() as u64;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error - continue to next operation
@@ -2214,8 +2342,14 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_put(sz as usize, duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
-                                bytes_counter.fetch_add(sz, Ordering::Relaxed);
+                                local_ops += 1;
+                                local_bytes += sz;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2263,7 +2397,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2342,7 +2482,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2421,7 +2567,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2480,7 +2632,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2541,7 +2699,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     tracker.record_meta(duration);
                                 }
                                 
-                                ops_counter.fetch_add(1, Ordering::Relaxed);
+                                local_ops += 1;
+                                if local_ops % FLUSH_INTERVAL == 0 {
+                                    ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                                    bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
+                                    local_ops = 0;
+                                    local_bytes = 0;
+                                }
                             }
                             Ok(None) => {
                                 // Operation skipped due to error
@@ -2552,6 +2716,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         }
                     }
                 }
+            }
+
+            // Flush remaining local counters before worker exits
+            if local_ops > 0 {
+                ops_counter.fetch_add(local_ops, Ordering::Relaxed);
+                bytes_counter.fetch_add(local_bytes, Ordering::Relaxed);
             }
 
             Ok::<WorkerStats, anyhow::Error>(ws)
@@ -2574,39 +2744,91 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     let mut meta_bins = SizeBins::default();
 
     let mut workload_error: Option<anyhow::Error> = None;
-    
-    for h in handles {
-        match h.await {
-            Ok(Ok(ws)) => {
-                // Worker completed successfully
-                merged_get.merge(&ws.hist_get);
-                merged_put.merge(&ws.hist_put);
-                merged_meta.merge(&ws.hist_meta);
-                get_bytes += ws.get_bytes;
-                get_ops += ws.get_ops;
-                put_bytes += ws.put_bytes;
-                put_ops += ws.put_ops;
-                meta_bytes += ws.meta_bytes;
-                meta_ops += ws.meta_ops;
-                get_bins.merge_from(&ws.get_bins);
-                put_bins.merge_from(&ws.put_bins);
-                meta_bins.merge_from(&ws.meta_bins);
+
+    // v0.8.71: Bounded drain — don't wait forever for workers that are stuck
+    // inside a store.get/put that didn't respect the per-op timeout.
+    // After DEFAULT_WORKER_DRAIN_TIMEOUT_SECS past the workload deadline, abort remaining.
+    // Workers still in-flight will be detached; their per-op timeouts (120s) will
+    // eventually unblock them so Tokio won't leak them indefinitely.
+    //
+    // IMPORTANT: drain_deadline is anchored to the workers' deadline (start + duration),
+    // NOT to Instant::now() at join time.  The drain is a grace window AFTER the workload
+    // duration expires, not a wall-clock limit from spawn.  Using Instant::now() here
+    // caused the drain to fire while workers were still doing legitimate work (bug fix).
+    let drain_budget = Duration::from_secs(crate::constants::DEFAULT_WORKER_DRAIN_TIMEOUT_SECS);
+    let drain_deadline = tokio::time::Instant::from_std(deadline) + drain_budget;
+    info!("⏱  Worker drain: deadline anchored to workload end + {}s drain window \
+           (workers had {:.1}s to run, drain fires at most {}s after that)",
+        drain_budget.as_secs(),
+        cfg.duration.as_secs_f64(),
+        drain_budget.as_secs());
+    let mut drained = 0usize;
+    let total_handles = handles.len();
+    info!("⏱  Entering worker join phase: {} workers spawned, drain deadline = workload_end + {}s",
+        total_handles, drain_budget.as_secs());
+
+    for mut h in handles {
+        // Use &mut h so we retain ownership on timeout and can call h.abort().
+        // timeout_at returns:  Result<Result<anyhow::Result<WorkerStats>, JoinError>, Elapsed>
+        match tokio::time::timeout_at(drain_deadline, &mut h).await {
+            Ok(join_result) => {
+                drained += 1;
+                match join_result {
+                    Ok(Ok(ws)) => {
+                        // Worker completed successfully — merge stats
+                        merged_get.merge(&ws.hist_get);
+                        merged_put.merge(&ws.hist_put);
+                        merged_meta.merge(&ws.hist_meta);
+                        get_bytes += ws.get_bytes;
+                        get_ops += ws.get_ops;
+                        put_bytes += ws.put_bytes;
+                        put_ops += ws.put_ops;
+                        meta_bytes += ws.meta_bytes;
+                        meta_ops += ws.meta_ops;
+                        get_bins.merge_from(&ws.get_bins);
+                        put_bins.merge_from(&ws.put_bins);
+                        meta_bins.merge_from(&ws.meta_bins);
+                    }
+                    Ok(Err(e)) => {
+                        // Worker returned Err (error threshold exceeded)
+                        error!("Worker task failed: {}", e);
+                        workload_error = Some(e);
+                        break;
+                    }
+                    Err(e) => {
+                        // Worker task panicked
+                        error!("Worker task panicked: {}", e);
+                        workload_error = Some(anyhow!("Worker task panicked: {}", e));
+                        break;
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                // Worker hit error threshold
-                error!("Worker task failed: {}", e);
-                workload_error = Some(e);
-                break;  // Stop processing remaining workers
-            }
-            Err(e) => {
-                // Worker panicked
-                error!("Worker task panicked: {}", e);
-                workload_error = Some(anyhow!("Worker task panicked: {}", e));
+            Err(_elapsed) => {
+                // Drain budget exhausted — abort this worker, skip the rest.
+                // Remaining handles from the for-loop iterator will be detached
+                // (Drop on JoinHandle does NOT cancel the task) but their in-flight
+                // store.get/put calls will time out within DEFAULT_OP_TIMEOUT_SECS (120s).
+                h.abort();
+                let stuck = total_handles - drained;
+                let elapsed_since_start = start.elapsed();
+                warn!(
+                    "⚠️  Worker drain timed out after {}s ({}/{} workers completed); \
+                     {} stuck worker(s) aborted. Their partial stats are discarded. \
+                     [workload elapsed: {:.1}s of {:.1}s configured duration]",
+                    drain_budget.as_secs(), drained, total_handles, stuck,
+                    elapsed_since_start.as_secs_f64(), cfg.duration.as_secs_f64(),
+                );
+                workload_error = Some(anyhow!(
+                    "Worker drain timeout: {} of {} worker(s) did not finish within {}s \
+                     (total elapsed: {:.1}s)",
+                    stuck, total_handles, drain_budget.as_secs(),
+                    elapsed_since_start.as_secs_f64(),
+                ));
                 break;
             }
         }
     }
-    
+
     // v0.7.13: If error occurred, cancel progress bar before returning
     if let Some(err) = workload_error {
         let _ = tx_cancel_progress.send(());
@@ -2754,24 +2976,22 @@ async fn prefetch_uris_multi_backend(base_uri: &str) -> Result<Vec<String>> {
     let store = create_store_with_logger(base_uri)?;
     
     if base_uri.contains('*') {
-        // Glob pattern: list directory and filter with regex
-        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
-        let list_prefix = &base_uri[..base_end];
-        
-        let uris = store.list(list_prefix, false).await?;
-        
+        let (list_prefix, recursive) = glob_list_params(base_uri);
+        info!("Resolving glob '{}': list_prefix='{}', recursive={}", base_uri, list_prefix, recursive);
+        let uris = store.list(list_prefix, recursive).await?;
+
         // Handle URI scheme normalization: s3dlio may return different schemes than input
         // For pattern matching, normalize both pattern and results to the same scheme
         let normalized_pattern = normalize_scheme_for_matching(base_uri);
         let re = glob_to_regex(&normalized_pattern)?;
-        
+
         let matched_uris: Vec<String> = uris.into_iter()
             .filter(|uri| {
                 let normalized_uri = normalize_scheme_for_matching(uri);
                 re.is_match(&normalized_uri)
             })
             .collect();
-            
+
         Ok(matched_uris)
     } else if base_uri.ends_with('/') {
         // Directory listing
@@ -2800,14 +3020,11 @@ async fn prefetch_uris_multi_endpoint(
     use s3dlio::ObjectStore;
     
     if base_uri.contains('*') {
-        // Glob pattern: list directory and filter with regex
-        let base_end = base_uri.rfind('/').map(|i| i + 1).unwrap_or(0);
-        let list_prefix = &base_uri[..base_end];
-        
-        debug!("Multi-endpoint list: prefix='{}' from base_uri='{}'", list_prefix, base_uri);
-        
+        let (list_prefix, recursive) = glob_list_params(base_uri);
+        debug!("Multi-endpoint list: prefix='{}' (recursive={}) from base_uri='{}'", list_prefix, recursive, base_uri);
+
         // Use regular list() - storage is shared, so any endpoint sees all files
-        let uris = multi_store.list(list_prefix, false).await?;
+        let uris = multi_store.list(list_prefix, recursive).await?;
         
         debug!("Multi-endpoint list returned {} URIs", uris.len());
         if !uris.is_empty() {
@@ -2843,6 +3060,41 @@ async fn prefetch_uris_multi_endpoint(
     }
 }
 
+
+/// Compute the safe listing prefix and recursion flag for a glob URI pattern.
+///
+/// Object-storage backends (GCS, S3, Azure) treat prefix bytes literally — a prefix
+/// that contains `*` returns 0 results immediately.  This function finds the last `/`
+/// *before* the first `*`, giving a clean wildcard-free prefix.  It also determines
+/// whether a recursive listing is required (when `*` appears inside a directory
+/// component, not just in the final filename segment).
+///
+/// # Returns
+/// `(list_prefix, recursive)` where `list_prefix` is a sub-slice of `uri`.
+///
+/// # Examples
+/// ```
+/// // Deep glob — star is inside a directory component
+/// let (prefix, rec) = glob_list_params("gs://b/unet3d/scan.d*_w*.dir/**/*");
+/// assert_eq!(prefix, "gs://b/unet3d/");
+/// assert!(rec);
+///
+/// // Simple filename glob — star is only in the final filename
+/// let (prefix, rec) = glob_list_params("s3://b/data/*.dat");
+/// assert_eq!(prefix, "s3://b/data/");
+/// assert!(!rec);
+/// ```
+pub(crate) fn glob_list_params(uri: &str) -> (&str, bool) {
+    debug_assert!(uri.contains('*'), "glob_list_params called on non-glob URI: {}", uri);
+    let star_pos  = uri.find('*').unwrap_or(uri.len());
+    let safe_end  = uri[..star_pos].rfind('/').map(|i| i + 1).unwrap_or(0);
+    // recursive=true only when a '/' exists AND the first '*' is at or before it
+    // (meaning the wildcard spans a directory component, not just the filename).
+    // Using rfind as an Option avoids the star_pos==0 / last_slash==0 collision
+    // that occurs when the pattern has no '/' at all (e.g. "*.dat").
+    let recursive = uri.rfind('/').map(|last| star_pos <= last).unwrap_or(false);
+    (&uri[..safe_end], recursive)
+}
 
 /// Convert glob pattern to regex
 /// Escapes all special regex chars except *, which becomes .*
@@ -3240,5 +3492,265 @@ mod error_handling_tests {
     }
 }
 
+// =============================================================================
+// glob_list_params Tests
+//
+// These tests document the bug that existed prior to the fix and prove that the
+// new helper produces correct (list_prefix, recursive) pairs for every pattern
+// shape encountered in real workloads.
+//
+// BUG (before fix):
+//   prefetch_uris_multi_backend used `rfind('/')` to compute list_prefix.
+//   For a deep-glob URI such as:
+//       "gs://bucket/unet3d/scan.d*_w*.dir/**/*"
+//   rfind('/') returns the position just before the trailing *, giving:
+//       list_prefix = "gs://bucket/unet3d/scan.d*_w*.dir/**/"  ← contains '*'!
+//   GCS/S3/Azure treat prefix bytes literally, so this returns 0 results in
+//   < 100 ms and the workload fails with "No URIs found for GET pattern".
+//   The same bug existed in prefetch_uris_multi_endpoint.
+//
+// FIX:
+//   glob_list_params finds the FIRST '*' in the URI, then strips back to the
+//   last '/' before that position, guaranteeing a wildcard-free prefix.
+//   It also sets recursive=true when '*' appears inside a directory component,
+//   which is required for backends that don't recurse by default.
+// =============================================================================
+#[cfg(test)]
+mod glob_list_params_tests {
+    use super::*;
+    use crate::directory_tree::{DirectoryStructureConfig, DirectoryTree, TreeManifest};
 
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /// Demonstrate what the OLD (broken) code produced for a given URI.
+    /// rfind('/') + 1 gives the "last-slash" prefix — broken for deep globs.
+    fn old_list_prefix(uri: &str) -> &str {
+        let base_end = uri.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &uri[..base_end]
+    }
+
+    // -------------------------------------------------------------------------
+    // 1.  The exact URI from the failing GCS RAPID workload
+    // -------------------------------------------------------------------------
+
+    /// Proves the old code produced a wildcard-contaminated prefix.
+    #[test]
+    fn old_code_produces_wildcard_prefix_for_deep_glob() {
+        let uri = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let prefix = old_list_prefix(uri);
+        // Old behaviour: prefix ends at the last slash, just before the trailing *
+        assert_eq!(
+            prefix,
+            "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/",
+            "OLD CODE regression: prefix contains '*' — object-storage listing \
+             returns 0 results immediately"
+        );
+        assert!(prefix.contains('*'), "OLD prefix still has '*' in it — this is the bug");
+    }
+
+    /// Proves the new code produces the correct (wildcard-free) prefix.
+    #[test]
+    fn new_code_produces_clean_prefix_for_deep_glob() {
+        let uri = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(
+            prefix, "gs://sig65-rapid1/unet3d/",
+            "NEW CODE: prefix is safe (no '*') so GCS will return all objects under unet3d/"
+        );
+        assert!(recursive,
+            "Deep glob ('*' inside directory component) requires recursive listing");
+        assert!(!prefix.contains('*'), "Prefix must be wildcard-free");
+    }
+
+    // -------------------------------------------------------------------------
+    // 2.  Simple filename glob — behaviour must NOT change
+    // -------------------------------------------------------------------------
+
+    /// For a simple filename-only wildcard the old and new code should agree.
+    #[test]
+    fn simple_filename_glob_unchanged() {
+        let uri = "s3://my-bucket/data/prepared-*.dat";
+        let old_prefix = old_list_prefix(uri);
+        let (new_prefix, recursive) = glob_list_params(uri);
+        // Both should strip to the directory
+        assert_eq!(old_prefix, "s3://my-bucket/data/",
+            "OLD: simple filename glob prefix");
+        assert_eq!(new_prefix, "s3://my-bucket/data/",
+            "NEW: simple filename glob prefix — must match old behaviour");
+        assert!(!recursive,
+            "Simple filename glob does NOT need recursive listing");
+    }
+
+    // -------------------------------------------------------------------------
+    // 3.  Additional pattern shapes
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn wildcard_only_in_first_dir_component() {
+        // The first '*' is in the first directory level after the bucket
+        let uri = "s3://bucket/dir*/subdir/file.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "s3://bucket/",
+            "Wildcard in first dir component — prefix must be just the bucket root");
+        assert!(recursive, "Wildcard before last slash → recursive");
+    }
+
+    #[test]
+    fn double_star_glob_unet3d_variant() {
+        // Pattern with both dir-level globs and trailing **/*
+        let uri = "gs://bucket/prefix/scan.d1_w1.dir/**/*";
+        let (prefix, recursive) = glob_list_params(uri);
+        // No '*' in "scan.d1_w1.dir/" — first '*' is inside "**"
+        assert_eq!(prefix, "gs://bucket/prefix/scan.d1_w1.dir/");
+        assert!(recursive);
+        assert!(!prefix.contains('*'));
+    }
+
+    #[test]
+    fn file_uri_flat_glob() {
+        let uri = "file:///tmp/bench/prepared-*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "file:///tmp/bench/");
+        assert!(!recursive);
+    }
+
+    #[test]
+    fn relative_path_glob() {
+        // No scheme — relative paths used with multi-endpoint local storage
+        let uri = "data/prepared-*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "data/");
+        assert!(!recursive);
+    }
+
+    #[test]
+    fn star_at_root_no_slash_before_it() {
+        // Pathological: glob starts with '*' (no safe parent directory)
+        let uri = "*.dat";
+        let (prefix, recursive) = glob_list_params(uri);
+        assert_eq!(prefix, "", "No '/' before '*' → empty prefix (list everything)");
+        assert!(!recursive);
+    }
+
+    // -------------------------------------------------------------------------
+    // 4.  glob_to_regex: returned objects match the glob after listing
+    // -------------------------------------------------------------------------
+    //
+    // Even with the correct prefix the filter regex must match what the storage
+    // backend actually returns.  These tests verify that objects with the exact
+    // naming produced by DirectoryTree are matched by the normalized regex.
+
+    #[test]
+    fn regex_matches_objects_returned_by_deep_listing() {
+        // Simulated objects as returned by GCS list("gs://bucket/unet3d/", recursive=true)
+        // after our fix — one object per leaf directory.
+        let listed = vec![
+            "gs://sig65-rapid1/unet3d/scan.d1_w1.dir/scan.d2_w1.dir/file_00000000.dat",
+            "gs://sig65-rapid1/unet3d/scan.d1_w1.dir/scan.d2_w2.dir/file_00000001.dat",
+            "gs://sig65-rapid1/unet3d/scan.d1_w28.dir/scan.d2_w28.dir/file_00050175.dat",
+        ];
+
+        let pattern = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let normalized_pattern = normalize_scheme_for_matching(pattern);
+        let re = glob_to_regex(&normalized_pattern).expect("valid regex");
+
+        for uri in &listed {
+            let normalized = normalize_scheme_for_matching(uri);
+            assert!(
+                re.is_match(&normalized),
+                "Regex should match '{}' (normalized: '{}')",
+                uri, normalized
+            );
+        }
+    }
+
+    #[test]
+    fn regex_does_not_match_wrong_prefix() {
+        // Objects under a different bucket should NOT match
+        let listed = vec![
+            "gs://other-bucket/unet3d/scan.d1_w1.dir/scan.d2_w1.dir/file_00000000.dat",
+        ];
+
+        let pattern = "gs://sig65-rapid1/unet3d/scan.d*_w*.dir/**/*";
+        let normalized_pattern = normalize_scheme_for_matching(pattern);
+        let re = glob_to_regex(&normalized_pattern).expect("valid regex");
+
+        for uri in &listed {
+            let normalized = normalize_scheme_for_matching(uri);
+            assert!(
+                !re.is_match(&normalized),
+                "Regex must NOT match object from different bucket: '{}'", uri
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.  TreeManifest paths match the GET glob pattern
+    // -------------------------------------------------------------------------
+    //
+    // This proves the end-to-end chain for the "GET-only, no listing" fix:
+    //   a. DirectoryTree generates paths deterministically from config.
+    //   b. Each generated path matches the glob in the YAML workload section.
+    //   c. Therefore the PathSelector will select valid objects without any
+    //      GCS listing call.
+
+    #[test]
+    fn tree_manifest_paths_match_get_glob() {
+        // Mirror the unet3d_1-host_gcs-rapid.yaml directory_structure config
+        let dir_config = DirectoryStructureConfig {
+            width: 2,           // Small for test speed; shape identical to width=28
+            depth: 2,
+            files_per_dir: 3,
+            distribution: "bottom".to_string(),
+            dir_mask: "scan.d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(dir_config).expect("tree generation failed");
+        let manifest = TreeManifest::from_tree(&tree);
+
+        // Every file path from the manifest must match the workload GET pattern
+        let glob_pattern_suffix = "scan.d*_w*.dir/**/*";
+        // Build a regex that matches the relative path portion (no URI prefix)
+        let escaped = regex::escape(glob_pattern_suffix).replace(r"\*", ".*");
+        let re = regex::Regex::new(&format!("^{}$", escaped))
+            .expect("valid regex");
+
+        assert!(manifest.total_files > 0, "Manifest must have files");
+
+        for idx in 0..manifest.total_files {
+            let path = manifest.get_file_path(idx)
+                .unwrap_or_else(|| panic!("get_file_path({}) returned None", idx));
+            assert!(
+                re.is_match(&path),
+                "Manifest file path '{}' (index {}) does not match glob '{}'",
+                path, idx, glob_pattern_suffix
+            );
+        }
+    }
+
+    #[test]
+    fn tree_manifest_synthesised_without_io_matches_expected_count() {
+        // Reproduces the exact config from the failing YAML (scaled down for test speed)
+        // to prove that manifest synthesis is pure arithmetic with the correct total.
+        let dir_config = DirectoryStructureConfig {
+            width: 28,
+            depth: 2,
+            files_per_dir: 64,
+            distribution: "bottom".to_string(),
+            dir_mask: "scan.d%d_w%d.dir".to_string(),
+        };
+
+        let tree = DirectoryTree::new(dir_config).expect("tree generation is pure computation, never fails");
+        let manifest = TreeManifest::from_tree(&tree);
+
+        // 28×28 = 784 leaf directories, 784×64 = 50,176 files — no GCS listing needed
+        assert_eq!(manifest.total_dirs,  784 + 28,  // leaf dirs + level-1 dirs
+            "Total directory count (width=28, depth=2)");
+        assert_eq!(manifest.total_files, 50_176,
+            "Total file count must be 784 leaf dirs × 64 files");
+        assert_eq!(manifest.files_per_dir, 64);
+    }
+}
 

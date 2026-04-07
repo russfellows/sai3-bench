@@ -6,6 +6,248 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.86] - 2026-03-24
+
+### Fixed
+
+- **GCS `enable_range_downloads` was a no-op for GCS/Azure backends (bug + doc)**
+  - `s3dlio_optimization.enable_range_downloads: true` set the env var
+    `S3DLIO_ENABLE_RANGE_OPTIMIZATION=1`, but `GcsObjectStore` (and `AzureObjectStore`)
+    never read that env var — only the S3 backend does.  Range parallelism was silently
+    disabled for all GCS workloads regardless of the YAML setting.
+  - Fixed in `src/workload.rs`: both `create_store_for_uri_with_config()` and
+    `create_store_with_logger_and_config()` now read `S3DLIO_ENABLE_RANGE_OPTIMIZATION`
+    and `S3DLIO_RANGE_THRESHOLD_MB` from the process environment (already set by
+    `apply_request_tuning()` before any store is constructed) and bridge them into
+    `GcsConfig { enable_range_engine: true, range_engine: { min_split_size: threshold } }`.
+  - Priority order for GCS store creation:
+    1. Explicit `range_engine:` YAML block (highest — unchanged)
+    2. `s3dlio_optimization.enable_range_downloads` / `range_threshold_mb` (new fallback)
+    3. Range disabled (default when neither is present)
+  - An `info!` log confirms when the bridge activates:
+    `GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads (threshold N MiB)`
+  - Root cause: `S3DLIO_ENABLE_RANGE_OPTIMIZATION` is an S3-specific mechanism;
+    GCS/Azure use per-store struct config.  A future s3dlio release will make
+    `GcsConfig::default()` read these env vars directly, making this bridge redundant.
+
+- **Misleading range-download comment in `tests/configs/ai-ml/unet3d_1-host_gcs-rapid.yaml`**
+  - Old comment: `# RAPID benefits from concurrent range GETs: enable with a low threshold`
+    — implied the `s3dlio_optimization` block was wiring range downloads correctly for RAPID.
+  - New comment accurately describes the sai3-bench bridge mechanism, and notes the
+    ReadObject-per-chunk trade-off (RAPID bidi transport is bypassed per chunk).
+
+- **Incorrect examples in `docs/GCS_INTEGRATION.md`**
+  - Both RAPID quick-start examples showed `enable_range_downloads: false` with comment
+    `# RAPID uses bidi streaming, not byte ranges`, which was misleading on two counts:
+    the setting is a valid option (not forbidden), and its prior silently-broken behaviour
+    was not documented.
+  - Comments updated; a new **"Range Downloads with RAPID"** section added explaining the
+    mechanism, GET-per-chunk trade-off, and a working configuration example.
+
+- **Worker drain deadline anchored incorrectly (CRITICAL)**
+  - `drain_deadline` was computed as `Instant::now() + drain_budget` at the moment workers
+    were spawned, so the drain fired 150 s into execute while workers still had time remaining
+  - Fixed: `drain_deadline = tokio::time::Instant::from_std(deadline) + drain_budget`
+    anchors the drain window to the workers' actual end-of-workload deadline
+  - **Impact**: Execute stage now runs for its full configured duration (e.g. 300 s)
+    instead of being killed after `drain_budget` seconds (default 150 s)
+
+### Added
+
+- **Object manifest source reported in `--dry-run` output**
+  - A new **"Object Manifest Source"** box is printed in `--dry-run` mode whenever
+    the workload contains GET operations or a prepare stage.  It shows exactly how
+    the agent will build the object-path manifest at runtime, so there are no surprises on
+    large buckets:
+
+  | Situation | What dry-run shows | Runtime behaviour |
+  |---|---|---|
+  | Prepare stage present | ✅ `prepare_objects()` builds manifest | Paths generated as objects are written |
+  | No prepare stage + `directory_structure:` present | ✅ Arithmetic synthesis | Paths computed in milliseconds — **no LIST call** |
+  | No prepare stage + no `directory_structure:` | ⚠️ Warning + guidance | Falls back to listing the bucket (may take hours for 50 M+ objects) |
+
+  - The warning case also explains the exact fix: add a `prepare:` section with
+    `directory_structure:` matching the layout of existing objects — a prepare **stage**
+    is not required.
+
+- **`glob_list_params()` — extracted safe listing helper**
+  - Both `prefetch_uris_multi_backend()` and `prefetch_uris_multi_endpoint()` now call a
+    shared `pub(crate) fn glob_list_params(uri) -> (&str, bool)` helper that computes
+    the correct `(list_prefix, recursive)` pair for any glob URI.
+  - Fixes the wildcard-contaminated-prefix bug (see Fixed section below).
+
+- **12 new unit tests for glob listing and manifest synthesis** (`src/workload.rs`)
+  - `old_code_produces_wildcard_prefix_for_deep_glob` — documents the pre-fix regression
+  - `new_code_produces_clean_prefix_for_deep_glob` — proves the fix
+  - `simple_filename_glob_unchanged` — proves no regression on simple `dir/*.dat` patterns
+  - `wildcard_only_in_first_dir_component`, `double_star_glob_unet3d_variant`,
+    `file_uri_flat_glob`, `relative_path_glob`, `star_at_root_no_slash_before_it`
+  - `regex_matches_objects_returned_by_deep_listing` — proves GCS-returned URIs match the glob
+  - `regex_does_not_match_wrong_prefix` — proves wrong-bucket URIs are rejected
+  - `tree_manifest_paths_match_get_glob` — proves every manifest path matches the YAML GET glob
+  - `tree_manifest_synthesised_without_io_matches_expected_count` — proves width=28 depth=2 files_per_dir=64 → 50,176 files with zero I/O
+
+- **New section in `docs/YAML_DRIVEN_STAGE_ORCHESTRATION.md`: "GET-Only / Read-Only Workflows"**
+  - Applies to **all object storage backends** (S3, GCS, Azure Blob, file, direct) — not
+    provider-specific.
+  - Explains the three manifest methods in priority order (prepare stage → arithmetic
+    synthesis → object-storage listing) with a cost/trigger/use-case comparison table.
+  - Documents how arithmetic synthesis works: `DirectoryTree::new()` is pure in-memory
+    math — no I/O, completes in milliseconds regardless of object count.
+  - Explains the critical rule: keep `prepare.directory_structure:` in the YAML even when
+    the prepare *stage* is removed; the section costs nothing to parse and enables zero-cost
+    manifest synthesis at startup.
+  - Shows the `--dry-run` "Object Manifest Source" box output so users can verify which
+    manifest method will be used before committing to a long benchmark run.
+  - Provides a complete annotated GET-only YAML pattern (2-stage: preflight + execute).
+  - Explains the listing fallback cost (2–4 hours for 50 M+ objects, per-call cloud charges)
+    so users understand why adding `directory_structure:` matters.
+
+### Fixed
+
+- **GET-only / read-only stage YAML fails with "No URIs found" despite `--dry-run` passing**
+  - When a `distributed.stages:` list has no prepare stage (e.g. a read-only re-run after
+    data has already been written), `tree_manifest` remained `None`.  `workload::run()`
+    then called `prefetch_uris_multi_backend()` with the full glob URI
+    (e.g. `gs://bucket/unet3d/scan.d*_w*.dir/**/*`).
+
+  - Two distinct bugs:
+    1. **Wildcard in list prefix** — `rfind('/')` gave `list_prefix =
+       "…/scan.d*_w*.dir/**/"` (contains `*`); GCS/S3/Azure treat prefix bytes literally
+       and return 0 results in < 100 ms → immediate "No URIs found" error.
+    2. **Non-recursive listing** — `store.list(prefix, false)` was used even for patterns
+       spanning directory boundaries; deep objects are never returned by a flat list.
+    3. **Listing never needed** — when `prepare.directory_structure` is present, object
+       paths are fully deterministic and can be computed arithmetically.
+
+  - **Fix 1 (avoid listing entirely)**: `src/bin/agent.rs` staged-workflow function now
+    synthesises `TreeManifest` from `prepare.directory_structure` config before the stage
+    loop when no prepare stage is present.  `DirectoryTree::new()` is pure in-memory
+    arithmetic — completes in milliseconds for any dataset size; no GCS calls are made.
+    `workload::run()` uses `PathSelector` (not listing) when `tree_manifest.is_some()`.
+
+  - **Fix 2 (correct listing if it does happen)**: `glob_list_params()` helper fixes both
+    listing bugs — safe prefix (strips to last `/` before first `*`) and `recursive=true`
+    when `*` appears inside a directory component.
+
+
+  - Workload start: duration, drain budget, total max wall time
+  - Worker join phase: worker count, drain deadline offset
+  - Agent execute stage: elapsed vs configured duration on both success and error paths
+  - Controller barrier release and Prepare→Workload transition events
+  - Enables post-mortem analysis without requiring trace-level logging
+
+### Changed
+
+- **s3dlio dependency**: v0.9.84 (already in place from v0.8.84 work)
+  - GCS RAPID storage is fully functional with s3dlio v0.9.84
+  - Both `BidiWriteObject` (PUT) and `BidiReadObject` (GET) verified working
+    against Hyperdisk ML RAPID buckets at ~1.7–1.8 GiB/s sustained throughput
+  - RAPID mode is auto-detected per bucket or can be forced via
+    `s3dlio_optimization.gcs_rapid_mode: true` in the workload YAML
+
+### Version
+
+- Aligned with s3dlio v0.9.**86** (last-two-digits convention: sai3-bench 0.8.**86**)
+
+---
+
+## [0.8.70] - 2026-03-16
+
+### Added
+
+- **`channels_per_thread` YAML parameter for autotune**
+  - New parameter in `AutotuneYaml` and `ControllerAutotuneConfig`
+  - Expresses GCS gRPC subchannel count as a multiplier of thread count: `effective_channels = threads × channels_per_thread`
+  - Example: `channels_per_thread: "1,2,4"` sweeps 1×, 2×, and 4× thread count as channel counts
+  - Mutually exclusive with the existing `channels` (absolute count) parameter; an error is raised if both are specified
+  - Both `TuneCase` and `CtTuneCase` gain a `channels_per_thread: Option<usize/u32>` field tracking the multiplier used
+  - Result output shows `channels_per_thread` info alongside the effective channel count
+
+- **Autotune dry-run mode** (`--dry-run` flag on `sai3-bench autotune`)
+  - Validates configuration and prints the complete sweep plan without executing any trials
+  - Shows: loop iteration order (outermost → innermost), dimension labels and values, total case count, total trial runs, estimated object I/O count, and a rough time estimate
+  - Warns if the total run count exceeds 200
+  - No trial count or time limit is enforced on actual runs; dry-run is the planning tool
+
+- **Unit tests for `channels_per_thread` and dry-run infrastructure** (11 new tests across `src/main.rs` and `src/bin/controller.rs`)
+
+### Changed
+
+- **`sai3-bench autotune` CLI flags removed** — all tuning parameters are now YAML-only
+  - Previously: individually specified via `--uri`, `--threads`, `--channels`, `--sizes`, etc.
+  - Now: all parameters live in the YAML config file; use `--config <file>`
+  - Retains `--config <path>` and adds `--dry-run`
+  - Eliminates the ambiguous CLI-overrides-YAML merge logic
+
+- **Autotune hard limit removed** — the previous 300-trial hard error is gone
+  - The dry-run plan display (case count, total runs, rough time estimate) serves as the planning check
+
+- **Distributed autotune example updated** (`examples/distributed-autotune-minimal.yaml`)
+  - Documents `channels` vs `channels_per_thread` mutual exclusion
+  - Adds commented-out `channels_per_thread` example
+
+- **Distributed autotune YAML example**
+  - Added `examples/distributed-autotune-minimal.yaml` for `sai3bench-ctl autotune`
+  - Includes minimal matrix and optional native tuning fields
+
+- **Native per-request tuning fields in controller↔agent RPCs**
+  - `RunGetRequest`: `gcs_rapid_mode`, `gcs_channel_count`, `enable_range_downloads`, `range_threshold_mb`, `gcs_write_chunk_size_bytes`
+  - `RunPutRequest`: `gcs_rapid_mode`, `gcs_channel_count`, `gcs_write_chunk_size_bytes`
+  - Added tri-state enum for optional boolean overrides (`UNSPECIFIED`, `OFF`, `ON`)
+
+### Changed
+
+- **Controller autotune now sends tuning settings over RPC**
+  - Tuning is no longer CLI-only/local for distributed sweeps
+  - Controller matrix can include channels, range optimization, threshold, and chunk size
+
+- **Controller autotune supports explicit `autotune:` YAML block**
+  - All tuneable fields are grouped under `autotune` for clarity
+  - Top-level autotune fields are not supported
+
+- **Agent applies tuning per request before GET/PUT execution**
+  - Maintains backward compatibility with `UNSPECIFIED`/zero values (no override)
+
+### Validation
+
+- Verified config dry-run paths still pass after RPC/schema changes:
+  - `sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run`
+  - `sai3bench-ctl --agents 127.0.0.1:7761 run --config tests/configs/custom_stage_test.yaml --dry-run`
+
+### Fixed
+
+- **YAML autotune config: invalid enum values now produce an error instead of silently falling back to defaults**
+  - `gcs_rapid_mode`, `optimize_for`, and `ops` fields in autotune YAML previously swallowed parse errors (`.ok()`)
+  - Invalid values (e.g., `gcs_rapid_mode: typo`) now propagate as fatal errors with a clear message
+
+### Tests
+
+- Added 35 unit tests in `src/main.rs` for `sai3-bench autotune` helpers:
+  - `resolve_util_uri`: flag-only, positional-only, both-same, both-different, neither
+  - `parse_csv_usize` / `parse_csv_bool`: valid, spaces, multi, empty, invalid
+  - `parse_sizes`: explicit list, dedup+sort, range (single/two/reversed/default steps)
+  - `mbps_from_output`: basic, integer, last-match-wins, absent, wrong unit
+  - `build_trial_uri`: glob, trailing-slash, bare URI, zero-padding
+  - `parse_rapid_mode_str` / `parse_optimize_for_str` / `parse_tune_ops_str`: all variants + invalid
+- Added 19 unit tests in `src/bin/controller.rs` for controller autotune helpers:
+  - `parse_csv_u32`, `parse_csv_bool` (controller copy), `to_pb_toggle`
+  - `split_put_uri`: trailing slash, no trailing slash, s3://, file://
+  - `parse_sizes_from_config`: explicit list, range with 1 step, default range
+
+- **`distributed.stages` with `barrier` blocks added to all AI/ML test configs**
+  - All 7 files in `tests/configs/ai-ml/` now include explicit `stages:` with 3 stages
+    (preflight, prepare, execute), each with `barrier: { type: all_or_nothing }`
+  - Added `perf_log: { enabled: true, interval: 1s }` to every config
+  - Added `force_overwrite: true` inside `prepare:` of every config
+  - Files updated: `resnet50_1-host.yaml`, `resnet50_4-hosts.yaml`, `resnet50_8-hosts.yaml`,
+    `unet3d_1-host.yaml`, `unet3d_2-hosts_quick-test.yaml`, `unet3d_4-hosts.yaml`,
+    `unet3d_8-hosts.yaml`
+
+### Tests
+
+- **638 tests passing, 0 failing, 0 warnings** (final verified count for this release)
+
 ## [0.8.63] - 2026-02-23
 
 **Multi-Endpoint Checkpoint Race Condition Fix + s3dlio Performance Tuning**

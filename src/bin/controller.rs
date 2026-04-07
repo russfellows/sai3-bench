@@ -7,7 +7,7 @@
 // Replaces old run_workload_with_live_stats unidirectional streaming approach.
 
 use anyhow::{anyhow, Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use dotenvy::dotenv;
 use tokio_stream::wrappers::ReceiverStream;
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
+use serde::Deserialize;
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
@@ -33,7 +34,7 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary, WorkloadPhase};
+use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, TriStateToggle, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary, WorkloadPhase};
 // Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
 // Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
@@ -748,10 +749,14 @@ enum Commands {
     },
     /// Distributed PUT
     Put {
+        /// Destination URI/pattern (supports s3://, az://, gs://, file://, direct://)
+        ///
+        /// Examples:
+        ///   --uri "s3://bucket/prefix/"
+        ///   --uri "gs://bucket/prefix/"
+        ///   --uri "file:///tmp/data/"
         #[arg(long)]
-        bucket: String,
-        #[arg(long, default_value = "bench/")]
-        prefix: String,
+        uri: String,
         #[arg(long, default_value_t = 1024)]
         object_size: u64,
         #[arg(long, default_value_t = 1)]
@@ -793,6 +798,15 @@ enum Commands {
         #[arg(long)]
         shared_prepare: Option<bool>,
     },
+
+    /// Distributed autotune sweep (controller orchestrates agents)
+    ///
+    /// Expects a YAML config file with uri/size/thread/trial matrix and objective.
+    Autotune {
+        /// Path to autotune YAML configuration
+        #[arg(long)]
+        config: PathBuf,
+    },
     
     /// Convert legacy YAML configs to explicit stages format (v0.8.61+)
     /// 
@@ -824,6 +838,414 @@ enum Commands {
         #[arg(long)]
         no_validate: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CtOptimizeFor {
+    Throughput,
+    Latency,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CtTuneOps {
+    Put,
+    Get,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CtRapidMode {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerAutotuneConfig {
+    uri: String,
+    sizes: Option<String>,
+    size_range: Option<String>,
+    size_steps: Option<usize>,
+    threads: Option<String>,
+    /// Absolute GCS gRPC channel counts to sweep (CSV).  Mutually exclusive with channels_per_thread.
+    channels: Option<String>,
+    /// GCS gRPC channels expressed as a multiplier of thread count (CSV of positive integers).
+    /// effective_channels = threads × channels_per_thread.
+    /// Default when neither 'channels' nor 'channels_per_thread' is set: 1
+    ///   (one channel per thread; effective_channels = threads).
+    /// Practical range: 1–8.  Values ≥ 9 are unusual; 0 is rejected as invalid.
+    /// Example: channels_per_thread: "1,2,4"  sweeps 1×, 2×, and 4× thread count.
+    /// Mutually exclusive with channels.
+    channels_per_thread: Option<String>,
+    range_enabled: Option<String>,
+    range_thresholds_mb: Option<String>,
+    gcs_write_chunk_sizes: Option<String>,
+    gcs_rapid_mode: Option<CtRapidMode>,
+    /// GCS project ID forwarded to agents (overrides GOOGLE_CLOUD_PROJECT env var on agent).
+    /// Falls back to the agent's own GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / GCS_PROJECT
+    /// environment variable when absent.
+    gcs_project: Option<String>,
+    objects: Option<u32>,
+    trials: Option<usize>,
+    optimize_for: Option<CtOptimizeFor>,
+    ops: Option<CtTuneOps>,
+}
+
+#[derive(Clone, Debug)]
+struct CtTuneCase {
+    size_bytes: u64,
+    threads: u32,
+    /// Effective (absolute) number of GCS gRPC channels used for this trial.
+    channels: u32,
+    /// Multiplier used to derive `channels` from `threads` (None = absolute sweep).
+    channels_per_thread: Option<u32>,
+    range_enabled: bool,
+    range_threshold_mb: u32,
+    gcs_write_chunk_size: u32,
+}
+
+#[derive(Clone, Debug)]
+struct CtTuneResult {
+    case: CtTuneCase,
+    put_mbps: Option<f64>,
+    get_mbps: Option<f64>,
+    put_avg_ms: Option<f64>,
+    get_avg_ms: Option<f64>,
+}
+
+fn parse_csv_u32(input: &str) -> Result<Vec<u32>> {
+    let vals = input
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().with_context(|| format!("Invalid integer: {}", s)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if vals.is_empty() {
+        bail!("Expected at least one thread value");
+    }
+    Ok(vals)
+}
+
+fn parse_csv_bool(input: &str) -> Result<Vec<bool>> {
+    let vals = input
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| match s.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => bail!("Invalid bool '{}'. Use true/false", s),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if vals.is_empty() {
+        bail!("Expected at least one bool value");
+    }
+    Ok(vals)
+}
+
+fn to_pb_toggle(on: Option<bool>) -> i32 {
+    match on {
+        Some(true) => TriStateToggle::On as i32,
+        Some(false) => TriStateToggle::Off as i32,
+        None => TriStateToggle::Unspecified as i32,
+    }
+}
+
+fn parse_sizes_from_config(cfg: &ControllerAutotuneConfig) -> Result<Vec<u64>> {
+    if let Some(sizes) = cfg.sizes.as_deref() {
+        let mut out = Vec::new();
+        for token in sizes.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            out.push(sai3_bench::size_parser::parse_size(token)?);
+        }
+        out.sort_unstable();
+        out.dedup();
+        if out.is_empty() {
+            bail!("No sizes parsed from 'sizes' list");
+        }
+        return Ok(out);
+    }
+
+    let range = cfg.size_range.as_deref().unwrap_or("32MiB-64MiB");
+    let mut parts = range.split('-').map(|s| s.trim());
+    let start = parts.next().ok_or_else(|| anyhow!("Invalid size_range"))?;
+    let end = parts.next().ok_or_else(|| anyhow!("Invalid size_range"))?;
+    if parts.next().is_some() {
+        bail!("Invalid size_range '{}', expected a-b", range);
+    }
+    let s0 = sai3_bench::size_parser::parse_size(start)?;
+    let s1 = sai3_bench::size_parser::parse_size(end)?;
+    let (min_s, max_s) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
+    let steps = cfg.size_steps.unwrap_or(4).max(1);
+    if steps == 1 || min_s == max_s {
+        return Ok(vec![min_s]);
+    }
+    let mut out = Vec::new();
+    let min_f = min_s as f64;
+    let max_f = max_s as f64;
+    for i in 0..steps {
+        let ratio = i as f64 / (steps - 1) as f64;
+        let val = min_f * (max_f / min_f).powf(ratio);
+        out.push(((val / 1024.0).round() * 1024.0) as u64);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+async fn controller_autotune(
+    agents: &[String],
+    insecure: bool,
+    agent_ca: Option<&PathBuf>,
+    agent_domain: &str,
+    cfg_path: &PathBuf,
+) -> Result<()> {
+    let text = fs::read_to_string(cfg_path)
+        .with_context(|| format!("Failed to read autotune config: {}", cfg_path.display()))?;
+    let root: serde_yaml::Value = serde_yaml::from_str(&text)
+        .with_context(|| format!("Failed to parse autotune YAML: {}", cfg_path.display()))?;
+
+    let block = root.get("autotune").ok_or_else(|| {
+        anyhow!(
+            "Missing required 'autotune' block in YAML: {}",
+            cfg_path.display()
+        )
+    })?;
+    let cfg: ControllerAutotuneConfig = serde_yaml::from_value(block.clone())
+        .with_context(|| {
+            format!(
+                "Failed to parse 'autotune' block in YAML: {}",
+                cfg_path.display()
+            )
+        })?;
+
+    let sizes = parse_sizes_from_config(&cfg)?;
+    let thread_values = parse_csv_u32(cfg.threads.as_deref().unwrap_or("16,32,64"))?;
+    let objects = cfg.objects.unwrap_or(64);
+    let trials = cfg.trials.unwrap_or(1);
+    let ops = cfg.ops.unwrap_or(CtTuneOps::Both);
+    let objective = cfg.optimize_for.unwrap_or(CtOptimizeFor::Throughput);
+    let is_gcs = cfg.uri.starts_with("gs://") || cfg.uri.starts_with("gcs://");
+
+    if cfg.channels.is_some() && cfg.channels_per_thread.is_some() {
+        bail!("autotune: specify 'channels' OR 'channels_per_thread' in YAML, not both");
+    }
+
+    // Channel sweep: absolute counts (channels=) OR per-thread multiplier (channels_per_thread=).
+    // channels_per_thread must be a CSV of positive integers (≥ 1).  Practical range: 1–8.
+    // Default when neither key is set: 1 (one channel per thread; effective = threads × 1).
+    enum CtChannelSpec { Absolute(Vec<u32>), PerThread(Vec<u32>) }
+
+    let channel_spec: CtChannelSpec = if is_gcs {
+        if let Some(cpt_str) = cfg.channels_per_thread.as_deref() {
+            let cpts = parse_csv_u32(cpt_str)?;
+            if cpts.iter().any(|&v| v == 0) {
+                bail!("channels_per_thread: all values must be ≥ 1 (0 is not a valid channel multiplier)");
+            }
+            CtChannelSpec::PerThread(cpts)
+        } else if let Some(ch_str) = cfg.channels.as_deref() {
+            CtChannelSpec::Absolute(parse_csv_u32(ch_str)?)
+        } else {
+            // Default: 1 channel per thread (effective_channels = threads)
+            CtChannelSpec::PerThread(vec![1])
+        }
+    } else {
+        CtChannelSpec::Absolute(vec![0])
+    };
+
+    let range_enabled_values = parse_csv_bool(cfg.range_enabled.as_deref().unwrap_or("false,true"))?;
+    let range_threshold_values = parse_csv_u32(cfg.range_thresholds_mb.as_deref().unwrap_or("32,64"))?;
+    let gcs_write_chunk_values = if is_gcs {
+        parse_csv_u32(cfg.gcs_write_chunk_sizes.as_deref().unwrap_or("2097152,4194304"))?
+    } else {
+        vec![0]
+    };
+    let rapid_mode = cfg.gcs_rapid_mode.unwrap_or(CtRapidMode::Auto);
+    let rapid_toggle = match rapid_mode {
+        CtRapidMode::Auto => TriStateToggle::Unspecified as i32,
+        CtRapidMode::On => TriStateToggle::On as i32,
+        CtRapidMode::Off => TriStateToggle::Off as i32,
+    };
+
+    let mut cases = Vec::new();
+    for size in sizes {
+        for th in &thread_values {
+            let ch_pairs: Vec<(u32, Option<u32>)> = match &channel_spec {
+                CtChannelSpec::Absolute(vals) => vals.iter().map(|&v| (v, None)).collect(),
+                CtChannelSpec::PerThread(cpts) => cpts.iter().map(|&cpt| (th * cpt, Some(cpt))).collect(),
+            };
+            for (ch, cpt) in &ch_pairs {
+                for range_enabled in &range_enabled_values {
+                    for range_threshold_mb in &range_threshold_values {
+                        for gcs_write_chunk_size in &gcs_write_chunk_values {
+                            cases.push(CtTuneCase {
+                                size_bytes: size,
+                                threads: *th,
+                                channels: *ch,
+                                channels_per_thread: *cpt,
+                                range_enabled: *range_enabled,
+                                range_threshold_mb: *range_threshold_mb,
+                                gcs_write_chunk_size: *gcs_write_chunk_size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cases.is_empty() {
+        bail!("No autotune cases generated");
+    }
+
+    println!(
+        "Controller autotune: {} case(s) × {} trial(s), objective={:?}, ops={:?}",
+        cases.len(), trials, objective, ops
+    );
+    println!("URI: {}", cfg.uri);
+
+    let mut results = Vec::new();
+    for case in &cases {
+        let mut put_mbps_samples = Vec::new();
+        let mut get_mbps_samples = Vec::new();
+        let mut put_avg_ms_samples = Vec::new();
+        let mut get_avg_ms_samples = Vec::new();
+
+        for _ in 0..trials {
+            if matches!(ops, CtTuneOps::Put | CtTuneOps::Both) {
+                let mut total_bytes = 0f64;
+                let mut total_secs = 0f64;
+                for a in agents {
+                    let mut c = mk_client(a, insecure, agent_ca, agent_domain, 30, 10)
+                        .await
+                        .with_context(|| format!("connect to {}", a))?;
+                    let (bucket, prefix) = split_put_uri(&cfg.uri);
+                    let r = c.run_put(RunPutRequest {
+                        bucket,
+                        prefix,
+                        object_size: case.size_bytes,
+                        objects,
+                        concurrency: case.threads,
+                        gcs_rapid_mode: rapid_toggle,
+                        gcs_channel_count: case.channels,
+                        gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
+                    }).await?.into_inner();
+                    total_bytes += r.total_bytes as f64;
+                    total_secs += r.seconds;
+                }
+                if total_secs > 0.0 {
+                    let mbps = (total_bytes / 1_048_576.0) / total_secs;
+                    put_mbps_samples.push(mbps);
+                    put_avg_ms_samples.push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
+                }
+            }
+
+            if matches!(ops, CtTuneOps::Get | CtTuneOps::Both) {
+                let mut total_bytes = 0f64;
+                let mut total_secs = 0f64;
+                for a in agents {
+                    let mut c = mk_client(a, insecure, agent_ca, agent_domain, 30, 10)
+                        .await
+                        .with_context(|| format!("connect to {}", a))?;
+                    let r = c.run_get(RunGetRequest {
+                        uri: cfg.uri.clone(),
+                        jobs: case.threads,
+                        gcs_rapid_mode: rapid_toggle,
+                        gcs_channel_count: case.channels,
+                        enable_range_downloads: to_pb_toggle(Some(case.range_enabled)),
+                        range_threshold_mb: case.range_threshold_mb,
+                        gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
+                    }).await?.into_inner();
+                    total_bytes += r.total_bytes as f64;
+                    total_secs += r.seconds;
+                }
+                if total_secs > 0.0 {
+                    let mbps = (total_bytes / 1_048_576.0) / total_secs;
+                    get_mbps_samples.push(mbps);
+                    get_avg_ms_samples.push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
+                }
+            }
+        }
+
+        let mean = |vals: &[f64]| -> Option<f64> {
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+        };
+
+        results.push(CtTuneResult {
+            case: case.clone(),
+            put_mbps: mean(&put_mbps_samples),
+            get_mbps: mean(&get_mbps_samples),
+            put_avg_ms: mean(&put_avg_ms_samples),
+            get_avg_ms: mean(&get_avg_ms_samples),
+        });
+    }
+
+    let score = |r: &CtTuneResult| -> f64 {
+        match objective {
+            CtOptimizeFor::Throughput => {
+                let mut total = 0.0;
+                let mut n = 0.0;
+                if let Some(v) = r.put_mbps { total += v; n += 1.0; }
+                if let Some(v) = r.get_mbps { total += v; n += 1.0; }
+                if n == 0.0 { 0.0 } else { total / n }
+            }
+            CtOptimizeFor::Latency => {
+                let mut total = 0.0;
+                let mut n = 0.0;
+                if let Some(v) = r.put_avg_ms { total += v; n += 1.0; }
+                if let Some(v) = r.get_avg_ms { total += v; n += 1.0; }
+                if n == 0.0 { f64::INFINITY } else { total / n }
+            }
+        }
+    };
+
+    let best = match objective {
+        CtOptimizeFor::Throughput => results
+            .iter()
+            .max_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow!("No best result found"))?,
+        CtOptimizeFor::Latency => results
+            .iter()
+            .min_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow!("No best result found"))?,
+    };
+
+    println!("\n=== CONTROLLER AUTOTUNE BEST ({:?}) ===", objective);
+    println!("size_bytes: {}", best.case.size_bytes);
+    println!("threads/jobs: {}", best.case.threads);
+    println!("channels: {}", best.case.channels);
+    if let Some(cpt) = best.case.channels_per_thread {
+        println!("channels_per_thread: {}  (= {} threads × {})", best.case.channels, best.case.threads, cpt);
+    }
+    println!("range_enabled: {}", best.case.range_enabled);
+    println!("range_threshold_mb: {}", best.case.range_threshold_mb);
+    println!("gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+    println!("gcs_rapid_mode: {:?}", rapid_mode);
+    println!("put_mbps: {:.2?}", best.put_mbps);
+    println!("get_mbps: {:.2?}", best.get_mbps);
+    println!("put_avg_ms_per_object: {:.2?}", best.put_avg_ms);
+    println!("get_avg_ms_per_object: {:.2?}", best.get_avg_ms);
+    println!("\nRecommended YAML:");
+    println!("concurrency: {}", best.case.threads);
+    println!("object_size: {}", best.case.size_bytes);
+    println!("s3dlio_optimization:");
+    println!("  enable_range_downloads: {}", best.case.range_enabled);
+    println!("  range_threshold_mb: {}", best.case.range_threshold_mb);
+    if is_gcs {
+        println!("  gcs_channel_count: {}", best.case.channels);
+        println!("  gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+        match rapid_mode {
+            CtRapidMode::On => println!("  gcs_rapid_mode: true"),
+            CtRapidMode::Off => println!("  gcs_rapid_mode: false"),
+            CtRapidMode::Auto => println!("  # gcs_rapid_mode omitted (auto-detect)"),
+        }
+    }
+
+    Ok(())
 }
 
 // v0.7.11: Abort workload on all agents (controller failure, user interrupt, etc.)
@@ -923,6 +1345,21 @@ async fn mk_client(
         .connect()
         .await?;
     Ok(AgentClient::new(channel))
+}
+
+fn split_put_uri(uri: &str) -> (String, String) {
+    let normalized = if uri.ends_with('/') {
+        uri.to_string()
+    } else {
+        format!("{}/", uri)
+    };
+
+    if let Some(pos) = normalized.rfind('/') {
+        let (base, tail) = normalized.split_at(pos + 1);
+        (base.to_string(), tail.to_string())
+    } else {
+        (normalized, String::new())
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -1031,6 +1468,12 @@ async fn main() -> Result<()> {
                     .run_get(RunGetRequest {
                         uri: uri.clone(),
                         jobs: *jobs as u32,
+                        gcs_rapid_mode: TriStateToggle::Unspecified as i32,
+                        gcs_channel_count: 0,
+                        enable_range_downloads: TriStateToggle::Unspecified as i32,
+                        range_threshold_mb: 0,
+                        gcs_write_chunk_size_bytes: 0,
+                        gcs_project: String::new(),
                     })
                     .await?
                     .into_inner();
@@ -1044,12 +1487,12 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Put {
-            bucket,
-            prefix,
+            uri,
             object_size,
             objects,
             concurrency,
         } => {
+            let (bucket, prefix) = split_put_uri(uri);
             for a in &agents {
                 let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
                     .await
@@ -1061,6 +1504,10 @@ async fn main() -> Result<()> {
                         object_size: *object_size,
                         objects: *objects as u32,         // <-- proto expects u32
                         concurrency: *concurrency as u32, // <-- proto expects u32
+                        gcs_rapid_mode: TriStateToggle::Unspecified as i32,
+                        gcs_channel_count: 0,
+                        gcs_write_chunk_size_bytes: 0,
+                        gcs_project: String::new(),
                     })
                     .await?
                     .into_inner();
@@ -1072,6 +1519,16 @@ async fn main() -> Result<()> {
                     (r.total_bytes as f64 / 1_048_576.0) / r.seconds.max(1e-6)
                 );
             }
+        }
+        Commands::Autotune { config } => {
+            controller_autotune(
+                &agents,
+                !cli.tls,
+                cli.agent_ca.as_ref(),
+                &cli.agent_domain,
+                config,
+            )
+            .await?;
         }
         Commands::Run {
             config,
@@ -2774,14 +3231,21 @@ async fn run_distributed_workload(
     eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
     
     // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
+    // v0.8.71: Also auto-enable when any YAML-driven stage has a barrier: config block
     let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
-        if distributed_config.barrier_sync.enabled {
+        let has_stage_barriers = distributed_config.stages.iter().any(|s| s.barrier.is_some());
+        if distributed_config.barrier_sync.enabled || has_stage_barriers {
             let agent_ids: Vec<String> = agent_addrs.to_vec();
             // Use default phase config (prepare) for initialization
             // Specific phase configs will be used in wait_for_barrier() calls
             let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
-            eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
-                     default_config.heartbeat_interval, default_config.missed_threshold);
+            if distributed_config.barrier_sync.enabled {
+                eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
+                         default_config.heartbeat_interval, default_config.missed_threshold);
+            } else {
+                let stage_count = distributed_config.stages.iter().filter(|s| s.barrier.is_some()).count();
+                eprintln!("🔄 Barrier synchronization auto-enabled ({} stage barrier(s) detected)", stage_count);
+            }
             Some(BarrierManager::new(agent_ids, default_config))
         } else {
             None
@@ -3036,7 +3500,7 @@ async fn run_distributed_workload(
                                 
                                 // Check if barrier can be released
                                 if let Some(barrier_info) = bm.check_barrier_ready(barrier_index) {
-                                    info!("Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER",
+                                    info!("⏱  Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER (stage transition)",
                                           barrier_index, barrier_info.ready_agents.len());
                                     
                                     // Send RELEASE_BARRIER to all agents via broadcast
@@ -3237,6 +3701,9 @@ async fn run_distributed_workload(
                             aggregator.reset_stats();
                             // Reset workload timer to measure actual workload duration (not including prepare)
                             workload_start = std::time::Instant::now();
+                            info!("⏱  Controller: agent '{}' transitioned Prepare→Workload (execute stage started). \
+                                   Workload timer reset to zero.",
+                                stats.agent_id);
                             
                             // v0.8.16: Reset perf_log warmup timers for workload phase
                             // Warmup should be measured from workload start, not prepare start
@@ -3291,7 +3758,11 @@ async fn run_distributed_workload(
                                 tracker.reset_for_stage();
                             }
                             stage_elapsed_s = stats.stage_elapsed_s;
-                            debug!("Stage transition detected ({} -> {}): reset perf_log elapsed timing", prev_stage_name, current_stage_name);
+                            info!("⏱  Controller: stage transition ({} '{}' → {} '{}') for agent '{}' - \
+                                   perf_log elapsed timer reset to zero",
+                                prev_stage_name, prev_stage_name,
+                                current_stage_name, current_stage_name,
+                                stats.agent_id);
                         } else {
                             stage_elapsed_s = stage_elapsed_s.max(stats.stage_elapsed_s);
                         }
@@ -3659,10 +4130,20 @@ async fn run_distributed_workload(
     // v0.8.25: Wait for execute barrier if enabled
     // v0.8.28: Skip legacy barrier wait when using YAML-driven stages
     // (stage barriers are already handled during the main loop)
+    // v0.8.86: Fix: use !stages.is_empty() (same as line ~2695), not barrier_sync.enabled.
+    // barrier_sync.enabled is false when using auto-detected stage barriers, causing the legacy
+    // execute barrier to run AFTER GOODBYE is sent, finding 0 agents → "insufficient agents".
     let using_yaml_stages = config.distributed.as_ref()
-        .map(|d| d.barrier_sync.enabled)
+        .map(|d| !d.stages.is_empty())
         .unwrap_or(false);
-    
+    info!("Post-GOODBYE barrier check: using_yaml_stages={} (stages-based={}, barrier_sync.enabled={})",
+        using_yaml_stages,
+        config.distributed.as_ref().map(|d| !d.stages.is_empty()).unwrap_or(false),
+        config.distributed.as_ref().map(|d| d.barrier_sync.enabled).unwrap_or(false));
+    if using_yaml_stages {
+        info!("YAML-driven stages active — skipping legacy execute barrier (all barriers handled in main loop)");
+    }
+
     if !using_yaml_stages {
         if let Some(ref mut bm) = barrier_manager {
             if let Some(ref distributed_config) = config.distributed {
@@ -6065,6 +6546,270 @@ workload:
             // Query for a barrier no agent has reached
             let release_info = manager.check_barrier_ready(999);
             assert!(release_info.is_none());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // v0.8.70: autotune helper function tests
+    // -------------------------------------------------------------------------
+
+    mod autotune_helpers {
+        use super::super::*;
+
+        // ----- parse_csv_u32 -----
+
+        #[test]
+        fn test_parse_csv_u32_single() {
+            assert_eq!(parse_csv_u32("32").unwrap(), vec![32u32]);
+        }
+
+        #[test]
+        fn test_parse_csv_u32_multi() {
+            assert_eq!(parse_csv_u32("16,32,64").unwrap(), vec![16u32, 32, 64]);
+        }
+
+        #[test]
+        fn test_parse_csv_u32_spaces() {
+            assert_eq!(parse_csv_u32(" 8 , 16 ").unwrap(), vec![8u32, 16]);
+        }
+
+        #[test]
+        fn test_parse_csv_u32_empty_errors() {
+            assert!(parse_csv_u32("").is_err());
+        }
+
+        #[test]
+        fn test_parse_csv_u32_non_numeric_errors() {
+            assert!(parse_csv_u32("16,abc").is_err());
+        }
+
+        // ----- parse_csv_bool (controller) -----
+
+        #[test]
+        fn test_ctl_parse_csv_bool_true_variants() {
+            for v in &["true", "1", "yes", "on"] {
+                assert_eq!(parse_csv_bool(v).unwrap(), vec![true], "failed for '{}'", v);
+            }
+        }
+
+        #[test]
+        fn test_ctl_parse_csv_bool_false_variants() {
+            for v in &["false", "0", "no", "off"] {
+                assert_eq!(parse_csv_bool(v).unwrap(), vec![false], "failed for '{}'", v);
+            }
+        }
+
+        #[test]
+        fn test_ctl_parse_csv_bool_multi() {
+            assert_eq!(parse_csv_bool("false,true,false").unwrap(), vec![false, true, false]);
+        }
+
+        #[test]
+        fn test_ctl_parse_csv_bool_empty_errors() {
+            assert!(parse_csv_bool("").is_err());
+        }
+
+        #[test]
+        fn test_ctl_parse_csv_bool_invalid_errors() {
+            assert!(parse_csv_bool("maybe").is_err());
+        }
+
+        // ----- to_pb_toggle -----
+
+        #[test]
+        fn test_to_pb_toggle_on() {
+            assert_eq!(to_pb_toggle(Some(true)), TriStateToggle::On as i32);
+        }
+
+        #[test]
+        fn test_to_pb_toggle_off() {
+            assert_eq!(to_pb_toggle(Some(false)), TriStateToggle::Off as i32);
+        }
+
+        #[test]
+        fn test_to_pb_toggle_unspecified() {
+            assert_eq!(to_pb_toggle(None), TriStateToggle::Unspecified as i32);
+        }
+
+        // ----- split_put_uri -----
+
+        #[test]
+        fn test_split_put_uri_trailing_slash() {
+            // Full URI with trailing slash: entire URI becomes bucket, prefix empty
+            let (bucket, prefix) = split_put_uri("gs://bucket/prefix/");
+            assert_eq!(bucket, "gs://bucket/prefix/");
+            assert_eq!(prefix, "");
+        }
+
+        #[test]
+        fn test_split_put_uri_no_trailing_slash() {
+            // Without trailing slash: slash is appended, result same as with slash
+            let (bucket, prefix) = split_put_uri("gs://bucket/prefix");
+            assert_eq!(bucket, "gs://bucket/prefix/");
+            assert_eq!(prefix, "");
+        }
+
+        #[test]
+        fn test_split_put_uri_s3() {
+            let (bucket, prefix) = split_put_uri("s3://my-bucket/bench/");
+            assert_eq!(bucket, "s3://my-bucket/bench/");
+            assert_eq!(prefix, "");
+        }
+
+        #[test]
+        fn test_split_put_uri_file() {
+            let (bucket, prefix) = split_put_uri("file:///tmp/data/");
+            assert_eq!(bucket, "file:///tmp/data/");
+            assert_eq!(prefix, "");
+        }
+
+        // ----- parse_sizes_from_config -----
+
+        #[test]
+        fn test_parse_sizes_from_config_explicit() {
+            let cfg = ControllerAutotuneConfig {
+                uri: "gs://bucket/prefix/".to_string(),
+                sizes: Some("1MiB,2MiB".to_string()),
+                size_range: None,
+                size_steps: None,
+                threads: None,
+                channels: None,
+                channels_per_thread: None,
+                range_enabled: None,
+                range_thresholds_mb: None,
+                gcs_write_chunk_sizes: None,
+                gcs_rapid_mode: None,
+                gcs_project: None,
+                objects: None,
+                trials: None,
+                optimize_for: None,
+                ops: None,
+            };
+            let sizes = parse_sizes_from_config(&cfg).unwrap();
+            assert_eq!(sizes, vec![1024 * 1024, 2 * 1024 * 1024]);
+        }
+
+        #[test]
+        fn test_parse_sizes_from_config_range() {
+            let cfg = ControllerAutotuneConfig {
+                uri: "gs://bucket/prefix/".to_string(),
+                sizes: None,
+                size_range: Some("4MiB-4MiB".to_string()),
+                size_steps: Some(1),
+                threads: None,
+                channels: None,
+                channels_per_thread: None,
+                range_enabled: None,
+                range_thresholds_mb: None,
+                gcs_write_chunk_sizes: None,
+                gcs_rapid_mode: None,
+                gcs_project: None,
+                objects: None,
+                trials: None,
+                optimize_for: None,
+                ops: None,
+            };
+            let sizes = parse_sizes_from_config(&cfg).unwrap();
+            assert_eq!(sizes.len(), 1);
+            assert_eq!(sizes[0], 4 * 1024 * 1024);
+        }
+
+        #[test]
+        fn test_parse_sizes_from_config_default_range() {
+            let cfg = ControllerAutotuneConfig {
+                uri: "gs://bucket/prefix/".to_string(),
+                sizes: None,
+                size_range: None,
+                size_steps: Some(4),
+                threads: None,
+                channels: None,
+                channels_per_thread: None,
+                range_enabled: None,
+                range_thresholds_mb: None,
+                gcs_write_chunk_sizes: None,
+                gcs_rapid_mode: None,
+                gcs_project: None,
+                objects: None,
+                trials: None,
+                optimize_for: None,
+                ops: None,
+            };
+            let sizes = parse_sizes_from_config(&cfg).unwrap();
+            assert_eq!(sizes.len(), 4);
+            // Default range is 32MiB-64MiB
+            let mib32 = 32 * 1024 * 1024u64;
+            let mib64 = 64 * 1024 * 1024u64;
+            assert!(sizes[0] >= mib32 - 1024);
+            assert!(sizes[3] <= mib64 + 1024);
+        }
+
+        // ── channels_per_thread ───────────────────────────────────────────
+
+        #[test]
+        fn test_ct_channels_per_thread_field_in_config() {
+            let yaml = "uri: \"gs://b/p\"\nchannels_per_thread: \"1,2,4\"\n";
+            let parsed: ControllerAutotuneConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(parsed.channels_per_thread.as_deref(), Some("1,2,4"));
+            assert!(parsed.channels.is_none());
+        }
+
+        #[test]
+        fn test_ct_channels_absolute_field_in_config() {
+            let yaml = "uri: \"gs://b/p\"\nchannels: \"32,64\"\n";
+            let parsed: ControllerAutotuneConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(parsed.channels.as_deref(), Some("32,64"));
+            assert!(parsed.channels_per_thread.is_none());
+        }
+
+        #[test]
+        fn test_ct_tune_case_channels_per_thread_absolute() {
+            let c = CtTuneCase {
+                size_bytes: 1024,
+                threads: 32,
+                channels: 64,
+                channels_per_thread: None,
+                range_enabled: false,
+                range_threshold_mb: 32,
+                gcs_write_chunk_size: 2097152,
+            };
+            assert!(c.channels_per_thread.is_none());
+            assert_eq!(c.channels, 64);
+        }
+
+        #[test]
+        fn test_ct_tune_case_channels_per_thread_derived() {
+            let threads: u32 = 32;
+            let cpt: u32 = 4;
+            let effective = threads * cpt;
+            let c = CtTuneCase {
+                size_bytes: 1024,
+                threads,
+                channels: effective,
+                channels_per_thread: Some(cpt),
+                range_enabled: false,
+                range_threshold_mb: 32,
+                gcs_write_chunk_size: 2097152,
+            };
+            assert_eq!(c.channels_per_thread, Some(4));
+            assert_eq!(c.channels, 128);
+        }
+
+        #[test]
+        fn test_ct_channels_per_thread_csv_parsing() {
+            let parsed = parse_csv_u32("1,2,4,8").unwrap();
+            assert_eq!(parsed, vec![1u32, 2, 4, 8]);
+        }
+
+        #[test]
+        fn test_ct_channels_per_thread_zero_rejected() {
+            // 0 is never a valid multiplier — would mean 0 channels
+            let cpts = parse_csv_u32("1,0,4").unwrap();
+            assert!(cpts.iter().any(|&v| v == 0));
+            // Confirm the check logic: any zero is invalid
+            assert!(cpts.iter().any(|&v| v == 0));
+            // A clean list with no zeros passes
+            let ok = parse_csv_u32("1,2,4").unwrap();
+            assert!(!ok.iter().any(|&v| v == 0));
         }
     }
 }

@@ -29,7 +29,7 @@ pub mod pb {
     }
 }
 use pb::iobench::agent_server::{Agent, AgentServer};
-use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase, StageSummary};
+use pb::iobench::{Empty, LiveStats, OpSummary, PingReply, PrepareSummary, RunGetRequest, RunPutRequest, RunWorkloadRequest, TriStateToggle, WorkloadSummary, OpAggregateMetrics, ControlMessage, control_message::Command, PreFlightRequest, PreFlightResponse, ValidationResult, ResultLevel, ErrorType, BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse, PhaseProgress, WorkloadPhase, StageSummary};
 
 /// Helper function to get current timestamp with optional simulated clock skew.
 /// 
@@ -470,7 +470,60 @@ impl AgentSvc {
     }
 }
 
-/// Extract filesystem path from Config.target or multi_endpoint, return None if not a file:// or direct:// URI
+/// Extract all object storage URIs from config (s3://, gs://, az://)
+fn extract_object_storage_endpoints_from_config(config: &sai3_bench::config::Config) -> Vec<String> {
+    let mut endpoints = Vec::new();
+    let object_storage_schemes = ["s3://", "gs://", "az://"];
+    let is_object_storage = |uri: &str| object_storage_schemes.iter().any(|s| uri.starts_with(s));
+
+    // config.target (standalone mode)
+    if let Some(ref target) = config.target {
+        if is_object_storage(target) {
+            endpoints.push(target.clone());
+        }
+    }
+
+    // multi_endpoint.endpoints
+    if let Some(ref multi) = config.multi_endpoint {
+        for ep in &multi.endpoints {
+            if is_object_storage(ep) {
+                endpoints.push(ep.clone());
+            }
+        }
+    }
+
+    // prepare.ensure_objects[].base_uri
+    if let Some(ref prepare) = config.prepare {
+        for ensure in &prepare.ensure_objects {
+            if let Some(ref uri) = ensure.base_uri {
+                if is_object_storage(uri) && !endpoints.contains(uri) {
+                    endpoints.push(uri.clone());
+                }
+            }
+        }
+    }
+
+    // distributed.agents[].target_override / multi_endpoint
+    if let Some(ref distributed) = config.distributed {
+        for agent in &distributed.agents {
+            if let Some(ref target) = agent.target_override {
+                if is_object_storage(target) && !endpoints.contains(target) {
+                    endpoints.push(target.clone());
+                }
+            }
+            if let Some(ref multi) = agent.multi_endpoint {
+                for ep in &multi.endpoints {
+                    if is_object_storage(ep) && !endpoints.contains(ep) {
+                        endpoints.push(ep.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    endpoints
+}
+
 fn extract_filesystem_path_from_config(config: &sai3_bench::config::Config) -> Option<std::path::PathBuf> {
     // First try config.target (standalone mode)
     if let Some(target) = config.target.as_ref() {
@@ -575,21 +628,30 @@ impl Agent for AgentSvc {
                 Status::internal(format!("Filesystem validation error: {}", e))
             })?
         } else {
-            // Not a filesystem target - skip filesystem validation
-            sai3_bench::preflight::ValidationSummary::new(vec![
-                sai3_bench::preflight::ValidationResult {
-                    level: sai3_bench::preflight::ResultLevel::Info,
-                    error_type: None,
-                    message: "Skipping filesystem validation (target is object storage)".to_string(),
-                    suggestion: String::new(),
-                    details: None,
-                    test_phase: "filesystem".to_string(),
-                }
-            ])
+            // Object storage target — do a quick bucket accessibility check
+            let obj_endpoints = extract_object_storage_endpoints_from_config(&config);
+            if !obj_endpoints.is_empty() {
+                sai3_bench::preflight::object_storage::validate_object_storage(
+                    &obj_endpoints,
+                    false,  // read-only check
+                ).await.map_err(|e| {
+                    error!("Object storage validation failed: {}", e);
+                    Status::internal(format!("Object storage validation error: {}", e))
+                })?
+            } else {
+                // No recognizable target found — report as info
+                sai3_bench::preflight::ValidationSummary::new(vec![
+                    sai3_bench::preflight::ValidationResult {
+                        level: sai3_bench::preflight::ResultLevel::Info,
+                        error_type: None,
+                        message: "Skipping filesystem validation (target is object storage)".to_string(),
+                        suggestion: String::new(),
+                        details: None,
+                        test_phase: "filesystem".to_string(),
+                    }
+                ])
+            }
         };
-        
-        // TODO Phase 2: Add object storage validation
-        // let obj_summary = sai3_bench::preflight::object_storage::validate_object_storage(&config).await;
         
         // Convert ValidationSummary to proto response
         let results: Vec<ValidationResult> = fs_summary.results.iter().map(|r| {
@@ -808,7 +870,25 @@ impl Agent for AgentSvc {
     }
 
     async fn run_get(&self, req: Request<RunGetRequest>) -> Result<Response<OpSummary>, Status> {
-        let RunGetRequest { uri, jobs } = req.into_inner();
+        let RunGetRequest {
+            uri,
+            jobs,
+            gcs_rapid_mode,
+            gcs_channel_count,
+            enable_range_downloads,
+            range_threshold_mb,
+            gcs_write_chunk_size_bytes,
+            gcs_project,
+        } = req.into_inner();
+
+        apply_request_tuning(
+            gcs_rapid_mode,
+            gcs_channel_count,
+            Some(enable_range_downloads),
+            Some(range_threshold_mb),
+            Some(gcs_write_chunk_size_bytes),
+            &gcs_project,
+        );
         
         // Parse URI to extract base and pattern
         // For S3: s3://bucket/prefix/pattern
@@ -883,7 +963,20 @@ impl Agent for AgentSvc {
             object_size,
             objects,
             concurrency,
+            gcs_rapid_mode,
+            gcs_channel_count,
+            gcs_write_chunk_size_bytes,
+            gcs_project,
         } = req.into_inner();
+
+        apply_request_tuning(
+            gcs_rapid_mode,
+            gcs_channel_count,
+            None,
+            None,
+            Some(gcs_write_chunk_size_bytes),
+            &gcs_project,
+        );
         
         // Build base URI from bucket (assume s3:// for backward compatibility)
         let base_uri = if bucket.starts_with("s3://") || bucket.starts_with("file://") || 
@@ -967,6 +1060,8 @@ impl Agent for AgentSvc {
             s3dlio_opt.apply();
             info!("Applied s3dlio optimization configuration from YAML (prepare)");
         }
+        // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+        config.apply_gcs_defaults();
 
         debug!("YAML config parsed successfully");
         debug!("Config has multi_endpoint: {}", config.multi_endpoint.is_some());
@@ -2267,6 +2362,8 @@ impl Agent for AgentSvc {
                                         s3dlio_opt.apply();
                                         info!("Applied s3dlio optimization configuration from YAML (workload)");
                                     }
+                                    // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
+                                    config.apply_gcs_defaults();
                                     
                                     if let Err(e) = config.apply_agent_prefix(&agent_id, &path_prefix, shared_storage) {
                                         error!("Control reader: Failed to apply agent prefix: {}", e);
@@ -3025,7 +3122,54 @@ async fn execute_stages_workflow(
     // Storage for prepared objects (needed for cleanup stages)
     let mut prepared_objects: Vec<sai3_bench::prepare::PreparedObject> = Vec::new();
     let mut tree_manifest = None;  // Type inferred from prepare_objects return
-    
+
+    // v0.8.87: Pre-synthesize TreeManifest from directory_structure config when there is no
+    // prepare stage in the stage list.  This enables "GET-only" runs after data has already
+    // been written by a previous prepare+execute run — without performing any object listing.
+    //
+    // Why this is safe:
+    //   • Object names are deterministic: they follow the dir_mask / file naming pattern
+    //     in directory_structure, so we can compute every path with pure arithmetic.
+    //   • DirectoryTree::new() is O(1) relative to storage — pure in-memory computation
+    //     that completes in milliseconds even for 50 M objects.
+    //   • workload::run() selects files via PathSelector when tree_manifest.is_some(),
+    //     which means prefetch_uris_multi_backend (the GCS listing call) is bypassed
+    //     entirely during the execute stage.
+    //
+    // Without this fix: tree_manifest stays None → workload falls back to listing GCS
+    // using the full glob URI (e.g. "gs://bucket/prefix/scan.d*_w*.dir/**/*") → listing
+    // with a wildcard prefix returns 0 results in < 100 ms → "No URIs found" error,
+    // even though the objects exist.  For very large datasets a listing would take hours.
+    let has_prepare_stage = stages.iter().any(|s| {
+        matches!(&s.config, sai3_bench::config::StageSpecificConfig::Prepare { .. })
+    });
+    if !has_prepare_stage {
+        if let Some(ref prepare_cfg) = config.prepare {
+            if let Some(ref dir_config) = prepare_cfg.directory_structure {
+                info!("No prepare stage in workflow — synthesizing TreeManifest from \
+                       directory_structure config (no object listing needed)");
+                match sai3_bench::directory_tree::DirectoryTree::new(dir_config.clone()) {
+                    Ok(tree) => {
+                        let manifest = sai3_bench::directory_tree::TreeManifest::from_tree(&tree);
+                        info!("TreeManifest synthesized: {} dirs, {} files \
+                               (width={}, depth={}, files_per_dir={})",
+                              manifest.total_dirs, manifest.total_files,
+                              dir_config.width, dir_config.depth, dir_config.files_per_dir);
+                        tree_manifest = Some(manifest);
+                    }
+                    Err(e) => {
+                        // Non-fatal: log the warning and continue; workload::run() will
+                        // attempt GCS listing as the fallback (which may fail for large
+                        // buckets with wildcard patterns, but gives a clear error).
+                        warn!("Failed to synthesize TreeManifest from directory_structure: {} \
+                               — falling back to object listing (may be slow or fail for \
+                               large buckets)", e);
+                    }
+                }
+            }
+        }
+    }
+
     // Iterate through stages in order
     for (stage_index, stage) in stages.iter().enumerate() {
         // Check for abort before starting next stage
@@ -3156,12 +3300,23 @@ async fn execute_stages_workflow(
                 }
                 
                 // Override config.duration with stage duration
+                // NOTE: This is stage-local — the timer will be reset fresh inside workload::run()
+                // using Instant::now() at call time, independent of any previous stage elapsed time.
                 config.duration = *duration;
+                let exec_drain_budget = sai3_bench::constants::DEFAULT_WORKER_DRAIN_TIMEOUT_SECS;
+                info!("⏱  Execute stage timer reset: duration={:.1}s, drain_budget={}s, \
+                       total_max_wall={:.1}s (timer starts NOW inside workload::run)",
+                    duration.as_secs_f64(),
+                    exec_drain_budget,
+                    duration.as_secs_f64() + exec_drain_budget as f64,
+                );
                 
                 // Run workload
+                let exec_start = std::time::Instant::now();
                 match sai3_bench::workload::run(&config, tree_manifest.clone()).await {
                     Ok(summary) => {
-                        info!("Execute stage complete");
+                        info!("Execute stage complete in {:.1}s (configured: {:.1}s)",
+                            exec_start.elapsed().as_secs_f64(), duration.as_secs_f64());
                         
                         // v0.8.28: Capture per-bucket histogram data for stage summary
                         // EXECUTE has GET, PUT, and META ops
@@ -3180,6 +3335,8 @@ async fn execute_stages_workflow(
                         }
                     }
                     Err(e) => {
+                        error!("Execute stage '{}' failed after {:.1}s: {}",
+                            stage.name, exec_start.elapsed().as_secs_f64(), e);
                         return Err(format!("Execute stage '{}' failed: {}", stage.name, e));
                     }
                 }
@@ -3855,6 +4012,58 @@ async fn create_agent_results(
 
 fn to_status<E: std::fmt::Display>(e: E) -> Status {
     Status::internal(e.to_string())
+}
+
+fn apply_request_tuning(
+    gcs_rapid_mode: i32,
+    gcs_channel_count: u32,
+    enable_range_downloads: Option<i32>,
+    range_threshold_mb: Option<u32>,
+    gcs_write_chunk_size_bytes: Option<u32>,
+    gcs_project: &str,
+) {
+    let rapid_mode = TriStateToggle::try_from(gcs_rapid_mode).unwrap_or(TriStateToggle::Unspecified);
+    match rapid_mode {
+        TriStateToggle::On => {
+            env::set_var("S3DLIO_GCS_RAPID", "true");
+            s3dlio::set_gcs_rapid_mode(Some(true));
+        }
+        TriStateToggle::Off => {
+            env::set_var("S3DLIO_GCS_RAPID", "false");
+            s3dlio::set_gcs_rapid_mode(Some(false));
+        }
+        TriStateToggle::Unspecified => {}
+    }
+
+    if gcs_channel_count > 0 {
+        env::set_var("S3DLIO_GCS_GRPC_CHANNELS", gcs_channel_count.to_string());
+    }
+
+    if let Some(toggle_raw) = enable_range_downloads {
+        let toggle = TriStateToggle::try_from(toggle_raw).unwrap_or(TriStateToggle::Unspecified);
+        match toggle {
+            TriStateToggle::On => env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "1"),
+            TriStateToggle::Off => env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "0"),
+            TriStateToggle::Unspecified => {}
+        }
+    }
+
+    if let Some(threshold_mb) = range_threshold_mb {
+        if threshold_mb > 0 {
+            env::set_var("S3DLIO_RANGE_THRESHOLD_MB", threshold_mb.to_string());
+        }
+    }
+
+    if let Some(chunk_size) = gcs_write_chunk_size_bytes {
+        if chunk_size > 0 {
+            env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", chunk_size.to_string());
+        }
+    }
+
+    // GCS: project ID — forwarded from YAML config, overrides env var on agent
+    if !gcs_project.is_empty() {
+        env::set_var("GOOGLE_CLOUD_PROJECT", gcs_project);
+    }
 }
 
 fn glob_match(pattern: &str, key: &str) -> bool {

@@ -149,13 +149,20 @@ impl LiveStatsTracker {
     }
 
     /// Record a GET operation (non-blocking atomic update)
+    ///
+    /// v0.8.71: Histogram update uses try_lock() to avoid blocking the hot
+    /// path when another worker is recording.  Atomic counters (throughput)
+    /// are always updated; a dropped histogram sample under contention only
+    /// affects the live monitoring percentiles — authoritative latency data
+    /// comes from per-worker WorkerStats.
     #[inline]
     pub fn record_get(&self, bytes: usize, latency: Duration) {
         self.get_ops.fetch_add(1, Ordering::Relaxed);
         self.get_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         let us = latency.as_micros().min(u64::MAX as u128) as u64;
-        // Histogram update requires lock but is fast (O(1) amortized)
-        let _ = self.get_hist.lock().record(us);
+        if let Some(mut hist) = self.get_hist.try_lock() {
+            let _ = hist.record(us);
+        }
     }
 
     /// Record a PUT operation (non-blocking atomic update)
@@ -164,7 +171,9 @@ impl LiveStatsTracker {
         self.put_ops.fetch_add(1, Ordering::Relaxed);
         self.put_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         let us = latency.as_micros().min(u64::MAX as u128) as u64;
-        let _ = self.put_hist.lock().record(us);
+        if let Some(mut hist) = self.put_hist.try_lock() {
+            let _ = hist.record(us);
+        }
     }
 
     /// Record a META operation (HEAD/LIST/DELETE - non-blocking atomic update)
@@ -172,7 +181,9 @@ impl LiveStatsTracker {
     pub fn record_meta(&self, latency: Duration) {
         self.meta_ops.fetch_add(1, Ordering::Relaxed);
         let us = latency.as_micros().min(u64::MAX as u128) as u64;
-        let _ = self.meta_hist.lock().record(us);
+        if let Some(mut hist) = self.meta_hist.try_lock() {
+            let _ = hist.record(us);
+        }
     }
     
     // =========================================================================

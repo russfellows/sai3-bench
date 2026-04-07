@@ -99,6 +99,26 @@ pub const DEFAULT_DURATION_SECS: u64 = 60;
 /// Default concurrency (number of worker tasks) if not specified
 pub const DEFAULT_CONCURRENCY: usize = 16;
 
+/// Per-operation timeout for object storage calls (GET/PUT/STAT/DELETE).
+///
+/// Prevents workers from hanging indefinitely when a gRPC channel stalls
+/// (e.g. after a GCS load-balancer reset or RAPID transport issue).
+/// A timed-out call is surfaced as an error and handled by the normal
+/// ErrorHandlingConfig logic (skip / retry / abort).
+///
+/// 120s is generous for any healthy storage backend but will catch
+/// pathological hangs that would otherwise freeze an entire stage.
+pub const DEFAULT_OP_TIMEOUT_SECS: u64 = 120;
+
+/// Maximum time to wait for worker tasks to finish after the workload
+/// deadline fires (the "drain" phase).
+///
+/// With DEFAULT_OP_TIMEOUT_SECS = 120s, any in-flight operation will
+/// time out before this budget is reached — so 150s provides a small
+/// safety margin on top.  Workers that still have not finished by then
+/// are aborted and their partial stats are discarded.
+pub const DEFAULT_WORKER_DRAIN_TIMEOUT_SECS: u64 = 150;
+
 /// Optimal chunk size for direct:// reads (4 MiB)
 /// Based on testing: 4M chunks achieve 1.73 GiB/s vs 0.01 GiB/s for whole-file
 pub const DIRECT_IO_CHUNK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB

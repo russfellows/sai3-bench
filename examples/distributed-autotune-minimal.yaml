@@ -1,0 +1,51 @@
+# Minimal dual-purpose config:
+#  1) valid sai3-bench run --dry-run config
+#  2) valid sai3bench-ctl autotune --config input (via explicit autotune block)
+# Usage:
+#   ./target/release/sai3bench-ctl \
+#     --agents host1:7761,host2:7761 \
+#     autotune --config examples/distributed-autotune-minimal.yaml
+#   ./target/release/sai3-bench run --config examples/distributed-autotune-minimal.yaml --dry-run
+
+target: "gs://my-bucket/bench/autotune/"
+
+# Minimal workload section so `sai3-bench run --dry-run` parses cleanly.
+workload:
+  - op: get
+    path: "*"
+    weight: 100
+
+# Everything autotune can change belongs in this block.
+autotune:
+  # Target object namespace/pattern to tune against.
+  # Works for s3://, az://, gs://, file://, direct://
+  uri: "gs://my-bucket/bench/autotune/obj*.dat"
+
+  # Keep matrix small for quick validation.
+  size_range: "32MiB-64MiB"
+  size_steps: 3
+  threads: "16,32"
+
+  # Optional tuning sweeps (applied via RPC request fields)
+  # GCS gRPC channel tuning (GCS/RAPID only).
+  # Use 'channels_per_thread' (recommended) or 'channels' (absolute count) — not both.
+  #
+  # channels_per_thread: integer multiplier of thread count.
+  #   effective_channels = threads × channels_per_thread
+  #   Default: 1 (one channel per thread; effective_channels = threads).
+  #   Practical range: 1–8.  Values ≥ 9 are unusual.  0 is rejected.
+  #   Example below sweeps 1× and 2× thread count:
+  channels_per_thread: "1,2"
+  #
+  # Alternatively, specify absolute channel counts:
+  # channels: "32,64"
+  range_enabled: "false,true"
+  range_thresholds_mb: "32"
+  gcs_write_chunk_sizes: "2097152"
+  gcs_rapid_mode: auto
+
+  # Trial behavior
+  objects: 64
+  trials: 1
+  optimize_for: throughput
+  ops: both

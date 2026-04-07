@@ -1,13 +1,13 @@
 [package]
 name = "sai3-bench"
-version = "0.8.63"
+version = "0.8.86"
 edition = "2021"
 build   = "build.rs"
 
 [dependencies]
-# AWS SDK - aligned with s3dlio v0.9.38
-aws-config = "=1.8.11"
-aws-sdk-s3 = "=1.116.0"
+# AWS SDK - aligned with s3dlio v0.9.86
+aws-config = "=1.8.14"
+aws-sdk-s3 = "=1.124.0"
 anyhow = "^1"
 base64 = "^0.22"
 chrono = "^0.4"
@@ -23,9 +23,13 @@ tracing-subscriber = { version = "^0.3", features = ["env-filter", "fmt"] }
 url = "^2.5"
 num_cpus = "^1.16"
 
-# s3dlio: Use git tag for releases (switch to local path for development)
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.50" }
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.50" }
+# s3dlio: git-tagged release dependency for portable builds on any machine.
+# Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
+# az:// and gs:// support even though s3dlio's own default profile is S3-focused.
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86", features = ["full-backends"] }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86" }
+# Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
+# Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

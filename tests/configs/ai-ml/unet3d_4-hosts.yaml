@@ -17,9 +17,14 @@ target: "gs://signal65-ai-ac/unet3d/"
 duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
 concurrency: 32      # Matches rdf-bench threads=32
 
+perf_log:
+  enabled: true
+  interval: 1s
+
 prepare:
   prepare_strategy: parallel
   skip_verification: true
+  force_overwrite: true
   
   # Create nested directory tree matching rdf-bench FSD:
   # width=28, depth=2, files=64 (per host in rdf-bench)
@@ -72,3 +77,26 @@ distributed:
       id: "agent-3"
     - address: "10.138.0.45:7761"
       id: "agent-4"
+
+  stages:
+  - name: preflight
+    order: 1
+    completion: validation_passed
+    timeout_secs: 300
+    type: validation
+    barrier:
+      type: all_or_nothing
+  - name: prepare
+    order: 2
+    completion: tasks_done
+    type: prepare
+    barrier:
+      type: all_or_nothing
+    expected_objects: 200704
+  - name: execute
+    order: 3
+    completion: duration
+    type: execute
+    barrier:
+      type: all_or_nothing
+    duration: 5m

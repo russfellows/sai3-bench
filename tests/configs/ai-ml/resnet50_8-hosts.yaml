@@ -6,9 +6,14 @@ target: "gs://signal65-ai-ac/resnet50/"
 duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
 concurrency: 64      # Matches rdf-bench threads=64 per host
 
+perf_log:
+  enabled: true
+  interval: 1s
+
 prepare:
   prepare_strategy: parallel
   skip_verification: true
+  force_overwrite: true
   
   # Create nested directory tree matching rdf-bench FSD:
   # width=64, depth=2, files=150 per host (150 × 8 hosts = 1,200 total)
@@ -66,3 +71,26 @@ distributed:
       id: "agent-7"
     - address: "127.0.0.1:7768"
       id: "agent-8"
+
+  stages:
+  - name: preflight
+    order: 1
+    completion: validation_passed
+    timeout_secs: 300
+    type: validation
+    barrier:
+      type: all_or_nothing
+  - name: prepare
+    order: 2
+    completion: tasks_done
+    type: prepare
+    barrier:
+      type: all_or_nothing
+    expected_objects: 4915200
+  - name: execute
+    order: 3
+    completion: duration
+    type: execute
+    barrier:
+      type: all_or_nothing
+    duration: 5m

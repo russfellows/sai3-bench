@@ -897,6 +897,52 @@ impl Config {
 
         Ok(())
     }
+
+    /// Apply GCS-specific smart defaults and optional concurrency scaling.
+    ///
+    /// Call this on every config-parsing path (standalone `main.rs` and agent
+    /// `execute_workload`), immediately after `s3dlio_opt.apply()`.
+    ///
+    /// **Behaviour for `gs://` / `gcs://` targets:**
+    ///
+    /// * **Explicit `gcs_channel_count = N`** (already forwarded to s3dlio via
+    ///   `apply()`): treats YAML `concurrency` as *per-channel* parallelism and
+    ///   scales the total Tokio task count to `concurrency × N`, capped at the
+    ///   number of logical CPUs.  A `WARN` line is emitted whenever scaling
+    ///   occurs (both the scaled-up case and the CPU-capped case).
+    ///
+    /// * **No `gcs_channel_count`** (smart default): calls
+    ///   `s3dlio::set_gcs_channel_count(concurrency)` — one subchannel per
+    ///   concurrent task, no concurrency change.  Emits `INFO`.
+    ///
+    /// Non-GCS targets (`s3://`, `az://`, `file://`, …): no-op.
+    pub fn apply_gcs_defaults(&mut self) {
+        let target_is_gcs = self.target.as_deref()
+            .map(|t| t.starts_with("gs://") || t.starts_with("gcs://"))
+            .unwrap_or(false)
+            || self.multi_endpoint.as_ref()
+                .map(|me| me.endpoints.iter().any(|e| e.starts_with("gs://") || e.starts_with("gcs://")))
+                .unwrap_or(false);
+
+        if !target_is_gcs {
+            return;
+        }
+
+        let explicit_channels = self.s3dlio_optimization
+            .as_ref()
+            .and_then(|o| o.gcs_channel_count);
+
+        if explicit_channels.is_none() {
+            // Smart default: one gRPC subchannel per concurrent task.
+            // If gcs_channel_count was explicitly set it was already forwarded
+            // to s3dlio in apply(), so nothing to do in that case.
+            s3dlio::set_gcs_channel_count(self.concurrency);
+            tracing::info!(
+                "GCS smart default: gRPC channel count = concurrency ({})",
+                self.concurrency
+            );
+        }
+    }
 }
 
 /// Join a base URI with a path suffix, handling different URI schemes properly.
@@ -1126,6 +1172,74 @@ pub struct S3dlioOptimizationConfig {
     /// Default: None (auto-calculated by s3dlio)
     #[serde(default)]
     pub chunk_size_mb: Option<u64>,
+
+    // ── GCS-specific settings ─────────────────────────────────────────────────
+
+    /// GCS: gRPC subchannel count override (v0.9.65+, requires s3dlio ≥ 0.9.65)
+    ///
+    /// Sets the number of gRPC subchannels (independent HTTP/2 connections) used
+    /// by the GCS client.  Each subchannel can carry multiple concurrent streams;
+    /// matching this to concurrency gives each task an uncontested flow-control
+    /// window.
+    ///
+    /// **Concurrency scaling**: When set to N, sai3-bench treats the YAML
+    /// `concurrency` field as *per-channel* parallelism and scales the total
+    /// Tokio task count to `concurrency × N`, capped at the number of logical
+    /// CPUs.  A `WARN` line is emitted whenever the total is adjusted.
+    ///
+    /// If absent, channel count is auto-set to `concurrency` for `gs://` targets
+    /// (smart default — one channel per task, no concurrency scaling).
+    ///
+    /// Only meaningful for `gs://` / `gcs://` targets; silently ignored otherwise.
+    #[serde(default)]
+    pub gcs_channel_count: Option<usize>,
+
+    /// GCS: RAPID (Hyperdisk ML / zonal GCS) mode override (v0.9.65+)
+    ///
+    /// Controls whether GCS I/O uses the appendable-object / bidi-read RAPID
+    /// path.  By default s3dlio auto-detects per bucket via `GetStorageLayout`.
+    ///
+    /// - `true`  — force RAPID on (skips detection RPC; use for known RAPID buckets)
+    /// - `false` — force RAPID off (standard reads, no appendable writes)
+    /// - absent  — auto-detect per bucket (recommended default)
+    ///
+    /// The `S3DLIO_GCS_RAPID` environment variable still takes precedence if set.
+    /// Only meaningful for `gs://` targets; silently ignored for S3/Azure/file.
+    #[serde(default)]
+    pub gcs_rapid_mode: Option<bool>,
+
+    /// GCS: gRPC write chunk size in bytes (v0.9.65+, requires s3dlio ≥ 0.9.65)
+    ///
+    /// Sets `S3DLIO_GRPC_WRITE_CHUNK_SIZE`. Controls the payload size of each
+    /// gRPC write frame for GCS bidi-streaming uploads (RAPID write path).
+    ///
+    /// Valid range: 256 KiB – 4 128 768 bytes (4 MiB − 64 KiB, the gRPC frame
+    /// limit).
+    ///
+    /// | Value   | Notes                                              |
+    /// |---------|----------------------------------------------------|
+    /// | 2097152 | Default (2 MiB) — safe for all workloads           |
+    /// | 4128768 | Maximum safe value — best throughput on RAPID      |
+    ///
+    /// Only meaningful for `gs://` write operations; ignored for reads.
+    #[serde(default)]
+    pub gcs_write_chunk_size_bytes: Option<u64>,
+
+    /// GCS: Google Cloud project ID (v0.9.70+)
+    ///
+    /// Sets the GCS project ID used for listing buckets. When set, takes
+    /// precedence over the `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, and
+    /// `GCS_PROJECT` environment variables.
+    ///
+    /// Set this in YAML so you don't have to export the variable on every
+    /// agent host separately.  Only needed for `sai3bench-ctl list-buckets`
+    /// and bucket-creation operations; individual object reads/writes resolve
+    /// the project from the bucket's own metadata.
+    ///
+    /// If absent, falls back to `GOOGLE_CLOUD_PROJECT` → `GCLOUD_PROJECT` →
+    /// `GCS_PROJECT` environment variables (existing behaviour).
+    #[serde(default)]
+    pub gcs_project: Option<String>,
 }
 
 fn default_s3dlio_range_threshold_mb() -> u64 {
@@ -1167,6 +1281,42 @@ impl S3dlioOptimizationConfig {
                           chunk_mb, chunk_bytes, chunk_bytes);
         } else {
             tracing::debug!("Using s3dlio auto-calculated chunk size");
+        }
+
+        // GCS: subchannel count — only if explicitly set in YAML.
+        // Smart default (channel count = concurrency) is applied later via
+        // Config::apply_gcs_defaults(), which also has access to concurrency.
+        if let Some(n) = self.gcs_channel_count {
+            s3dlio::set_gcs_channel_count(n);
+            tracing::info!("Set GCS gRPC channel count: {} (via set_gcs_channel_count)", n);
+        }
+
+        // GCS: RAPID mode override
+        if let Some(rapid) = self.gcs_rapid_mode {
+            // Mirror YAML choice to env so inherited shell environment cannot
+            // override explicit config intent (s3dlio resolves env first).
+            std::env::set_var("S3DLIO_GCS_RAPID", if rapid { "true" } else { "false" });
+            s3dlio::set_gcs_rapid_mode(Some(rapid));
+            tracing::info!(
+                "Set GCS RAPID mode: {} (via YAML -> S3DLIO_GCS_RAPID + set_gcs_rapid_mode)",
+                rapid
+            );
+        } else {
+            tracing::debug!("GCS RAPID mode: auto-detect per bucket (default)");
+        }
+
+        // GCS: write chunk size in bytes
+        if let Some(bytes) = self.gcs_write_chunk_size_bytes {
+            std::env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", bytes.to_string());
+            tracing::info!("Set GCS write chunk size: {} bytes (S3DLIO_GRPC_WRITE_CHUNK_SIZE={})", bytes, bytes);
+        }
+
+        // GCS: project ID — YAML takes precedence over environment variable
+        if let Some(ref project) = self.gcs_project {
+            std::env::set_var("GOOGLE_CLOUD_PROJECT", project);
+            tracing::info!("Set GCS project: {} (via YAML -> GOOGLE_CLOUD_PROJECT)", project);
+        } else {
+            tracing::debug!("GCS project: using GOOGLE_CLOUD_PROJECT env var fallback");
         }
     }
 }
