@@ -1,0 +1,127 @@
+# unet3d_1-host-get_gcs-rapid.yaml - 1 agent, GCS RAPID (Hyperdisk ML) storage
+# GET-ONLY / EXECUTE-ONLY VARIANT — skips prepare and consistency-wait stages.
+# Use this when the dataset (50,176 files) is already in place in the bucket.
+# For a full run (prepare + execute), see unet3d_1-host_gcs-rapid.yaml instead.
+#
+# Derived from unet3d_1-host.yaml; bucket changed to sig65-rapid1 and
+# GCS RAPID mode forced on with optimal gRPC settings.
+#
+# RAPID Storage bucket: gs://sig65-rapid1
+# Requires GCLOUD_PROJECT (or GOOGLE_CLOUD_PROJECT) to be set in the
+# environment on the controller and each agent host:
+#
+#   export GCLOUD_PROJECT=signal65-testing
+#
+# Matches rdf-bench config: width=28, depth=2, files=64 per host
+# Size distribution matches: sizes=(1m,10,2m,20,4m,30,8m,25,16m,10,32m,5)
+#
+# rdf-bench equivalent: 1 host × 50,176 files = 50,176 files total
+# Directory Structure:
+#   width=28, depth=2 → 28 × 28 = 784 leaf directories
+#   784 dirs × 64 files = 50,176 files per host
+#
+# Average file size: ~6.9 MB (weighted average from rdf-bench distribution)
+# Total dataset: ~338 GB
+
+target: "gs://sig65-rapid1/unet3d/"
+duration: "5m"       # 300s run (matches rdf-bench rd_run elapsed=300)
+concurrency: 32      # Matches rdf-bench threads=32
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# ── GCS RAPID / gRPC tuning ────────────────────────────────────────────────
+# These settings activate the RAPID (bidi-streaming gRPC) transport and tune
+# the channel + write-chunk parameters for maximum RAPID throughput.
+s3dlio_optimization:
+  # Force GCS RAPID mode ON (skip auto-detection for this known RAPID bucket).
+  # Set to false (or remove) to revert to standard GCS gRPC for comparison.
+  gcs_rapid_mode: true
+
+  # gRPC subchannel count.
+  # RAPID throughput scales with subchannel count × thread count.
+  # Rule of thumb: start with concurrency (32) and tune up in powers of 2.
+  # Typical sweet spot for RAPID: 1–2× the thread count.
+  gcs_channel_count: 32        # = 1× concurrency (start here)
+
+  # gRPC write-chunk size in bytes (bidi-streaming PUT path).
+  # 4128768 = 4 MiB − 64 KiB (maximum safe gRPC frame payload).
+  # Use 2097152 (2 MiB, the default) if you see gRPC frame errors.
+  gcs_write_chunk_size_bytes: 4128768
+
+  # Range-download optimization for large reads (GET path).
+  # sai3-bench bridges this field into GcsConfig.enable_range_engine so that
+  # objects ≥ range_threshold_mb are split into concurrent parallel ReadObject
+  # RPCs.  Note: each chunk uses ReadObject (not BidiReadObject), so RAPID
+  # bidi-streaming transport is bypassed per chunk.  Benchmark to verify
+  # net benefit for your object sizes before using in production.
+  enable_range_downloads: true
+  range_threshold_mb: 8        # Files ≥ 8 MB use parallel range requests
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+
+  # Create nested directory tree matching rdf-bench FSD:
+  # width=28, depth=2, files=64 (per host in rdf-bench)
+  # rdf-bench: 1 host creates 784×64=50,176 files
+  # sai3-bench: coordinator creates 1×50,176=50,176 files
+  directory_structure:
+    width: 28                # 28 subdirectories per level (matches rdf-bench)
+    depth: 2                 # 2 levels deep (matches rdf-bench)
+    files_per_dir: 64        # 64 files/host × 1 host = 64 files per directory
+    distribution: "bottom"   # Files only in leaf directories
+    dir_mask: "scan.d%d_w%d.dir"
+
+  # Total files calculation: 784 leaf dirs × 64 files/dir = 50,176 files
+  ensure_objects:
+    - base_uri: "gs://sig65-rapid1/unet3d/"
+      count: 50176  # 784 dirs × 64 files = 1 host × 50,176 files/host
+      fill: random
+      size_spec:
+        type: lognormal
+        mean: 7235174      # ~6.90 MB (matches rdf-bench weighted avg)
+        std_dev: 5788139   # ~5.52 MB (provides spread similar to discrete dist)
+        min: 1048576       # 1 MB minimum (matches rdf-bench)
+        max: 33554432      # 32 MB maximum (matches rdf-bench)
+      dedup_factor: 1
+      compress_factor: 1
+
+  cleanup: false  # Keep data between runs
+
+workload:
+  # Sequential reads matching rdf-bench:
+  # operation=read, fileio=sequential, xfersize=1m
+  # Each worker will select files uniformly at random
+
+  - op: get
+    path: "scan.d*_w*.dir/**/*"  # Match actual directory structure
+    weight: 100
+
+# Distributed Configuration (1 controller + 1 worker)
+distributed:
+  shared_filesystem: true  # GCS is shared across all agents
+  tree_creation_mode: coordinator  # Controller creates directory tree once
+  path_selection: random  # Random file selection for workload
+  agents:
+    - address: "10.128.0.11:7761"
+      id: "agent-1"
+
+  stages:
+  - name: preflight
+    order: 1
+    completion: validation_passed
+    timeout_secs: 300
+    type: validation
+    barrier:
+      type: all_or_nothing
+  - name: execute
+    order: 2
+    completion: duration
+    type: execute
+    barrier:
+      type: all_or_nothing
+    duration: 5m
+
