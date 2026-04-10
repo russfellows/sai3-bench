@@ -67,8 +67,8 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Listen address, e.g. 0.0.0.0:7761
-    #[arg(long, default_value = "0.0.0.0:7761")]
+    /// Listen address, e.g. 0.0.0.0:7167
+    #[arg(long, default_value = "0.0.0.0:7167")]
     listen: String,
 
     /// Enable TLS with an ephemeral self-signed certificate
@@ -227,6 +227,11 @@ impl AgentState {
             (AtStage { stage_index: 0, ready_for_next: true, stage_name }, 
              AtStage { stage_index: 0, ready_for_next: false, .. }) if stage_name == "validated" => true,
             
+            // Preflight (stage 0) always runs first; YAML stages begin at index 1.
+            // Allow direct transition from preflight executing -> first YAML stage executing.
+            (AtStage { stage_index: 0, ready_for_next: false, stage_name },
+             AtStage { stage_index: 1, ready_for_next: false, .. }) if stage_name == "preflight" => true,
+
             // Start first stage from Idle (executing mode)
             (Idle, AtStage { stage_index: 0, ready_for_next: false, .. }) => true,
             
@@ -631,9 +636,15 @@ impl Agent for AgentSvc {
             // Object storage target — do a quick bucket accessibility check
             let obj_endpoints = extract_object_storage_endpoints_from_config(&config);
             if !obj_endpoints.is_empty() {
+                // Run a write probe only when the workload has PUT/DELETE ops.
+                // Skip for GET-only workloads where write permission is irrelevant.
+                let has_write_ops = config.workload.iter().any(|w| {
+                    matches!(w.spec, sai3_bench::config::OpSpec::Put { .. }
+                                   | sai3_bench::config::OpSpec::Delete { .. })
+                });
                 sai3_bench::preflight::object_storage::validate_object_storage(
                     &obj_endpoints,
-                    false,  // read-only check
+                    has_write_ops,
                 ).await.map_err(|e| {
                     error!("Object storage validation failed: {}", e);
                     Status::internal(format!("Object storage validation error: {}", e))
@@ -2388,9 +2399,9 @@ impl Agent for AgentSvc {
                                         match distributed_config.get_sorted_stages() {
                                             Ok(stage_vec) => {
                                                 if !stage_vec.is_empty() {
-                                                    info!("Control reader: Parsed {} YAML-driven stages", stage_vec.len());
+                                                    info!("Control reader: Parsed {} YAML-driven stages (stage 0 = preflight, YAML stages start at 1)", stage_vec.len());
                                                     for (i, stage) in stage_vec.iter().enumerate() {
-                                                        info!("  Stage {}: {} ({})", i, stage.name, 
+                                                        info!("  Stage {}: {} ({})", i + 1, stage.name, 
                                                             match &stage.config {
                                                                 sai3_bench::config::StageSpecificConfig::Execute { .. } => "execute",
                                                                 sai3_bench::config::StageSpecificConfig::Prepare { .. } => "prepare",
@@ -2423,14 +2434,15 @@ impl Agent for AgentSvc {
                                     // Store stages in AgentState for use during execution
                                     agent_state_reader.set_stages(stages).await;
                                     
-                                    // v0.8.61: Transition to AtStage{0, ready_for_next: false} = "executing stage 0"
-                                    // The transition itself triggers execution - no separate START needed
+                                    // Preflight is always stage 0; YAML-driven stages begin at index 1.
+                                    // Set state to preflight executing so the state machine is consistent
+                                    // before the execution loop starts.
                                     let executing_state = WorkloadState::AtStage {
                                         stage_index: 0,
                                         stage_name: "preflight".to_string(),
                                         ready_for_next: false,  // Executing NOW
                                     };
-                                    if let Err(e) = agent_state_reader.transition_to(executing_state, "starting stage 0").await {
+                                    if let Err(e) = agent_state_reader.transition_to(executing_state, "starting preflight (stage 0)").await {
                                         error!("Control reader: Failed to transition to executing state: {}", e);
                                         let _ = tx_done.send(Err(format!("State transition failed: {}", e))).await;
                                         return;
@@ -3170,17 +3182,19 @@ async fn execute_stages_workflow(
         }
     }
 
-    // Iterate through stages in order
-    for (stage_index, stage) in stages.iter().enumerate() {
+    // Iterate through stages in order.
+    // Stage index 0 is always reserved for pre-flight; YAML stages start at 1.
+    for (i, stage) in stages.iter().enumerate() {
+        let stage_index = i + 1;  // 0 = preflight, 1+ = YAML stages
         // Check for abort before starting next stage
         tokio::select! {
             _ = abort_rx.recv() => {
-                warn!("Abort signal received during stage workflow - stopping at stage {}/{}", stage_index + 1, stages.len());
+                warn!("Abort signal received during stage workflow - stopping at stage {}/{}", stage_index, stages.len());
                 return Err("Workload aborted by user".to_string());
             }
             _ = async {} => {}
         }
-        info!("=== Stage {}/{}: {} ===", stage_index + 1, stages.len(), stage.name);
+        info!("=== Stage {}/{}: {} ===", stage_index, stages.len(), stage.name);
         
         // Transition to AtStage (ready_for_next=false, executing)
         let at_stage = WorkloadState::AtStage {
@@ -3474,7 +3488,7 @@ async fn execute_stages_workflow(
             return Err(format!("State transition failed: {}", e));
         }
         
-        info!("Stage {}/{} complete, waiting at barrier", stage_index + 1, stages.len());
+        info!("Stage {}/{} complete, waiting at barrier", stage_index, stages.len());
         
         // v0.8.27: Compute stage summary before barrier wait
         // This ensures stats are captured and sent immediately, preventing data loss
@@ -3589,9 +3603,10 @@ async fn execute_stages_workflow(
         
         // v0.8.61: Barrier coordination implementation
         // Phase 3: Wait for controller to release barrier before proceeding to next stage
-        // CRITICAL: Use NUMERIC stage index ONLY for barrier coordination
-        // Stage names are cosmetic - indices drive the state machine
-        let barrier_index = stage_index as u32;  // Cast usize to u32 for proto field
+        // CRITICAL: The barrier ID must be 0-based across YAML stages so it matches
+        // the controller's own 0-based barrier counter.  The stage_index is offset by 1
+        // (preflight = 0, YAML stages = 1+), so subtract 1 to get the barrier counter.
+        let barrier_index = (stage_index as u32).saturating_sub(1);  // 0-based barrier counter
         let mut barrier_sequence = 0u32;
         
         // Get configurable barrier timeout from stage config or use default
@@ -4270,6 +4285,36 @@ async fn main() -> Result<()> {
     
     let addr: SocketAddr = args.listen.parse().context("invalid listen addr")?;
 
+    // Pre-flight port availability check: probe-bind before handing off to tonic.
+    // This produces a clear, actionable error instead of a cryptic gRPC startup failure.
+    {
+        use std::net::TcpListener as StdTcpListener;
+        if let Err(e) = StdTcpListener::bind(addr) {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                eprintln!("ERROR: Port {} is already in use.", addr.port());
+                eprintln!();
+                eprintln!("sai3bench-agent cannot start because another process is already");
+                eprintln!("listening on {} (port {}).", addr, addr.port());
+                eprintln!();
+                eprintln!("Common causes:");
+                eprintln!("  - Another sai3bench-agent is already running on this host");
+                eprintln!("  - Another application is occupying port {}", addr.port());
+                eprintln!();
+                eprintln!("Diagnostics:");
+                eprintln!("  ss -tlnp | grep {}    # show which process is using the port", addr.port());
+                eprintln!("  lsof -i :{}           # alternative diagnostic", addr.port());
+                eprintln!();
+                eprintln!("Solutions:");
+                eprintln!("  - Stop the conflicting process, then restart sai3bench-agent");
+                eprintln!("  - Use a different port:  sai3bench-agent --listen 0.0.0.0:<port>");
+                std::process::exit(1);
+            } else {
+                return Err(anyhow::anyhow!("cannot bind to {}: {}", addr, e));
+            }
+        }
+        // Listener is dropped here; tonic will re-bind in the next step.
+    }
+
     // Decide between plaintext and TLS
     if !args.tls {
         info!("Agent starting in PLAINTEXT mode on {}", addr);
@@ -4586,7 +4631,7 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "agent-1"
       target_override: "file:///agent1/data/"
 "#;
@@ -4614,7 +4659,7 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "172.21.4.10:7761"
+    - address: "172.21.4.10:7167"
       id: "agent-1"
       concurrency_override: 16
       multi_endpoint:
@@ -4624,7 +4669,7 @@ distributed:
           - "file:///mnt/vast3/benchmark/"
           - "file:///mnt/vast4/benchmark/"
         strategy: round_robin
-    - address: "172.21.4.11:7761"
+    - address: "172.21.4.11:7167"
       id: "agent-2"
       concurrency_override: 16
       multi_endpoint:
@@ -4707,7 +4752,7 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "agent-1"
       multi_endpoint:
         endpoints:

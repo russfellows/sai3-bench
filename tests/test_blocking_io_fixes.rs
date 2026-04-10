@@ -31,7 +31,7 @@ concurrency: 32
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
   shared_filesystem: false
   tree_creation_mode: isolated
@@ -64,7 +64,7 @@ concurrency: 32
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
   shared_filesystem: false
   tree_creation_mode: isolated
@@ -111,7 +111,7 @@ concurrency: 32
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   shared_filesystem: false
   tree_creation_mode: isolated
   path_selection: random
@@ -510,7 +510,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   shared_filesystem: false
   tree_creation_mode: isolated
   path_selection: random
@@ -575,7 +575,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   shared_filesystem: false
   tree_creation_mode: isolated
   path_selection: random
@@ -612,7 +612,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   shared_filesystem: false
   tree_creation_mode: isolated
   path_selection: random

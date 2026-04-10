@@ -96,7 +96,7 @@ distributed:
   # Agent configuration: 4 agents × 4 endpoints each = 16 total
   agents:
     # Agent 1: 172.21.4.10 → Mount points 1-4
-    - address: "172.21.4.10:7761"
+    - address: "172.21.4.10:7167"
       id: "agent-1"
       concurrency_override: 16
       multi_endpoint:
@@ -108,7 +108,7 @@ distributed:
         strategy: least_connections
 
     # Agent 2: 172.21.4.11 → Mount points 5-8
-    - address: "172.21.4.11:7761"
+    - address: "172.21.4.11:7167"
       id: "agent-2"
       concurrency_override: 16
       multi_endpoint:
@@ -120,7 +120,7 @@ distributed:
         strategy: least_connections
 
     # Agent 3: 172.21.4.12 → Mount points 9-12
-    - address: "172.21.4.12:7761"
+    - address: "172.21.4.12:7167"
       id: "agent-3"
       concurrency_override: 16
       multi_endpoint:
@@ -132,7 +132,7 @@ distributed:
         strategy: least_connections
 
     # Agent 4: 172.21.4.13 → Mount points 13-16
-    - address: "172.21.4.13:7761"
+    - address: "172.21.4.13:7167"
       id: "agent-4"
       concurrency_override: 16
       multi_endpoint:

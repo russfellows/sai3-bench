@@ -1,0 +1,58 @@
+# Pre-flight write-probe test against a real S3 target (MinIO at 172.16.1.40:9000)
+# Single agent on localhost, tiny PUT+GET workload so the write probe runs.
+# Credentials and endpoint come from .env (AWS_ACCESS_KEY_ID, AWS_ENDPOINT_URL, AWS_CA_BUNDLE)
+
+target: "s3://test-bucket/"
+concurrency: 2
+duration: "10s"
+force_overwrite: true
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: false
+  force_overwrite: true
+  ensure_objects:
+    - base_uri: "s3://test-bucket/preflight-test/"
+      count: 4
+      fill: zero
+      size_spec: 4096
+      dedup_factor: 1
+      compress_factor: 1
+  cleanup: false
+
+workload:
+  - op: put
+    path: "s3://test-bucket/preflight-test/"
+    object_size: 4096
+    weight: 50
+  - op: get
+    path: "s3://test-bucket/preflight-test/"
+    weight: 50
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+
+  barrier_sync:
+    enabled: true
+    default_heartbeat_interval: 10
+    default_missed_threshold: 3
+    default_query_timeout: 10
+    default_query_retries: 2
+
+  stages:
+    - name: "prepare"
+      order: 1
+      completion: tasks_done
+      type: prepare
+
+    - name: "execute"
+      order: 2
+      completion: duration
+      type: execute
+      duration: 10s
+
+  agents:
+    - address: "localhost:7167"
+      id: "agent-1"

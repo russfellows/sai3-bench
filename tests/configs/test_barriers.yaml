@@ -28,9 +28,9 @@ distributed:
   path_selection: exclusive
   
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-2"
   
   # ENABLE BARRIER SYNCHRONIZATION

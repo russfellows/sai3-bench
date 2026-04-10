@@ -19,34 +19,34 @@ concurrency: 32  # Per VM, 256 total (8 VMs × 32)
 # Scale-out: 8 VMs, 1 container each
 distributed:
   agents:
-    - address: "vm1.example.com:7761"
+    - address: "vm1.example.com:7167"
       id: "agent-1"
       env:
         RUST_LOG: "info"
         AWS_PROFILE: "benchmark"
     
-    - address: "vm2.example.com:7761"
+    - address: "vm2.example.com:7167"
       id: "agent-2"
       env:
         RUST_LOG: "info"
         AWS_PROFILE: "benchmark"
     
-    - address: "vm3.example.com:7761"
+    - address: "vm3.example.com:7167"
       id: "agent-3"
     
-    - address: "vm4.example.com:7761"
+    - address: "vm4.example.com:7167"
       id: "agent-4"
     
-    - address: "vm5.example.com:7761"
+    - address: "vm5.example.com:7167"
       id: "agent-5"
     
-    - address: "vm6.example.com:7761"
+    - address: "vm6.example.com:7167"
       id: "agent-6"
     
-    - address: "vm7.example.com:7761"
+    - address: "vm7.example.com:7167"
       id: "agent-7"
     
-    - address: "vm8.example.com:7761"
+    - address: "vm8.example.com:7167"
       id: "agent-8"
   
   ssh:

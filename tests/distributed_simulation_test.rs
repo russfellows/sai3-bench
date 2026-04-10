@@ -16,7 +16,7 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "vm1.example.com:7761"
+    - address: "vm1.example.com:7167"
       id: "agent-1"
     
     - address: "vm2.example.com"  # No port
@@ -61,9 +61,9 @@ workload:
         })
         .collect();
     
-    assert_eq!(resolved_addrs[0], "vm1.example.com:7761");
+    assert_eq!(resolved_addrs[0], "vm1.example.com:7167");
     assert_eq!(resolved_addrs[1], "vm2.example.com:8888");
-    assert_eq!(resolved_addrs[2], "10.0.1.50:7761");  // Uses default port
+    assert_eq!(resolved_addrs[2], "10.0.1.50:7167");  // Uses default port
     
     println!("✓ Agent addresses resolved correctly:");
     for (idx, addr) in resolved_addrs.iter().enumerate() {
@@ -85,16 +85,16 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "agent1:7761"
+    - address: "agent1:7167"
       id: "reader"
       # Uses defaults: target and concurrency from base config
     
-    - address: "agent2:7761"
+    - address: "agent2:7167"
       id: "writer"
       target_override: "s3://bucket-2/data/"
       concurrency_override: 128
     
-    - address: "agent3:7761"
+    - address: "agent3:7167"
       id: "local"
       target_override: "file:///mnt/nvme/"
       concurrency_override: 32
@@ -154,12 +154,12 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "agent1:7761"
+    - address: "agent1:7167"
       env:
         AWS_PROFILE: "reader"
         RUST_LOG: "info"
     
-    - address: "agent2:7761"
+    - address: "agent2:7167"
       env:
         AWS_PROFILE: "writer"
         RUST_LOG: "debug"
@@ -202,12 +202,12 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "agent1:7761"
+    - address: "agent1:7167"
       volumes:
         - "/mnt/nvme:/data"
         - "/tmp/results:/results:ro"
     
-    - address: "agent2:7761"
+    - address: "agent2:7167"
       volumes:
         - "/mnt/ssd:/mnt/ssd"
 
@@ -248,9 +248,9 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "agent1:7761"
-    - address: "agent2:7761"
-    - address: "agent3:7761"
+    - address: "agent1:7167"
+    - address: "agent2:7167"
+    - address: "agent3:7167"
   
   path_template: "agent-{id}/"
 
@@ -295,7 +295,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     
     // Simulate controller logic
-    let cli_agents = vec!["agent1:7761".to_string(), "agent2:7761".to_string()];
+    let cli_agents = vec!["agent1:7167".to_string(), "agent2:7167".to_string()];
     
     let (agent_addrs, ssh_deployment) = if let Some(ref dist_config) = config.distributed {
         // Would use config.distributed.agents
@@ -327,21 +327,21 @@ distributed:
   tree_creation_mode: isolated
   path_selection: random
   agents:
-    - address: "cloud-agent-1:7761"
+    - address: "cloud-agent-1:7167"
       id: "s3-1"
       # Uses default S3 target
     
-    - address: "cloud-agent-2:7761"
+    - address: "cloud-agent-2:7167"
       id: "s3-2"
       target_override: "s3://bucket-2/"
     
-    - address: "local-agent:7761"
+    - address: "local-agent:7167"
       id: "local"
       target_override: "file:///mnt/local/"
       volumes:
         - "/mnt/local:/mnt/local"
     
-    - address: "azure-agent:7761"
+    - address: "azure-agent:7167"
       id: "azure"
       target_override: "az://storage-account/container/"
       env:
@@ -401,7 +401,7 @@ distributed:
   agents:
     - address: "vm1.example.com"
       id: "agent-1"
-      listen_port: 7761
+      listen_port: 7167
       env:
         RUST_LOG: "info"
         AWS_PROFILE: "test"
@@ -465,7 +465,7 @@ workload:
     assert!(full_cmd.contains("-v /data:/data"));
     assert!(full_cmd.contains("--cpus=2"));
     assert!(full_cmd.contains("sai3bench:v0.6.11"));
-    assert!(full_cmd.contains("--listen 0.0.0.0:7761"));
+    assert!(full_cmd.contains("--listen 0.0.0.0:7167"));
     
     println!("✓ Docker command built correctly");
     

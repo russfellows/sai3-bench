@@ -6,6 +6,52 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.88] - 2026-04-10
+
+### Changed
+
+- **Default agent port changed from 7761 to 7167** to avoid conflicts with other
+  tools that also use port 7761.  When a port conflict exists, agents silently fail
+  to start and the controller reports "no response" from all agents.
+  - New default: `sai3bench-agent --listen 0.0.0.0:7167`
+  - Sequential ports for multi-agent-per-host setups: 7167, 7168, 7169, … 7174
+  - All YAML configs, example files, documentation, and scripts updated accordingly
+  - **Migration**: update any existing YAML configs or firewall rules that reference
+    port 7761 → 7167 (or 7762 → 7168, etc.)
+
+### Added
+
+- **Port-in-use detection on agent startup** — `sai3bench-agent` now probes the
+  configured port before handing off to the gRPC server.  If the port is already
+  occupied, a clear diagnostic message is printed showing the port number, likely
+  causes, and remediation steps, then the process exits with a non-zero code instead
+  of producing a cryptic tonic startup failure.
+
+- **Preflight write probe** — when the workload contains any PUT or DELETE
+  operations, `validate_object_storage()` now performs a write-probe cycle on each
+  configured endpoint before the benchmark begins:
+  1. PUT a fixed 24-byte sentinel string (`sai3bench-write-probe-v1`) under the key
+     `sai3bench-preflight-probe-<8hex>.bin` (random hex suffix avoids collisions
+     between concurrent probes).
+  2. GET the object and verify the content byte-for-byte.
+  3. DELETE the probe object.
+  All probe failures are reported as `WARNING` (not hard errors), so the benchmark
+  still runs if an endpoint cannot be verified — operators decide whether to abort.
+  Read-only workloads skip the write probe entirely.
+
+- **Preflight stage always occupies stage 0; YAML stages start at 1** — the agent
+  state machine now reserves index 0 for the preflight validation stage.  The first
+  YAML-defined stage (e.g. `prepare`) is stage 1, the second is stage 2, and so on.
+  This makes the log output and controller/agent stage coordination unambiguous:
+  - Log header: `=== Stage 1/N: prepare ===` (not `Stage 0`)
+  - Barrier IDs sent to the controller are 0-based relative to the YAML stages
+    (stage 1 → barrier 0, stage 2 → barrier 1, …) to stay compatible with the
+    controller's own counter.
+  - New state transition rule: `{0,"preflight",false} → {1,*,false}` is explicitly
+    allowed, which was previously rejected as a same-index conflict.
+
+---
+
 ## [0.8.86] - 2026-03-24
 
 ### Fixed
@@ -213,7 +259,7 @@ All notable changes to sai3-bench are documented in this file.
 
 - Verified config dry-run paths still pass after RPC/schema changes:
   - `sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run`
-  - `sai3bench-ctl --agents 127.0.0.1:7761 run --config tests/configs/custom_stage_test.yaml --dry-run`
+  - `sai3bench-ctl --agents 127.0.0.1:7167 run --config tests/configs/custom_stage_test.yaml --dry-run`
 
 ### Fixed
 
@@ -1080,14 +1126,14 @@ multi_endpoint:
 ```yaml
 distributed:
   agents:
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       multi_endpoint:
         endpoints:
           - s3://192.168.1.10:9000/bucket/
           - s3://192.168.1.11:9000/bucket/
     
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       multi_endpoint:
         endpoints:

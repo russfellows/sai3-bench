@@ -154,7 +154,7 @@ distributed:
   
   agents:
     # Agent 1: 172.21.4.10 → S3 Endpoints 1-2
-    - address: "172.21.4.10:7761"
+    - address: "172.21.4.10:7167"
       id: "agent-1"
       concurrency_override: 16
       multi_endpoint:
@@ -164,7 +164,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: 172.21.4.11 → S3 Endpoints 3-4
-    - address: "172.21.4.11:7761"
+    - address: "172.21.4.11:7167"
       id: "agent-2"
       concurrency_override: 16
       multi_endpoint:
@@ -174,7 +174,7 @@ distributed:
         strategy: round_robin
     
     # Agent 3: 172.21.4.12 → S3 Endpoints 5-6
-    - address: "172.21.4.12:7761"
+    - address: "172.21.4.12:7167"
       id: "agent-3"
       concurrency_override: 16
       multi_endpoint:
@@ -184,7 +184,7 @@ distributed:
         strategy: round_robin
     
     # Agent 4: 172.21.4.13 → S3 Endpoints 7-8
-    - address: "172.21.4.13:7761"
+    - address: "172.21.4.13:7167"
       id: "agent-4"
       concurrency_override: 16
       multi_endpoint:

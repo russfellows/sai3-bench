@@ -45,7 +45,7 @@ Comprehensive documentation for sai3-bench - a high-performance distributed I/O 
 distributed:
   agents:
     # Agent 1: ONLY endpoints A & B
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-dc-a"
       multi_endpoint:
         endpoints:
@@ -54,7 +54,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: ONLY endpoints C & D
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-dc-b"
       multi_endpoint:
         endpoints:
@@ -75,9 +75,9 @@ distributed:
 
 ```
 Controller (sai3bench-ctl)
-    ├─→ Agent 1 (host1:7761)
-    ├─→ Agent 2 (host2:7761)
-    └─→ Agent N (hostN:7761)
+    ├─→ Agent 1 (host1:7167)
+    ├─→ Agent 2 (host2:7167)
+    └─→ Agent N (hostN:7167)
             ↓
     Storage Backend (S3/Azure/GCS/File)
 ```
@@ -85,7 +85,7 @@ Controller (sai3bench-ctl)
 **Quick start**:
 ```bash
 # Start agents on each host
-sai3bench-agent --listen 0.0.0.0:7761
+sai3bench-agent --listen 0.0.0.0:7167
 
 # Run distributed test
 sai3bench-ctl run --config distributed-test.yaml

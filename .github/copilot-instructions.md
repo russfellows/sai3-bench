@@ -344,11 +344,11 @@ STATS_INTERVAL: Duration = 1s
 
 ```bash
 # Start 2 agents with verbose logging (RECOMMENDED for debugging):
-./scripts/start_local_agents.sh 2 7761 "-vv"
+./scripts/start_local_agents.sh 2 7167 "-vv"
 
 # Parameters:
 # 1. NUM_AGENTS (default: 2)
-# 2. BASE_PORT (default: 7761) 
+# 2. BASE_PORT (default: 7167) 
 # 3. VERBOSE flag (default: "-v", use "-vv" for debugging)
 # 4. LOG_DIR (default: "/tmp")
 ```
@@ -469,15 +469,15 @@ Added 21 new tests in `tests/distributed_config_tests.rs`:
 **Starting agents** (for distributed testing):
 ```bash
 # CORRECT - agent uses --listen, NOT --port or --id
-./target/release/sai3bench-agent --listen 0.0.0.0:7761 -vv
-./target/release/sai3bench-agent --listen 0.0.0.0:7762 -vv
+./target/release/sai3bench-agent --listen 0.0.0.0:7167 -vv
+./target/release/sai3bench-agent --listen 0.0.0.0:7168 -vv
 
 # WRONG - these flags DO NOT EXIST
-./target/release/sai3bench-agent --port 7761 --id agent-1    # ERROR!
+./target/release/sai3bench-agent --port 7167 --id agent-1    # ERROR!
 ```
 
 **Agent options**:
-- `--listen <ADDR:PORT>` - Listen address (default: 0.0.0.0:7761)
+- `--listen <ADDR:PORT>` - Listen address (default: 0.0.0.0:7167)
 - `-v`, `-vv`, `-vvv` - Verbosity levels (use -vv for debugging)
 - `--tls` - Enable TLS with ephemeral self-signed certificate
 - `--tls-domain <DOMAIN>` - Subject DNS name for cert (default: localhost)
@@ -488,9 +488,9 @@ Added 21 new tests in `tests/distributed_config_tests.rs`:
 ```yaml
 distributed:
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "agent-1"              # Agent ID defined HERE
-    - address: "127.0.0.1:7762"
+    - address: "127.0.0.1:7168"
       id: "agent-2"              # Agent ID defined HERE
 ```
 
@@ -500,7 +500,7 @@ distributed:
 ./target/release/sai3bench-ctl run --config test.yaml
 
 # Explicit agents (overrides config)
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 run --config test.yaml
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 run --config test.yaml
 ```
 
 ### Removed Binaries (v0.6.9+)
@@ -696,13 +696,13 @@ rg "gRPC" proto/
 ### Distributed Mode Testing
 ```bash
 # Terminal 1: Start agent
-./target/release/sai3bench-agent --listen 127.0.0.1:7761
+./target/release/sai3bench-agent --listen 127.0.0.1:7167
 
 # Terminal 2: Test connectivity
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7167 ping
 
 # Terminal 2: Run distributed workload (v0.6.0+)
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/distributed_mixed_test.yaml --start-delay 2
 ```
 
@@ -787,11 +787,11 @@ Look for `TODO: Remove legacy s3_utils imports` - these indicate partial migrati
 ### Usage Pattern
 ```bash
 # Start multiple agents
-sai3bench-agent --listen 0.0.0.0:7761  # On host 1
-sai3bench-agent --listen 0.0.0.0:7761  # On host 2
+sai3bench-agent --listen 0.0.0.0:7167  # On host 1
+sai3bench-agent --listen 0.0.0.0:7167  # On host 2
 
 # Run coordinated workload
-sai3bench-ctl --insecure --agents host1:7761,host2:7761 \
+sai3bench-ctl --insecure --agents host1:7167,host2:7167 \
     run --config workload.yaml --start-delay 2
 ```
 

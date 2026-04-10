@@ -22,7 +22,7 @@ distributed:
   
   agents:
     # Agent 1: Uses endpoints A & B only
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-dc-a"
       concurrency_override: 8
       multi_endpoint:
@@ -32,7 +32,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: Uses endpoints C & D only
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-dc-b"
       concurrency_override: 8
       multi_endpoint:

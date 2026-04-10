@@ -14,13 +14,13 @@ The agent binary supports an optional environment variable `SAI3_AGENT_CLOCK_SKE
 
 ```bash
 # Agent with clock 5 seconds ahead
-SAI3_AGENT_CLOCK_SKEW_MS=5000 ./target/release/sai3bench-agent --listen 0.0.0.0:7761
+SAI3_AGENT_CLOCK_SKEW_MS=5000 ./target/release/sai3bench-agent --listen 0.0.0.0:7167
 
 # Agent with clock 3 seconds behind (negative value)
-SAI3_AGENT_CLOCK_SKEW_MS=-3000 ./target/release/sai3bench-agent --listen 0.0.0.0:7762
+SAI3_AGENT_CLOCK_SKEW_MS=-3000 ./target/release/sai3bench-agent --listen 0.0.0.0:7168
 
 # Agent with no skew (normal operation)
-./target/release/sai3bench-agent --listen 0.0.0.0:7763
+./target/release/sai3bench-agent --listen 0.0.0.0:7169
 ```
 
 When an agent starts with this variable set, it will:
@@ -56,10 +56,10 @@ This script:
 
 Controller should log messages like:
 ```
-Agent 127.0.0.1:7761 clock offset: 5000123456 ns (5000.12 ms)
-Agent 127.0.0.1:7762 clock offset: -2999876543 ns (-2999.88 ms)
-Agent 127.0.0.1:7763 clock offset: 1000234567 ns (1000.23 ms)
-WARNING: Agent 127.0.0.1:7761 offset > 1000ms, may indicate clock skew
+Agent 127.0.0.1:7167 clock offset: 5000123456 ns (5000.12 ms)
+Agent 127.0.0.1:7168 clock offset: -2999876543 ns (-2999.88 ms)
+Agent 127.0.0.1:7169 clock offset: 1000234567 ns (1000.23 ms)
+WARNING: Agent 127.0.0.1:7167 offset > 1000ms, may indicate clock skew
 ```
 
 All agents should start their workloads within milliseconds of each other (in absolute epoch time), despite their different clock offsets.

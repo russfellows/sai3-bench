@@ -314,11 +314,11 @@ None of these are plausible for a normally functioning system.
 
 ```bash
 # Start agents on all 4 nodes (172.21.4.10-13)
-[on each agent node]$ sai3bench-agent --listen 0.0.0.0:7761
+[on each agent node]$ sai3bench-agent --listen 0.0.0.0:7167
 
 # Run distributed test from controller
 $ ./target/release/sai3bench-ctl \
-    --agents 172.21.4.10:7761,172.21.4.11:7761,172.21.4.12:7761,172.21.4.13:7761 \
+    --agents 172.21.4.10:7167,172.21.4.11:7167,172.21.4.12:7167,172.21.4.13:7167 \
     run --config ./tests/configs/distributed_4node_16endpoint_test.yaml
 
 # Monitor progress (in separate terminal)

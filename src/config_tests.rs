@@ -270,14 +270,14 @@ mod barrier_defaults_tests {
     ) -> DistributedConfig {
         DistributedConfig {
             agents: vec![AgentConfig {
-                address: "127.0.0.1:7761".to_string(),
+                address: "127.0.0.1:7167".to_string(),
                 id: Some("agent-1".to_string()),
                 target_override: None,
                 concurrency_override: None,
                 env: HashMap::new(),
                 volumes: Vec::new(),
                 path_template: None,
-                listen_port: 7761,
+                listen_port: 7167,
                 multi_endpoint: None,
                 kv_cache_dir: None,
             }],

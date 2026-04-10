@@ -1463,7 +1463,7 @@ pub struct DistributedConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AgentConfig {
     /// Agent address (host:port) or hostname (for SSH deployment)
-    /// Examples: "node1.example.com:7761", "10.0.1.50:7761", "node1" (SSH mode)
+    /// Examples: "node1.example.com:7167", "10.0.1.50:7167", "node1" (SSH mode)
     pub address: String,
     
     /// Optional friendly identifier (default: derived from address)
@@ -1495,7 +1495,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub path_template: Option<String>,
     
-    /// Listen port for agent (SSH mode only, default: 7761)
+    /// Listen port for agent (SSH mode only, default: 7167)
     #[serde(default = "default_agent_port")]
     pub listen_port: u16,
     
@@ -1585,7 +1585,7 @@ fn default_path_template() -> String {
 }
 
 fn default_agent_port() -> u16 {
-    7761
+    7167
 }
 
 fn default_ssh_timeout() -> u64 {

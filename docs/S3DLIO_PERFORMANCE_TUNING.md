@@ -189,9 +189,9 @@ s3dlio_optimization:
 
 distributed:
   agents:
-    - address: "agent1:7761"
+    - address: "agent1:7167"
       id: "agent-1"
-    - address: "agent2:7761"
+    - address: "agent2:7167"
       id: "agent-2"
 
 workload:
@@ -219,7 +219,7 @@ sai3-bench run --config workload.yaml
 [Service]
 Environment="S3DLIO_ENABLE_RANGE_OPTIMIZATION=1"
 Environment="S3DLIO_RANGE_THRESHOLD_MB=64"
-ExecStart=/usr/local/bin/sai3bench-agent --listen 0.0.0.0:7761
+ExecStart=/usr/local/bin/sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 ---

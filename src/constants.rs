@@ -237,8 +237,10 @@ pub const PERF_LOG_HEADER: &str = "agent_id\ttimestamp_epoch_ms\telapsed_s\tstag
 // Distributed Testing Defaults
 // =============================================================================
 
-/// Default gRPC port for agents
-pub const DEFAULT_AGENT_PORT: u16 = 7760;
+/// Default gRPC port for agents.
+/// NOTE: Changed from 7761 to 7167 in v0.8.88 to avoid potential conflicts
+/// with other benchmark tools that also use port 7761.
+pub const DEFAULT_AGENT_PORT: u16 = 7167;
 
 /// Default coordinated start delay (seconds)
 /// User can override via config: distributed.start_delay

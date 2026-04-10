@@ -20,10 +20,10 @@ cargo build --release --bin sai3bench-agent --bin sai3bench-ctl
 echo ""
 
 # Start 2 test agents with verbose logging
-echo "2. Starting 2 test agents on ports 7761, 7762 with verbose logging..."
-./target/release/sai3bench-agent --listen 0.0.0.0:7761 -vv > /tmp/agent1_ctrlc.log 2>&1 &
+echo "2. Starting 2 test agents on ports 7167, 7168 with verbose logging..."
+./target/release/sai3bench-agent --listen 0.0.0.0:7167 -vv > /tmp/agent1_ctrlc.log 2>&1 &
 AGENT1_PID=$!
-./target/release/sai3bench-agent --listen 0.0.0.0:7762 -vv > /tmp/agent2_ctrlc.log 2>&1 &
+./target/release/sai3bench-agent --listen 0.0.0.0:7168 -vv > /tmp/agent2_ctrlc.log 2>&1 &
 AGENT2_PID=$!
 
 # Wait for agents to start
@@ -60,7 +60,7 @@ echo ""
 
 # Run controller in background and capture PID
 ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_abort_2agents.yaml > /tmp/controller_ctrlc.log 2>&1 &
 CONTROLLER_PID=$!
 
@@ -104,7 +104,7 @@ echo ""
 # Test 2: Verify agents can accept new workload after abort
 echo "6. Test 2: Running new workload to verify agents recovered..."
 timeout 30s ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_abort_2agents.yaml 2>&1 | tail -20 || true
 
 echo ""

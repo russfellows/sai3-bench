@@ -19,7 +19,7 @@ distributed:
   
   agents:
     # Test Host 1: Targets Node 1 NIC A + Node 2 NIC A
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       multi_endpoint:
         strategy: round_robin
@@ -28,7 +28,7 @@ distributed:
           - s3://192.168.1.12:9000/bucket/  # Node 2 NIC A
     
     # Test Host 2: Targets Node 1 NIC B + Node 2 NIC B
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       multi_endpoint:
         strategy: round_robin
@@ -37,7 +37,7 @@ distributed:
           - s3://192.168.1.13:9000/bucket/  # Node 2 NIC B
     
     # Test Host 3: Targets Node 3 NIC A + Node 4 NIC A
-    - address: "testhost3:7761"
+    - address: "testhost3:7167"
       id: agent3
       multi_endpoint:
         strategy: round_robin
@@ -46,7 +46,7 @@ distributed:
           - s3://192.168.1.16:9000/bucket/  # Node 4 NIC A
     
     # Test Host 4: Targets Node 3 NIC B + Node 4 NIC B
-    - address: "testhost4:7761"
+    - address: "testhost4:7167"
       id: agent4
       multi_endpoint:
         strategy: round_robin

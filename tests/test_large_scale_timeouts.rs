@@ -272,7 +272,7 @@ tree_creation_mode: isolated
 path_selection: random
 
 agents:
-  - address: "172.21.4.10:7761"
+  - address: "172.21.4.10:7167"
     id: "agent-1"
     concurrency_override: 16
     multi_endpoint:
@@ -283,7 +283,7 @@ agents:
         - "file:///mnt/filesys4/benchmark/"
       strategy: least_connections
 
-  - address: "172.21.4.11:7761"
+  - address: "172.21.4.11:7167"
     id: "agent-2"
     concurrency_override: 16
     multi_endpoint:
@@ -294,7 +294,7 @@ agents:
         - "file:///mnt/filesys8/benchmark/"
       strategy: least_connections
 
-  - address: "172.21.4.12:7761"
+  - address: "172.21.4.12:7167"
     id: "agent-3"
     concurrency_override: 16
     multi_endpoint:
@@ -305,7 +305,7 @@ agents:
         - "file:///mnt/filesys12/benchmark/"
       strategy: least_connections
 
-  - address: "172.21.4.13:7761"
+  - address: "172.21.4.13:7167"
     id: "agent-4"
     concurrency_override: 16
     multi_endpoint:

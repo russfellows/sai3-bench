@@ -27,16 +27,16 @@ done
 echo
 
 # Start two agents with operation logging
-echo "Starting agent-1 on port 7761..."
+echo "Starting agent-1 on port 7167..."
 ./target/release/sai3bench-agent \
-    --listen 0.0.0.0:7761 \
+    --listen 0.0.0.0:7167 \
     --op-log /tmp/agent-1-oplog.tsv.zst \
     > /tmp/agent-1.log 2>&1 &
 AGENT1_PID=$!
 
-echo "Starting agent-2 on port 7762..."
+echo "Starting agent-2 on port 7168..."
 ./target/release/sai3bench-agent \
-    --listen 0.0.0.0:7762 \
+    --listen 0.0.0.0:7168 \
     --op-log /tmp/agent-2-oplog.tsv.zst \
     > /tmp/agent-2.log 2>&1 &
 AGENT2_PID=$!
@@ -58,7 +58,7 @@ EOF
 
 echo "Running distributed workload..."
 ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config /tmp/test-client-id-config.yaml \
     --start-delay 0
 echo

@@ -381,8 +381,8 @@ concurrency: 8
 distributed:
   role: controller
   agents:
-    - address: "host1:7761"
-    - address: "host2:7761"
+    - address: "host1:7167"
+    - address: "host2:7167"
 
 workload:
   - op: get

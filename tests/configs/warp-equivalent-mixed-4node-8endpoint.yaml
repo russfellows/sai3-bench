@@ -35,8 +35,8 @@
 #   1. Set credentials in environment on each agent host:
 #        export AWS_ACCESS_KEY_ID=<key>
 #        export AWS_SECRET_ACCESS_KEY=<secret>
-#   2. sai3bench-agent running on each client node (port 7761):
-#        sai3bench-agent --listen 0.0.0.0:7761
+#   2. sai3bench-agent running on each client node (port 7167):
+#        sai3bench-agent --listen 0.0.0.0:7167
 #   3. Update agent IPs below if they differ from 172.21.4.10-13
 #   4. TLS is disabled (HTTP endpoints on port 80)
 #
@@ -119,7 +119,7 @@ distributed:
     timeout_seconds: 120
 
   agents:
-    - address: "172.21.4.10:7761"
+    - address: "172.21.4.10:7167"
       id: "agent-1"
       concurrency_override: 24
       multi_endpoint:
@@ -134,7 +134,7 @@ distributed:
           - "s3://10.9.0.27:80/s3-bucket1/"
           - "s3://10.9.0.28:80/s3-bucket1/"
 
-    - address: "172.21.4.11:7761"
+    - address: "172.21.4.11:7167"
       id: "agent-2"
       concurrency_override: 24
       multi_endpoint:
@@ -149,7 +149,7 @@ distributed:
           - "s3://10.9.0.27:80/s3-bucket1/"
           - "s3://10.9.0.28:80/s3-bucket1/"
 
-    - address: "172.21.4.12:7761"
+    - address: "172.21.4.12:7167"
       id: "agent-3"
       concurrency_override: 24
       multi_endpoint:
@@ -164,7 +164,7 @@ distributed:
           - "s3://10.9.0.27:80/s3-bucket1/"
           - "s3://10.9.0.28:80/s3-bucket1/"
 
-    - address: "172.21.4.13:7761"
+    - address: "172.21.4.13:7167"
       id: "agent-4"
       concurrency_override: 24
       multi_endpoint:

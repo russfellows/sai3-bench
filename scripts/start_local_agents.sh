@@ -5,7 +5,7 @@ set -e
 
 # Configuration
 NUM_AGENTS=${1:-2}
-BASE_PORT=${2:-7761}
+BASE_PORT=${2:-7167}
 VERBOSE=${3:-"-v"}
 LOG_DIR=${4:-"/tmp"}
 OP_LOG=${5:-""}  # Optional: oplog base path (e.g., /tmp/agent-oplogs/oplog.tsv.zst)

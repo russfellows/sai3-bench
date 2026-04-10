@@ -184,7 +184,7 @@ Agent continuously listens for control messages:
 
 ```bash
 # Start 2 local agents with verbose logging
-bash scripts/start_local_agents.sh 2 7761 -v
+bash scripts/start_local_agents.sh 2 7167 -v
 ```
 
 ### Run Controller
@@ -192,7 +192,7 @@ bash scripts/start_local_agents.sh 2 7761 -v
 ```bash
 # Run distributed test
 ./target/release/sai3bench-ctl \
-  --agents 127.0.0.1:7761,127.0.0.1:7762 \
+  --agents 127.0.0.1:7167,127.0.0.1:7168 \
   run --config tests/configs/local_test_2agents.yaml
 ```
 

@@ -36,16 +36,16 @@ TEST_DIR="/tmp/sai3-clock-test-$$"
 mkdir -p "$TEST_DIR"
 
 # Start agents with different clock skews
-echo "Starting agent 1 (port 7761, +5s skew)..."
-SAI3_AGENT_CLOCK_SKEW_MS=5000 "$AGENT_BIN" --listen 127.0.0.1:7761 > "$TEST_DIR/agent1.log" 2>&1 &
+echo "Starting agent 1 (port 7167, +5s skew)..."
+SAI3_AGENT_CLOCK_SKEW_MS=5000 "$AGENT_BIN" --listen 127.0.0.1:7167 > "$TEST_DIR/agent1.log" 2>&1 &
 AGENT1_PID=$!
 
-echo "Starting agent 2 (port 7762, -3s skew)..."
-SAI3_AGENT_CLOCK_SKEW_MS=-3000 "$AGENT_BIN" --listen 127.0.0.1:7762 > "$TEST_DIR/agent2.log" 2>&1 &
+echo "Starting agent 2 (port 7168, -3s skew)..."
+SAI3_AGENT_CLOCK_SKEW_MS=-3000 "$AGENT_BIN" --listen 127.0.0.1:7168 > "$TEST_DIR/agent2.log" 2>&1 &
 AGENT2_PID=$!
 
-echo "Starting agent 3 (port 7763, +1s skew)..."
-SAI3_AGENT_CLOCK_SKEW_MS=1000 "$AGENT_BIN" --listen 127.0.0.1:7763 > "$TEST_DIR/agent3.log" 2>&1 &
+echo "Starting agent 3 (port 7169, +1s skew)..."
+SAI3_AGENT_CLOCK_SKEW_MS=1000 "$AGENT_BIN" --listen 127.0.0.1:7169 > "$TEST_DIR/agent3.log" 2>&1 &
 AGENT3_PID=$!
 
 # Wait for agents to start
@@ -75,9 +75,9 @@ workload:
 EOF
 
 echo "Validating config with --dry-run..."
-if ! "$CONTROLLER_BIN" --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 run --config "$TEST_DIR/test_config.yaml" --dry-run 2>&1 | grep -q "Configuration is valid"; then
+if ! "$CONTROLLER_BIN" --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 run --config "$TEST_DIR/test_config.yaml" --dry-run 2>&1 | grep -q "Configuration is valid"; then
     echo "ERROR: Config validation failed"
-    "$CONTROLLER_BIN" --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 run --config "$TEST_DIR/test_config.yaml" --dry-run
+    "$CONTROLLER_BIN" --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 run --config "$TEST_DIR/test_config.yaml" --dry-run
     exit 1
 fi
 echo "Config validated successfully"
@@ -88,7 +88,7 @@ echo "Controller will calculate clock offsets and coordinate start"
 echo ""
 
 "$CONTROLLER_BIN" \
-    --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 \
     run --config "$TEST_DIR/test_config.yaml" \
     2>&1 | tee "$TEST_DIR/controller.log"
 

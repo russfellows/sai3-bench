@@ -3,7 +3,7 @@
 #  2) valid sai3bench-ctl autotune --config input (via explicit autotune block)
 # Usage:
 #   ./target/release/sai3bench-ctl \
-#     --agents host1:7761,host2:7761 \
+#     --agents host1:7167,host2:7167 \
 #     autotune --config examples/distributed-autotune-minimal.yaml
 #   ./target/release/sai3-bench run --config examples/distributed-autotune-minimal.yaml --dry-run
 

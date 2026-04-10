@@ -14,15 +14,15 @@ rm -rf /tmp/sai3bench-test/ sai3-*
 
 # Start 2 agents
 echo "Starting 2 agents..."
-./target/release/sai3bench-agent --listen 127.0.0.1:7761 >/dev/null 2>&1 &
+./target/release/sai3bench-agent --listen 127.0.0.1:7167 >/dev/null 2>&1 &
 PID1=$!
-./target/release/sai3bench-agent --listen 127.0.0.1:7762 >/dev/null 2>&1 &
+./target/release/sai3bench-agent --listen 127.0.0.1:7168 >/dev/null 2>&1 &
 PID2=$!
 sleep 2
 
 # Run distributed workload
 echo "Running distributed workload..."
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/distributed_put_test.yaml --start-delay 3
 
 # Get the result directory

@@ -19,8 +19,8 @@
 target: "gs://benchmark-bucket/"
 distributed:
   agents:
-    - { address: "vm1:7761", id: "agent-1" }
-    - { address: "vm2:7761", id: "agent-2" }
+    - { address: "vm1:7167", id: "agent-1" }
+    - { address: "vm2:7167", id: "agent-2" }
     # ... vm3-vm8
 ```
 
@@ -35,8 +35,8 @@ distributed:
 target: "gs://benchmark-bucket/"
 distributed:
   agents:
-    - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
-    - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
+    - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+    - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
     # ... c3-c8
 ```
 
@@ -49,10 +49,10 @@ distributed:
 # Scale-Out: VMs in different regions
 distributed:
   agents:
-    - { address: "us-east-vm:7761", id: "us-east" }
-    - { address: "us-west-vm:7761", id: "us-west" }
-    - { address: "eu-west-vm:7761", id: "eu-west" }
-    - { address: "ap-south-vm:7761", id: "ap-south" }
+    - { address: "us-east-vm:7167", id: "us-east" }
+    - { address: "us-west-vm:7167", id: "us-west" }
+    - { address: "eu-west-vm:7167", id: "eu-west" }
+    - { address: "ap-south-vm:7167", id: "ap-south" }
 ```
 
 **Why scale-out**: Must use separate VMs in different regions
@@ -65,11 +65,11 @@ distributed:
 distributed:
   agents:
     # VM 1: 2 containers
-    - { address: "vm1:7761", id: "vm1-c1", listen_port: 7761 }
-    - { address: "vm1:7762", id: "vm1-c2", listen_port: 7762 }
+    - { address: "vm1:7167", id: "vm1-c1", listen_port: 7167 }
+    - { address: "vm1:7168", id: "vm1-c2", listen_port: 7168 }
     # VM 2: 2 containers
-    - { address: "vm2:7761", id: "vm2-c1", listen_port: 7761 }
-    - { address: "vm2:7762", id: "vm2-c2", listen_port: 7762 }
+    - { address: "vm2:7167", id: "vm2-c1", listen_port: 7167 }
+    - { address: "vm2:7168", id: "vm2-c2", listen_port: 7168 }
     # VM 3-4: similar
 ```
 
@@ -126,14 +126,14 @@ distributed:
 # See examples/distributed-scale-out.yaml
 distributed:
   agents:
-    - { address: "vm1:7761", id: "agent-1" }
-    - { address: "vm2:7761", id: "agent-2" }
-    - { address: "vm3:7761", id: "agent-3" }
-    - { address: "vm4:7761", id: "agent-4" }
-    - { address: "vm5:7761", id: "agent-5" }
-    - { address: "vm6:7761", id: "agent-6" }
-    - { address: "vm7:7761", id: "agent-7" }
-    - { address: "vm8:7761", id: "agent-8" }
+    - { address: "vm1:7167", id: "agent-1" }
+    - { address: "vm2:7167", id: "agent-2" }
+    - { address: "vm3:7167", id: "agent-3" }
+    - { address: "vm4:7167", id: "agent-4" }
+    - { address: "vm5:7167", id: "agent-5" }
+    - { address: "vm6:7167", id: "agent-6" }
+    - { address: "vm7:7167", id: "agent-7" }
+    - { address: "vm8:7167", id: "agent-8" }
 ```
 
 ### Scale-Up (1 VM, 8 containers)
@@ -141,28 +141,28 @@ distributed:
 # See examples/distributed-scale-up.yaml
 distributed:
   agents:
-    - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
-    - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
-    - { address: "big-vm:7763", id: "c3", listen_port: 7763 }
-    - { address: "big-vm:7764", id: "c4", listen_port: 7764 }
-    - { address: "big-vm:7765", id: "c5", listen_port: 7765 }
-    - { address: "big-vm:7766", id: "c6", listen_port: 7766 }
-    - { address: "big-vm:7767", id: "c7", listen_port: 7767 }
-    - { address: "big-vm:7768", id: "c8", listen_port: 7768 }
+    - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+    - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
+    - { address: "big-vm:7169", id: "c3", listen_port: 7169 }
+    - { address: "big-vm:7170", id: "c4", listen_port: 7170 }
+    - { address: "big-vm:7171", id: "c5", listen_port: 7171 }
+    - { address: "big-vm:7172", id: "c6", listen_port: 7172 }
+    - { address: "big-vm:7173", id: "c7", listen_port: 7173 }
+    - { address: "big-vm:7174", id: "c8", listen_port: 7174 }
 ```
 
 ### Hybrid (4 VMs, 2 containers each)
 ```yaml
 distributed:
   agents:
-    - { address: "vm1:7761", id: "vm1-c1", listen_port: 7761 }
-    - { address: "vm1:7762", id: "vm1-c2", listen_port: 7762 }
-    - { address: "vm2:7761", id: "vm2-c1", listen_port: 7761 }
-    - { address: "vm2:7762", id: "vm2-c2", listen_port: 7762 }
-    - { address: "vm3:7761", id: "vm3-c1", listen_port: 7761 }
-    - { address: "vm3:7762", id: "vm3-c2", listen_port: 7762 }
-    - { address: "vm4:7761", id: "vm4-c1", listen_port: 7761 }
-    - { address: "vm4:7762", id: "vm4-c2", listen_port: 7762 }
+    - { address: "vm1:7167", id: "vm1-c1", listen_port: 7167 }
+    - { address: "vm1:7168", id: "vm1-c2", listen_port: 7168 }
+    - { address: "vm2:7167", id: "vm2-c1", listen_port: 7167 }
+    - { address: "vm2:7168", id: "vm2-c2", listen_port: 7168 }
+    - { address: "vm3:7167", id: "vm3-c1", listen_port: 7167 }
+    - { address: "vm3:7168", id: "vm3-c2", listen_port: 7168 }
+    - { address: "vm4:7167", id: "vm4-c1", listen_port: 7167 }
+    - { address: "vm4:7168", id: "vm4-c2", listen_port: 7168 }
 ```
 
 ## Testing Workflow

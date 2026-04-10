@@ -170,9 +170,9 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
 
 prepare:
@@ -203,7 +203,7 @@ EOF
 **Distributed Mode** - Multi-host testing:
 ```bash
 # On each test host (Host 1, Host 2, etc.), start an agent:
-./target/release/sai3bench-agent --listen 0.0.0.0:7761
+./target/release/sai3bench-agent --listen 0.0.0.0:7167
 
 # On the controller host, create a distributed config:
 cat > distributed-test.yaml <<EOF
@@ -220,9 +220,9 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
 
 prepare:
@@ -578,8 +578,8 @@ distributed:
 ```yaml
 # 8 VMs, 1 container each = 8× network interfaces
 agents:
-  - { address: "vm1:7761", id: "agent-1" }
-  - { address: "vm2:7761", id: "agent-2" }
+  - { address: "vm1:7167", id: "agent-1" }
+  - { address: "vm2:7167", id: "agent-2" }
   # ... vm3-vm8
 ```
 
@@ -587,8 +587,8 @@ agents:
 ```yaml
 # 1 large VM, 8 containers on different ports
 agents:
-  - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
-  - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
+  - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+  - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
   # ... c3-c8
 ```
 
