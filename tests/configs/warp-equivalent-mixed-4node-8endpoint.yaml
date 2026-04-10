@@ -69,7 +69,7 @@ multi_endpoint:
 prepare:
   prepare_strategy: parallel
   skip_verification: true
-  force_overwrite: false
+  force_overwrite: true
   ensure_objects:
     - base_uri: "data/"
       count: 10000
@@ -103,22 +103,20 @@ distributed:
   start_delay: 2
 
   stages:
-    - name: "preflight"
-      order: 1
-      type: validation
-      completion: validation_passed
-      timeout_secs: 120
-
     - name: "prepare"
-      order: 2
+      order: 1
       type: prepare
       completion: tasks_done
 
     - name: "execute"
-      order: 3
+      order: 2
       type: execute
       completion: duration
       duration: 15m
+  
+  barrier_sync:
+    enabled: true
+    timeout_seconds: 120
 
   agents:
     - address: "172.21.4.10:7761"
