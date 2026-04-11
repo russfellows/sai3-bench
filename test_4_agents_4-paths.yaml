@@ -117,8 +117,8 @@ distributed:
   # 2 LOCAL agents, each with 2 endpoints on /mnt/nvme_data
   #############################################################################
   agents:
-    # Agent 1: localhost:7761 → /mnt/nvme_data paths 1 and 2
-    - address: "127.0.0.1:7761"
+    # Agent 1: localhost:7167 → /mnt/nvme_data paths 1 and 2
+    - address: "127.0.0.1:7167"
       id: "agent-1"
       concurrency_override: 16
       multi_endpoint:
@@ -127,8 +127,8 @@ distributed:
           - "file:///mnt/nvme_data/sai3-path2/"
         strategy: round_robin
 
-    # Agent 2: localhost:7762 → /mnt/nvme_data paths 3 and 4
-    - address: "127.0.0.1:7762"
+    # Agent 2: localhost:7168 → /mnt/nvme_data paths 3 and 4
+    - address: "127.0.0.1:7168"
       id: "agent-2"
       concurrency_override: 16
       multi_endpoint:

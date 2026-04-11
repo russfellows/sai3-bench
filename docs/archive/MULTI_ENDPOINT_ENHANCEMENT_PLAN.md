@@ -123,7 +123,7 @@ concurrency: 32
 distributed:
   agents:
     # Agent 1: Targets endpoints 1 & 2
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       multi_endpoint:
         strategy: round_robin
@@ -132,7 +132,7 @@ distributed:
           - s3://192.168.1.11:9000/bucket/
     
     # Agent 2: Targets endpoints 3 & 4
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       multi_endpoint:
         strategy: round_robin
@@ -141,7 +141,7 @@ distributed:
           - s3://192.168.1.13:9000/bucket/
     
     # Agent 3: Targets endpoints 5 & 6
-    - address: "testhost3:7761"
+    - address: "testhost3:7167"
       id: agent3
       multi_endpoint:
         strategy: round_robin
@@ -150,7 +150,7 @@ distributed:
           - s3://192.168.1.15:9000/bucket/
     
     # Agent 4: Targets endpoints 7 & 8
-    - address: "testhost4:7761"
+    - address: "testhost4:7167"
       id: agent4
       multi_endpoint:
         strategy: round_robin
@@ -191,11 +191,11 @@ concurrency: 32
 
 distributed:
   agents:
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       # Uses global endpoints (4 endpoints)
     
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       # Override: Only use these 2 endpoints
       multi_endpoint:
@@ -203,7 +203,7 @@ distributed:
           - s3://192.168.1.14:9000/bucket/
           - s3://192.168.1.15:9000/bucket/
     
-    - address: "testhost3:7761"
+    - address: "testhost3:7167"
       id: agent3
       # Uses global endpoints (4 endpoints)
 
@@ -458,12 +458,12 @@ Each host runs 2 agent processes, each targeting a different endpoint:
 
 ```bash
 # On testhost1:
-./sai3bench-agent --listen 0.0.0.0:7761 --id agent1a &
-./sai3bench-agent --listen 0.0.0.0:7762 --id agent1b &
+./sai3bench-agent --listen 0.0.0.0:7167 --id agent1a &
+./sai3bench-agent --listen 0.0.0.0:7168 --id agent1b &
 
 # On testhost2:
-./sai3bench-agent --listen 0.0.0.0:7761 --id agent2a &
-./sai3bench-agent --listen 0.0.0.0:7762 --id agent2b &
+./sai3bench-agent --listen 0.0.0.0:7167 --id agent2a &
+./sai3bench-agent --listen 0.0.0.0:7168 --id agent2b &
 
 # ... etc for testhost3 and testhost4
 ```
@@ -484,10 +484,10 @@ target: "s3://192.168.1.11:9000/bucket/"
 
 Run controller twice (or use 2 controllers):
 ```bash
-./sai3bench-ctl --agents testhost1:7761,testhost2:7761,testhost3:7761,testhost4:7761 \
+./sai3bench-ctl --agents testhost1:7167,testhost2:7167,testhost3:7167,testhost4:7167 \
   run --config config_endpoints_1_2.yaml &
 
-./sai3bench-ctl --agents testhost1:7762,testhost2:7762,testhost3:7762,testhost4:7762 \
+./sai3bench-ctl --agents testhost1:7168,testhost2:7168,testhost3:7168,testhost4:7168 \
   run --config config_endpoints_3_4.yaml &
 ```
 
@@ -631,7 +631,7 @@ concurrency: 64
 
 distributed:
   agents:
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       multi_endpoint:
         strategy: round_robin
@@ -639,7 +639,7 @@ distributed:
           - s3://192.168.1.10:9000/bucket/
           - s3://192.168.1.11:9000/bucket/
     
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       multi_endpoint:
         strategy: round_robin
@@ -647,7 +647,7 @@ distributed:
           - s3://192.168.1.12:9000/bucket/
           - s3://192.168.1.13:9000/bucket/
     
-    - address: "testhost3:7761"
+    - address: "testhost3:7167"
       id: agent3
       multi_endpoint:
         strategy: round_robin
@@ -655,7 +655,7 @@ distributed:
           - s3://192.168.1.14:9000/bucket/
           - s3://192.168.1.15:9000/bucket/
     
-    - address: "testhost4:7761"
+    - address: "testhost4:7167"
       id: agent4
       multi_endpoint:
         strategy: round_robin

@@ -152,7 +152,7 @@ aws s3 mb s3://benchmark --endpoint-url http://192.168.1.1:9000
 
 ```bash
 # On each agent host (172.21.4.10-13)
-./sai3bench-agent --listen 0.0.0.0:7761
+./sai3bench-agent --listen 0.0.0.0:7167
 
 # Ensure S3 credentials are available on each agent host
 ```

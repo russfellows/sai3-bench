@@ -334,7 +334,7 @@ You can test cross-region/cross-cloud scenarios:
 ### Benchmark fails to start
 - Check agent connectivity: `sai3bench-ctl ping --agents host1,host2`
 - Verify Docker image exists: `docker images | grep sai3bench`
-- Check firewall rules for gRPC port (7761)
+- Check firewall rules for gRPC port (7167)
 - Review agent logs: `docker logs sai3bench-agent-*`
 
 ### High costs from orphaned VMs
@@ -400,10 +400,10 @@ Deploy multiple agent containers on a single large VM by using different ports.
 # Example config: 8 containers on 1 VM
 distributed:
   agents:
-    - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
-    - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
-    - { address: "big-vm:7763", id: "c3", listen_port: 7763 }
-    # ... up to c8 on port 7768
+    - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+    - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
+    - { address: "big-vm:7169", id: "c3", listen_port: 7169 }
+    # ... up to c8 on port 7174
 ```
 
 **Use case**: Lower network latency, simpler deployment, cost optimization

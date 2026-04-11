@@ -15,7 +15,7 @@ This directory contains example configurations demonstrating various sai3-bench 
 **Usage**:
 ```bash
 ./target/release/sai3bench-ctl \
-  --agents host1:7761,host2:7761 \
+  --agents host1:7167,host2:7167 \
   autotune --config examples/distributed-autotune-minimal.yaml
 ```
 

@@ -5597,21 +5597,21 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
       multi_endpoint:
         strategy: round_robin
         endpoints:
           - "file:///tmp/agent1-a/"
           - "file:///tmp/agent1-b/"
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-2"
       multi_endpoint:
         strategy: least_connections
         endpoints:
           - "file:///tmp/agent2-c/"
           - "file:///tmp/agent2-d/"
-    - address: "localhost:7763"
+    - address: "localhost:7169"
       id: "agent-3"
       # No override - should use global
 
@@ -5696,7 +5696,7 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
       multi_endpoint:
         strategy: least_connections
@@ -5763,7 +5763,7 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
       # No multi_endpoint override
 
@@ -5812,17 +5812,17 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
       multi_endpoint:
         strategy: round_robin
         endpoints:
           - "file:///tmp/agent1-a/"
           - "file:///tmp/agent1-b/"
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-2"
       # No override
-    - address: "localhost:7763"
+    - address: "localhost:7169"
       id: "agent-3"
       multi_endpoint:
         strategy: least_connections
@@ -5878,14 +5878,14 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-dc-a"
       multi_endpoint:
         endpoints:
           - "file:///tmp/ep-a/"
           - "file:///tmp/ep-b/"
         strategy: round_robin
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-dc-b"
       multi_endpoint:
         endpoints:
@@ -5904,7 +5904,7 @@ workload:
             .expect("Failed to parse config");
 
         // Simulate controller loop for each agent
-        for (idx, _agent_addr) in ["localhost:7761", "localhost:7762"].iter().enumerate() {
+        for (idx, _agent_addr) in ["localhost:7167", "localhost:7168"].iter().enumerate() {
             // This is the exact logic from the controller
             let agent_specific_yaml = if let Some(ref distributed) = config.distributed {
                 if idx < distributed.agents.len() {

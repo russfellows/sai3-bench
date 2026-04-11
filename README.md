@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.86-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.88-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-638%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-655%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.88)**: **KV cache compact encoding + coverage observability** — KV cache entries now use [postcard](https://crates.io/crates/postcard) binary encoding (56% smaller, 2× faster scans). At startup, a one-line cache summary reports object count and total logical storage (`📊 Cache summary: N objects | X.XX GiB`). Progressive WARN messages fire if a coverage scan exceeds 10 s. Preflight now queries the cache per-spec and logs coverage. Safe write-probe cycle validates writable endpoints before any benchmark I/O. Agent port changed to **7167** (was 7761) with automatic port-conflict detection on startup. +17 new tests.
 
 **🚀 NEW (v0.8.86)**: **GCS RAPID storage fully working** (s3dlio v0.9.86) — `BidiWriteObject` PUTs and `BidiReadObject` GETs verified against Hyperdisk ML RAPID buckets. RAPID mode is auto-detected per bucket or forced via `gcs_rapid_mode: true`. Worker drain deadline bug fixed (execute stage now runs its full configured duration). Timer observability logs added.
 
@@ -170,9 +172,9 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
 
 prepare:
@@ -203,7 +205,7 @@ EOF
 **Distributed Mode** - Multi-host testing:
 ```bash
 # On each test host (Host 1, Host 2, etc.), start an agent:
-./target/release/sai3bench-agent --listen 0.0.0.0:7761
+./target/release/sai3bench-agent --listen 0.0.0.0:7167
 
 # On the controller host, create a distributed config:
 cat > distributed-test.yaml <<EOF
@@ -220,9 +222,9 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
 
 prepare:
@@ -578,8 +580,8 @@ distributed:
 ```yaml
 # 8 VMs, 1 container each = 8× network interfaces
 agents:
-  - { address: "vm1:7761", id: "agent-1" }
-  - { address: "vm2:7761", id: "agent-2" }
+  - { address: "vm1:7167", id: "agent-1" }
+  - { address: "vm2:7167", id: "agent-2" }
   # ... vm3-vm8
 ```
 
@@ -587,8 +589,8 @@ agents:
 ```yaml
 # 1 large VM, 8 containers on different ports
 agents:
-  - { address: "big-vm:7761", id: "c1", listen_port: 7761 }
-  - { address: "big-vm:7762", id: "c2", listen_port: 7762 }
+  - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+  - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
   # ... c3-c8
 ```
 

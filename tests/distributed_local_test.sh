@@ -49,14 +49,14 @@ EOF
 echo "Starting 2 agents..."
 
 # Start agent 1
-$AGENT_BIN -vv --listen 127.0.0.1:7761 > /tmp/agent1.log 2>&1 &
+$AGENT_BIN -vv --listen 127.0.0.1:7167 > /tmp/agent1.log 2>&1 &
 AGENT1_PID=$!
-echo "Agent 1 (PID $AGENT1_PID) listening on 127.0.0.1:7761"
+echo "Agent 1 (PID $AGENT1_PID) listening on 127.0.0.1:7167"
 
 # Start agent 2
-$AGENT_BIN -vv --listen 127.0.0.1:7762 > /tmp/agent2.log 2>&1 &
+$AGENT_BIN -vv --listen 127.0.0.1:7168 > /tmp/agent2.log 2>&1 &
 AGENT2_PID=$!
-echo "Agent 2 (PID $AGENT2_PID) listening on 127.0.0.1:7762"
+echo "Agent 2 (PID $AGENT2_PID) listening on 127.0.0.1:7168"
 
 # Give agents time to start
 sleep 2
@@ -71,7 +71,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Verify agents are running
-if ! $CTL_BIN --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 ping > /dev/null 2>&1; then
+if ! $CTL_BIN --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 ping > /dev/null 2>&1; then
     echo "ERROR: Agents not responding to ping"
     exit 1
 fi
@@ -80,7 +80,7 @@ echo ""
 
 # Run distributed workload
 echo "Running distributed workload..."
-$CTL_BIN -vv --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+$CTL_BIN -vv --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config "$TEST_CONFIG" --start-delay 1
 
 echo ""

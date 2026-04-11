@@ -58,6 +58,7 @@ pub(crate) async fn prepare_parallel(
         fill: FillPattern,
         dedup: usize,
         compress: usize,
+        file_idx: u64,
     }
     
     struct PreparePlan {
@@ -151,6 +152,16 @@ pub(crate) async fn prepare_parallel(
             // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
             // v0.7.9: Parse filenames to extract indices for gap-filling
             // v0.8.29: Track whether an actual LIST was performed (for accurate log messages)
+            // v0.8.88: Query KV cache first — if all objects are already Created, skip the entire LIST
+            let kv_cache_coverage: Option<crate::metadata_cache::CheckpointCoverage> =
+                if let Some(cache_arc) = metadata_cache.as_ref() {
+                    let cache_lock = cache_arc.lock().await;
+                    cache_lock.check_listing_coverage(spec.count).ok().flatten()
+                } else {
+                    None
+                };
+            let kv_cache_covers_all = kv_cache_coverage.as_ref().map(|c| c.covers_all).unwrap_or(false);
+
             let mut did_list = false;
             let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist", spec.count);
@@ -158,6 +169,15 @@ pub(crate) async fn prepare_parallel(
             } else if config.force_overwrite {
                 info!("  🔨 force_overwrite enabled - creating all {} objects", spec.count);
                 (0, HashSet::new())  // Assume no files exist, create everything
+            } else if kv_cache_covers_all {
+                info!("  ⚡ KV cache checkpoint shows all {} objects already Created — skipping LIST", spec.count);
+                if let Some(cov) = &kv_cache_coverage {
+                    if let Some(&total_bytes) = cov.bytes_by_state.get(&crate::metadata_cache::ObjectState::Created) {
+                        let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        info!("  📊 Cache summary: {} objects | {:.2} GiB total storage", cov.created_count, total_gib);
+                    }
+                }
+                (spec.count, HashSet::new())
             } else if tree_manifest.is_some() {
                 did_list = true;
                 // v0.8.14: Use distributed listing with progress updates
@@ -544,6 +564,7 @@ pub(crate) async fn prepare_parallel(
                 fill: plan.fill,
                 dedup: plan.dedup,
                 compress: plan.compress,
+                file_idx: idx,
             });
 
             if chunk_tasks.len() >= TASK_CHUNK_SIZE {
@@ -621,7 +642,7 @@ pub(crate) async fn prepare_parallel(
                                     t.set_prepare_progress(created, total);
                                 }
 
-                                Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
+                                Ok::<Option<(String, u64, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us, task.file_idx)))
                             }
                             RetryResult::Failed(e) => {
                                 let error_msg = format!("{}", e);
@@ -659,12 +680,27 @@ pub(crate) async fn prepare_parallel(
                     }
 
                     match result {
-                        Ok(Ok(Some((uri, size, latency_us)))) => {
+                        Ok(Ok(Some((uri, size, latency_us, file_idx)))) => {
                             metrics.put.bytes += size;
                             metrics.put.ops += 1;
                             metrics.put_bins.add(size);
                             let bucket = crate::metrics::bucket_index(size as usize);
                             metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+
+                            // Wire KV cache: record every successfully created object.
+                            if let Some(ref cache_arc) = metadata_cache {
+                                let cache = cache_arc.lock().await;
+                                if let Some(ep) = cache.endpoint_for_file(file_idx as usize) {
+                                    let _ = ep.record_created(
+                                        cache.config_hash(),
+                                        file_idx as usize,
+                                        &uri,
+                                        size,
+                                        None,
+                                        None,
+                                    );
+                                }
+                            }
 
                             all_prepared.push(PreparedObject {
                                 uri,
@@ -770,7 +806,7 @@ pub(crate) async fn prepare_parallel(
                             t.set_prepare_progress(created, total);
                         }
 
-                        Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us)))
+                        Ok::<Option<(String, u64, u64, u64)>, anyhow::Error>(Some((task.uri, task.size, latency_us, task.file_idx)))
                     }
                     RetryResult::Failed(e) => {
                         let error_msg = format!("{}", e);
@@ -808,12 +844,27 @@ pub(crate) async fn prepare_parallel(
             }
 
             match result {
-                Ok(Ok(Some((uri, size, latency_us)))) => {
+                Ok(Ok(Some((uri, size, latency_us, file_idx)))) => {
                     metrics.put.bytes += size;
                     metrics.put.ops += 1;
                     metrics.put_bins.add(size);
                     let bucket = crate::metrics::bucket_index(size as usize);
                     metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+
+                    // Wire KV cache: record every successfully created object.
+                    if let Some(ref cache_arc) = metadata_cache {
+                        let cache = cache_arc.lock().await;
+                        if let Some(ep) = cache.endpoint_for_file(file_idx as usize) {
+                            let _ = ep.record_created(
+                                cache.config_hash(),
+                                file_idx as usize,
+                                &uri,
+                                size,
+                                None,
+                                None,
+                            );
+                        }
+                    }
 
                     all_prepared.push(PreparedObject {
                         uri,

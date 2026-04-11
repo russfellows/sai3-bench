@@ -13,10 +13,10 @@ concurrency: 32
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
     
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-2"
   
   shared_filesystem: false
@@ -35,9 +35,9 @@ workload:
     let dist = config.distributed.as_ref().unwrap();
     
     assert_eq!(dist.agents.len(), 2);
-    assert_eq!(dist.agents[0].address, "localhost:7761");
+    assert_eq!(dist.agents[0].address, "localhost:7167");
     assert_eq!(dist.agents[0].id, Some("agent-1".to_string()));
-    assert_eq!(dist.agents[1].address, "localhost:7762");
+    assert_eq!(dist.agents[1].address, "localhost:7168");
     
     Ok(())
 }
@@ -141,7 +141,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   deployment:
     deploy_type: "docker"
@@ -185,7 +185,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: false
   tree_creation_mode: isolated
@@ -204,7 +204,7 @@ workload:
     // Test defaults
     assert_eq!(dist.start_delay, 2);  // default_start_delay
     assert_eq!(dist.path_template, "agent-{id}/");  // default_path_template
-    assert_eq!(dist.agents[0].listen_port, 7761);  // default_agent_port
+    assert_eq!(dist.agents[0].listen_port, 7167);  // default_agent_port
     assert!(dist.agents[0].env.is_empty());
     assert!(dist.agents[0].volumes.is_empty());
     
@@ -244,7 +244,7 @@ fn test_parse_real_config_file() -> Result<()> {
     let dist = config.distributed.as_ref().unwrap();
     
     assert_eq!(dist.agents.len(), 2);
-    assert_eq!(dist.agents[0].address, "127.0.0.1:7761");
+    assert_eq!(dist.agents[0].address, "127.0.0.1:7167");
     assert_eq!(dist.agents[0].id, Some("test-agent-1".to_string()));
     
     // Verify shared filesystem settings
@@ -262,7 +262,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "vm1.example.com:7761"  # Explicit port
+    - address: "vm1.example.com:7167"  # Explicit port
       id: "agent-1"
     
     - address: "vm2.example.com"  # No port, should use listen_port
@@ -282,7 +282,7 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     
-    assert_eq!(dist.agents[0].address, "vm1.example.com:7761");
+    assert_eq!(dist.agents[0].address, "vm1.example.com:7167");
     assert_eq!(dist.agents[1].address, "vm2.example.com");
     assert_eq!(dist.agents[1].listen_port, 8888);
     
@@ -347,7 +347,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       env:
         AWS_ACCESS_KEY_ID: "test-key"
         AWS_SECRET_ACCESS_KEY: "test-secret"
@@ -389,7 +389,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
   
   shared_filesystem: false
@@ -420,8 +420,8 @@ duration: 60s
 
 distributed:
   agents:
-    - address: "vm1:7761"
-    - address: "vm2:7761"
+    - address: "vm1:7167"
+    - address: "vm2:7167"
   
   shared_filesystem: true
   tree_creation_mode: coordinator
@@ -452,9 +452,9 @@ duration: 30s
 
 distributed:
   agents:
-    - address: "localhost:7761"
-    - address: "localhost:7762"
-    - address: "localhost:7763"
+    - address: "localhost:7167"
+    - address: "localhost:7168"
+    - address: "localhost:7169"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -484,7 +484,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -512,7 +512,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -542,7 +542,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -570,7 +570,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -601,7 +601,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -630,7 +630,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -659,7 +659,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -688,7 +688,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -716,7 +716,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: false
   tree_creation_mode: isolated
@@ -789,7 +789,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: invalid_mode
@@ -813,7 +813,7 @@ duration: 10s
 
 distributed:
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
   
   shared_filesystem: true
   tree_creation_mode: concurrent
@@ -844,12 +844,12 @@ prepare:
 
 distributed:
   agents:
-    - address: "vm1.example.com:7761"
+    - address: "vm1.example.com:7167"
       id: "agent-1"
       env:
         AWS_PROFILE: "benchmark"
     
-    - address: "vm2.example.com:7761"
+    - address: "vm2.example.com:7167"
       id: "agent-2"
       env:
         AWS_PROFILE: "benchmark"
@@ -899,14 +899,14 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
     let original_dist = DistributedConfig {
         agents: vec![
             AgentConfig {
-                address: "localhost:7761".to_string(),
+                address: "localhost:7167".to_string(),
                 id: Some("test-agent".to_string()),
                 target_override: None,
                 concurrency_override: None,
                 env: std::collections::HashMap::new(),
                 volumes: vec![],
                 path_template: None,
-                listen_port: 7761,
+                listen_port: 7167,
                 multi_endpoint: None,
                 kv_cache_dir: None,
             }

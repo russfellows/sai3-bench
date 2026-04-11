@@ -66,9 +66,9 @@ distributed:
   tree_creation_mode: coordinator  # Controller creates directory tree once
   path_selection: random  # Random file selection for workload
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "agent-1"
-    - address: "127.0.0.1:7762"
+    - address: "127.0.0.1:7168"
       id: "agent-2"
 
   stages:

@@ -22,9 +22,9 @@ echo ""
 
 # Start agents in background
 echo "🚀 Starting 2 local agents..."
-./target/release/sai3bench-agent --port 7761 --id test-agent-1 > /tmp/agent1.log 2>&1 &
+./target/release/sai3bench-agent --port 7167 --id test-agent-1 > /tmp/agent1.log 2>&1 &
 AGENT1_PID=$!
-./target/release/sai3bench-agent --port 7762 --id test-agent-2 > /tmp/agent2.log 2>&1 &
+./target/release/sai3bench-agent --port 7168 --id test-agent-2 > /tmp/agent2.log 2>&1 &
 AGENT2_PID=$!
 
 # Wait for agents to start
@@ -49,7 +49,7 @@ echo "Expected: Create 320 files, detect 0 existing"
 echo ""
 
 check_agents
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/local_test_2agents.yaml
 
 echo ""
@@ -65,7 +65,7 @@ echo "Expected: Detect 320 existing files, create 0 new"
 echo ""
 
 check_agents
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/local_test_2agents.yaml
 
 echo ""
@@ -81,7 +81,7 @@ echo "Expected: Skip LIST entirely, proceed directly to workload"
 echo ""
 
 check_agents
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/local_test_2agents_skip.yaml
 
 echo ""

@@ -17,10 +17,10 @@ cargo build --release --bin sai3bench-agent --bin sai3bench-ctl
 echo ""
 
 # Start 2 test agents
-echo "2. Starting 2 test agents on ports 7761, 7762..."
-./target/release/sai3bench-agent --listen 0.0.0.0:7761 > /tmp/agent1.log 2>&1 &
+echo "2. Starting 2 test agents on ports 7167, 7168..."
+./target/release/sai3bench-agent --listen 0.0.0.0:7167 > /tmp/agent1.log 2>&1 &
 AGENT1_PID=$!
-./target/release/sai3bench-agent --listen 0.0.0.0:7762 > /tmp/agent2.log 2>&1 &
+./target/release/sai3bench-agent --listen 0.0.0.0:7168 > /tmp/agent2.log 2>&1 &
 AGENT2_PID=$!
 
 # Wait for agents to start
@@ -46,7 +46,7 @@ trap cleanup EXIT
 echo "3. Test 1: Startup timeout with only 2 of 3 agents (should abort)"
 echo "   Running controller with 3 agents but only 2 are running..."
 timeout 15s ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 \
     run --config tests/configs/test_abort_2agents.yaml 2>&1 | head -30 || true
 
 echo ""
@@ -86,14 +86,14 @@ distributed:
   tree_creation_mode: coordinator
   path_selection: random
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "agent-1"
-    - address: "127.0.0.1:7762"
+    - address: "127.0.0.1:7168"
       id: "agent-2"
 EOF
 
 timeout 15s ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config /tmp/test_invalid_config.yaml 2>&1 | head -30 || true
 
 echo ""
@@ -120,7 +120,7 @@ for i in {1..20}; do
 done
 
 timeout 30s ./target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_abort_2agents.yaml 2>&1 | tail -20 || true
 
 echo ""

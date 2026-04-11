@@ -31,9 +31,9 @@ test_basic_distributed() {
     
     # Start 2 agents
     echo "Starting agents..."
-    $BINARY_AGENT --listen 127.0.0.1:7761 &
+    $BINARY_AGENT --listen 127.0.0.1:7167 &
     AGENT1_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7762 &
+    $BINARY_AGENT --listen 127.0.0.1:7168 &
     AGENT2_PID=$!
     
     # Wait for agents to be ready
@@ -41,7 +41,7 @@ test_basic_distributed() {
     
     # Verify agents are responding
     echo "Pinging agents..."
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 ping || {
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 ping || {
         echo "❌ Agent ping failed"
         kill $AGENT1_PID $AGENT2_PID 2>/dev/null || true
         return 1
@@ -49,7 +49,7 @@ test_basic_distributed() {
     
     # Run distributed workload
     echo "Running distributed workload..."
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
         run --config $CONFIG --start-delay 3 || {
         echo "❌ Distributed run failed"
         kill $AGENT1_PID $AGENT2_PID 2>/dev/null || true

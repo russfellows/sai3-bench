@@ -29,9 +29,9 @@ When running distributed tests with multiple workers/agents against a **shared f
 ```yaml
 distributed:
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       id: "agent-1"
-    - address: "node2:7761"
+    - address: "node2:7167"
       id: "agent-2"
   path_template: "agent-{id}/"  # Each agent isolated
 
@@ -312,13 +312,13 @@ distributed:
   path_selection: "random"         # Maximum contention (default)
   
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       id: "agent-1"
-    - address: "node2:7761"
+    - address: "node2:7167"
       id: "agent-2"
-    - address: "node3:7761"
+    - address: "node3:7167"
       id: "agent-3"
-    - address: "node4:7761"
+    - address: "node4:7167"
       id: "agent-4"
 
 prepare:

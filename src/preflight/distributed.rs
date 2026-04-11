@@ -162,14 +162,14 @@ mod tests {
     /// Helper to create a minimal agent config
     fn create_agent(id: &str, endpoints: Vec<String>) -> AgentConfig {
         AgentConfig {
-            address: "127.0.0.1:7761".to_string(),
+            address: "127.0.0.1:7167".to_string(),
             id: Some(id.to_string()),
             target_override: None,
             concurrency_override: None,
             env: std::collections::HashMap::new(),
             volumes: Vec::new(),
             path_template: None,
-            listen_port: 7761,
+            listen_port: 7167,
             multi_endpoint: Some(MultiEndpointConfig {
                 endpoints,
                 strategy: "round_robin".to_string(),
@@ -369,14 +369,14 @@ mod tests {
                     create_agent("agent-1", vec!["s3://shared-bucket/".to_string()]),
                     // Agent 2 has no multi_endpoint - will use global target
                     AgentConfig {
-                        address: "127.0.0.1:7762".to_string(),
+                        address: "127.0.0.1:7168".to_string(),
                         id: Some("agent-2".to_string()),
                         target_override: None,
                         concurrency_override: None,
                         env: std::collections::HashMap::new(),
                         volumes: Vec::new(),
                         path_template: None,
-                        listen_port: 7762,
+                        listen_port: 7168,
                         multi_endpoint: None,  // Missing multi_endpoint
                         kv_cache_dir: None,
                     },

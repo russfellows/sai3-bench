@@ -43,7 +43,7 @@ echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Test 1: Full Lifecycle (prepare + workload + cleanup)${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_distributed_full_lifecycle.yaml
 
 echo ""
@@ -61,7 +61,7 @@ echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Test 2: No Cleanup (prepare + workload, leave files)${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_distributed_no_cleanup.yaml
 
 echo ""
@@ -79,7 +79,7 @@ echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Test 3: Cleanup-Only (cleanup files from Test 2)${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
-timeout 60 ./target/release/sai3bench-ctl -v --agents 127.0.0.1:7761,127.0.0.1:7762 \
+timeout 60 ./target/release/sai3bench-ctl -v --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config tests/configs/test_distributed_cleanup_only.yaml
 TEST3_EXIT=$?
 

@@ -174,7 +174,7 @@ RUN cargo build --release --bin sai3bench-agent
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/sai3bench-agent /usr/local/bin/
-CMD ["sai3bench-agent", "--listen", "0.0.0.0:7761"]
+CMD ["sai3bench-agent", "--listen", "0.0.0.0:7167"]
 EOF
         return 1
     fi
@@ -193,17 +193,17 @@ start_agents() {
     
     for i in $(seq 1 $AGENT_COUNT); do
         local container_name="${CONTAINER_PREFIX}-agent-${i}"
-        local port=$((7760 + i))
+        local port=$((7166 + i))
         
         log_info "Starting $container_name on port $port"
         
         docker run -d \
             --name "$container_name" \
             --network "$NETWORK_NAME" \
-            -p "${port}:7761" \
+            -p "${port}:7167" \
             -e "RUST_LOG=info" \
             "$DOCKER_IMAGE" \
-            sai3bench-agent --listen "0.0.0.0:7761" || {
+            sai3bench-agent --listen "0.0.0.0:7167" || {
             log_warn "Container $container_name may already be running"
         }
     done
@@ -236,7 +236,7 @@ generate_config() {
     # Build agent list
     local agents_yaml=""
     for i in $(seq 1 $AGENT_COUNT); do
-        local port=$((7760 + i))
+        local port=$((7166 + i))
         agents_yaml="${agents_yaml}    - address: \"localhost:${port}\"\n"
         agents_yaml="${agents_yaml}      id: \"agent-${i}\"\n"
     done

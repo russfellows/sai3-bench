@@ -103,6 +103,16 @@ pub(crate) async fn prepare_sequential(
             // v0.7.9: If tree manifest exists, files are nested in directories (e.g., scan.d0_w0.dir/file_*.dat)
             // v0.7.9: Parse filenames to extract indices for gap-filling
             // v0.8.29: Track whether an actual LIST was performed (for accurate log messages)
+            // v0.8.88: Query KV cache first — if all objects are already Created, skip the entire LIST
+            let kv_cache_coverage: Option<crate::metadata_cache::CheckpointCoverage> =
+                if let Some(cache_arc) = metadata_cache.as_ref() {
+                    let cache_lock = cache_arc.lock().await;
+                    cache_lock.check_listing_coverage(spec.count).ok().flatten()
+                } else {
+                    None
+                };
+            let kv_cache_covers_all = kv_cache_coverage.as_ref().map(|c| c.covers_all).unwrap_or(false);
+
             let mut did_list = false;
             let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
                 info!("  ⚡ skip_verification enabled - assuming all {} objects exist", spec.count);
@@ -110,6 +120,15 @@ pub(crate) async fn prepare_sequential(
             } else if config.force_overwrite {
                 info!("  🔨 force_overwrite enabled - creating all {} objects", spec.count);
                 (0, HashSet::new())  // Assume no files exist, create everything
+            } else if kv_cache_covers_all {
+                info!("  ⚡ KV cache checkpoint shows all {} objects already Created — skipping LIST", spec.count);
+                if let Some(cov) = &kv_cache_coverage {
+                    if let Some(&total_bytes) = cov.bytes_by_state.get(&crate::metadata_cache::ObjectState::Created) {
+                        let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        info!("  📊 Cache summary: {} objects | {:.2} GiB total storage", cov.created_count, total_gib);
+                    }
+                }
+                (spec.count, HashSet::new())
             } else if tree_manifest.is_some() {
                 did_list = true;
                 // v0.8.14: Use distributed listing with progress updates
@@ -314,7 +333,8 @@ pub(crate) async fn prepare_sequential(
                 });
                 
                 // v0.7.9: Generate tasks for missing indices with streamed sizes
-                let mut tasks: Vec<(String, u64)> = Vec::with_capacity(missing_indices.len());
+                // file_idx is carried through to record_created after a successful PUT.
+                let mut tasks: Vec<(String, u64, u64)> = Vec::with_capacity(missing_indices.len());
                 
                 if let Some(manifest) = tree_manifest {
                     for idx in 0..spec.count {
@@ -331,7 +351,7 @@ pub(crate) async fn prepare_sequential(
                             } else {
                                 format!("{}/{}", base_uri, rel_path)
                             };
-                            tasks.push((uri, size));
+                            tasks.push((uri, size, idx));
                         } else {
                             warn!("No file path for missing index {} in tree manifest", idx);
                         }
@@ -351,7 +371,7 @@ pub(crate) async fn prepare_sequential(
                         } else {
                             format!("{}/{}", base_uri, key)
                         };
-                        tasks.push((uri, size));
+                        tasks.push((uri, size, idx));
                     }
                 }
                 
@@ -367,7 +387,7 @@ pub(crate) async fn prepare_sequential(
                 // v0.8.23: shared_store is now created at beginning of loop (supports multi-endpoint)
                 // Removed redundant create_store_for_uri() call that bypassed multi-endpoint
                 
-                for (uri, size) in tasks {
+                for (uri, size, file_idx) in tasks {
                     let sem2 = sem.clone();
                     let store = shared_store.clone();
                     let fill = spec.fill;
@@ -448,7 +468,7 @@ pub(crate) async fn prepare_sequential(
                                     t.set_prepare_progress(created, total);
                                 }
                                 
-                                Ok::<Option<(String, u64, u64)>, anyhow::Error>(Some((uri_clone, size, latency_us)))
+                                Ok::<Option<(String, u64, u64, u64)>, anyhow::Error>(Some((uri_clone, size, latency_us, file_idx)))
                             }
                             RetryResult::Failed(e) => {
                                 // v0.8.13: All retries failed - record error and check thresholds
@@ -492,13 +512,28 @@ pub(crate) async fn prepare_sequential(
                     }
                     
                     match result {
-                        Ok(Ok(Some((uri, size, latency_us)))) => {
+                        Ok(Ok(Some((uri, size, latency_us, file_idx)))) => {
                             metrics.put.bytes += size;
                             metrics.put.ops += 1;
                             metrics.put_bins.add(size);
                             let bucket = crate::metrics::bucket_index(size as usize);
                             metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
-                            
+
+                            // Wire KV cache: record every successfully created object.
+                            if let Some(ref cache_arc) = metadata_cache {
+                                let cache = cache_arc.lock().await;
+                                if let Some(ep) = cache.endpoint_for_file(file_idx as usize) {
+                                    let _ = ep.record_created(
+                                        cache.config_hash(),
+                                        file_idx as usize,
+                                        &uri,
+                                        size,
+                                        None,
+                                        None,
+                                    );
+                                }
+                            }
+
                             created_objects.push(PreparedObject {
                                 uri,
                                 size,

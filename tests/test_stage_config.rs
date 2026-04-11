@@ -124,7 +124,7 @@ expected_tasks: 5000
 fn test_distributed_config_with_stages() {
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned
@@ -165,7 +165,7 @@ fn test_get_sorted_stages_reorders_by_order_field() {
     // Define stages in scrambled YAML order
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned
@@ -210,7 +210,7 @@ fn test_default_stages_generation() {
     // Config without stages should fail validation (stages are required)
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned
@@ -227,7 +227,7 @@ path_selection: partitioned
 fn test_validate_duplicate_stage_names() {
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned
@@ -254,7 +254,7 @@ stages:
 fn test_validate_duplicate_order_values() {
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned
@@ -281,7 +281,7 @@ fn test_validate_completion_criteria_mismatch() {
     // Execute stage with TasksDone completion (should be Duration)
     let yaml = r#"
 agents:
-  - address: "node1:7761"
+  - address: "node1:7167"
 shared_filesystem: true
 tree_creation_mode: coordinator
 path_selection: partitioned

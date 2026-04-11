@@ -38,10 +38,10 @@ cp tests/configs/local_test_2agents.yaml "$CONFIG_FILE"
 
 # Modify config to use 3 agents
 sed -i 's/local_test_2agents/coordinated_start_test/' "$CONFIG_FILE"
-sed -i '/agent-2/a\    - address: "127.0.0.1:7763"\n      id: "agent-3"' "$CONFIG_FILE"
+sed -i '/agent-2/a\    - address: "127.0.0.1:7169"\n      id: "agent-3"' "$CONFIG_FILE"
 
 echo -e "${YELLOW}Validating config with --dry-run...${NC}"
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 \
     run --config "$CONFIG_FILE" --dry-run || {
     echo -e "${RED}Config validation failed!${NC}"
     echo "Config content:"
@@ -57,22 +57,22 @@ mkdir -p "$LOG_DIR"
 echo -e "${YELLOW}Starting agents with simulated clock skew (with verbose logging)...${NC}"
 
 # Agent 1: Normal clock
-echo "  Agent 1 (listen 0.0.0.0:7761): Normal clock"
-./target/release/sai3bench-agent -v --listen 0.0.0.0:7761 > "$LOG_DIR/agent1.log" 2>&1 &
+echo "  Agent 1 (listen 0.0.0.0:7167): Normal clock"
+./target/release/sai3bench-agent -v --listen 0.0.0.0:7167 > "$LOG_DIR/agent1.log" 2>&1 &
 AGENT1_PID=$!
 echo "    Started with PID $AGENT1_PID"
 sleep 2
 
 # Agent 2: +3.5 seconds ahead
-echo "  Agent 2 (listen 0.0.0.0:7762): +3.5 seconds ahead"
-faketime -f '+3.5s' ./target/release/sai3bench-agent -v --listen 0.0.0.0:7762 > "$LOG_DIR/agent2.log" 2>&1 &
+echo "  Agent 2 (listen 0.0.0.0:7168): +3.5 seconds ahead"
+faketime -f '+3.5s' ./target/release/sai3bench-agent -v --listen 0.0.0.0:7168 > "$LOG_DIR/agent2.log" 2>&1 &
 AGENT2_PID=$!
 echo "    Started with PID $AGENT2_PID"
 sleep 2
 
 # Agent 3: -2.8 seconds behind
-echo "  Agent 3 (listen 0.0.0.0:7763): -2.8 seconds behind"
-faketime -f '-2.8s' ./target/release/sai3bench-agent -v --listen 0.0.0.0:7763 > "$LOG_DIR/agent3.log" 2>&1 &
+echo "  Agent 3 (listen 0.0.0.0:7169): -2.8 seconds behind"
+faketime -f '-2.8s' ./target/release/sai3bench-agent -v --listen 0.0.0.0:7169 > "$LOG_DIR/agent3.log" 2>&1 &
 AGENT3_PID=$!
 echo "    Started with PID $AGENT3_PID"
 sleep 2
@@ -116,7 +116,7 @@ echo ""
 
 # Check if agents are listening on their ports
 echo -e "${YELLOW}Checking if agents are listening on ports:${NC}"
-netstat -tuln | grep -E ':(7761|7762|7763)' || echo "  No agents listening on expected ports!"
+netstat -tuln | grep -E ':(7167|7168|7169)' || echo "  No agents listening on expected ports!"
 echo ""
 
 # Verify all agents are running
@@ -142,7 +142,7 @@ echo -e "${GREEN}All 3 agents verified running and listening${NC}\n"
 
 # Run controller
 echo -e "${YELLOW}Running controller with coordinated start (verbose logging)...${NC}"
-./target/release/sai3bench-ctl -v --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 \
+./target/release/sai3bench-ctl -v --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 \
     run --config "$CONFIG_FILE"
 
 CONTROLLER_EXIT=$?
@@ -205,19 +205,19 @@ fi
 echo -e "\n${GREEN}Starting agents...${NC}"
 
 # Agent 1: Normal clock
-../target/release/sai3bench-agent --port 7761 > "$TEST_DIR/agent1.log" 2>&1 &
+../target/release/sai3bench-agent --port 7167 > "$TEST_DIR/agent1.log" 2>&1 &
 AGENT1_PID=$!
-echo "Agent 1 (normal clock) started on port 7761 (PID: $AGENT1_PID)"
+echo "Agent 1 (normal clock) started on port 7167 (PID: $AGENT1_PID)"
 
 # Agent 2: +2 hours ahead
-faketime '+2h' ../target/release/sai3bench-agent --port 7762 > "$TEST_DIR/agent2.log" 2>&1 &
+faketime '+2h' ../target/release/sai3bench-agent --port 7168 > "$TEST_DIR/agent2.log" 2>&1 &
 AGENT2_PID=$!
-echo "Agent 2 (+2h ahead) started on port 7762 (PID: $AGENT2_PID)"
+echo "Agent 2 (+2h ahead) started on port 7168 (PID: $AGENT2_PID)"
 
 # Agent 3: -1 hour behind
-faketime '-1h' ../target/release/sai3bench-agent --port 7763 > "$TEST_DIR/agent3.log" 2>&1 &
+faketime '-1h' ../target/release/sai3bench-agent --port 7169 > "$TEST_DIR/agent3.log" 2>&1 &
 AGENT3_PID=$!
-echo "Agent 3 (-1h behind) started on port 7763 (PID: $AGENT3_PID)"
+echo "Agent 3 (-1h behind) started on port 7169 (PID: $AGENT3_PID)"
 
 # Wait for agents to start
 sleep 2
@@ -247,7 +247,7 @@ echo -e "\n${GREEN}All agents started successfully${NC}\n"
 echo -e "${GREEN}Running controller with 3 agents...${NC}\n"
 
 ../target/release/sai3bench-ctl \
-    --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169 \
     run \
     --config "$TEST_DIR/test_config.yaml" \
     --results-dir "$TEST_DIR/results" \

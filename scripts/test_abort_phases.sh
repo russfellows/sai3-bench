@@ -4,8 +4,8 @@
 
 set -e
 
-AGENT1_PORT=7761
-AGENT2_PORT=7762
+AGENT1_PORT=7167
+AGENT2_PORT=7168
 AGENT1_LOG=/tmp/agent1_phases.log
 AGENT2_LOG=/tmp/agent2_phases.log
 RESULTS_LOG=/tmp/abort_phases_results.log

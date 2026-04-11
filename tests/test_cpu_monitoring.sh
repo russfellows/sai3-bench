@@ -53,14 +53,14 @@ echo ""
 echo "Starting 2 agents..."
 
 # Start agent 1
-$AGENT_BIN -vv --listen 127.0.0.1:7761 > /tmp/cpu_agent1.log 2>&1 &
+$AGENT_BIN -vv --listen 127.0.0.1:7167 > /tmp/cpu_agent1.log 2>&1 &
 AGENT1_PID=$!
-echo "Agent 1 (PID $AGENT1_PID) listening on 127.0.0.1:7761"
+echo "Agent 1 (PID $AGENT1_PID) listening on 127.0.0.1:7167"
 
 # Start agent 2  
-$AGENT_BIN -vv --listen 127.0.0.1:7762 > /tmp/cpu_agent2.log 2>&1 &
+$AGENT_BIN -vv --listen 127.0.0.1:7168 > /tmp/cpu_agent2.log 2>&1 &
 AGENT2_PID=$!
-echo "Agent 2 (PID $AGENT2_PID) listening on 127.0.0.1:7762"
+echo "Agent 2 (PID $AGENT2_PID) listening on 127.0.0.1:7168"
 
 # Give agents time to start
 sleep 3
@@ -77,13 +77,13 @@ trap cleanup EXIT
 
 # Verify agents are running (optional - ping may not be implemented)
 echo "Checking agents..."
-if $CTL_BIN --agents 127.0.0.1:7761,127.0.0.1:7762 ping > /dev/null 2>&1; then
+if $CTL_BIN --agents 127.0.0.1:7167,127.0.0.1:7168 ping > /dev/null 2>&1; then
     echo "✓ Agents responding to ping"
 else
     echo "⚠ Ping not available (agents may still be functional)"
     # Verify agents are at least listening on their ports
-    if ss -ltn | grep -q ":7761" && ss -ltn | grep -q ":7762"; then
-        echo "✓ Agents listening on ports 7761 and 7762"
+    if ss -ltn | grep -q ":7167" && ss -ltn | grep -q ":7168"; then
+        echo "✓ Agents listening on ports 7167 and 7168"
     else
         echo "✗ ERROR: Agents not listening on expected ports"
         exit 1
@@ -93,7 +93,7 @@ echo ""
 
 # Run distributed workload with controller logging
 echo "Running distributed workload (10s)..."
-$CTL_BIN -vv --agents 127.0.0.1:7761,127.0.0.1:7762 \
+$CTL_BIN -vv --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config "$TEST_CONFIG" --start-delay 1 2>&1 | tee /tmp/cpu_ctl.log
 
 echo ""

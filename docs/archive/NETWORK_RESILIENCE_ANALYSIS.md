@@ -153,7 +153,7 @@ Add network stability check before starting distributed workload:
 # validate-network.sh
 
 AGENTS="agent-host-1 agent-host-2 agent-host-3 agent-host-4 agent-host-5 agent-host-6 agent-host-7 agent-host-8"
-PORTS="7761 7762 7763 7764 7765 7766 7767 7768"
+PORTS="7167 7168 7169 7170 7171 7172 7173 7174"
 
 echo "=== Network Validation ==="
 echo "Testing connectivity to all agents..."

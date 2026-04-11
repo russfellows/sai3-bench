@@ -7,23 +7,36 @@
 //! Also checks:
 //! - Permission source detection (env vars vs instance-level IAM)
 //! - EC2 IAM role, GCP service account, Azure managed identity
+//! - Optional write probe: PUT → LIST → DELETE a small test object (warnings only)
 
 use super::{ErrorType, ValidationResult, ValidationSummary};
 use anyhow::Result;
+use bytes;
 use futures::StreamExt;
+use rand::Rng;
 use s3dlio::object_store::store_for_uri;
+
+/// Known content written during the write probe. After PUTting this, we GET it
+/// back and compare byte-for-byte to confirm read-after-write consistency.
+const PROBE_CONTENT: &[u8] = b"sai3bench-write-probe-v1";
 
 /// Validate object storage access with a quick bucket accessibility check.
 ///
 /// Performs a streaming list (reads at most 1 key) against each endpoint to
 /// verify connectivity and credentials without loading all objects into memory.
 ///
+/// When `check_write` is `true`, also runs a write probe per endpoint:
+/// PUT a small known-content object → GET it back and verify content → DELETE.
+/// Failures at any probe step are reported as **warnings only** — they never
+/// cause the preflight to hard-fail. This is so that read-only creds on a
+/// GET-only workload don't block execution.
+///
 /// # Arguments
 /// * `endpoints` - List of object storage URIs to validate (e.g. `gs://bucket/prefix`)
-/// * `_check_write` - Reserved for future write-permission testing; currently unused
+/// * `check_write` - When `true`, run PUT/GET/DELETE write probe on each endpoint
 pub async fn validate_object_storage(
     endpoints: &[String],
-    _check_write: bool,
+    check_write: bool,
 ) -> Result<ValidationSummary> {
     let mut results = Vec::new();
 
@@ -114,9 +127,157 @@ pub async fn validate_object_storage(
                 ));
             }
         }
+
+        // Write probe: PUT a known-content object, GET it back, DELETE it.
+        // All steps are warning-only — never a hard failure.
+        if check_write {
+            let probe_results = write_probe(endpoint).await;
+            results.extend(probe_results);
+        }
     }
 
     Ok(ValidationSummary::new(results))
+}
+
+/// PUT a tiny probe object, GET it back and verify its content, then DELETE it.
+///
+/// All three steps issue only warnings on failure — the preflight does not
+/// hard-fail because a read-only credential set on a GET-only workload should
+/// never prevent the run.
+async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+
+    // Build a unique probe URI from the endpoint so concurrent agents don't collide.
+    // Uniqueness comes from a random 16-bit suffix; the content itself is a fixed
+    // known string (PROBE_CONTENT) that we verify on read-back.
+    let suffix: u32 = rand::rng().random();
+    let sep = if endpoint.ends_with('/') { "" } else { "/" };
+    let probe_uri = format!("{}{}sai3bench-preflight-probe-{:08x}.bin", endpoint, sep, suffix);
+
+    // ── Step 1: PUT ────────────────────────────────────────────────────────────
+    let store = match store_for_uri(&probe_uri) {
+        Ok(s) => s,
+        Err(e) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Configuration,
+                "write-probe",
+                format!("Cannot initialize store for write probe at {}: {}", endpoint, e),
+                "Write probe skipped — check URI format",
+            ));
+            return results;
+        }
+    };
+
+    let put_data = bytes::Bytes::from_static(PROBE_CONTENT);
+    let put_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        store.put(&probe_uri, put_data),
+    ).await;
+
+    match put_result {
+        Err(_elapsed) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Network,
+                "write-probe-put",
+                format!("Write probe PUT timed out at {}", endpoint),
+                "PUT took > 15 s — check network and write permissions",
+            ));
+            return results;
+        }
+        Ok(Err(e)) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Permission,
+                "write-probe-put",
+                format!("Write probe PUT failed at {}: {}", endpoint, e),
+                "Workload may fail if it requires write access — check write permissions",
+            ));
+            return results;
+        }
+        Ok(Ok(())) => {
+            results.push(ValidationResult::success(
+                "write-probe-put",
+                format!("Write probe PUT succeeded at {}", endpoint),
+            ));
+        }
+    }
+
+    // ── Step 2: GET and verify content ─────────────────────────────────────────
+    let get_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        store.get(&probe_uri),
+    ).await;
+
+    match get_result {
+        Err(_elapsed) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Network,
+                "write-probe-get",
+                format!("Write probe GET timed out at {}", endpoint),
+                "Object was written but could not be read back within 15 s",
+            ));
+        }
+        Ok(Err(e)) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Network,
+                "write-probe-get",
+                format!("Write probe GET failed at {}: {}", endpoint, e),
+                "Object was written but was not readable — possible consistency issue",
+            ));
+        }
+        Ok(Ok(data)) => {
+            if data.as_ref() == PROBE_CONTENT {
+                results.push(ValidationResult::success(
+                    "write-probe-get",
+                    format!("Write probe GET verified correct content at {}", endpoint),
+                ));
+            } else {
+                results.push(ValidationResult::warning(
+                    ErrorType::System,
+                    "write-probe-get",
+                    format!(
+                        "Write probe GET at {} returned unexpected content (got {} bytes, expected {:?})",
+                        endpoint,
+                        data.len(),
+                        std::str::from_utf8(PROBE_CONTENT).unwrap_or("<binary>"),
+                    ),
+                    "Storage may be returning stale or corrupted data",
+                ));
+            }
+        }
+    }
+
+    // ── Step 3: DELETE ─────────────────────────────────────────────────────────
+    let del_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        store.delete(&probe_uri),
+    ).await;
+
+    match del_result {
+        Err(_elapsed) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Network,
+                "write-probe-delete",
+                format!("Write probe DELETE timed out at {} — probe object may remain", endpoint),
+                "Manually delete: sai3bench-preflight-probe-*.bin",
+            ));
+        }
+        Ok(Err(e)) => {
+            results.push(ValidationResult::warning(
+                ErrorType::Permission,
+                "write-probe-delete",
+                format!("Write probe DELETE failed at {}: {} — probe object may remain", endpoint, e),
+                "Manually delete: sai3bench-preflight-probe-*.bin",
+            ));
+        }
+        Ok(Ok(())) => {
+            results.push(ValidationResult::success(
+                "write-probe-delete",
+                format!("Write probe DELETE succeeded at {}", endpoint),
+            ));
+        }
+    }
+
+    results
 }
 
 /// Detect permission source (environment variables vs instance-level)

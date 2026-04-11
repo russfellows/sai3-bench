@@ -125,23 +125,23 @@ docker run -d \
   -e AWS_REGION=us-east-1 \
   -e RUST_LOG=info \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 **Check status:**
 ```bash
 docker logs sai3-agent
-# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7761"
+# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Controller config:**
 ```yaml
 distributed:
   agents:
-    - address: "vm1.example.com:7761"
+    - address: "vm1.example.com:7167"
       id: "agent-1"
     
-    - address: "vm2.example.com:7761"
+    - address: "vm2.example.com:7167"
       id: "agent-2"
 ```
 
@@ -152,11 +152,11 @@ If host network is unavailable:
 ```bash
 docker run -d \
   --name sai3-agent \
-  -p 7761:7761 \
+  -p 7167:7167 \
   -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
   -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 ### Passing Cloud Credentials
@@ -168,7 +168,7 @@ docker run -d --net=host \
   -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
   -e AWS_REGION=us-east-1 \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 **Azure:**
@@ -177,7 +177,7 @@ docker run -d --net=host \
   -e AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT}" \
   -e AZURE_STORAGE_KEY="${AZURE_STORAGE_KEY}" \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 **GCS (via service account file):**
@@ -186,7 +186,7 @@ docker run -d --net=host \
   -v /path/to/gcs-key.json:/gcs-key.json:ro \
   -e GOOGLE_APPLICATION_CREDENTIALS=/gcs-key.json \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 ### Building Container Image
@@ -229,7 +229,7 @@ Create `run_agent.sh` on each agent host:
 ```bash
 #!/bin/bash
 AGENT_ID="${1:-agent-1}"
-PORT="${2:-7761}"
+PORT="${2:-7167}"
 LOG_DIR="/home/ubuntu/sai3-logs"
 mkdir -p "$LOG_DIR"
 
@@ -253,7 +253,7 @@ echo "Or: tail -f ${LOG_DIR}/agent-${AGENT_ID}.log"
 
 Run on each host:
 ```bash
-./run_agent.sh agent-1 7761
+./run_agent.sh agent-1 7167
 ```
 
 #### 2. Run Controller in tmux Session
@@ -305,15 +305,15 @@ For cross-region testing:
 distributed:
   agents:
     # US East
-    - address: "10.0.1.10:7761"
+    - address: "10.0.1.10:7167"
       id: "agent-us-east-1"
     
     # US West
-    - address: "10.0.2.10:7761"
+    - address: "10.0.2.10:7167"
       id: "agent-us-west-1"
     
     # Europe
-    - address: "10.0.3.10:7761"
+    - address: "10.0.3.10:7167"
       id: "agent-eu-west-1"
 
 # Each agent can target different endpoint
@@ -329,25 +329,25 @@ workload:
 docker run -d --net=host \
   -e AWS_REGION=us-east-1 \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 
 # EU West agent
 docker run -d --net=host \
   -e AWS_REGION=eu-west-1 \
   myregistry/sai3-bench:latest \
-  sai3bench-agent --listen 0.0.0.0:7761
+  sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 ### Firewall/Security Group Configuration
 
 **Required ports:**
-- Agent: TCP 7761 (or custom port) - inbound from controller
+- Agent: TCP 7167 (or custom port) - inbound from controller
 - Controller: No inbound required (initiates connections)
 
 **AWS Security Group example:**
 ```
 Type: Custom TCP
-Port: 7761
+Port: 7167
 Source: <controller-security-group-id>
 Description: sai3-bench agent gRPC
 ```
@@ -355,7 +355,7 @@ Description: sai3-bench agent gRPC
 **Verify connectivity:**
 ```bash
 # From controller
-telnet vm1.example.com 7761
+telnet vm1.example.com 7167
 # Should connect (then Ctrl-C to exit)
 ```
 
@@ -388,7 +388,7 @@ docker logs sai3-agent
 ```
 
 **Common issues:**
-- Port already in use: `lsof -i :7761`
+- Port already in use: `lsof -i :7167`
 - Missing credentials: verify env vars are set
 - Network: ensure port is accessible from controller
 
@@ -396,13 +396,13 @@ docker logs sai3-agent
 
 **Test network:**
 ```bash
-telnet agent-host 7761
+telnet agent-host 7167
 ```
 
 **Check agent is listening:**
 ```bash
 docker logs sai3-agent | grep "listening"
-# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7761"
+# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Verify credentials:**

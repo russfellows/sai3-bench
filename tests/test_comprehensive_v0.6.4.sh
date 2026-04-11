@@ -29,14 +29,14 @@ test_put_only() {
     echo "=== Test 1: PUT-only workload (2 agents) ==="
     
     # Start agents
-    $BINARY_AGENT --listen 127.0.0.1:7761 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7167 >/dev/null 2>&1 &
     AGENT1_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7762 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7168 >/dev/null 2>&1 &
     AGENT2_PID=$!
     sleep 2
     
     # Run workload
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
         run --config tests/configs/distributed_put_test.yaml --start-delay 3 >/dev/null 2>&1
     
     RESULT_DIR=$(ls -td sai3-* 2>/dev/null | head -1)
@@ -115,14 +115,14 @@ test_multiple_sizes() {
     echo "=== Test 2: Multiple object sizes (2 agents) ==="
     
     # Start agents
-    $BINARY_AGENT --listen 127.0.0.1:7761 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7167 >/dev/null 2>&1 &
     AGENT1_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7762 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7168 >/dev/null 2>&1 &
     AGENT2_PID=$!
     sleep 2
     
     # Run workload with varied sizes
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
         run --config tests/configs/size_distributions_test.yaml --start-delay 3 >/dev/null 2>&1
     
     RESULT_DIR=$(ls -td sai3-* 2>/dev/null | head -1)
@@ -191,18 +191,18 @@ test_four_agents() {
     echo "=== Test 3: Four agents (stress test) ==="
     
     # Start 4 agents
-    $BINARY_AGENT --listen 127.0.0.1:7761 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7167 >/dev/null 2>&1 &
     AGENT1_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7762 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7168 >/dev/null 2>&1 &
     AGENT2_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7763 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7169 >/dev/null 2>&1 &
     AGENT3_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7764 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7170 >/dev/null 2>&1 &
     AGENT4_PID=$!
     sleep 2
     
     # Run simple PUT workload with 4 agents
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762,127.0.0.1:7763,127.0.0.1:7764 \
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168,127.0.0.1:7169,127.0.0.1:7170 \
         run --config tests/configs/distributed_put_test.yaml --start-delay 3 >/dev/null 2>&1
     
     RESULT_DIR=$(ls -td sai3-* 2>/dev/null | head -1)
@@ -257,14 +257,14 @@ test_histogram_accuracy() {
     echo "=== Test 4: Histogram merging accuracy ==="
     
     # Start agents
-    $BINARY_AGENT --listen 127.0.0.1:7761 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7167 >/dev/null 2>&1 &
     AGENT1_PID=$!
-    $BINARY_AGENT --listen 127.0.0.1:7762 >/dev/null 2>&1 &
+    $BINARY_AGENT --listen 127.0.0.1:7168 >/dev/null 2>&1 &
     AGENT2_PID=$!
     sleep 2
     
     # Run simple PUT workload
-    $BINARY_CTL --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    $BINARY_CTL --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 \
         run --config tests/configs/distributed_put_test.yaml --start-delay 3 >/dev/null 2>&1
     
     RESULT_DIR=$(ls -td sai3-* 2>/dev/null | head -1)

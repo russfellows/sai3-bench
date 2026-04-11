@@ -21,7 +21,7 @@ distributed:
   
   agents:
     # Agent 1: Creates files across endpoints A & B (round robin)
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-dc-a"
       concurrency_override: 4
       multi_endpoint:
@@ -31,7 +31,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: Creates files across endpoints C & D (least connections)
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-dc-b"
       concurrency_override: 4
       multi_endpoint:

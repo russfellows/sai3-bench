@@ -37,13 +37,13 @@ distributed:
   path_selection: exclusive
   
   agents:
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-1"
       target_override: "file:///mnt/scratch/agent1-test/"
       multi_endpoint:
         endpoints:
           - "file:///mnt/scratch/agent1-test/"
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-2"
       target_override: "file:///mnt/scratch/agent2-test/"
       multi_endpoint:

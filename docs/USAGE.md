@@ -381,7 +381,7 @@ This doc focuses on the distributed controller/agent mode, including plaintext a
   - **Google Cloud Storage**: Application Default Credentials via gcloud CLI:
     - `gcloud auth application-default login`
   - **File/Direct I/O**: No credentials required, uses local filesystem
-- **Open firewall** for the agent port (default: `7761`)
+- **Open firewall** for the agent port (default: `7167`)
 
 ## Custom Endpoints (Local Emulators & Proxies)
 
@@ -453,7 +453,7 @@ USAGE:
                 [--tls-sans <csv>] [--tls-write-ca <dir>] [--op-log <path>]
 
 FLAGS/OPTIONS:
-  --listen <addr>       Listen address (default: 0.0.0.0:7761)
+  --listen <addr>       Listen address (default: 0.0.0.0:7167)
   --tls                 Enable TLS with an ephemeral self-signed cert
   --tls-domain <name>   Subject CN / default SAN if --tls-sans not set (default: "localhost")
   --tls-sans <csv>      Comma-separated SANs (DNS names and/or IPs) for the cert (e.g. "hostA,10.1.2.3,127.0.0.1")
@@ -499,9 +499,9 @@ You have three flexible options for specifying agent addresses:
 ```yaml
 distributed:
   agents:
-    - address: "node1.example.com:7761"
+    - address: "node1.example.com:7167"
       id: "agent-1"
-    - address: "node2.example.com:7761"
+    - address: "node2.example.com:7167"
       id: "agent-2"
 ```
 
@@ -513,13 +513,13 @@ distributed:
 ### Option 2: CLI Only (Quick Testing)
 ```bash
 # Specify on command line
-./sai3bench-ctl --agents node1:7761,node2:7761 run --config workload.yaml
+./sai3bench-ctl --agents node1:7167,node2:7167 run --config workload.yaml
 ```
 
 ### Option 3: Both (Config Takes Precedence)
 ```bash
 # Config YAML agents override CLI agents
-./sai3bench-ctl --agents localhost:7761,localhost:7762 run --config workload.yaml
+./sai3bench-ctl --agents localhost:7167,localhost:7168 run --config workload.yaml
 # Uses agents from workload.yaml, not CLI
 ```
 
@@ -546,10 +546,10 @@ distributed:
   shared_filesystem: false      # Per-agent storage
   tree_creation_mode: isolated  # Each agent creates separate tree
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       multi_endpoint:
         endpoints: ["file:///mnt/filesys1/"]
-    - address: "node2:7761"
+    - address: "node2:7167"
       multi_endpoint:
         endpoints: ["file:///mnt/filesys5/"]
 
@@ -577,10 +577,10 @@ distributed:
   shared_filesystem: true       # All agents access same data
   tree_creation_mode: concurrent
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       multi_endpoint:
         endpoints: ["file:///mnt/shared/"]  # Different mount, same storage
-    - address: "node2:7761"
+    - address: "node2:7167"
       multi_endpoint:
         endpoints: ["file:///mnt/shared/"]
 
@@ -626,10 +626,10 @@ workload:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       multi_endpoint:
         endpoints: ["s3://10.0.1.10:9000/bucket/"]  # Host1 specific
-    - address: "host2:7761"
+    - address: "host2:7167"
       multi_endpoint:
         endpoints: ["s3://10.0.1.11:9000/bucket/"]  # Host2 specific
 ```
@@ -854,26 +854,26 @@ prepare:
 # 3 Quick Start — Single Host (PLAINTEXT)
 In one terminal:
 
-## Run agent without TLS on port 7761
-./target/release/sai3bench-agent --listen 127.0.0.1:7761
+## Run agent without TLS on port 7167
+./target/release/sai3bench-agent --listen 127.0.0.1:7167
 In another terminal:
 
 ## Controller talking to that agent (plaintext is default):
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167 ping
 
 ## Example GET workload (jobs = concurrency for downloads)
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167 get \
   --uri s3://my-bucket/path/ --jobs 8
 
 # 4 Multi-Host (PLAINTEXT)
 On each agent host (e.g., node1, node2):
 
-./sai3bench-agent --listen 0.0.0.0:7761
+./sai3bench-agent --listen 0.0.0.0:7167
 From the controller host:
 
-./sai3bench-ctl --agents node1:7761,node2:7761 ping
+./sai3bench-ctl --agents node1:7167,node2:7167 ping
 
-./sai3bench-ctl --agents node1:7761,node2:7761 get \
+./sai3bench-ctl --agents node1:7167,node2:7167 get \
   --uri s3://my-bucket/data/ --jobs 16
 
 # 5 TLS with Self‑Signed Certificates (No CA hassles)
@@ -888,7 +888,7 @@ resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 ### Example: agent runs on loki-node3, reachable by name and IP
 Write cert & key into /tmp/agent-ca/  (for you to scp to controller)
 ./sai3bench-agent \
-  --listen 0.0.0.0:7761 \
+  --listen 0.0.0.0:7167 \
   --tls \
   --tls-domain loki-node3 \
   --tls-sans "loki-node3,127.0.0.1,10.10.0.23" \
@@ -914,7 +914,7 @@ Single agent:
 
 ```
 ./sai3bench-ctl \
-  --agents loki-node3:7761 \
+  --agents loki-node3:7167 \
   --agent-ca /tmp/agent_ca.pem \
   ping
 ```
@@ -925,7 +925,7 @@ If you connect by an alternate name or IP that’s in the SANs, you may need
 ## Connecting to the agent by IP, telling TLS to expect "loki-node3" (in SANs)
 ```
 ./sai3bench-ctl \
-  --agents 10.10.0.23:7761 \
+  --agents 10.10.0.23:7167 \
   --agent-ca /tmp/agent_ca.pem \
   --agent-domain loki-node3 \
   ping
@@ -935,13 +935,13 @@ Multiple agents (all in TLS mode):
 
 ```
 ./sai3bench-ctl \
-  --agents loki-node3:7761,loki-node4:7761 \
+  --agents loki-node3:7167,loki-node4:7167 \
   --agent-ca /tmp/agent_ca.pem \
   ping
 ```
 ```
 ./sai3bench-ctl \
-  --agents loki-node3:7761,loki-node4:7761 \
+  --agents loki-node3:7167,loki-node4:7167 \
   --agent-ca /tmp/agent_ca.pem \
   get --uri s3://my-bucket/data/ --jobs 16
 ```
@@ -1068,7 +1068,7 @@ The improved startup sequence provides better visibility:
 The default start delay is 2 seconds (on top of the 10-second coordinated start). You can adjust it:
 
 ```bash
-./sai3bench-ctl --agents node1:7761,node2:7761 \
+./sai3bench-ctl --agents node1:7167,node2:7167 \
   --start-delay 5 \  # 5s instead of 2s (total: 15s coordinated start)
   run --config workload.yaml
 ```
@@ -1079,13 +1079,13 @@ For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEME
 GET (download) via controller
 ### PLAINTEXT (Default)
 ```
-./sai3bench-ctl --agents node1:7761 get \
+./sai3bench-ctl --agents node1:7167 get \
   --uri s3://my-bucket/prefix/ --jobs 16
 ```
 
 ### TLS
 ```
-./sai3bench-ctl --agents node1:7761 \
+./sai3bench-ctl --agents node1:7167 \
   --agent-ca /tmp/agent_ca.pem \
   get --uri s3://my-bucket/prefix/ --jobs 16
 ```
@@ -1098,7 +1098,7 @@ PUT (upload) via controller
 
 ### PLAINTEXT
 ```
-./sai3bench-ctl --agents node1:7761 put \
+./sai3bench-ctl --agents node1:7167 put \
   --bucket my-bucket \
   --prefix test/ \
   --object-size 1048576 \
@@ -1108,7 +1108,7 @@ PUT (upload) via controller
 
 ### TLS
 ```
-./sai3bench-ctl --agents node1:7761 \
+./sai3bench-ctl --agents node1:7167 \
   --agent-ca /tmp/agent_ca.pem \
   put --bucket my-bucket \
   --prefix test/ \
@@ -1120,16 +1120,16 @@ PUT (upload) via controller
 # 8 Localhost Demo (No Makefile Needed)
 ### Terminal A — agent (PLAINTEXT)
 ```
-./target/release/sai3bench-agent --listen 127.0.0.1:7761
+./target/release/sai3bench-agent --listen 127.0.0.1:7167
 ```
 
 ### Terminal B — controller
 ```
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761 ping
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167 ping
 ```
 
 ```
-./target/release/sai3bench-ctl --agents 127.0.0.1:7761 get \
+./target/release/sai3bench-ctl --agents 127.0.0.1:7167 get \
   --uri s3://my-bucket/prefix/ --jobs 4
 ```
 
@@ -1137,7 +1137,7 @@ PUT (upload) via controller
 
 ### Terminal A — agent with TLS & SANs covering "localhost" and "127.0.0.1"
 ```
-./sai3bench-agent --listen 127.0.0.1:7761 --tls \
+./sai3bench-agent --listen 127.0.0.1:7167 --tls \
   --tls-domain localhost \
   --tls-sans "localhost,127.0.0.1" \
   --tls-write-ca /tmp/agent-ca
@@ -1146,7 +1146,7 @@ PUT (upload) via controller
 
 ### Terminal B — controller
 ```
-./sai3bench-ctl --agents 127.0.0.1:7761 \
+./sai3bench-ctl --agents 127.0.0.1:7167 \
   --agent-ca /tmp/agent-ca/agent_cert.pem \
   --agent-domain localhost \
   ping
@@ -1226,18 +1226,18 @@ Control error/retry logging with verbosity flags:
 
 **Default** (no flags): Shows only critical failures and threshold warnings
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761
+./sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 **`-v` (info level)**: Adds retry attempt logging with 🔄 emoji
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 -v
+./sai3bench-agent --listen 0.0.0.0:7167 -v
 # Output: 🔄 Retry 1/3 for operation get on s3://bucket/key
 ```
 
 **`-vv` (debug level)**: Shows individual errors with full context
 ```bash
-./sai3bench-agent --listen 0.0.0.0:7761 -vv
+./sai3bench-agent --listen 0.0.0.0:7167 -vv
 # Output: ❌ Error on get s3://bucket/key: Connection timeout (attempt 1/3)
 ```
 
@@ -1280,7 +1280,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 **CLI Flag** (applies to all workloads on agent):
 ```bash
 # Enable oplog via CLI flag
-./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
+./sai3bench-agent --listen 0.0.0.0:7167 --op-log /data/oplogs/trace.tsv.zst
 # Creates: /data/oplogs/trace-agent1.tsv.zst (agent_id automatically appended)
 ```
 
@@ -1291,9 +1291,9 @@ op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
 
 distributed:
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       id: agent1
-    - address: "node2:7761"
+    - address: "node2:7167"
       id: agent2
 ```
 
@@ -1306,7 +1306,7 @@ Results in per-agent files:
 # Optional: configure buffer size (default: 64KB)
 export S3DLIO_OPLOG_BUF=131072
 
-./sai3bench-agent --listen 0.0.0.0:7761 --op-log /data/oplogs/trace.tsv.zst
+./sai3bench-agent --listen 0.0.0.0:7167 --op-log /data/oplogs/trace.tsv.zst
 ```
 
 **Post-Processing: Sorting Oplogs**:
@@ -1457,7 +1457,7 @@ Sections 3–4.
 The agent reports its version on ping:
 
 ```
-./sai3bench-ctl --agents node1:7761 ping
-# connected to node1:7761 (agent version X.Y.Z)
+./sai3bench-ctl --agents node1:7167 ping
+# connected to node1:7167 (agent version X.Y.Z)
 ```
 Keep controller/agent binaries from the same source build when testing.

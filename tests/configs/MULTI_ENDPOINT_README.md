@@ -34,7 +34,7 @@ Multi-endpoint configuration enables distributing I/O operations across multiple
 ./sai3-bench run --config tests/configs/multi_endpoint_global.yaml
 
 # Distributed test (all agents share same 8 endpoints)
-./sai3bench-ctl --agents host1:7761,host2:7761,host3:7761,host4:7761 \
+./sai3bench-ctl --agents host1:7167,host2:7167,host3:7167,host4:7167 \
   run --config tests/configs/multi_endpoint_global.yaml
 ```
 
@@ -67,7 +67,7 @@ Multi-endpoint configuration enables distributing I/O operations across multiple
 **Run**:
 ```bash
 # Must run with distributed controller (requires 4 agents)
-./sai3bench-ctl --agents testhost1:7761,testhost2:7761,testhost3:7761,testhost4:7761 \
+./sai3bench-ctl --agents testhost1:7167,testhost2:7167,testhost3:7167,testhost4:7167 \
   run --config tests/configs/multi_endpoint_per_agent.yaml
 ```
 
@@ -143,7 +143,7 @@ Each agent gets specific endpoints:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: agent1
       multi_endpoint:
         strategy: round_robin
@@ -151,7 +151,7 @@ distributed:
           - s3://192.168.1.10:9000/bucket/
           - s3://192.168.1.11:9000/bucket/
     
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: agent2
       multi_endpoint:
         endpoints:

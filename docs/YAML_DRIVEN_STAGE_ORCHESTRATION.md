@@ -46,9 +46,9 @@ Idle → Validating → PrepareReady → Preparing → ExecuteReady → Executin
 ```yaml
 distributed:
   agents:
-    - address: "host1:7760"
+    - address: "host1:7166"
       id: "agent-1"
-    - address: "host2:7760"
+    - address: "host2:7166"
       id: "agent-2"
   
   # Explicit stage orchestration
@@ -707,7 +707,7 @@ distributed:
   shared_filesystem: true
   path_selection: random
   agents:
-    - address: "agent-host:7761"
+    - address: "agent-host:7167"
       id: "agent-1"
 
   stages:

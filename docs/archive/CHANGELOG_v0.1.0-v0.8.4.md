@@ -216,7 +216,7 @@ Disconnect/Reconnect Count: 3
 **`start_local_agents.sh` Updates**:
 - New 5th parameter for optional oplog base path
 - Usage: `./start_local_agents.sh <num_agents> <base_port> <verbose> <log_dir> <op_log>`
-- Example: `./start_local_agents.sh 2 7761 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"`
+- Example: `./start_local_agents.sh 2 7167 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"`
 - Automatically passes `--op-log` to each agent if provided
 
 #### Use Cases
@@ -228,9 +228,9 @@ op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
 
 distributed:
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       id: agent1
-    - address: "node2:7761"  
+    - address: "node2:7167"  
       id: agent2
 ```
 
@@ -639,13 +639,13 @@ message PrepareSummary {
   
   ```bash
   # Old way (v0.7.6):
-  sai3bench-ctl --agents host:7761 run --config test.yaml
+  sai3bench-ctl --agents host:7167 run --config test.yaml
   
   # New way (v0.7.7):
-  sai3bench-ctl --agents host:7761 run --config test.yaml
+  sai3bench-ctl --agents host:7167 run --config test.yaml
   
   # For TLS (v0.7.7):
-  sai3bench-ctl --agents host:7761 --tls --agent-ca cert.pem run --config test.yaml
+  sai3bench-ctl --agents host:7167 --tls --agent-ca cert.pem run --config test.yaml
   ```
 
 #### Added
@@ -657,7 +657,7 @@ message PrepareSummary {
   - Provides quick feedback for testing configurations
   
   ```bash
-  sai3bench-ctl --agents 10.138.0.42:7761 run --config test.yaml --dry-run
+  sai3bench-ctl --agents 10.138.0.42:7167 run --config test.yaml --dry-run
   # Output:
   # ✅ Configuration validated successfully
   #    Config file: test.yaml
@@ -2142,11 +2142,11 @@ PUT        64KiB-512KiB     3          360.61    ...
 **Usage**:
 ```bash
 # Start agents on multiple hosts
-sai3bench-agent --listen 0.0.0.0:7761  # On host 1
-sai3bench-agent --listen 0.0.0.0:7761  # On host 2
+sai3bench-agent --listen 0.0.0.0:7167  # On host 1
+sai3bench-agent --listen 0.0.0.0:7167  # On host 2
 
 # Run distributed workload from controller
-sai3bench-ctl --agents host1:7761,host2:7761 \
+sai3bench-ctl --agents host1:7167,host2:7167 \
     run --config workload.yaml --start-delay 2
 
 # Output shows per-agent and aggregate results
@@ -2255,7 +2255,7 @@ Throughput: 23507.30 ops/s
 
 GET operations:
   Ops: 42750 (14091.13 ops/s)
-  Bytes: 43776000 (41.75 MB)
+  Bytes: 43716600 (41.75 MB)
   Throughput: 13.76 MiB/s
   Latency mean: 181µs, p50: 175µs, p95: 273µs, p99: 338µs
 

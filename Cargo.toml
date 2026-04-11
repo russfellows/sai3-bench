@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.86"
+version = "0.8.88"
 edition = "2021"
 build   = "build.rs"
 
@@ -41,6 +41,7 @@ rcgen = "^0.14"
 serde = { version = "^1.0", features = ["derive"] }
 serde_yaml = "^0.9.34"
 serde_json = "^1.0"
+postcard = { version = "^1", features = ["alloc"] } # compact binary KV record encoding
 rand = "^0.9"  # Aligned with s3dlio v0.9.38
 humantime-serde = "^1.1.1"
 humantime = "^2.2"

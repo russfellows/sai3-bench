@@ -6,6 +6,102 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.88] - 2026-04-10
+
+### Changed
+
+- **Default agent port changed from 7761 to 7167** to avoid conflicts with other
+  tools that also use port 7761.  When a port conflict exists, agents silently fail
+  to start and the controller reports "no response" from all agents.
+  - New default: `sai3bench-agent --listen 0.0.0.0:7167`
+  - Sequential ports for multi-agent-per-host setups: 7167, 7168, 7169, … 7174
+  - All YAML configs, example files, documentation, and scripts updated accordingly
+  - **Migration**: update any existing YAML configs or firewall rules that reference
+    port 7761 → 7167 (or 7762 → 7168, etc.)
+
+- **KV cache serialization migrated from JSON to postcard** — each `ObjectEntry`
+  record stored in the fjall KV store is now encoded with
+  [postcard](https://crates.io/crates/postcard) (compact binary, varint integers,
+  no field-name overhead) instead of `serde_json`.
+  - Per-entry size: **~156 bytes → ~68 bytes** (56% reduction)
+  - Scan throughput: **1.6 M entries/s → 3.2 M entries/s** (2× speedup, release build)
+  - No backward-compatibility concern — fjall KV stores are agent-local, created fresh
+    per run, and never shared between binary versions.
+  - Struct derives (`Serialize, Deserialize`) unchanged; only the two call sites
+    (`to_bytes` / `from_bytes`) in `src/metadata_cache.rs` were updated.
+
+### Added
+
+- **Port-in-use detection on agent startup** — `sai3bench-agent` now probes the
+  configured port before handing off to the gRPC server.  If the port is already
+  occupied, a clear diagnostic message is printed showing the port number, likely
+  causes, and remediation steps, then the process exits with a non-zero code instead
+  of producing a cryptic tonic startup failure.
+
+- **Preflight write probe** — when the workload contains any PUT or DELETE
+  operations, `validate_object_storage()` now performs a write-probe cycle on each
+  configured endpoint before the benchmark begins:
+  1. PUT a fixed 24-byte sentinel string (`sai3bench-write-probe-v1`) under the key
+     `sai3bench-preflight-probe-<8hex>.bin` (random hex suffix avoids collisions
+     between concurrent probes).
+  2. GET the object and verify the content byte-for-byte.
+  3. DELETE the probe object.
+  All probe failures are reported as `WARNING` (not hard errors), so the benchmark
+  still runs if an endpoint cannot be verified — operators decide whether to abort.
+  Read-only workloads skip the write probe entirely.
+
+- **Preflight stage always occupies stage 0; YAML stages start at 1** — the agent
+  state machine now reserves index 0 for the preflight validation stage.  The first
+  YAML-defined stage (e.g. `prepare`) is stage 1, the second is stage 2, and so on.
+  This makes the log output and controller/agent stage coordination unambiguous:
+  - Log header: `=== Stage 1/N: prepare ===` (not `Stage 0`)
+  - Barrier IDs sent to the controller are 0-based relative to the YAML stages
+    (stage 1 → barrier 0, stage 2 → barrier 1, …) to stay compatible with the
+    controller's own counter.
+  - New state transition rule: `{0,"preflight",false} → {1,*,false}` is explicitly
+    allowed, which was previously rejected as a same-index conflict.
+
+- **KV cache coverage summary at startup** — after a KV cache checkpoint is restored,
+  both `sequential.rs` and `parallel.rs` now log a one-line human-readable summary:
+  ```
+  ⚡ KV cache checkpoint shows all 64032768 objects already Created — skipping LIST
+  📊 Cache summary: 64032768 objects | 7.63 GiB total storage
+  ```
+  The storage total is accumulated in the same single fjall scan that counts objects
+  by state, so there is zero additional I/O overhead.
+
+- **`count_and_bytes_by_state()` on `EndpointCache`** — new method that walks the
+  fjall keyspace once and returns both a `HashMap<ObjectState, usize>` (counts) and a
+  `HashMap<ObjectState, u64>` (logical bytes) simultaneously.  Replaces the previous
+  count-only scan; `CheckpointCoverage` gains a new `bytes_by_state` field populated
+  from this single pass.
+
+- **Progressive WARN safeguards for slow KV cache scans** — `count_and_bytes_by_state`
+  now measures elapsed time every 50 000 entries (negligible overhead).  If the scan
+  exceeds 10 s a `WARN` is emitted; another fires every 10 s thereafter, with the
+  message escalating to a stronger tone at 30 s.  The scan never aborts — the warning
+  explicitly notes "a LIST would take far longer."
+
+- **KV cache coverage query from agent preflight** — `sai3bench-agent` now queries the
+  on-disk KV cache checkpoint for each `ensure_objects` spec during the preflight phase
+  and logs the result (✅ all created, ⚠️ partial with breakdown, ℹ️ no checkpoint).
+  This is purely informational and does not change pass/fail behaviour.
+
+- **18 new unit / integration tests** (17 active, 1 `#[ignore]`):
+  - *`src/metadata_cache.rs`* — 12 new tests covering checkpoint round-trip, coverage
+    queries (full and partial), multi-agent isolation, per-object lookup after restore,
+    `get_objects_by_state` after restore, and the convenience `query_checkpoint_coverage`
+    helper.  Includes `test_coverage_scan_timing_600k` (`#[ignore]`) which populates
+    600 000 entries and asserts both scan passes complete in under 10 s.
+  - *`src/prepare/tests.rs`* — 6 new integration tests exercising KV cache population
+    during real sequential and parallel prepare runs across flat and tree object layouts
+    (`test_kv_cache_flat_sequential_200`, `test_kv_cache_flat_parallel_variable_sizes`,
+    `test_kv_cache_tree_sequential_192`, `test_kv_cache_tree_parallel_variable_sizes`,
+    `test_sequential_prepare_populates_kv_cache`,
+    `test_parallel_prepare_populates_kv_cache`).
+
+---
+
 ## [0.8.86] - 2026-03-24
 
 ### Fixed
@@ -213,7 +309,7 @@ All notable changes to sai3-bench are documented in this file.
 
 - Verified config dry-run paths still pass after RPC/schema changes:
   - `sai3-bench run --config tests/configs/test_fill_random.yaml --dry-run`
-  - `sai3bench-ctl --agents 127.0.0.1:7761 run --config tests/configs/custom_stage_test.yaml --dry-run`
+  - `sai3bench-ctl --agents 127.0.0.1:7167 run --config tests/configs/custom_stage_test.yaml --dry-run`
 
 ### Fixed
 
@@ -1080,14 +1176,14 @@ multi_endpoint:
 ```yaml
 distributed:
   agents:
-    - address: "testhost1:7761"
+    - address: "testhost1:7167"
       id: agent1
       multi_endpoint:
         endpoints:
           - s3://192.168.1.10:9000/bucket/
           - s3://192.168.1.11:9000/bucket/
     
-    - address: "testhost2:7761"
+    - address: "testhost2:7167"
       id: agent2
       multi_endpoint:
         endpoints:

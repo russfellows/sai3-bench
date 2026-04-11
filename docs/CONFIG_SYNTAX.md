@@ -190,7 +190,7 @@ workload:
 # No global multi_endpoint - agents have individual configs
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
       multi_endpoint:
         strategy: round_robin
@@ -198,7 +198,7 @@ distributed:
           - "s3://192.168.1.10:9000/bucket/"  # Agent 1 gets endpoints 10 & 11
           - "s3://192.168.1.11:9000/bucket/"
     
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
       multi_endpoint:
         strategy: round_robin
@@ -223,10 +223,10 @@ multi_endpoint:
 
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       # Uses global multi_endpoint config
     
-    - address: "host2:7761"
+    - address: "host2:7167"
       multi_endpoint:               # Override: different endpoints for this agent
         strategy: least_connections
         endpoints:
@@ -354,7 +354,7 @@ Multi-endpoint mode generates per-endpoint statistics files:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       multi_endpoint:
         endpoints: ["s3://ip1/", "s3://ip2/"]  # Agent 1 specific
 ```
@@ -415,8 +415,8 @@ Stages are defined in the `distributed.stages` array:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
-    - address: "host2:7761"
+    - address: "host1:7167"
+    - address: "host2:7167"
   
   # Define execution stages
   stages:
@@ -865,8 +865,8 @@ distributed:
     agent_barrier_timeout: 120  # 2 minutes
   
   agents:
-    - address: "host1:7761"
-    - address: "host2:7761"
+    - address: "host1:7167"
+    - address: "host2:7167"
 ```
 
 **Large-scale test** (300k+ directories):
@@ -1027,8 +1027,8 @@ distributed:
   # grpc_keepalive_timeout: 10
   
   agents:
-    - address: "host1:7761"
-    - address: "host2:7761"
+    - address: "host1:7167"
+    - address: "host2:7167"
 ```
 
 **Parameters**:
@@ -1207,7 +1207,7 @@ distributed:
   agent_ready_timeout: "5m"      # Agent ready timeout (or plain: 300)
   
   agents:
-    - address: "host1.example.com:7761"
+    - address: "host1.example.com:7167"
       id: "node-1"
       concurrency_override: 64     # Override global concurrency
       target_override: "file:///mnt/filesys1/benchmark/"
@@ -1218,7 +1218,7 @@ distributed:
         - "/mnt/nvme:/data"
         - "/tmp/results:/results:ro"
     
-    - address: "host2.example.com:7761"
+    - address: "host2.example.com:7167"
       id: "node-2"
       concurrency_override: 128
 ```
@@ -1232,7 +1232,7 @@ distributed:
 - **`env`**: Environment variables injected into agent process/container
 - **`volumes`**: Docker volume mounts (format: `"host:container"` or `"host:container:mode"`)
 - **`path_template`**: Custom path template override
-- **`listen_port`**: Agent listen port (SSH mode only, default: 7761)
+- **`listen_port`**: Agent listen port (SSH mode only, default: 7167)
 - **`multi_endpoint`**: Per-agent multi-endpoint override (see [Multi-Endpoint](#multi-endpoint-load-balancing))
 - **`kv_cache_dir`**: Per-agent KV cache directory override (v0.8.60+, see [KV Cache Isolation](#kv-cache-isolation))
 
@@ -1248,9 +1248,9 @@ The metadata KV cache uses LSM (Log-Structured Merge-tree) operations that gener
 distributed:
   kv_cache_dir: "/mnt/local-ssd/kv-cache"  # Fast local storage
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"  # Uses /mnt/local-ssd/kv-cache/sai3-cache-agent-0-{hash}/
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"  # Uses /mnt/local-ssd/kv-cache/sai3-cache-agent-1-{hash}/
 ```
 
@@ -1260,10 +1260,10 @@ distributed:
 distributed:
   kv_cache_dir: "/mnt/slow-disk/kv-cache"  # Default for most agents
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
       kv_cache_dir: "/mnt/nvme/kv-cache"  # Fast local NVMe
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
       # Uses global default: /mnt/slow-disk/kv-cache/
 ```
@@ -1273,7 +1273,7 @@ distributed:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       # kv_cache_dir omitted → defaults to /tmp/sai3-cache-agent-0-{hash}/
 ```
 
@@ -1316,9 +1316,9 @@ prepare:
 cache_checkpoint_interval_secs: 300  # All agents checkpoint every 5 minutes
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"  # Checkpoints to .sai3-cache-agent-1.tar.zst
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"  # Checkpoints to .sai3-cache-agent-2.tar.zst
 ```
 
@@ -1367,9 +1367,9 @@ distributed:
   
   agents:
     - address: "host1"              # Hostname only in SSH mode
-      listen_port: 7761
+      listen_port: 7167
     - address: "host2"
-      listen_port: 7761
+      listen_port: 7167
 ```
 
 **SSH configuration**:
@@ -1701,9 +1701,9 @@ op_log_path: /shared/storage/oplogs/trace.tsv.zst
 
 distributed:
   agents:
-    - address: "node1:7761"
+    - address: "node1:7167"
       id: agent1
-    - address: "node2:7761"
+    - address: "node2:7167"
       id: agent2
 ```
 

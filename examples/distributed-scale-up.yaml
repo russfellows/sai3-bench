@@ -19,50 +19,50 @@ concurrency: 32  # Per container, 256 total (8 containers × 32)
 distributed:
   agents:
     # Container 1
-    - address: "big-vm.example.com:7761"
+    - address: "big-vm.example.com:7167"
       id: "container-1"
-      listen_port: 7761
+      listen_port: 7167
       env:
         RUST_LOG: "info"
         CONTAINER_NUM: "1"
     
     # Container 2
-    - address: "big-vm.example.com:7762"
+    - address: "big-vm.example.com:7168"
       id: "container-2"
-      listen_port: 7762
+      listen_port: 7168
       env:
         RUST_LOG: "info"
         CONTAINER_NUM: "2"
     
     # Container 3
-    - address: "big-vm.example.com:7763"
+    - address: "big-vm.example.com:7169"
       id: "container-3"
-      listen_port: 7763
+      listen_port: 7169
     
     # Container 4
-    - address: "big-vm.example.com:7764"
+    - address: "big-vm.example.com:7170"
       id: "container-4"
-      listen_port: 7764
+      listen_port: 7170
     
     # Container 5
-    - address: "big-vm.example.com:7765"
+    - address: "big-vm.example.com:7171"
       id: "container-5"
-      listen_port: 7765
+      listen_port: 7171
     
     # Container 6
-    - address: "big-vm.example.com:7766"
+    - address: "big-vm.example.com:7172"
       id: "container-6"
-      listen_port: 7766
+      listen_port: 7172
     
     # Container 7
-    - address: "big-vm.example.com:7767"
+    - address: "big-vm.example.com:7173"
       id: "container-7"
-      listen_port: 7767
+      listen_port: 7173
     
     # Container 8
-    - address: "big-vm.example.com:7768"
+    - address: "big-vm.example.com:7174"
       id: "container-8"
-      listen_port: 7768
+      listen_port: 7174
   
   ssh:
     enabled: true
@@ -116,7 +116,7 @@ workload:
 # 2. Run test:
 #    sai3bench-ctl run --config examples/distributed-scale-up.yaml
 #
-# Expected: 8 containers start on big-vm on ports 7761-7768, generating
+# Expected: 8 containers start on big-vm on ports 7167-7174, generating
 # 256 concurrent operations (8 × 32) against S3.
 #
 # Compare with scale-out: 8 VMs with 1 container each for network/cost analysis.

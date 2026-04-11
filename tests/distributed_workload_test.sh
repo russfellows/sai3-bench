@@ -22,12 +22,12 @@ rm -rf /tmp/sai3bench-distributed-test
 mkdir -p /tmp/sai3bench-distributed-test
 
 # Start two agents in background
-echo "Starting agent 1 on port 7761..."
-./target/release/sai3bench-agent --listen 127.0.0.1:7761 &
+echo "Starting agent 1 on port 7167..."
+./target/release/sai3bench-agent --listen 127.0.0.1:7167 &
 AGENT1_PID=$!
 
-echo "Starting agent 2 on port 7762..."
-./target/release/sai3bench-agent --listen 127.0.0.1:7762 &
+echo "Starting agent 2 on port 7168..."
+./target/release/sai3bench-agent --listen 127.0.0.1:7168 &
 AGENT2_PID=$!
 
 # Cleanup function
@@ -46,13 +46,13 @@ sleep 2
 # Test ping
 echo
 echo "Testing ping..."
-./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7761,127.0.0.1:7762 ping
+./target/release/sai3bench-ctl --insecure --agents 127.0.0.1:7167,127.0.0.1:7168 ping
 
 # Run distributed workload
 echo
 echo "Running distributed workload..."
 ./target/release/sai3bench-ctl --insecure \
-    --agents 127.0.0.1:7761,127.0.0.1:7762 \
+    --agents 127.0.0.1:7167,127.0.0.1:7168 \
     run --config /tmp/distributed-test.yaml \
     --start-delay 1
 

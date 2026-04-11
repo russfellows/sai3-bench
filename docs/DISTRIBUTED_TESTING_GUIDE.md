@@ -121,10 +121,10 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-us-east-1a"  # Descriptive ID
     
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-us-east-1b"
 ```
 
@@ -132,8 +132,8 @@ distributed:
 ```yaml
 distributed:
   agents:
-    - address: "host1:7761"  # ID: "agent-0"
-    - address: "host2:7761"  # ID: "agent-1"
+    - address: "host1:7167"  # ID: "agent-0"
+    - address: "host2:7167"  # ID: "agent-1"
 ```
 
 Agent IDs appear in:
@@ -150,24 +150,24 @@ Agent IDs appear in:
 On each test host:
 
 ```bash
-# Start agent on default port (7761)
-sai3bench-agent --listen 0.0.0.0:7761
+# Start agent on default port (7167)
+sai3bench-agent --listen 0.0.0.0:7167
 
 # Or specify custom port
 sai3bench-agent --listen 0.0.0.0:8000
 
 # Run in background
-nohup sai3bench-agent --listen 0.0.0.0:7761 > agent.log 2>&1 &
+nohup sai3bench-agent --listen 0.0.0.0:7167 > agent.log 2>&1 &
 ```
 
 **Verify agents are listening:**
 ```bash
 # Check agent log
 tail -f agent.log
-# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7761"
+# Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 
 # Test from controller
-telnet host1 7761  # Should connect
+telnet host1 7167  # Should connect
 ```
 
 ### 2. Create Workload Config
@@ -187,13 +187,13 @@ distributed:
   path_selection: random
   
   agents:
-    - address: "host1:7761"
+    - address: "host1:7167"
       id: "agent-1"
     
-    - address: "host2:7761"
+    - address: "host2:7167"
       id: "agent-2"
     
-    - address: "host3:7761"
+    - address: "host3:7167"
       id: "agent-3"
 
 # Prepare test data
@@ -304,10 +304,10 @@ distributed:
   path_selection: random
   
   agents:
-    - address: "127.0.0.1:7761"
+    - address: "127.0.0.1:7167"
       id: "test-agent-1"
     
-    - address: "127.0.0.1:7762"
+    - address: "127.0.0.1:7168"
       id: "test-agent-2"
 
 prepare:
@@ -455,7 +455,7 @@ distributed:
   
   agents:
     # Agent 1: Uses ONLY endpoints A & B
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-dc-a"
       concurrency_override: 8
       multi_endpoint:
@@ -465,7 +465,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: Uses ONLY endpoints C & D
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-dc-b"
       concurrency_override: 8
       multi_endpoint:
@@ -540,7 +540,7 @@ distributed:
   
   agents:
     # Agent 1: ONLY endpoints A & B
-    - address: "localhost:7761"
+    - address: "localhost:7167"
       id: "agent-dc-a"
       concurrency_override: 8
       multi_endpoint:
@@ -550,7 +550,7 @@ distributed:
         strategy: round_robin
     
     # Agent 2: ONLY endpoints C & D
-    - address: "localhost:7762"
+    - address: "localhost:7168"
       id: "agent-dc-b"
       concurrency_override: 8
       multi_endpoint:
@@ -628,14 +628,14 @@ sai3-20260129-2221-multi_endpoint_workload/
 # Agent in EU West accesses S3 eu-west-1
 distributed:
   agents:
-    - address: "us-east-vm:7761"
+    - address: "us-east-vm:7167"
       id: "agent-us-east-1"
       multi_endpoint:
         endpoints:
           - "s3://my-bucket-us-east-1/data/"
         strategy: round_robin
     
-    - address: "eu-west-vm:7761"
+    - address: "eu-west-vm:7167"
       id: "agent-eu-west-1"
       multi_endpoint:
         endpoints:
@@ -655,14 +655,14 @@ distributed:
 # Each agent talks to specific MinIO nodes
 distributed:
   agents:
-    - address: "client1:7761"
+    - address: "client1:7167"
       multi_endpoint:
         endpoints:
           - "s3://minio-node1:9000/bucket/"
           - "s3://minio-node2:9000/bucket/"
         strategy: round_robin
     
-    - address: "client2:7761"
+    - address: "client2:7167"
       multi_endpoint:
         endpoints:
           - "s3://minio-node3:9000/bucket/"
@@ -681,11 +681,11 @@ Different agents can run with different thread counts:
 ```yaml
 distributed:
   agents:
-    - address: "powerful-vm:7761"
+    - address: "powerful-vm:7167"
       id: "agent-high-perf"
       concurrency_override: 64  # 64 threads
     
-    - address: "small-vm:7761"
+    - address: "small-vm:7167"
       id: "agent-low-perf"
       concurrency_override: 8   # 8 threads
 ```
@@ -701,8 +701,8 @@ distributed:
   start_delay: 5  # All agents start in 5 seconds
 
   agents:
-    - address: "host1:7761"
-    - address: "host2:7761"
+    - address: "host1:7167"
+    - address: "host2:7167"
 ```
 
 Controller calculates synchronized start time across all agents.
@@ -759,25 +759,25 @@ ps aux | grep sai3bench-agent
 **Check 2: Port is listening**
 ```bash
 # On agent host
-netstat -tlnp | grep 7761
+netstat -tlnp | grep 7167
 # Or
-lsof -i :7761
+lsof -i :7167
 ```
 
 **Check 3: Network connectivity**
 ```bash
 # From controller host
-telnet agent-host 7761
+telnet agent-host 7167
 # Should connect
 ```
 
 **Check 4: Firewall rules**
 ```bash
-# Allow port 7761 inbound on agent host
-sudo ufw allow 7761/tcp
+# Allow port 7167 inbound on agent host
+sudo ufw allow 7167/tcp
 
 # AWS Security Group: Add inbound rule
-# Type: Custom TCP, Port: 7761, Source: <controller-sg-id>
+# Type: Custom TCP, Port: 7167, Source: <controller-sg-id>
 ```
 
 ### Agent Ready Timeout
