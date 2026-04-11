@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.86-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.88-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-638%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-655%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.88)**: **KV cache compact encoding + coverage observability** — KV cache entries now use [postcard](https://crates.io/crates/postcard) binary encoding (56% smaller, 2× faster scans). At startup, a one-line cache summary reports object count and total logical storage (`📊 Cache summary: N objects | X.XX GiB`). Progressive WARN messages fire if a coverage scan exceeds 10 s. Preflight now queries the cache per-spec and logs coverage. Safe write-probe cycle validates writable endpoints before any benchmark I/O. Agent port changed to **7167** (was 7761) with automatic port-conflict detection on startup. +17 new tests.
 
 **🚀 NEW (v0.8.86)**: **GCS RAPID storage fully working** (s3dlio v0.9.86) — `BidiWriteObject` PUTs and `BidiReadObject` GETs verified against Hyperdisk ML RAPID buckets. RAPID mode is auto-detected per bucket or forced via `gcs_rapid_mode: true`. Worker drain deadline bug fixed (execute stage now runs its full configured duration). Timer observability logs added.
 

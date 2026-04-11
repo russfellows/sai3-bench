@@ -3438,10 +3438,50 @@ async fn execute_stages_workflow(
             
             sai3_bench::config::StageSpecificConfig::Validation => {
                 info!("Executing VALIDATION stage: {} (timeout: {:?}s)", stage.name, stage.timeout_secs);
-                
-                // Validation stage completes immediately - actual validation happened
-                // at RPC level (pre-flight checks) before YAML stages execute
-                // This stage exists for barrier synchronization purposes
+
+                // v0.8.88: Query KV-cache checkpoint per ensure_objects spec and report
+                // coverage.  This adds observability without changing the pass/fail
+                // outcome (validation is still barrier-only at this point).
+                if let Some(ref prepare_config) = config.prepare {
+                    let config_hash = sai3_bench::metadata_cache::generate_config_hash(&config);
+                    for (spec_idx, spec) in prepare_config.ensure_objects.iter().enumerate() {
+                        let multi_endpoint_uris = config.multi_endpoint.as_ref().map(|cfg| cfg.endpoints.as_slice());
+                        match spec.get_base_uri(multi_endpoint_uris) {
+                            Ok(endpoint_uri) => {
+                                match sai3_bench::metadata_cache::query_checkpoint_coverage(
+                                    &endpoint_uri,
+                                    Some(agent_index),
+                                    &config_hash,
+                                    spec.count,
+                                ).await {
+                                    Ok(Some(cov)) => {
+                                        if cov.covers_all {
+                                            info!("  ✅ Spec[{}] KV cache: {}/{} objects Created (covers all)",
+                                                spec_idx, cov.created_count, spec.count);
+                                        } else {
+                                            warn!("  ⚠️  Spec[{}] KV cache: {}/{} Created, {}/{} Planned, {}/{} Failed",
+                                                spec_idx,
+                                                cov.created_count, spec.count,
+                                                cov.planned_count, spec.count,
+                                                cov.failed_count, spec.count);
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        info!("  ℹ️  Spec[{}] No checkpoint found at {} — listing will run at prepare time",
+                                            spec_idx, endpoint_uri);
+                                    }
+                                    Err(e) => {
+                                        warn!("  ⚠️  Spec[{}] Checkpoint query error (non-fatal): {}", spec_idx, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("  ⚠️  Spec[{}] Could not determine endpoint URI: {}", spec_idx, e);
+                            }
+                        }
+                    }
+                }
+
                 info!("Validation stage complete (pre-flight checks already passed)");
             }
         }

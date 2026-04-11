@@ -1309,3 +1309,520 @@ mod tests {
         assert!(description.contains("Full retry"), "Description should indicate full retry: {}", description);
     }
 }
+
+// =============================================================================
+// KV-cache integration tests (TDD: written BEFORE the bug is fixed)
+//
+// These tests verify that `prepare_objects` actually records every successfully
+// created object into the KV metadata cache (EndpointCache).
+//
+// ROOT CAUSE (before fix):
+//   - `record_created` / `mark_creating` / `mark_created` are NEVER called in
+//     the sequential or parallel PUT loops → cache is always empty.
+//   - `mark_creating` and `mark_created` also have a secondary bug: they are
+//     read-modify-write and silently no-op when no prior `plan_object` call
+//     exists.  The new `record_created` method is an unconditional upsert that
+//     avoids this problem entirely.
+//
+// For both tests the strategy is:
+//   1.  Run `prepare_objects` against a `file://` temp directory with 4 objects.
+//   2.  Open a FRESH `EndpointCache` loaded from the checkpoint that
+//       `prepare_objects` wrote to the same temp directory.
+//   3.  Assert `count_by_state(config_hash)[Created] == 4`.
+//
+// BEFORE the fix these tests fail because count == 0.
+// AFTER  the fix these tests pass because count == 4.
+// =============================================================================
+#[cfg(test)]
+mod kv_cache_tests {
+    use std::sync::Arc;
+    use std::collections::HashMap;
+
+    use crate::config::{EnsureSpec, FillPattern, PrepareConfig, PrepareStrategy};
+    use crate::metadata_cache::{EndpointCache, ObjectState, generate_config_hash};
+    use crate::prepare::prepare_objects;
+
+    /// Build a minimal but complete `Config` + `PrepareConfig` for 4 × 1 KiB
+    /// zero-fill objects stored at `storage_uri` using the given strategy.
+    fn make_cfg(
+        storage_uri: &str,
+        strategy: PrepareStrategy,
+    ) -> (crate::config::Config, PrepareConfig) {
+        let prepare_config = PrepareConfig {
+            ensure_objects: vec![EnsureSpec {
+                base_uri: Some(storage_uri.to_string()),
+                use_multi_endpoint: false,
+                count: 4,
+                min_size: Some(1024),
+                max_size: Some(1024),
+                size_spec: None,
+                fill: FillPattern::Zero,
+                dedup_factor: 1,
+                compress_factor: 1,
+            }],
+            prepare_strategy: strategy,
+            ..PrepareConfig::default()
+        };
+
+        // Use serde_yaml so all Config defaults (duration, concurrency, etc.) are applied.
+        // Disable periodic checkpointing (interval = 0) so only the final checkpoint fires.
+        let yaml = format!(
+            "target: \"{}\"\nworkload: []\ncache_checkpoint_interval_secs: 0\n",
+            storage_uri
+        );
+        let mut config: crate::config::Config =
+            serde_yaml::from_str(&yaml).expect("failed to build Config from yaml");
+        config.prepare = Some(prepare_config.clone());
+
+        (config, prepare_config)
+    }
+
+    /// Core helper: run prepare, then read back from the checkpoint and return
+    /// the number of objects recorded as `Created`.
+    async fn created_count_after_prepare(strategy: PrepareStrategy) -> usize {
+        let storage_dir = tempfile::tempdir().expect("temp storage dir");
+        let results_dir = tempfile::tempdir().expect("temp results dir");
+
+        let storage_uri = format!("file://{}/", storage_dir.path().display());
+        let (config, prepare_config) = make_cfg(&storage_uri, strategy);
+
+        let multi_ep_cache =
+            Arc::new(std::sync::Mutex::new(HashMap::<String, Arc<_>>::new()));
+
+        prepare_objects(
+            &prepare_config,
+            None,               // workload
+            None,               // live_stats_tracker
+            None,               // multi_endpoint_config
+            &multi_ep_cache,
+            4,                  // concurrency
+            0,                  // agent_id
+            1,                  // num_agents (>0 but <=1 → single-node mode)
+            false,              // shared_storage
+            Some(results_dir.path()),  // enables KV cache (coordinator cache location)
+            Some(&config),             // enables KV cache (for config hash)
+        )
+        .await
+        .expect("prepare_objects must succeed");
+
+        // Derive the same config hash that prepare_objects used internally.
+        let config_hash = generate_config_hash(&config);
+
+        // Open a FRESH EndpointCache – this will restore from the checkpoint that
+        // prepare_objects wrote to the storage directory.
+        let cache = EndpointCache::new(&storage_uri, 0, None, None)
+            .await
+            .expect("EndpointCache::new must succeed");
+
+        let counts = cache
+            .count_by_state(&config_hash)
+            .expect("count_by_state must succeed");
+
+        *counts.get(&ObjectState::Created).unwrap_or(&0)
+    }
+
+    /// TDD FAILING TEST — sequential prepare must populate the KV cache.
+    ///
+    /// Expected behaviour AFTER fix: AssertionError is gone; count == 4.
+    /// Before fix: count == 0, assertion fails.
+    #[tokio::test]
+    async fn test_sequential_prepare_populates_kv_cache() {
+        let created = created_count_after_prepare(PrepareStrategy::Sequential).await;
+        assert_eq!(
+            created, 4,
+            "sequential prepare must record 4 Created entries in the KV cache (got {})",
+            created
+        );
+    }
+
+    /// TDD FAILING TEST — parallel prepare must populate the KV cache.
+    ///
+    /// Expected behaviour AFTER fix: AssertionError is gone; count == 4.
+    /// Before fix: count == 0, assertion fails.
+    #[tokio::test]
+    async fn test_parallel_prepare_populates_kv_cache() {
+        let created = created_count_after_prepare(PrepareStrategy::Parallel).await;
+        assert_eq!(
+            created, 4,
+            "parallel prepare must record 4 Created entries in the KV cache (got {})",
+            created
+        );
+    }
+}
+
+/// Comprehensive metadata-accuracy tests for the KV cache.
+///
+/// For each test case we:
+///   1. Run `prepare_objects` — creates objects on storage and writes a KV cache checkpoint.
+///   2. Restore the checkpoint cold via `EndpointCache::new` (no in-memory state carries over).
+///   3. Walk every `Created` entry returned by `get_objects_by_state`.
+///   4. Assert exact path format, recorded size, correct state, and full index coverage.
+///   5. `stat()` every object on the actual storage backend and confirm:
+///      - The object physically exists at the URI stored in the cache.
+///      - The storage-reported size equals the size the cache recorded.
+///
+/// Object counts are chosen to be comprehensive but fast:
+///   - Flat tests : 200 objects each  (all file_idx 0..199 verified)
+///   - Tree tests : 192 objects each  (4-wide × 2-deep tree, 12 files/leaf dir)
+///
+/// Strategy coverage:
+///   - flat + Sequential  (test 1)
+///   - flat + Parallel    (test 2 — verifies the parallel chunk-flush + remainder-flush paths)
+///   - tree + Sequential  (test 3)
+///   - tree + Parallel    (test 4)
+///
+/// Size coverage:
+///   - Fixed sizes  (tests 1 & 3) — lets us assert exact values in both cache and stat
+///   - Variable sizes (tests 2 & 4) — confirms each object's individual size is stored faithfully
+#[cfg(test)]
+mod kv_cache_detailed_tests {
+    use std::sync::Arc;
+    use std::collections::{HashMap, HashSet};
+
+    use crate::config::{EnsureSpec, FillPattern, PrepareConfig, PrepareStrategy};
+    use crate::directory_tree::DirectoryStructureConfig;
+    use crate::metadata_cache::{EndpointCache, ObjectEntry, ObjectState, generate_config_hash};
+    use crate::prepare::prepare_objects;
+    use crate::workload::create_store_for_uri;
+
+    // ─── Infrastructure ──────────────────────────────────────────────────────
+
+    /// Keeps both TempDirs alive for the lifetime of the test, so the backing
+    /// storage is not deleted before stat() calls complete.
+    struct PrepareRun {
+        _storage_dir: tempfile::TempDir,
+        _results_dir: tempfile::TempDir,
+        base_uri:     String,
+        config:       crate::config::Config,
+    }
+
+    /// Build and execute a prepare run, returning the live `PrepareRun`.
+    ///
+    /// * `dir_structure = None`  → flat mode  (files named `prepared-{:08}.dat`)
+    /// * `dir_structure = Some` → tree mode  (files nested in `sai3bench.d%d_w%d.dir/…/file_{:08}.dat`)
+    async fn run_prepare(
+        count:         u64,
+        min_size:      u64,
+        max_size:      u64,
+        strategy:      PrepareStrategy,
+        dir_structure: Option<DirectoryStructureConfig>,
+    ) -> PrepareRun {
+        let storage_dir = tempfile::tempdir().expect("temp storage dir");
+        let results_dir = tempfile::tempdir().expect("temp results dir");
+        let storage_uri = format!("file://{}/", storage_dir.path().display());
+
+        let prepare_config = PrepareConfig {
+            ensure_objects: vec![EnsureSpec {
+                base_uri:           Some(storage_uri.clone()),
+                use_multi_endpoint: false,
+                count,
+                min_size:           Some(min_size),
+                max_size:           Some(max_size),
+                size_spec:          None,
+                fill:               FillPattern::Zero,
+                dedup_factor:       1,
+                compress_factor:    1,
+            }],
+            directory_structure: dir_structure,
+            prepare_strategy:    strategy,
+            ..PrepareConfig::default()
+        };
+
+        // cache_checkpoint_interval_secs: 0 → only the final checkpoint fires
+        let yaml = format!(
+            "target: \"{}\"\nworkload: []\ncache_checkpoint_interval_secs: 0\n",
+            storage_uri
+        );
+        let mut config: crate::config::Config =
+            serde_yaml::from_str(&yaml).expect("Config from yaml");
+        config.prepare = Some(prepare_config.clone());
+
+        let multi_ep_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        prepare_objects(
+            &prepare_config,
+            None,
+            None,
+            None,
+            &multi_ep_cache,
+            4,      // concurrency
+            0,      // agent_id
+            1,      // num_agents (single-node → all objects go to this agent)
+            false,
+            Some(results_dir.path()),
+            Some(&config),
+        )
+        .await
+        .expect("prepare_objects must succeed");
+
+        PrepareRun {
+            _storage_dir: storage_dir,
+            _results_dir: results_dir,
+            base_uri: storage_uri,
+            config,
+        }
+    }
+
+    /// Open a **fresh** (checkpoint-restored) `EndpointCache` and return every
+    /// `Created` entry.
+    ///
+    /// Also asserts:
+    ///   * The total count equals `expected_count`.
+    ///   * Every file_idx in `[0, expected_count)` is present exactly once
+    ///     (no gaps, no duplicates).
+    async fn load_created_entries(
+        run:            &PrepareRun,
+        expected_count: usize,
+    ) -> Vec<(usize, ObjectEntry)> {
+        let config_hash = generate_config_hash(&run.config);
+
+        // Cold open: reconstructs state from the checkpoint written to storage
+        let cache = EndpointCache::new(&run.base_uri, 0, None, None)
+            .await
+            .expect("EndpointCache::new (checkpoint restore) must succeed");
+
+        let entries = cache
+            .get_objects_by_state(&config_hash, ObjectState::Created)
+            .expect("get_objects_by_state must succeed");
+
+        // Count
+        assert_eq!(
+            entries.len(), expected_count,
+            "expected {} Created entries in KV cache, got {}",
+            expected_count, entries.len()
+        );
+
+        // Full coverage: every file_idx in [0, expected_count) must appear
+        let idx_set: HashSet<usize> = entries.iter().map(|(i, _)| *i).collect();
+        let missing: Vec<usize> = (0..expected_count)
+            .filter(|i| !idx_set.contains(i))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} file_idx value(s) missing from KV cache (showing first ≤10): {:?}",
+            missing.len(), &missing[..missing.len().min(10)]
+        );
+
+        entries
+    }
+
+    /// For every cache entry call `stat()` on the actual storage and verify:
+    ///   * The object physically exists (no stat error).
+    ///   * The storage-reported size matches the size recorded in the cache.
+    ///
+    /// Reports ALL mismatches rather than stopping at the first one.
+    async fn verify_stat_matches_cache(
+        run:     &PrepareRun,
+        entries: &[(usize, ObjectEntry)],
+    ) {
+        let store = create_store_for_uri(&run.base_uri)
+            .expect("create_store_for_uri must succeed");
+
+        let mut missing_on_storage: Vec<(usize, String, String)>      = Vec::new();
+        let mut size_mismatches:    Vec<(usize, String, u64, u64)>     = Vec::new();
+
+        for (file_idx, entry) in entries {
+            // Basic sanity on every entry before we even touch storage
+            assert_eq!(
+                entry.state, ObjectState::Created,
+                "file_idx={} unexpectedly has state {:?}", file_idx, entry.state
+            );
+            assert!(
+                entry.path.starts_with(&run.base_uri),
+                "file_idx={} path {:?} does not start with base_uri {:?}",
+                file_idx, entry.path, run.base_uri
+            );
+            assert!(entry.size > 0, "file_idx={} has recorded size 0", file_idx);
+
+            // Ground-truth check against storage
+            match store.stat(&entry.path).await {
+                Err(e) => {
+                    missing_on_storage.push((*file_idx, entry.path.clone(), format!("{:#}", e)));
+                }
+                Ok(meta) => {
+                    if meta.size != entry.size {
+                        size_mismatches.push((
+                            *file_idx,
+                            entry.path.clone(),
+                            entry.size,   // what the cache says
+                            meta.size,    // what storage says
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing_on_storage.is_empty(),
+            "{} object(s) are in the KV cache but absent from storage. \
+             First ≤5:\n{:#?}",
+            missing_on_storage.len(),
+            &missing_on_storage[..missing_on_storage.len().min(5)]
+        );
+        assert!(
+            size_mismatches.is_empty(),
+            "{} size mismatch(es): (file_idx, path, cache_size, storage_size). \
+             First ≤5:\n{:#?}",
+            size_mismatches.len(),
+            &size_mismatches[..size_mismatches.len().min(5)]
+        );
+    }
+
+    // ─── Test 1: flat + sequential, 200 fixed-size objects ───────────────────
+    //
+    // Verifies:
+    //   • 200 Created entries, file_idx 0..199 all present.
+    //   • Path == "{base_uri}prepared-{file_idx:08}.dat" for every entry.
+    //   • Stored size == 4096 for every entry.
+    //   • stat() on each object: file exists, storage size == 4096.
+    // ─────────────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_kv_cache_flat_sequential_200() {
+        let run = run_prepare(200, 4096, 4096, PrepareStrategy::Sequential, None).await;
+        let entries = load_created_entries(&run, 200).await;
+
+        for (file_idx, entry) in &entries {
+            let expected = format!("{}prepared-{:08}.dat", run.base_uri, file_idx);
+            assert_eq!(
+                entry.path, expected,
+                "flat/seq file_idx={}: wrong path stored in KV cache", file_idx
+            );
+            assert_eq!(
+                entry.size, 4096,
+                "flat/seq file_idx={}: wrong size stored in KV cache", file_idx
+            );
+        }
+
+        verify_stat_matches_cache(&run, &entries).await;
+    }
+
+    // ─── Test 2: flat + parallel, 200 variable-size objects ──────────────────
+    //
+    // Verifies:
+    //   • 200 Created entries, file_idx 0..199 all present.
+    //   • Path format matches flat naming convention.
+    //   • Stored size is in [2048, 65536] (within the requested range).
+    //   • stat() on ALL 200 objects: storage_size == cache_size.
+    //     (The cache must faithfully record each object's individual size.)
+    // ─────────────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_kv_cache_flat_parallel_variable_sizes() {
+        let run = run_prepare(200, 2048, 65536, PrepareStrategy::Parallel, None).await;
+        let entries = load_created_entries(&run, 200).await;
+
+        for (file_idx, entry) in &entries {
+            let expected = format!("{}prepared-{:08}.dat", run.base_uri, file_idx);
+            assert_eq!(
+                entry.path, expected,
+                "flat/par file_idx={}: wrong path stored in KV cache", file_idx
+            );
+            assert!(
+                entry.size >= 2048 && entry.size <= 65536,
+                "flat/par file_idx={}: size {} is outside the requested range [2048, 65536]",
+                file_idx, entry.size
+            );
+        }
+
+        // Key assertion for variable sizes: cache_size must equal actual storage_size
+        verify_stat_matches_cache(&run, &entries).await;
+    }
+
+    // ─── Test 3: tree + sequential, 192 fixed-size objects ───────────────────
+    //
+    // Directory layout (width=4, depth=2, files_per_dir=12, distribution="bottom"):
+    //   4 level-1 dirs × 4 level-2 leaf dirs = 16 leaf dirs × 12 files = 192 objects
+    //
+    // Verifies:
+    //   • 192 Created entries, file_idx 0..191 all present.
+    //   • Every path contains the dir-mask prefix "sai3bench.d" (nested, not flat).
+    //   • Every path ends with "file_{file_idx:08}.dat" (tree naming convention).
+    //   • stat() on each object: file physically exists nested inside directory tree,
+    //     size == 8192.
+    // ─────────────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_kv_cache_tree_sequential_192() {
+        let dir_cfg = DirectoryStructureConfig {
+            width:         4,
+            depth:         2,
+            files_per_dir: 12,
+            distribution:  "bottom".to_string(),
+            dir_mask:      "sai3bench.d%d_w%d.dir".to_string(),
+        };
+
+        let run = run_prepare(192, 8192, 8192, PrepareStrategy::Sequential, Some(dir_cfg)).await;
+        let entries = load_created_entries(&run, 192).await;
+
+        for (file_idx, entry) in &entries {
+            let rel = entry.path
+                .strip_prefix(&run.base_uri)
+                .unwrap_or_else(|| panic!(
+                    "tree/seq file_idx={}: path {:?} does not start with base_uri {:?}",
+                    file_idx, entry.path, run.base_uri
+                ));
+
+            // Must contain at least two directory components matching our dir_mask
+            assert!(
+                rel.contains("sai3bench.d"),
+                "tree/seq file_idx={}: relative path {:?} missing expected directory prefix",
+                file_idx, rel
+            );
+
+            // File name must follow the tree convention
+            assert!(
+                rel.ends_with(&format!("file_{:08}.dat", file_idx)),
+                "tree/seq file_idx={}: path {:?} ends with wrong file name",
+                file_idx, entry.path
+            );
+
+            assert_eq!(
+                entry.size, 8192,
+                "tree/seq file_idx={}: wrong size stored in KV cache", file_idx
+            );
+        }
+
+        verify_stat_matches_cache(&run, &entries).await;
+    }
+
+    // ─── Test 4: tree + parallel, 192 variable-size objects ──────────────────
+    //
+    // Same tree layout as Test 3; verifies that the parallel strategy's
+    // chunk-flush *and* remainder-flush collection loops both correctly
+    // record nested-path objects with accurate per-object sizes.
+    // ─────────────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_kv_cache_tree_parallel_variable_sizes() {
+        let dir_cfg = DirectoryStructureConfig {
+            width:         4,
+            depth:         2,
+            files_per_dir: 12,
+            distribution:  "bottom".to_string(),
+            dir_mask:      "sai3bench.d%d_w%d.dir".to_string(),
+        };
+
+        let run = run_prepare(192, 4096, 32768, PrepareStrategy::Parallel, Some(dir_cfg)).await;
+        let entries = load_created_entries(&run, 192).await;
+
+        for (file_idx, entry) in &entries {
+            let rel = entry.path
+                .strip_prefix(&run.base_uri)
+                .unwrap_or_else(|| panic!(
+                    "tree/par file_idx={}: path {:?} missing base_uri prefix",
+                    file_idx, entry.path
+                ));
+
+            assert!(
+                rel.contains("sai3bench.d"),
+                "tree/par file_idx={}: relative path {:?} missing directory component",
+                file_idx, rel
+            );
+            assert!(
+                entry.size >= 4096 && entry.size <= 32768,
+                "tree/par file_idx={}: size {} outside requested range [4096, 32768]",
+                file_idx, entry.size
+            );
+        }
+
+        // The stat check confirms: correct path + correct per-object size for all 192
+        verify_stat_matches_cache(&run, &entries).await;
+    }
+}

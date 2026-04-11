@@ -409,16 +409,14 @@ impl ObjectEntry {
         }
     }
 
-    /// Serialize to bytes for storage
+    /// Serialize to bytes for KV storage using postcard (compact binary, no field names).
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let json = serde_json::to_vec(self)?;
-        Ok(json)
+        postcard::to_allocvec(self).map_err(|e| anyhow::anyhow!("postcard serialize: {}", e))
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let entry: ObjectEntry = serde_json::from_slice(data)?;
-        Ok(entry)
+        postcard::from_bytes(data).map_err(|e| anyhow::anyhow!("postcard deserialize: {}", e))
     }
 }
 
@@ -674,11 +672,13 @@ impl EndpointCache {
         use std::fs::File;
         use tar::Archive;
 
-        // Build checkpoint file name (matches write_checkpoint logic)
+        // Build checkpoint file name (MUST match write_checkpoint / create_and_write_checkpoint_static)
+        // Single-node:     sai3-kv-cache.tar.zst           (no leading dot, legacy-compatible name)
+        // Distributed:    .sai3-cache-agent-{id}.tar.zst  (leading dot, hidden from plain LIST)
         let checkpoint_name = if let Some(id) = agent_id {
             format!(".sai3-cache-agent-{}.tar.zst", id)
         } else {
-            ".sai3-cache.tar.zst".to_string()
+            "sai3-kv-cache.tar.zst".to_string()
         };
 
         // Create object store for endpoint
@@ -712,9 +712,17 @@ impl EndpointCache {
             bytes.len()
         );
 
-        // Write to temporary file for extraction
+        // Build a temp-file path that is unique per (endpoint, agent_id, process).
+        // cache_location already contains a hash of endpoint_uri, so its filename
+        // component differs across concurrent tests that use different endpoints.
+        // Including the PID prevents collisions across separate processes.
+        let cache_dir_name = cache_location
+            .file_name()
+            .context("Cache location has no filename component")?
+            .to_string_lossy();
         let temp_file = std::env::temp_dir().join(format!(
-            "sai3-checkpoint-{}.tar.zst",
+            ".sai3-extract-{}-{}.tar.zst",
+            cache_dir_name,
             std::process::id()
         ));
 
@@ -782,7 +790,7 @@ impl EndpointCache {
             }
         }
 
-        // Clean up temporary file
+        // Clean up temp extraction file
         let _ = std::fs::remove_file(&temp_file);
 
         info!("✅ Checkpoint restored successfully from storage");
@@ -895,6 +903,50 @@ impl EndpointCache {
         Ok(())
     }
 
+    /// Record object as successfully created (unconditional upsert).
+    ///
+    /// Unlike `mark_created`, this does **not** require a prior `plan_object` call.
+    /// It inserts a `Created` entry whether or not the key already exists.
+    /// This is the correct method to call from the prepare PUT loop.
+    ///
+    /// # Arguments
+    /// * `path` - Relative path of the object (e.g., "prepared-00000042.dat")
+    /// * `size` - Object size in bytes
+    /// * `created_at` - Optional epoch seconds; uses current time when `None`
+    /// * `checksum`   - Optional content checksum
+    pub fn record_created(
+        &self,
+        config_hash: &str,
+        file_idx: usize,
+        path: &str,
+        size: u64,
+        created_at: Option<u64>,
+        checksum: Option<u64>,
+    ) -> Result<()> {
+        let key = format!("{}:{:08}", config_hash, file_idx);
+        let timestamp = created_at.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
+
+        // Upsert: update existing entry if present, otherwise create a new one.
+        let mut entry = if let Some(bytes) = self.objects.get(key.as_bytes())? {
+            ObjectEntry::from_bytes(&bytes)?
+        } else {
+            ObjectEntry::new_planned(path.to_string(), size, self.endpoint_index)
+        };
+
+        entry.state = ObjectState::Created;
+        entry.created_at = Some(timestamp);
+        entry.checksum = checksum;
+
+        self.objects.insert(key.as_bytes(), &entry.to_bytes()?)?;
+        self.maybe_flush()?;
+        Ok(())
+    }
+
     /// Get object entry
     pub fn get_object(&self, config_hash: &str, file_idx: usize) -> Result<Option<ObjectEntry>> {
         let key = format!("{}:{:08}", config_hash, file_idx);
@@ -962,6 +1014,75 @@ impl EndpointCache {
         }
 
         Ok(counts)
+    }
+
+    /// Count objects **and** accumulate byte totals by state in a single scan.
+    ///
+    /// When called from the coverage path the fjall scan is already required;
+    /// summing bytes here adds no extra I/O.
+    ///
+    /// Emits [`warn!`] messages if the scan runs longer than expected so that
+    /// operators are never left wondering why startup is slow:
+    /// - First warning at 10 s, then every 10 s thereafter.
+    /// - Message tone escalates at 30 s to note the scan is still running.
+    /// - The scan is **never aborted** — the alternative (a full LIST of millions
+    ///   of objects) is orders of magnitude slower and the user is better served
+    ///   by a slow KV scan than by falling through to a LIST that may take hours.
+    pub fn count_and_bytes_by_state(
+        &self,
+        config_hash: &str,
+    ) -> Result<(HashMap<ObjectState, usize>, HashMap<ObjectState, u64>)> {
+        let mut counts: HashMap<ObjectState, usize> = HashMap::new();
+        let mut bytes: HashMap<ObjectState, u64> = HashMap::new();
+        let prefix = format!("{}:", config_hash);
+
+        let t0 = std::time::Instant::now();
+        let mut scanned: usize = 0;
+        // next_warn fires at 10 s, then every 10 s after that.
+        let mut next_warn_secs: u64 = 10;
+
+        for guard in self.objects.iter() {
+            let (key, value) = guard.into_inner()
+                .context("Fjall iteration error")?;
+
+            let key_str = std::str::from_utf8(&key)?;
+
+            if !key_str.starts_with(&prefix) {
+                continue;
+            }
+
+            let entry = ObjectEntry::from_bytes(&value)?;
+            *counts.entry(entry.state).or_insert(0) += 1;
+            *bytes.entry(entry.state).or_insert(0) += entry.size;
+            scanned += 1;
+
+            // Check elapsed every 50 000 entries — negligible overhead but
+            // responsive enough to catch a slow scan promptly.
+            if scanned % 50_000 == 0 {
+                let elapsed_secs = t0.elapsed().as_secs();
+                if elapsed_secs >= next_warn_secs {
+                    if elapsed_secs >= 30 {
+                        warn!(
+                            "⏳ KV cache scan still running: {}s elapsed, {} entries scanned. \
+                             NOT aborting — a LIST of this dataset would take far longer. \
+                             Please wait.",
+                            elapsed_secs, scanned
+                        );
+                    } else {
+                        warn!(
+                            "⏳ KV cache scan is taking longer than expected: {}s elapsed, \
+                             {} entries scanned so far. Normal for very large datasets — \
+                             please wait.",
+                            elapsed_secs, scanned
+                        );
+                    }
+                    // Next warning fires 10 s later.
+                    next_warn_secs = elapsed_secs.saturating_add(10);
+                }
+            }
+        }
+
+        Ok((counts, bytes))
     }
 
     //
@@ -2248,6 +2369,32 @@ impl MetadataCache {
         Ok(totals)
     }
 
+    /// Aggregate counts **and** byte totals across all endpoints in one scan per endpoint.
+    fn aggregate_coverage(&self, config_hash: &str) -> Result<(HashMap<ObjectState, usize>, HashMap<ObjectState, u64>)> {
+        let mut total_counts: HashMap<ObjectState, usize> = HashMap::new();
+        let mut total_bytes: HashMap<ObjectState, u64> = HashMap::new();
+        let t0 = std::time::Instant::now();
+
+        for endpoint in self.endpoints.values() {
+            let (counts, bytes) = endpoint.count_and_bytes_by_state(config_hash)?;
+            for (state, count) in counts {
+                *total_counts.entry(state).or_insert(0) += count;
+            }
+            for (state, b) in bytes {
+                *total_bytes.entry(state).or_insert(0) += b;
+            }
+        }
+
+        let total: usize = total_counts.values().sum();
+        debug!(
+            "KV cache coverage scan: {} entries in {:.3}s",
+            total,
+            t0.elapsed().as_secs_f64()
+        );
+
+        Ok((total_counts, total_bytes))
+    }
+
     /// Enable async interval flush policy for ZERO-BLOCKING benchmark performance
     ///
     /// This sets flush policy to AsyncInterval mode, which means cache writes
@@ -2352,6 +2499,226 @@ pub fn compute_config_hash(
 
     let hash_value = hash(hasher_input.as_bytes());
     format!("{:016x}", hash_value)
+}
+
+// ============================================================================
+// Checkpoint-Based Listing-Skip Optimisation (v0.8.89)
+// ============================================================================
+
+/// How completely a KV-cache checkpoint covers the expected object population.
+///
+/// Returned by [`EndpointCache::check_coverage`] and
+/// [`MetadataCache::check_listing_coverage`].  The caller can decide whether to
+/// skip a potentially expensive LIST operation based on [`Self::covers_all`].
+///
+/// # Example
+/// ```text
+/// CheckpointCoverage {
+///     created_count: 1_000_000,
+///     planned_count: 0,
+///     failed_count:  0,
+///     total_tracked: 1_000_000,
+///     expected_count: 1_000_000,
+///     covers_all: true,       ← safe to skip LIST
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct CheckpointCoverage {
+    /// Number of objects in the `Created` state.
+    pub created_count: usize,
+    /// Number of objects still in the `Planned` state (not yet created).
+    pub planned_count: usize,
+    /// Number of objects in the `Failed` state.
+    pub failed_count: usize,
+    /// Total objects tracked in this cache (all states).
+    pub total_tracked: usize,
+    /// The expected total from the prepare config (`ensure_objects[].count`).
+    pub expected_count: usize,
+    /// `true` iff `created_count >= expected_count` — it is safe to skip LIST.
+    pub covers_all: bool,
+    /// Full state breakdown (may contain states not listed above).
+    pub state_counts: HashMap<ObjectState, usize>,
+    /// Total bytes per state (populated when computed through coverage path; zero otherwise).
+    pub bytes_by_state: HashMap<ObjectState, u64>,
+}
+
+impl CheckpointCoverage {
+    /// Build from state-count and byte-total maps.
+    fn from_state_counts(
+        state_counts: HashMap<ObjectState, usize>,
+        bytes_by_state: HashMap<ObjectState, u64>,
+        expected_count: usize,
+    ) -> Self {
+        let created_count = *state_counts.get(&ObjectState::Created).unwrap_or(&0);
+        let planned_count = *state_counts.get(&ObjectState::Planned).unwrap_or(&0);
+        let failed_count  = *state_counts.get(&ObjectState::Failed).unwrap_or(&0);
+        let total_tracked: usize = state_counts.values().sum();
+        let covers_all = created_count >= expected_count && expected_count > 0;
+        Self {
+            created_count,
+            planned_count,
+            failed_count,
+            total_tracked,
+            expected_count,
+            covers_all,
+            state_counts,
+            bytes_by_state,
+        }
+    }
+}
+
+impl EndpointCache {
+    /// Load an `EndpointCache` from a checkpoint already stored on the endpoint's
+    /// own storage, **without** going through the full `EndpointCache::new()` path.
+    ///
+    /// # When to use this
+    ///
+    /// Call this when you need to *read* checkpoint data outside of a normal
+    /// prepare cycle — for example, in pre-workload validation or the
+    /// `StageKind::Validation` stage handler.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)` — no checkpoint file exists on storage (not an error).
+    /// - `Ok(Some(cache))` — checkpoint found, extracted, and database opened.
+    /// - `Err(…)` — checkpoint exists but could not be decompressed/opened.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_uri` — storage location, e.g. `s3://bucket/prefix/`
+    /// * `agent_id`     — agent index used when writing the checkpoint, or
+    ///                     `None` for the single-node checkpoint.
+    /// * `kv_cache_base_dir` — local directory for the extracted fjall database
+    ///                          (defaults to system temp dir).
+    pub async fn try_load_from_checkpoint(
+        endpoint_uri: &str,
+        agent_id: Option<usize>,
+        kv_cache_base_dir: Option<&Path>,
+    ) -> Result<Option<Self>> {
+        let cache_location = Self::resolve_cache_location(endpoint_uri, agent_id, kv_cache_base_dir)
+            .context("Failed to resolve cache location")?;
+
+        // Attempt to restore from the checkpoint stored on the endpoint.
+        let restored = Self::try_restore_from_checkpoint(endpoint_uri, &cache_location, agent_id).await
+            .context("Failed to restore checkpoint")?;
+
+        if !restored {
+            // No checkpoint on storage — not an error, caller should fall back to LIST.
+            return Ok(None);
+        }
+
+        // Checkpoint was extracted; now open the fjall database.
+        std::fs::create_dir_all(&cache_location)
+            .context("Failed to create cache directory after restore")?;
+
+        let db = Database::builder(&cache_location)
+            .open()
+            .context("Failed to open fjall database from restored checkpoint")?;
+
+        use fjall::compaction::Leveled;
+        let compaction_strategy = Arc::new(
+            Leveled::default().with_table_target_size(16 * 1024 * 1024)
+        );
+        let keyspace_opts = KeyspaceCreateOptions::default()
+            .compaction_strategy(compaction_strategy);
+
+        let objects = db
+            .keyspace("objects", || keyspace_opts.clone())
+            .context("Failed to open objects keyspace")?;
+        let listing_cache = db
+            .keyspace("listing_cache", || keyspace_opts.clone())
+            .context("Failed to open listing_cache keyspace")?;
+        let endpoint_map = db
+            .keyspace("endpoint_map", || keyspace_opts.clone())
+            .context("Failed to open endpoint_map keyspace")?;
+        let seeds = db
+            .keyspace("seeds", || keyspace_opts)
+            .context("Failed to open seeds keyspace")?;
+
+        // Use a fixed index of 0 here — callers only query by config_hash, not endpoint index.
+        Ok(Some(EndpointCache {
+            db,
+            endpoint_index: 0,
+            endpoint_uri: endpoint_uri.to_string(),
+            cache_location,
+            objects,
+            listing_cache,
+            endpoint_map,
+            seeds,
+            pending_writes: AtomicU64::new(0),
+            flush_policy: RwLock::new(FlushPolicy::Immediate),
+        }))
+    }
+
+    /// Summarise how much of `expected_count` objects are in the `Created` state.
+    ///
+    /// This is an **O(n)** scan of the objects keyspace — acceptable for
+    /// pre-workload validation but should not be called in hot paths.
+    ///
+    /// Returns a [`CheckpointCoverage`] regardless of object count; if the
+    /// keyspace is empty (no checkpoint was restored) `creates_all` will be
+    /// `false`.
+    pub fn check_coverage(&self, config_hash: &str, expected_count: u64) -> Result<CheckpointCoverage> {
+        let (state_counts, bytes_by_state) = self.count_and_bytes_by_state(config_hash)?;
+        Ok(CheckpointCoverage::from_state_counts(state_counts, bytes_by_state, expected_count as usize))
+    }
+}
+
+impl MetadataCache {
+    /// Query the aggregate coverage across **all** endpoint sub-caches.
+    ///
+    /// Use this in the prepare-phase listing decision to determine whether a
+    /// full LIST operation can be skipped:
+    ///
+    /// ```rust,no_run
+    /// // Inside prepare_sequential / prepare_parallel
+    /// if let Some(cov) = metadata_cache.check_listing_coverage(spec.count)? {
+    ///     if cov.covers_all {
+    ///         // skip LIST — KV cache confirms all objects are Created
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Returns `Ok(None)` when the cache has no tracked objects at all
+    /// (e.g., no checkpoint was restored and prepare hasn't started).
+    pub fn check_listing_coverage(&self, expected_count: u64) -> Result<Option<CheckpointCoverage>> {
+        let (state_counts, bytes_by_state) = self.aggregate_coverage(&self.config_hash)?;
+        if state_counts.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(CheckpointCoverage::from_state_counts(state_counts, bytes_by_state, expected_count as usize)))
+    }
+
+    /// Config hash accessor (needed externally to query endpoint caches).
+    pub fn config_hash_str(&self) -> &str {
+        &self.config_hash
+    }
+}
+
+/// Convenience: download a checkpoint from `endpoint_uri`, open it, and return
+/// a [`CheckpointCoverage`] — all without a full prepare cycle.
+///
+/// This is the main entry-point for the `StageKind::Validation` agent handler
+/// and for the preflight object-storage check.
+///
+/// # Returns
+///
+/// - `Ok(None)` — no checkpoint exists on storage.
+/// - `Ok(Some(coverage))` — checkpoint loaded and queried.
+/// - `Err(…)` — checkpoint exists but could not be read.
+pub async fn query_checkpoint_coverage(
+    endpoint_uri: &str,
+    agent_id: Option<usize>,
+    config_hash: &str,
+    expected_count: u64,
+) -> Result<Option<CheckpointCoverage>> {
+    match EndpointCache::try_load_from_checkpoint(endpoint_uri, agent_id, None).await? {
+        None => Ok(None),
+        Some(cache) => {
+            let coverage = cache.check_coverage(config_hash, expected_count)?;
+            Ok(Some(coverage))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4064,6 +4431,578 @@ mod tests {
             result.is_ok(),
             "Checkpointing empty cache should succeed (creates empty archive)"
         );
+    }
+
+    // ========================================================================
+    // Unit Tests: CheckpointCoverage + listing-skip optimisation (v0.8.89)
+    // ========================================================================
+
+    /// Round-trip: write checkpoint with Created objects; load it via
+    /// `try_load_from_checkpoint` and verify `check_coverage` reports the
+    /// correct counts without doing any network LIST.
+    #[tokio::test]
+    async fn test_checkpoint_round_trip_with_created_objects() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "rt_created_test";
+        let agent_id = Some(0_usize);
+        let total_objects: usize = 50;
+
+        // ── Phase 1: Simulate successful prepare ──────────────────────────────
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+
+            for i in 0..total_objects {
+                cache.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), 4096).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+
+            cache.force_flush().unwrap();
+
+            // Confirm all are Created before checkpointing
+            let counts = cache.count_by_state(config_hash).unwrap();
+            assert_eq!(
+                *counts.get(&ObjectState::Created).unwrap_or(&0),
+                total_objects,
+                "All objects should be Created before checkpoint"
+            );
+
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        // ── Phase 2: Read checkpoint back via try_load_from_checkpoint ─────────
+        let loaded_cache = EndpointCache::try_load_from_checkpoint(&storage_uri, agent_id, None)
+            .await
+            .expect("try_load_from_checkpoint should not error")
+            .expect("checkpoint should be present on file:// storage");
+
+        // ── Phase 3: Verify coverage ──────────────────────────────────────────
+        let coverage = loaded_cache
+            .check_coverage(config_hash, total_objects as u64)
+            .unwrap();
+
+        assert_eq!(coverage.created_count, total_objects, "All objects should be Created");
+        assert_eq!(coverage.planned_count, 0, "No objects should be Planned");
+        assert_eq!(coverage.failed_count, 0, "No objects should be Failed");
+        assert_eq!(coverage.total_tracked, total_objects, "Total tracked should match");
+        assert_eq!(coverage.expected_count, total_objects, "expected_count should match");
+        assert!(coverage.covers_all, "covers_all must be true when created == expected");
+    }
+
+    /// `try_load_from_checkpoint` returns `None` when no checkpoint exists.
+    #[tokio::test]
+    async fn test_try_load_from_checkpoint_returns_none_when_missing() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/empty_storage/", temp.path().display());
+
+        // No checkpoint was written — expect None
+        let result = EndpointCache::try_load_from_checkpoint(&storage_uri, Some(0), None)
+            .await
+            .expect("Should not error when checkpoint is simply absent");
+
+        assert!(
+            result.is_none(),
+            "Should return None when no checkpoint exists"
+        );
+    }
+
+    /// `check_coverage` returns `covers_all = false` when fewer objects are
+    /// Created than expected.
+    #[tokio::test]
+    async fn test_check_coverage_partial_creation() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "partial_test";
+        let agent_id = Some(0_usize);
+        let total_objects: usize = 100;
+        let created: usize = 60;
+
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+
+            // Create only 60 of 100 objects
+            for i in 0..created {
+                cache.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), 4096).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+            // Plan the remaining 40 but leave them as Planned
+            for i in created..total_objects {
+                cache.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), 4096).unwrap();
+            }
+
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        let loaded = EndpointCache::try_load_from_checkpoint(&storage_uri, agent_id, None)
+            .await.unwrap().unwrap();
+
+        let coverage = loaded.check_coverage(config_hash, total_objects as u64).unwrap();
+
+        assert_eq!(coverage.created_count, created);
+        assert_eq!(coverage.planned_count, total_objects - created);
+        assert_eq!(coverage.total_tracked, total_objects);
+        assert!(!coverage.covers_all, "covers_all should be false when partial");
+    }
+
+    /// `check_coverage` returns `covers_all = false` when `expected_count` is
+    /// zero (edge case — guards against accidental skip when config has count=0).
+    #[tokio::test]
+    async fn test_check_coverage_zero_expected_never_covers_all() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "zero_expected";
+        let agent_id = Some(0_usize);
+
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+            cache.plan_object(config_hash, 0, "file.dat", 1024).unwrap();
+            cache.mark_created(config_hash, 0, None, None).unwrap();
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        let loaded = EndpointCache::try_load_from_checkpoint(&storage_uri, agent_id, None)
+            .await.unwrap().unwrap();
+        let coverage = loaded.check_coverage(config_hash, 0).unwrap();
+
+        assert!(
+            !coverage.covers_all,
+            "covers_all must not be true when expected_count is 0"
+        );
+    }
+
+    /// `MetadataCache::check_listing_coverage` aggregates across endpoint caches
+    /// and returns `None` when no objects are tracked.
+    #[tokio::test]
+    async fn test_metadata_cache_check_listing_coverage_empty() {
+        let temp = TempDir::new().unwrap();
+        let results_dir = temp.path().join("results");
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "empty_coverage";
+
+        // Create a fresh MetadataCache with no objects
+        let cache = MetadataCache::new(
+            &results_dir,
+            &[storage_uri.clone()],
+            config_hash.to_string(),
+            None,
+            None,
+        ).await.unwrap();
+
+        let coverage = cache.check_listing_coverage(1000).unwrap();
+
+        assert!(
+            coverage.is_none(),
+            "Should return None when no objects are tracked yet"
+        );
+    }
+
+    /// `MetadataCache::check_listing_coverage` returns `covers_all = true` when
+    /// all objects across all endpoints are in the `Created` state.
+    #[tokio::test]
+    async fn test_metadata_cache_check_listing_coverage_full() {
+        let temp = TempDir::new().unwrap();
+        let results_dir = temp.path().join("results");
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "full_coverage";
+        let total_objects: usize = 30;
+
+        {
+            let cache = MetadataCache::new(
+                &results_dir,
+                &[storage_uri.clone()],
+                config_hash.to_string(),
+                None,
+                None,
+            ).await.unwrap();
+
+            let ep = cache.endpoint(0).unwrap();
+            for i in 0..total_objects {
+                ep.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), 4096).unwrap();
+                ep.mark_created(config_hash, i, None, None).unwrap();
+            }
+            cache.flush_all().unwrap();
+        }
+
+        // Re-open (simulates restore from checkpoint)
+        let cache = MetadataCache::new(
+            &results_dir,
+            &[storage_uri],
+            config_hash.to_string(),
+            None,
+            None,
+        ).await.unwrap();
+
+        let coverage = cache.check_listing_coverage(total_objects as u64).unwrap().unwrap();
+
+        assert!(coverage.covers_all, "Should cover all when all objects are Created");
+        assert_eq!(coverage.created_count, total_objects);
+    }
+
+    /// `query_checkpoint_coverage` convenience function: round-trip via file:// storage.
+    #[tokio::test]
+    async fn test_query_checkpoint_coverage_convenience_fn() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "qcc_test";
+        let agent_id = Some(0_usize);
+        let total: usize = 25;
+
+        // Write checkpoint
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+            for i in 0..total {
+                cache.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), 1024).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        // Query via convenience function
+        let result = query_checkpoint_coverage(&storage_uri, agent_id, config_hash, total as u64)
+            .await
+            .expect("Should not error");
+
+        let coverage = result.expect("Checkpoint should be found");
+        assert!(coverage.covers_all);
+        assert_eq!(coverage.created_count, total);
+
+        // Same function returns None when no checkpoint exists
+        let new_temp = TempDir::new().unwrap();
+        let missing_uri = format!("file://{}/nostorage/", new_temp.path().display());
+        let missing = query_checkpoint_coverage(&missing_uri, agent_id, config_hash, total as u64)
+            .await
+            .expect("Should not error for missing checkpoint");
+
+        assert!(missing.is_none(), "Should return None when checkpoint does not exist");
+    }
+
+    /// Verify individual `get_object` lookups work on a checkpoint-restored cache.
+    /// This tests that the fjall database is fully readable, not just the counts.
+    #[tokio::test]
+    async fn test_checkpoint_individual_entry_lookup_after_restore() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "entry_lookup";
+        let agent_id = Some(0_usize);
+
+        // Write 10 objects with distinct sizes and paths
+        let sizes: Vec<u64> = (0..10).map(|i| 1024 * (i + 1) as u64).collect();
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+            for (i, &size) in sizes.iter().enumerate() {
+                cache.plan_object(config_hash, i, &format!("prepared-{:08}.dat", i), size).unwrap();
+                cache.mark_created(config_hash, i, Some(1_700_000_000 + i as u64), None).unwrap();
+            }
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        // Restore and verify each entry individually
+        let restored = EndpointCache::try_load_from_checkpoint(&storage_uri, agent_id, None)
+            .await.unwrap().unwrap();
+
+        for (i, &expected_size) in sizes.iter().enumerate() {
+            let entry = restored.get_object(config_hash, i)
+                .expect("get_object should not fail")
+                .expect(&format!("Object {} should be present", i));
+
+            assert_eq!(entry.state, ObjectState::Created,
+                "Object {} should be Created", i);
+            assert_eq!(entry.size, expected_size,
+                "Object {} size should match", i);
+            assert_eq!(entry.path, format!("prepared-{:08}.dat", i),
+                "Object {} path should match", i);
+            assert!(entry.created_at.is_some(),
+                "Object {} created_at should be set", i);
+        }
+    }
+
+    /// `get_objects_by_state` returns the correct slice after checkpoint restore.
+    #[tokio::test]
+    async fn test_get_objects_by_state_after_restore() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "by_state";
+        let agent_id = Some(0_usize);
+        let created_count = 15_usize;
+        let planned_count = 5_usize;
+
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, agent_id, None).await.unwrap();
+            // First 15 = Created
+            for i in 0..created_count {
+                cache.plan_object(config_hash, i, &format!("c-{:08}.dat", i), 512).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+            // Next 5 = Planned only
+            for i in created_count..(created_count + planned_count) {
+                cache.plan_object(config_hash, i, &format!("p-{:08}.dat", i), 512).unwrap();
+            }
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(agent_id).await.unwrap();
+        }
+
+        let restored = EndpointCache::try_load_from_checkpoint(&storage_uri, agent_id, None)
+            .await.unwrap().unwrap();
+
+        let created_entries = restored
+            .get_objects_by_state(config_hash, ObjectState::Created)
+            .unwrap();
+        assert_eq!(created_entries.len(), created_count,
+            "Should find exactly {} Created entries", created_count);
+
+        let planned_entries = restored
+            .get_objects_by_state(config_hash, ObjectState::Planned)
+            .unwrap();
+        assert_eq!(planned_entries.len(), planned_count,
+            "Should find exactly {} Planned entries", planned_count);
+    }
+
+    /// Different `agent_id` values produce independent checkpoints that restore
+    /// independently — no data bleed between agents.
+    #[tokio::test]
+    async fn test_multi_agent_checkpoint_isolation() {
+        let temp = TempDir::new().unwrap();
+        let storage_uri = format!("file://{}/storage/", temp.path().display());
+        let config_hash = "isolation_test";
+
+        // Agent 0: 10 Created objects
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, Some(0), None).await.unwrap();
+            for i in 0..10 {
+                cache.plan_object(config_hash, i, &format!("a0-{:08}.dat", i), 1024).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(Some(0)).await.unwrap();
+        }
+
+        // Agent 1: 20 Created objects
+        {
+            let cache = EndpointCache::new(&storage_uri, 0, Some(1), None).await.unwrap();
+            for i in 0..20 {
+                cache.plan_object(config_hash, i, &format!("a1-{:08}.dat", i), 2048).unwrap();
+                cache.mark_created(config_hash, i, None, None).unwrap();
+            }
+            cache.force_flush().unwrap();
+            cache.write_checkpoint(Some(1)).await.unwrap();
+        }
+
+        // Restore agent 0 — should see exactly 10
+        let c0 = EndpointCache::try_load_from_checkpoint(&storage_uri, Some(0), None)
+            .await.unwrap().unwrap();
+        let cov0 = c0.check_coverage(config_hash, 10).unwrap();
+        assert_eq!(cov0.created_count, 10, "Agent 0 should have 10 Created objects");
+        assert!(cov0.covers_all);
+
+        // Restore agent 1 — should see exactly 20
+        let c1 = EndpointCache::try_load_from_checkpoint(&storage_uri, Some(1), None)
+            .await.unwrap().unwrap();
+        let cov1 = c1.check_coverage(config_hash, 20).unwrap();
+        assert_eq!(cov1.created_count, 20, "Agent 1 should have 20 Created objects");
+        assert!(cov1.covers_all);
+    }
+
+    // ======================================================================
+    // Integration: verify real S3 checkpoint written by preflight_test_s3.yaml
+    //
+    // Run with:
+    //   source .env && cargo test --lib -- test_s3_checkpoint_load_and_verify
+    //
+    // Skipped automatically when AWS_ACCESS_KEY_ID is not set.
+    // ======================================================================
+
+    /// Load the checkpoint that was written by a real preflight_test_s3.yaml run
+    /// and assert that the KV cache accurately reflects the expected object state.
+    ///
+    /// The prepare phase created 4 zero-filled 4096-byte objects at
+    /// s3://test-bucket/preflight-test/.  After a successful run the
+    /// checkpoint s3://test-bucket/preflight-test/sai3-kv-cache.tar.zst holds a
+    /// single-node KV database whose `objects` keyspace should contain those
+    /// 4 entries all in the `Created` state.
+    #[tokio::test]
+    async fn test_s3_checkpoint_load_and_verify() {
+        // Skip when credentials are not available
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
+            eprintln!("test_s3_checkpoint_load_and_verify: SKIP — AWS_ACCESS_KEY_ID not set (run 'source .env' first)");
+            return;
+        }
+
+        let endpoint_uri = "s3://test-bucket/preflight-test/";
+        let expected_count: u64 = 4;
+
+        // ── Step 1: load checkpoint from real S3 ─────────────────────────────
+        let loaded = EndpointCache::try_load_from_checkpoint(endpoint_uri, None, None)
+            .await
+            .expect("try_load_from_checkpoint should not return Err");
+
+        assert!(
+            loaded.is_some(),
+            "No checkpoint found at {}sai3-kv-cache.tar.zst — \n\
+             Did you run: source .env && ./target/debug/sai3bench-ctl -v run \
+             --config tests/configs/preflight_test_s3.yaml ?",
+            endpoint_uri
+        );
+        let cache = loaded.unwrap();
+
+        // ── Step 2: compute config_hash from the known YAML ──────────────────
+        let config_yaml = std::fs::read_to_string("tests/configs/preflight_test_s3.yaml")
+            .expect("tests/configs/preflight_test_s3.yaml not found — run from sai3-bench/ directory");
+        let config: crate::config::Config = serde_yaml::from_str(&config_yaml)
+            .expect("Failed to parse preflight_test_s3.yaml");
+        let config_hash = generate_config_hash(&config);
+
+        // ── Step 3: raw count — how many object entries exist at all? ────────
+        // This snapshot captures all config-hash namespaces (defensive sanity).
+        let raw_total: usize = {
+            let mut n = 0usize;
+            for guard in cache.objects.iter() {
+                let _ = guard;  // just count
+                n += 1;
+            }
+            n
+        };
+        println!("Raw object keyspace entries: {raw_total}");
+        assert!(
+            raw_total >= expected_count as usize,
+            "Expected at least {expected_count} entries in objects keyspace, found {raw_total}"
+        );
+
+        // ── Step 4: filtered count by config_hash ────────────────────────────
+        let coverage = cache
+            .check_coverage(&config_hash, expected_count)
+            .expect("check_coverage should not error");
+
+        println!(
+            "Coverage for hash '{config_hash}': {:?}",
+            coverage.state_counts
+        );
+        println!(
+            "  created={}/{expected_count}  planned={}  failed={}  covers_all={}",
+            coverage.created_count,
+            coverage.planned_count,
+            coverage.failed_count,
+            coverage.covers_all
+        );
+
+        assert_eq!(
+            coverage.expected_count, expected_count as usize,
+            "expected_count mismatch"
+        );
+        assert_eq!(
+            coverage.created_count, expected_count as usize,
+            "Expected all {expected_count} objects to be Created; \
+             planned={} failed={}",
+            coverage.planned_count, coverage.failed_count
+        );
+        assert!(
+            coverage.covers_all,
+            "covers_all should be true; state_counts={:?}",
+            coverage.state_counts
+        );
+    }
+
+    // ========================================================================
+    // Scale timing test — NOT run in normal CI, run explicitly with:
+    //   cargo test --lib -- --ignored test_coverage_scan_timing_600k
+    // ========================================================================
+
+    /// Measure the real wall-clock cost of `check_listing_coverage` (the coverage
+    /// scan) over a 600 000-entry KV cache — the per-agent object count for a
+    /// typical 8-agent, 4.8 M-object job.
+    ///
+    /// The test phases are timed separately so you can see:
+    ///   1. How long writing 600 K Created entries takes (setup — not the real question).
+    ///   2. **How long the coverage scan takes** (the real question).
+    ///   3. A second cold scan to confirm repeatability.
+    ///
+    /// Run with:
+    ///   cargo test --lib -- --ignored test_coverage_scan_timing_600k --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_coverage_scan_timing_600k() {
+        const N: usize = 600_000;
+        const SIZE: u64 = 128 * 1024 * 1024; // 128 MiB per object (typical checkpoint shard)
+        const CONFIG_HASH: &str = "scale_600k";
+
+        let temp = TempDir::new().unwrap();
+        let uri = format!("file://{}/ep0", temp.path().display());
+
+        // ── Phase 1: populate ─────────────────────────────────────────────────
+        // Default flush policy is AsyncInterval(30) — no blocking on each write.
+        let cache = EndpointCache::new(&uri, 0, None, None).await.unwrap();
+
+        println!("\n=== 600 K-entry KV cache scan timing test ===");
+        println!("  Writing {} Created entries (128 MiB each = {:.1} TiB logical)…",
+            N, (N as f64 * SIZE as f64) / (1024.0_f64.powi(4)));
+
+        let t_write = std::time::Instant::now();
+        for i in 0..N {
+            // record_created is an unconditional upsert; no prior plan_object needed.
+            cache.record_created(
+                CONFIG_HASH,
+                i,
+                &format!("file://{}/ep0/prepared-{:08}.dat", temp.path().display(), i),
+                SIZE,
+                Some(1_700_000_000 + i as u64),
+                None,
+            ).unwrap();
+        }
+        // Flush everything to disk before we measure reads.
+        cache.force_flush().unwrap();
+        let write_elapsed = t_write.elapsed();
+        println!("  Write phase:  {} entries in {:.3}s  ({:.0} K entries/s)",
+            N,
+            write_elapsed.as_secs_f64(),
+            N as f64 / write_elapsed.as_secs_f64() / 1000.0);
+
+        // ── Phase 2: first coverage scan ─────────────────────────────────────
+        println!("  Scanning (first pass)…");
+        let t_scan1 = std::time::Instant::now();
+        let (counts, bytes) = cache.count_and_bytes_by_state(CONFIG_HASH).unwrap();
+        let scan1_elapsed = t_scan1.elapsed();
+
+        let created = *counts.get(&ObjectState::Created).unwrap_or(&0);
+        let total_gib = bytes.get(&ObjectState::Created).copied().unwrap_or(0) as f64
+            / (1024.0_f64.powi(3));
+
+        println!("  Scan 1 result: {} Created, {:.1} GiB logical", created, total_gib);
+        println!("  Scan 1 time:   {:.3}s  ({:.0} K entries/s)",
+            scan1_elapsed.as_secs_f64(),
+            N as f64 / scan1_elapsed.as_secs_f64() / 1000.0);
+
+        // ── Phase 3: second scan (page-cache warm) ────────────────────────────
+        println!("  Scanning (second pass — OS page cache warm)…");
+        let t_scan2 = std::time::Instant::now();
+        let (counts2, _) = cache.count_and_bytes_by_state(CONFIG_HASH).unwrap();
+        let scan2_elapsed = t_scan2.elapsed();
+        let created2 = *counts2.get(&ObjectState::Created).unwrap_or(&0);
+
+        println!("  Scan 2 result: {} Created", created2);
+        println!("  Scan 2 time:   {:.3}s  ({:.0} K entries/s)",
+            scan2_elapsed.as_secs_f64(),
+            N as f64 / scan2_elapsed.as_secs_f64() / 1000.0);
+
+        // ── Assertions ────────────────────────────────────────────────────────
+        assert_eq!(created, N, "All {} entries should be Created", N);
+        assert_eq!(created2, N, "Second scan must agree");
+
+        // Sanity-check GiB (600k × 128 MiB = 75 TiB logical, stored as metadata only).
+        let expected_gib = N as f64 * SIZE as f64 / (1024.0_f64.powi(3));
+        let ratio = total_gib / expected_gib;
+        assert!((0.99..=1.01).contains(&ratio),
+            "Byte total off: got {:.1} GiB, expected {:.1} GiB", total_gib, expected_gib);
+
+        // The scan should finish well within 10 seconds on any reasonable hardware.
+        assert!(scan1_elapsed.as_secs() < 10,
+            "First scan took {:.3}s — exceeds 10 s budget", scan1_elapsed.as_secs_f64());
+        assert!(scan2_elapsed.as_secs() < 10,
+            "Second scan took {:.3}s — exceeds 10 s budget", scan2_elapsed.as_secs_f64());
+
+        println!("\n  ✅ Pass — both scans under 10 s budget.");
     }
 }
 
