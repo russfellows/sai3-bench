@@ -2670,7 +2670,7 @@ impl MetadataCache {
     /// Use this in the prepare-phase listing decision to determine whether a
     /// full LIST operation can be skipped:
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Inside prepare_sequential / prepare_parallel
     /// if let Some(cov) = metadata_cache.check_listing_coverage(spec.count)? {
     ///     if cov.covers_all {

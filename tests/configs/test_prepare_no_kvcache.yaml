@@ -1,0 +1,36 @@
+# Test config demonstrating enable_metadata_cache: false (v0.8.89+)
+# and the always-on populate_ledger.tsv tracking (v0.8.90+)
+#
+# Use case: large-scale namespace creation (1T+ objects) where
+# per-object KV tracking overhead is not desired.
+# The populate_ledger.tsv is ALWAYS written regardless of this setting.
+
+target: "file:///mnt/test/sai3-prepare-test/"
+
+# v0.8.89: Disable the internal Fjall KV metadata cache.
+# Eliminates per-PUT KV writes and ~3.4 GB disk usage per 50M objects.
+# Crash-resume is NOT available when this is false.
+enable_metadata_cache: false
+
+prepare:
+  prepare_strategy: parallel
+  directory_structure:
+    width: 3
+    depth: 2
+    files_per_dir: 10
+    distribution: "bottom"
+    dir_mask: "scan.d%d_w%d.dir"
+  ensure_objects:
+    - base_uri: "file:///mnt/test/sai3-prepare-test/"
+      count: 90  # 3x3x10 = 90 files
+      min_size: 1048576  # 1 MB
+      max_size: 1048576
+  post_prepare_delay: 1
+
+duration: 5s
+concurrency: 2
+
+workload:
+  - op: get
+    path: "scan.*/*.dat"
+    weight: 100

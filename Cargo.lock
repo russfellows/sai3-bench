@@ -1564,6 +1564,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dgen-data"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031248c76a6edbd117d0bd415791f4aa3c328a41ab86734801417c218ab0768c"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "core_affinity",
+ "num_cpus",
+ "rand 0.9.2",
+ "rand_xoshiro",
+ "rayon",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "difflib"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4981,7 +4999,7 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.8.88"
+version = "0.8.90"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4994,6 +5012,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "dgen-data",
  "dotenvy",
  "fjall",
  "fs2",

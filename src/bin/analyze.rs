@@ -70,6 +70,8 @@ struct ResultsDir {
     // Legacy format (pre-v0.8.50)
     results_tsv: Option<PathBuf>,
     legacy_prepare_results_tsv: Option<PathBuf>,
+    // Current standalone format
+    workload_results_tsv: Option<PathBuf>,
     // Other files
     perf_log_tsv: Option<PathBuf>,
     workload_endpoint_stats_tsv: Option<PathBuf>,
@@ -136,6 +138,9 @@ impl ResultsDir {
         let legacy_results_tsv = path.join("results.tsv");
         let legacy_prepare_results_tsv = path.join("prepare_results.tsv");
         
+        // Current standalone format
+        let workload_results_tsv = path.join("workload_results.tsv");
+        
         // Check for other TSV files
         let perf_log_tsv = path.join("perf_log.tsv");
         let workload_endpoint_stats_tsv = path.join("workload_endpoint_stats.tsv");
@@ -200,6 +205,12 @@ impl ResultsDir {
                 Some(legacy_prepare_results_tsv) 
             } else { 
                 None 
+            },
+            // Current standalone format
+            workload_results_tsv: if workload_results_tsv.exists() {
+                Some(workload_results_tsv)
+            } else {
+                None
             },
             // Other files
             perf_log_tsv: if perf_log_tsv.exists() {
@@ -360,7 +371,8 @@ fn find_results_dirs(args: &Args) -> Result<Vec<ResultsDir>> {
                 || results_dir.execute_results_tsv.is_some()
                 || results_dir.cleanup_results_tsv.is_some()
                 || results_dir.results_tsv.is_some() 
-                || results_dir.legacy_prepare_results_tsv.is_some() 
+                || results_dir.legacy_prepare_results_tsv.is_some()
+                || results_dir.workload_results_tsv.is_some()
                 || results_dir.perf_log_tsv.is_some() 
             {
                 results_dirs.push(results_dir);
@@ -569,6 +581,21 @@ fn create_excel_workbook(results_dirs: &[ResultsDir], output_path: &Path) -> Res
 
             let rows = read_tsv_file(tsv_path)
                 .with_context(|| format!("Failed to read 04_cleanup_results.tsv from {:?}", results_dir.path))?;
+
+            let worksheet = workbook.add_worksheet();
+            worksheet.set_name(&tab_name)?;
+            write_tsv_to_worksheet(worksheet, &rows, &header_format, &data_format)?;
+
+            tabs_created += 1;
+        }
+
+        // Add workload_results.tsv tab (current standalone format)
+        if let Some(ref tsv_path) = results_dir.workload_results_tsv {
+            let tab_name = unique_tab_name(results_dir.generate_tab_name("workload"), results_dir);
+            println!("  Creating tab: {} (workload_results.tsv)", tab_name);
+
+            let rows = read_tsv_file(tsv_path)
+                .with_context(|| format!("Failed to read workload_results.tsv from {:?}", results_dir.path))?;
 
             let worksheet = workbook.add_worksheet();
             worksheet.set_name(&tab_name)?;
@@ -800,6 +827,7 @@ mod tests {
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,
+            workload_results_tsv: None,
             agent_perf_logs: Vec::new(),
         };
 
@@ -836,6 +864,7 @@ mod tests {
             perf_log_tsv: None,
             workload_endpoint_stats_tsv: None,
             prepare_endpoint_stats_tsv: None,
+            workload_results_tsv: None,
             agent_perf_logs: Vec::new(),
         };
 

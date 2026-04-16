@@ -416,10 +416,8 @@ pub(crate) async fn prepare_sequential(
                                 crate::data_gen_pool::generate_data_optimized(size as usize, dedup, compress)
                             }
                             FillPattern::Prand => {
-                                // Use fill_controlled_data() for in-place generation (86-163 GB/s)
-                                let mut buf = bytes::BytesMut::zeroed(size as usize);
-                                s3dlio::fill_controlled_data(&mut buf, dedup, compress);
-                                buf.freeze()
+                                // Prand: same path as Random — dgen-data replaced fill_controlled_data
+                                crate::data_gen_pool::generate_data_optimized(size as usize, dedup, compress)
                             }
                         };
                         

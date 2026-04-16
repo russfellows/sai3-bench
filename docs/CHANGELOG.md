@@ -6,6 +6,96 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.90] - 2026-04-15
+
+### Added
+
+- **`enable_metadata_cache` config option** (`v0.8.89`) — new top-level YAML field that
+  controls whether the internal Fjall KV metadata cache is created during prepare.
+  The cache tracks per-object creation state and enables crash/resume for long-running
+  prepares; it now has a documented sweet-spot and can be turned off for very large or
+  simple workloads:
+  ```yaml
+  enable_metadata_cache: false   # disable for > ~1 Billion objects/batch
+  ```
+  - **Default: `true`** — fully backward-compatible, no config changes required for
+    existing workloads.
+  - **Sweet spot: 1 M – 1 B objects per batch** — crash-resume value exceeds overhead.
+  - **Suggested off: > 1 B objects/batch** — KV store becomes impractically large
+    (~3.4 GB per 50 M objects, ~15 s scan on resume, ~2 GB RAM spike at checkpoint).
+  - Dry-run and preflight validation now print a clear banner showing whether the
+    cache is enabled or disabled for the current run.
+
+- **Populate ledger (`populate_ledger.tsv`)** (`v0.8.90`) — a new always-on TSV that
+  records object creation counts and sizes after every prepare phase, independent of
+  `enable_metadata_cache`.  At trillion-object scales, listing from storage to verify
+  counts is infeasible; this ledger provides a lightweight ground-truth:
+  - **Standalone**: `<results_dir>/populate_ledger.tsv`
+  - **Distributed**: per-agent row + one `AGGREGATE` row summing all agents
+  - Columns: `timestamp`, `test_name`, `agent_id`, `stage`, `objects_created`,
+    `objects_existed`, `total_objects`, `total_bytes`, `avg_bytes`, `wall_seconds`,
+    `ops_per_sec`
+  - Sum across batches without listing:
+    ```sh
+    awk -F'\t' 'NR>1 && $3!="AGGREGATE" {sum += $5} END {print sum}' \
+        sai3-*/populate_ledger.tsv
+    ```
+
+- **`dgen-data` crate for data generation** — `data_gen_pool.rs` has been rewritten
+  to use the [`dgen-data`](https://crates.io/crates/dgen-data) crate (v0.2.3) in
+  place of the internal `s3dlio::fill_controlled_data` call.  The new design uses a
+  **rolling-pointer pool**: a single 1 MB buffer is generated once and successive PUT
+  operations receive zero-copy `Bytes::slice()` windows into it.  A new buffer is only
+  generated when the pool is exhausted or the dedup/compress/seed config changes.
+  - Generator setup cost is paid **once per 1 MB** produced, not once per PUT.
+  - No data copying for any object size ≤ 1 MB.
+  - Objects > 1 MB are generated individually (PUT latency dominates; pool overhead
+    is negligible at that size).
+  - `dgen-data` is declared with `default-features = false` (excludes PyO3 Python
+    bindings) and `features = ["thread-pinning"]` (optional CPU affinity via
+    `core_affinity`; no hwloc dependency).
+
+- **PUT latency split: internal setup vs. external I/O** — the workload engine now
+  measures and reports two separate latency distributions for PUT operations:
+  - **`Latency (I/O ext)`** — time spent inside `store.put()` (network/VFS round-trip).
+  - **`Latency (setup int)`** — everything before the I/O call: size selection,
+    data generation from the rolling pool, URI construction, and task scheduling.
+    Stored at **nanosecond resolution** (HDR histogram lower-bound = 1 ns) so that
+    sub-microsecond setup overhead is not truncated to zero.
+  - `SizeSpec::Fixed` fast-path: skips `StdRng` construction entirely for fixed-size
+    workloads, eliminating unnecessary overhead in the hot path.
+
+- **Excel output now includes workload results** — `sai3bench-analyze` previously
+  missed `workload_results.tsv` (the main workload output file) because it only looked
+  for the legacy `results.tsv` and the new numbered-stage `03_execute_results.tsv`
+  filenames.  `workload_results.tsv` is now discovered and written as a dedicated
+  Excel tab alongside the prepare tab.
+
+### Changed
+
+- **Terminal output formatting** — all large integer and latency values in the
+  terminal (not in TSV files) are now formatted for readability:
+  - **Comma-separated integers**: ops counts, byte counts, latency values
+    (e.g. `53,754`, `102,400,000`).
+  - **Comma-separated floats**: ops/s throughput values (e.g. `36,184.43 ops/s`).
+  - **Adaptive latency units** (5 significant digits, auto-scaled):
+    values below 10,000 in their current unit are shown as comma-formatted integers;
+    at ≥ 10,000 they convert up one tier (ns → µs → ms → s) with appropriate
+    decimal places (e.g. `29,309µs` → `29.309ms`, `666,623µs` → `666.62ms`).
+  - **Adaptive byte units** (`fmt_bytes`): same 5-sig-digit rule applied to byte
+    totals in the populate ledger line (bytes → KiB → MiB → GiB → TiB).
+  - TSV export files are **unchanged** — raw numeric columns are preserved exactly.
+
+- **`results_dir.tsv_path()` returns `workload_results.tsv`** — the workload result
+  TSV was already being written to this filename; `analyze.rs` is now aware of it.
+
+### Dependencies
+
+- Added `dgen-data = { version = "0.2.3", default-features = false, features = ["thread-pinning"] }`
+- Removed direct dependency on `s3dlio::fill_controlled_data` for data generation
+
+---
+
 ## [0.8.88] - 2026-04-10
 
 ### Changed

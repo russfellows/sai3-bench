@@ -1,0 +1,32 @@
+# local_1kb_put_test.yaml
+# Create exactly 100,000 objects of 1 KiB each to the local filesystem.
+# Total data: 100,000 × 1,024 bytes = ~97.7 MiB
+#
+# Run (after dry-run passes):
+#   mkdir -p /tmp/test-data
+#   ./target/release/sai3-bench run --config tests/configs/local_1kb_put_test.yaml
+
+target: "file:///tmp/test-data/"
+concurrency: 256
+duration: 5s            # Quick workload check after prepare completes
+
+# Disable Fjall KV metadata cache (v0.8.89+) — eliminates per-object KV writes
+# which would otherwise bottleneck small-object throughput on /tmp.
+# Crash-resume is not available with this setting, but for a quick local test
+# that's fine.
+enable_metadata_cache: false
+
+prepare:
+  prepare_strategy: parallel
+  ensure_objects:
+    - base_uri: "file:///tmp/test-data/"
+      count: 100000
+      size_spec: 1024   # Fixed 1 KiB
+      fill: random
+  cleanup: false
+
+workload:
+  - op: put
+    path: ""            # Empty = objects go directly under target root
+    weight: 100
+    object_size: 1024   # 1 KiB

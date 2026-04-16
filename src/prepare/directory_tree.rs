@@ -379,11 +379,8 @@ pub async fn create_directory_tree(
                                     crate::data_gen_pool::generate_data_optimized(size as usize, dedup_factor, compress_factor)
                                 }
                                 FillPattern::Prand => {
-                                    // Zero-copy data generation using BytesMut→Bytes pattern
-                                    #[allow(unused_mut)]  // Suppress false warning - mut required for fill_controlled_data
-                                    let mut buf = bytes::BytesMut::zeroed(size as usize);
-                                    s3dlio::fill_controlled_data(&mut buf, dedup_factor, compress_factor);
-                                    buf.freeze()
+                                    // Prand: same path as Random — dgen-data replaced fill_controlled_data
+                                    crate::data_gen_pool::generate_data_optimized(size as usize, dedup_factor, compress_factor)
                                 }
                             };
                             
