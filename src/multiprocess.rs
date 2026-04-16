@@ -226,6 +226,8 @@ fn merge_summaries(summaries: Vec<IpcSummary>) -> Result<Summary> {
         meta_bins: merged_meta_bins,
         get_hists: merged_get_hists,
         put_hists: merged_put_hists,
+        put_hists_setup: crate::metrics::OpHists::new(),  // Not available in distributed mode
+        put_hists_io: crate::metrics::OpHists::new(),     // Not available in distributed mode
         meta_hists: merged_meta_hists,
         total_errors,
         error_rate: avg_error_rate,

@@ -510,6 +510,93 @@ fn parse_tune_ops_str(s: &str) -> Result<TuneOps> {
 }
 
 // -----------------------------------------------------------------------------
+// Helper: format a u64 with comma separators for terminal output
+// -----------------------------------------------------------------------------
+fn fmt_commas(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(b as char);
+    }
+    result
+}
+
+/// Format a float latency value with the right decimal places for 5 significant digits.
+/// `value` must be in [0, 9999.x) — caller ensures correct unit conversion.
+fn fmt_lat_f(value: f64, unit: &str) -> String {
+    let decimals = if value < 10.0 { 4 }
+        else if value < 100.0 { 3 }
+        else if value < 1_000.0 { 2 }
+        else { 1 };
+    let s = format!("{:.prec$}", value, prec = decimals);
+    let dot = s.find('.').unwrap_or(s.len());
+    let int_part = &s[..dot];
+    let frac_part = &s[dot..];
+    if int_part.len() == 4 {
+        // "1234" → "1,234"
+        format!("{},{}{}{}", &int_part[..1], &int_part[1..], frac_part, unit)
+    } else {
+        format!("{}{}{}", int_part, frac_part, unit)
+    }
+}
+
+/// Format a nanosecond latency value with adaptive units (ns → µs → ms → s).
+fn fmt_latency_ns(ns: u64) -> String {
+    if ns < 10_000 {
+        format!("{}ns", fmt_commas(ns))
+    } else if ns < 10_000_000 {
+        fmt_lat_f(ns as f64 / 1_000.0, "µs")
+    } else if ns < 10_000_000_000 {
+        fmt_lat_f(ns as f64 / 1_000_000.0, "ms")
+    } else {
+        fmt_lat_f(ns as f64 / 1_000_000_000.0, "s")
+    }
+}
+
+/// Format a microsecond latency value with adaptive units (µs → ms → s).
+fn fmt_latency_us(us: u64) -> String {
+    if us < 10_000 {
+        format!("{}µs", fmt_commas(us))
+    } else if us < 10_000_000 {
+        fmt_lat_f(us as f64 / 1_000.0, "ms")
+    } else {
+        fmt_lat_f(us as f64 / 1_000_000.0, "s")
+    }
+}
+
+/// Format a byte count with adaptive binary units (bytes → KiB → MiB → GiB → TiB),
+/// using 5 significant digits via fmt_lat_f.
+fn fmt_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1_024;
+    const MIB: u64 = 1_024 * KIB;
+    const GIB: u64 = 1_024 * MIB;
+    const TIB: u64 = 1_024 * GIB;
+    if bytes < 10_000 {
+        format!("{} bytes", fmt_commas(bytes))
+    } else if bytes < 10_000 * KIB {
+        fmt_lat_f(bytes as f64 / KIB as f64, "KiB")
+    } else if bytes < 10_000 * MIB {
+        fmt_lat_f(bytes as f64 / MIB as f64, "MiB")
+    } else if bytes < 10_000 * GIB {
+        fmt_lat_f(bytes as f64 / GIB as f64, "GiB")
+    } else {
+        fmt_lat_f(bytes as f64 / TIB as f64, "TiB")
+    }
+}
+
+/// Format a floating-point number with comma-separated thousands (2 decimal places).
+fn fmt_float_commas(v: f64) -> String {
+    let int_part = v as u64;
+    let frac = v - int_part as f64;
+    format!("{}.{:02}", fmt_commas(int_part), (frac * 100.0).round() as u64)
+}
+
+// -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
 fn main() -> Result<()> {
@@ -2093,12 +2180,12 @@ fn run_workload(
                 0,  // agent_id (standalone mode)
                 1,  // num_agents (standalone mode)
                 true,  // shared_storage (N/A in standalone, but use true for backward compat)
-                Some(results_dir.path()),  // v0.8.60: Enable metadata cache with checkpoints
-                Some(&config),              // v0.8.60: For config hash generation and checkpoint interval
+                if config.enable_metadata_cache { Some(results_dir.path()) } else { None },  // v0.8.89: Conditional metadata cache
+                if config.enable_metadata_cache { Some(&config) } else { None },              // v0.8.89: Conditional cache hash
             ))?;
             
             let prepared_msg = format!("Prepared {} objects ({} created, {} existed) in {:.2}s", 
-                prepared.len(), prepare_metrics.objects_created, prepare_metrics.objects_existed, prepare_metrics.wall_seconds);
+                fmt_commas(prepared.len() as u64), fmt_commas(prepare_metrics.objects_created), fmt_commas(prepare_metrics.objects_existed), prepare_metrics.wall_seconds);
             println!("{}", prepared_msg);
             results_dir.write_console(&prepared_msg)?;
             
@@ -2111,11 +2198,11 @@ fn run_workload(
                 println!("{}", perf_header);
                 results_dir.write_console(perf_header)?;
                 
-                let ops_msg = format!("  Total ops: {} ({:.2} ops/s)", prepare_metrics.put.ops, put_ops_s);
+                let ops_msg = format!("  Total ops: {} ({} ops/s)", fmt_commas(prepare_metrics.put.ops), fmt_float_commas(put_ops_s));
                 println!("{}", ops_msg);
                 results_dir.write_console(&ops_msg)?;
                 
-                let bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", prepare_metrics.put.bytes, prepare_metrics.put.bytes as f64 / 1_048_576.0);
+                let bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", fmt_commas(prepare_metrics.put.bytes), prepare_metrics.put.bytes as f64 / 1_048_576.0);
                 println!("{}", bytes_msg);
                 results_dir.write_console(&bytes_msg)?;
                 
@@ -2153,12 +2240,12 @@ fn run_workload(
                     println!("{}", endpoint_msg);
                     results_dir.write_console(&endpoint_msg)?;
                     
-                    let requests_msg = format!("    Total requests: {}", stats.total_requests);
+                    let requests_msg = format!("    Total requests: {}", fmt_commas(stats.total_requests));
                     println!("{}", requests_msg);
                     results_dir.write_console(&requests_msg)?;
                     
                     let write_msg = format!("    Bytes written: {} ({:.2} MiB)", 
-                        stats.bytes_written, stats.bytes_written as f64 / 1_048_576.0);
+                        fmt_commas(stats.bytes_written), stats.bytes_written as f64 / 1_048_576.0);
                     println!("{}", write_msg);
                     results_dir.write_console(&write_msg)?;
                     
@@ -2222,6 +2309,31 @@ fn run_workload(
                 }
             }
             
+            // v0.8.90: Write populate ledger row (always-on, regardless of enable_metadata_cache)
+            {
+                let ledger_row = sai3_bench::populate_ledger::LedgerRow {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    test_name: results_dir.test_name().to_string(),
+                    agent_id: "standalone".to_string(),
+                    stage: "prepare".to_string(),
+                    objects_created: prepare_metrics.objects_created,
+                    objects_existed: prepare_metrics.objects_existed,
+                    total_bytes: prepare_metrics.put.bytes,
+                    wall_seconds: prepare_metrics.wall_seconds,
+                };
+                if let Err(e) = sai3_bench::populate_ledger::append_row(results_dir.path(), &ledger_row) {
+                    warn!("Failed to write populate ledger: {}", e);
+                } else {
+                    let ledger_msg = format!("Populate ledger: {} objects, {} total, {} avg/obj → {}",
+                        fmt_commas(ledger_row.objects_created),
+                        fmt_bytes(ledger_row.total_bytes),
+                        fmt_bytes(ledger_row.avg_bytes() as u64),
+                        results_dir.path().join(sai3_bench::populate_ledger::LEDGER_FILENAME).display());
+                    println!("{}", ledger_msg);
+                    results_dir.write_console(&ledger_msg)?;
+                }
+            }
+
             // Use configurable delay from YAML (only if objects were created)
             if prepared.iter().any(|p| p.created) && prepare_config.post_prepare_delay > 0 {
                 let delay_secs = prepare_config.post_prepare_delay;
@@ -2567,19 +2679,19 @@ fn run_workload(
     
     if summary.get.ops > 0 {
         let get_pct = (summary.get.ops as f64 / summary.total_ops as f64) * 100.0;
-        let get_msg = format!("  GET: {} ops ({:.1}%)", summary.get.ops, get_pct);
+        let get_msg = format!("  GET: {} ops ({:.1}%)", fmt_commas(summary.get.ops), get_pct);
         println!("{}", get_msg);
         results_dir.write_console(&get_msg)?;
     }
     if summary.put.ops > 0 {
         let put_pct = (summary.put.ops as f64 / summary.total_ops as f64) * 100.0;
-        let put_msg = format!("  PUT: {} ops ({:.1}%)", summary.put.ops, put_pct);
+        let put_msg = format!("  PUT: {} ops ({:.1}%)", fmt_commas(summary.put.ops), put_pct);
         println!("{}", put_msg);
         results_dir.write_console(&put_msg)?;
     }
     if summary.meta.ops > 0 {
         let meta_pct = (summary.meta.ops as f64 / summary.total_ops as f64) * 100.0;
-        let meta_msg = format!("  META (LIST/STAT/DELETE): {} ops ({:.1}%)", summary.meta.ops, meta_pct);
+        let meta_msg = format!("  META (LIST/STAT/DELETE): {} ops ({:.1}%)", fmt_commas(summary.meta.ops), meta_pct);
         println!("{}", meta_msg);
         results_dir.write_console(&meta_msg)?;
     }
@@ -2588,15 +2700,15 @@ fn run_workload(
     println!("{}", overall_header);
     results_dir.write_console(overall_header)?;
     
-    let total_ops_msg = format!("  Total ops: {}", summary.total_ops);
+    let total_ops_msg = format!("  Total ops: {}", fmt_commas(summary.total_ops));
     println!("{}", total_ops_msg);
     results_dir.write_console(&total_ops_msg)?;
     
-    let total_bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", summary.total_bytes, summary.total_bytes as f64 / 1_048_576.0);
+    let total_bytes_msg = format!("  Total bytes: {} ({:.2} MiB)", fmt_commas(summary.total_bytes), summary.total_bytes as f64 / 1_048_576.0);
     println!("{}", total_bytes_msg);
     results_dir.write_console(&total_bytes_msg)?;
     
-    let throughput_msg = format!("  Throughput: {:.2} ops/s", summary.total_ops as f64 / summary.wall_seconds);
+    let throughput_msg = format!("  Throughput: {} ops/s", fmt_float_commas(summary.total_ops as f64 / summary.wall_seconds));
     println!("{}", throughput_msg);
     results_dir.write_console(&throughput_msg)?;
     
@@ -2607,11 +2719,11 @@ fn run_workload(
         println!("{}", get_header);
         results_dir.write_console(get_header)?;
         
-        let get_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.get.ops, summary.get.ops as f64 / summary.wall_seconds);
+        let get_ops_msg = format!("  Ops: {} ({} ops/s)", fmt_commas(summary.get.ops), fmt_float_commas(summary.get.ops as f64 / summary.wall_seconds));
         println!("{}", get_ops_msg);
         results_dir.write_console(&get_ops_msg)?;
         
-        let get_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.get.bytes, summary.get.bytes as f64 / 1_048_576.0);
+        let get_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", fmt_commas(summary.get.bytes), summary.get.bytes as f64 / 1_048_576.0);
         println!("{}", get_bytes_msg);
         results_dir.write_console(&get_bytes_msg)?;
         
@@ -2620,7 +2732,7 @@ fn run_workload(
         results_dir.write_console(&get_throughput_msg)?;
         
         let get_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
-            summary.get.mean_us, summary.get.p50_us, summary.get.p95_us, summary.get.p99_us);
+            fmt_commas(summary.get.mean_us), fmt_commas(summary.get.p50_us), fmt_commas(summary.get.p95_us), fmt_commas(summary.get.p99_us));
         println!("{}", get_latency_msg);
         results_dir.write_console(&get_latency_msg)?;
     }
@@ -2632,11 +2744,11 @@ fn run_workload(
         println!("{}", put_header);
         results_dir.write_console(put_header)?;
         
-        let put_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.put.ops, summary.put.ops as f64 / summary.wall_seconds);
+        let put_ops_msg = format!("  Ops: {} ({} ops/s)", fmt_commas(summary.put.ops), fmt_float_commas(summary.put.ops as f64 / summary.wall_seconds));
         println!("{}", put_ops_msg);
         results_dir.write_console(&put_ops_msg)?;
         
-        let put_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.put.bytes, summary.put.bytes as f64 / 1_048_576.0);
+        let put_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", fmt_commas(summary.put.bytes), summary.put.bytes as f64 / 1_048_576.0);
         println!("{}", put_bytes_msg);
         results_dir.write_console(&put_bytes_msg)?;
         
@@ -2644,10 +2756,32 @@ fn run_workload(
         println!("{}", put_throughput_msg);
         results_dir.write_console(&put_throughput_msg)?;
         
-        let put_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
-            summary.put.mean_us, summary.put.p50_us, summary.put.p95_us, summary.put.p99_us);
+        let put_latency_msg = format!("  Latency (total):  mean={}, p50={}, p95={}, p99={}", 
+            fmt_latency_us(summary.put.mean_us), fmt_latency_us(summary.put.p50_us), fmt_latency_us(summary.put.p95_us), fmt_latency_us(summary.put.p99_us));
         println!("{}", put_latency_msg);
         results_dir.write_console(&put_latency_msg)?;
+
+        // Internal vs external latency breakdown (standalone mode only; empty in distributed mode)
+        let put_io_combined = summary.put_hists_io.combined_histogram();
+        let put_setup_combined = summary.put_hists_setup.combined_histogram();
+        if put_io_combined.len() > 0 {
+            let io_msg = format!("  Latency (I/O ext): mean={}, p50={}, p95={}, p99={}  ← store.put() wait",
+                fmt_latency_us(put_io_combined.mean() as u64),
+                fmt_latency_us(put_io_combined.value_at_quantile(0.50)),
+                fmt_latency_us(put_io_combined.value_at_quantile(0.95)),
+                fmt_latency_us(put_io_combined.value_at_quantile(0.99)));
+            println!("{}", io_msg);
+            results_dir.write_console(&io_msg)?;
+        }
+        if put_setup_combined.len() > 0 {
+            let setup_msg = format!("  Latency (setup int): mean={}, p50={}, p95={}, p99={}  ← data-gen + scheduling",
+                fmt_latency_ns(put_setup_combined.mean() as u64),
+                fmt_latency_ns(put_setup_combined.value_at_quantile(0.50)),
+                fmt_latency_ns(put_setup_combined.value_at_quantile(0.95)),
+                fmt_latency_ns(put_setup_combined.value_at_quantile(0.99)));
+            println!("{}", setup_msg);
+            results_dir.write_console(&setup_msg)?;
+        }
     }
     
     if summary.meta.ops > 0 {
@@ -2655,16 +2789,16 @@ fn run_workload(
         println!("{}", meta_header);
         results_dir.write_console(meta_header)?;
         
-        let meta_ops_msg = format!("  Ops: {} ({:.2} ops/s)", summary.meta.ops, summary.meta.ops as f64 / summary.wall_seconds);
+        let meta_ops_msg = format!("  Ops: {} ({} ops/s)", fmt_commas(summary.meta.ops), fmt_float_commas(summary.meta.ops as f64 / summary.wall_seconds));
         println!("{}", meta_ops_msg);
         results_dir.write_console(&meta_ops_msg)?;
         
-        let meta_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", summary.meta.bytes, summary.meta.bytes as f64 / 1_048_576.0);
+        let meta_bytes_msg = format!("  Bytes: {} ({:.2} MiB)", fmt_commas(summary.meta.bytes), summary.meta.bytes as f64 / 1_048_576.0);
         println!("{}", meta_bytes_msg);
         results_dir.write_console(&meta_bytes_msg)?;
         
         let meta_latency_msg = format!("  Latency: mean={}µs, p50={}µs, p95={}µs, p99={}µs", 
-            summary.meta.mean_us, summary.meta.p50_us, summary.meta.p95_us, summary.meta.p99_us);
+            fmt_commas(summary.meta.mean_us), fmt_commas(summary.meta.p50_us), fmt_commas(summary.meta.p95_us), fmt_commas(summary.meta.p99_us));
         println!("{}", meta_latency_msg);
         results_dir.write_console(&meta_latency_msg)?;
     }
@@ -2684,28 +2818,28 @@ fn run_workload(
             println!("{}", endpoint_msg);
             results_dir.write_console(&endpoint_msg)?;
             
-            let requests_msg = format!("    Total requests: {}", stats.total_requests);
+            let requests_msg = format!("    Total requests: {}", fmt_commas(stats.total_requests));
             println!("{}", requests_msg);
             results_dir.write_console(&requests_msg)?;
             
             let read_msg = format!("    Bytes read: {} ({:.2} MiB)", 
-                stats.bytes_read, stats.bytes_read as f64 / 1_048_576.0);
+                fmt_commas(stats.bytes_read), stats.bytes_read as f64 / 1_048_576.0);
             println!("{}", read_msg);
             results_dir.write_console(&read_msg)?;
             
             let write_msg = format!("    Bytes written: {} ({:.2} MiB)", 
-                stats.bytes_written, stats.bytes_written as f64 / 1_048_576.0);
+                fmt_commas(stats.bytes_written), stats.bytes_written as f64 / 1_048_576.0);
             println!("{}", write_msg);
             results_dir.write_console(&write_msg)?;
             
             if stats.error_count > 0 {
-                let error_msg = format!("    Errors: {}", stats.error_count);
+                let error_msg = format!("    Errors: {}", fmt_commas(stats.error_count));
                 println!("{}", error_msg);
                 results_dir.write_console(&error_msg)?;
             }
             
             if stats.active_requests > 0 {
-                let active_msg = format!("    Active requests: {}", stats.active_requests);
+                let active_msg = format!("    Active requests: {}", fmt_commas(stats.active_requests as u64));
                 println!("{}", active_msg);
                 results_dir.write_console(&active_msg)?;
             }

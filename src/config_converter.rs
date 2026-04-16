@@ -515,6 +515,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            enable_metadata_cache: true,
             s3dlio_optimization: None,
         }
     }
@@ -651,6 +652,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            enable_metadata_cache: true,
             s3dlio_optimization: None,
         };
 
@@ -727,6 +729,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: 300,
+            enable_metadata_cache: true,
             s3dlio_optimization: None,
         };
 

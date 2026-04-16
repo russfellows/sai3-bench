@@ -4330,7 +4330,66 @@ async fn run_distributed_workload(
     
     // Finalize results directory with elapsed time from final stats
     results_dir.finalize(final_stats.elapsed_s)?;
-    
+
+    // v0.8.90: Write populate ledger (always-on, regardless of enable_metadata_cache)
+    // Per-agent rows + one AGGREGATE row, works for both YAML-stage and legacy modes.
+    if !prepare_summaries.is_empty() {
+        let test_name = results_dir.test_name().to_string();
+        let ts = chrono::Utc::now().to_rfc3339();
+        let mut agg_objects_created: u64 = 0;
+        let mut agg_objects_existed: u64 = 0;
+        let mut agg_total_bytes: u64 = 0;
+        let mut agg_wall_seconds: f64 = 0.0_f64;
+
+        for prep in &prepare_summaries {
+            let row = sai3_bench::populate_ledger::LedgerRow {
+                timestamp: ts.clone(),
+                test_name: test_name.clone(),
+                agent_id: prep.agent_id.clone(),
+                stage: "prepare".to_string(),
+                objects_created: prep.objects_created,
+                objects_existed: prep.objects_existed,
+                total_bytes: prep.put.as_ref().map(|p| p.bytes).unwrap_or(0),
+                wall_seconds: prep.wall_seconds,
+            };
+            agg_objects_created += row.objects_created;
+            agg_objects_existed += row.objects_existed;
+            agg_total_bytes += row.total_bytes;
+            agg_wall_seconds = agg_wall_seconds.max(row.wall_seconds); // wall time = max across agents (parallel)
+
+            if let Err(e) = sai3_bench::populate_ledger::append_row(results_dir.path(), &row) {
+                error!("Failed to write per-agent populate ledger row for {}: {}", prep.agent_id, e);
+            }
+        }
+
+        // Write aggregate row summarising all agents
+        let agg_row = sai3_bench::populate_ledger::LedgerRow {
+            timestamp: ts,
+            test_name,
+            agent_id: "AGGREGATE".to_string(),
+            stage: "prepare".to_string(),
+            objects_created: agg_objects_created,
+            objects_existed: agg_objects_existed,
+            total_bytes: agg_total_bytes,
+            wall_seconds: agg_wall_seconds,
+        };
+        if let Err(e) = sai3_bench::populate_ledger::append_row(results_dir.path(), &agg_row) {
+            error!("Failed to write aggregate populate ledger row: {}", e);
+        } else {
+            let ledger_msg = format!(
+                "Populate ledger: {} total objects, {} total bytes, {:.0} avg bytes/obj, {:.1}s → {}",
+                agg_row.objects_created,
+                agg_row.total_bytes,
+                agg_row.avg_bytes(),
+                agg_row.wall_seconds,
+                results_dir.path().join(sai3_bench::populate_ledger::LEDGER_FILENAME).display()
+            );
+            println!("{}", ledger_msg);
+            results_dir.write_console(&ledger_msg)?;
+            info!("✓ Populate ledger written ({} agent rows + AGGREGATE)", prepare_summaries.len());
+        }
+    }
+
     // v0.8.1: Check agent states and write test status summary
     let status_summary = check_test_status(&agent_trackers, &agent_summaries);
     write_test_status(&results_dir, &status_summary)?;

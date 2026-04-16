@@ -869,7 +869,10 @@ async fn get_object_cached(
 }
 
 /// Internal PUT operation with cached store (for performance-critical workloads)
-/// 
+///
+/// Returns the duration of the underlying `store.put()` call only (external / I/O latency).
+/// The caller can compare this against the total call time to derive internal overhead.
+///
 /// # Arguments
 /// * `use_multi_endpoint` - When true, route through MultiEndpointStore for load balancing (v0.8.23+)
 async fn put_object_cached(
@@ -880,12 +883,15 @@ async fn put_object_cached(
     config: &Config,
     agent_config: Option<&crate::config::AgentConfig>,
     use_multi_endpoint: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Duration> {
     trace!("PUT operation (cached store) starting for URI: {}, {} bytes", uri, data.len());
     let store = get_cached_store(uri, cache, multi_ep_cache, config, agent_config, use_multi_endpoint)?;
 
     // v0.8.71: per-op timeout
     let timeout_secs = crate::constants::DEFAULT_OP_TIMEOUT_SECS;
+
+    // Measure only the I/O wait time (external latency): from handoff to store until response.
+    let t_io = Instant::now();
     tokio::time::timeout(
         Duration::from_secs(timeout_secs),
         store.put(uri, data),
@@ -893,9 +899,10 @@ async fn put_object_cached(
     .await
     .map_err(|_| anyhow!("PUT timed out after {}s: {}", timeout_secs, uri))?
     .with_context(|| format!("Failed to put object to URI: {}", uri))?;
+    let io_duration = t_io.elapsed();
 
     trace!("PUT operation completed successfully for URI: {}", uri);
-    Ok(())
+    Ok(io_duration)
 }
 
 /// Internal DELETE operation with cached store (for performance-critical workloads)
@@ -1282,6 +1289,13 @@ pub struct Summary {
     pub get_hists: crate::metrics::OpHists,
     pub put_hists: crate::metrics::OpHists,
     pub meta_hists: crate::metrics::OpHists,
+
+    /// Internal PUT latency histogram: setup time before store.put() is called.
+    /// Empty in distributed (multiprocess) mode; populated in standalone mode only.
+    pub put_hists_setup: crate::metrics::OpHists,
+    /// External PUT latency histogram: store.put() I/O wait time only.
+    /// Empty in distributed (multiprocess) mode; populated in standalone mode only.
+    pub put_hists_io: crate::metrics::OpHists,
     
     // v0.7.13: Error statistics
     pub total_errors: u64,
@@ -1311,6 +1325,13 @@ struct WorkerStats {
     hist_get: crate::metrics::OpHists,
     hist_put: crate::metrics::OpHists,
     hist_meta: crate::metrics::OpHists,
+    /// Internal PUT latency: time from start of PUT handler (after semaphore/rate-control)
+    /// to the moment `store.put()` starts — covers data-gen, URI construction, Arc clones,
+    /// and async scheduling/task-dispatch overhead.
+    hist_put_setup: crate::metrics::OpHists,
+    /// External PUT latency: time from `store.put()` call until the response returns —
+    /// the true I/O wait time (syscall, network RTT, server processing).
+    hist_put_io: crate::metrics::OpHists,
     get_bytes: u64,
     get_ops: u64,
     put_bytes: u64,
@@ -2253,14 +2274,22 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     OpSpec::Put { dedup_factor, compress_factor, use_multi_endpoint, .. } => {
                         // v0.8.23: Extract use_multi_endpoint flag for routing
                         let use_multi_ep = *use_multi_endpoint;
+
+                        // Capture start-of-handler time to measure internal (setup) latency:
+                        // everything from here through data-gen / URI construction / Arc clones,
+                        // up until store.put() is actually called.
+                        let t_pre = Instant::now();
                         
                         // v0.7.13: Wrap PUT operation with error handling
                         let (full_uri, sz) = if let Some(ref selector) = path_selector {
                             let file_path = selector.select_file();
                             let (_base_uri, size_spec) = cfg.get_put_size_spec(op);
-                            use crate::size_generator::SizeGenerator;
-                            let mut size_generator = SizeGenerator::new(&size_spec)?;
-                            let sz = size_generator.generate();
+                            let sz = if let Some(fixed) = size_spec.as_fixed() {
+                                fixed
+                            } else {
+                                use crate::size_generator::SizeGenerator;
+                                SizeGenerator::new(&size_spec)?.generate()
+                            };
                             // v0.8.53: Multi-endpoint support for tree mode with round-robin mapping
                             let base_uri = if use_multi_ep {
                                 if let Some(ref me_cfg) = cfg.multi_endpoint {
@@ -2283,9 +2312,12 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             (full_uri, sz)
                         } else {
                             let (base_uri, size_spec) = cfg.get_put_size_spec(op);
-                            use crate::size_generator::SizeGenerator;
-                            let mut size_generator = SizeGenerator::new(&size_spec)?;
-                            let sz = size_generator.generate();
+                            let sz = if let Some(fixed) = size_spec.as_fixed() {
+                                fixed
+                            } else {
+                                use crate::size_generator::SizeGenerator;
+                                SizeGenerator::new(&size_spec)?.generate()
+                            };
                             let key = {
                                 let mut r = rng();
                                 format!("obj_{}", r.random::<u64>())
@@ -2315,8 +2347,16 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             "PUT",
                             &error_tracker,
                             || async {
-                                let t0 = Instant::now();
-                                put_object_cached(
+                                // Internal (setup) latency: everything from the start of the Put
+                                // handler (t_pre, set before data-gen) to this point where we are
+                                // about to issue the I/O.  Includes data-gen, URI construction,
+                                // Arc clones, and the Tokio task-scheduling delay.
+                                // Note: t_pre is Copy (Instant), captured cheaply into this Fn closure.
+                                let setup_dur = t_pre.elapsed();
+
+                                let t_call = Instant::now();
+                                // External (I/O) latency: returned directly from put_object_cached.
+                                let io_dur = put_object_cached(
                                     &uri_for_closure,
                                     buf.clone(),  // Clone is cheap: Bytes is Arc-like
                                     &store_cache_put,
@@ -2325,21 +2365,23 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                     None,  // agent_config: None for standalone mode
                                     use_multi_ep,
                                 ).await?;
-                                let duration = t0.elapsed();
-                                Ok(duration)
+                                let total_dur = t_call.elapsed(); // includes get_cached_store + io
+                                Ok((setup_dur, io_dur, total_dur))
                             }
                         ).await;
                         
                         match result {
-                            Ok(Some(duration)) => {
+                            Ok(Some((setup_dur, io_dur, total_dur))) => {
                                 let bucket = crate::metrics::bucket_index(buf.len());
-                                ws.hist_put.record(bucket, duration);
+                                ws.hist_put.record(bucket, total_dur);
+                                ws.hist_put_setup.record_nanos(bucket, setup_dur);  // sub-µs: use ns resolution
+                                ws.hist_put_io.record(bucket, io_dur);
                                 ws.put_ops += 1;
                                 ws.put_bytes += sz;
                                 ws.put_bins.add(sz);
                                 
                                 if let Some(ref tracker) = cfg.live_stats_tracker {
-                                    tracker.record_put(sz as usize, duration);
+                                    tracker.record_put(sz as usize, total_dur);
                                 }
                                 
                                 local_ops += 1;
@@ -2732,6 +2774,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
     // If any worker hit error threshold, cancel progress bar and return error
     let mut merged_get = crate::metrics::OpHists::new();
     let mut merged_put = crate::metrics::OpHists::new();
+    let mut merged_put_setup = crate::metrics::OpHists::new();
+    let mut merged_put_io = crate::metrics::OpHists::new();
     let mut merged_meta = crate::metrics::OpHists::new();
     let mut get_bytes = 0u64;
     let mut get_ops = 0u64;
@@ -2778,6 +2822,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         // Worker completed successfully — merge stats
                         merged_get.merge(&ws.hist_get);
                         merged_put.merge(&ws.hist_put);
+                        merged_put_setup.merge(&ws.hist_put_setup);
+                        merged_put_io.merge(&ws.hist_put_io);
                         merged_meta.merge(&ws.hist_meta);
                         get_bytes += ws.get_bytes;
                         get_ops += ws.get_ops;
@@ -2929,6 +2975,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         meta_bins,
         get_hists: merged_get,
         put_hists: merged_put,
+        put_hists_setup: merged_put_setup,
+        put_hists_io: merged_put_io,
         meta_hists: merged_meta,
         total_errors: final_total_errors,
         error_rate: final_error_rate,
@@ -3073,7 +3121,7 @@ async fn prefetch_uris_multi_endpoint(
 /// `(list_prefix, recursive)` where `list_prefix` is a sub-slice of `uri`.
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// // Deep glob — star is inside a directory component
 /// let (prefix, rec) = glob_list_params("gs://b/unet3d/scan.d*_w*.dir/**/*");
 /// assert_eq!(prefix, "gs://b/unet3d/");

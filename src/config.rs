@@ -119,7 +119,33 @@ pub struct Config {
     /// ```
     #[serde(default = "default_cache_checkpoint_interval")]
     pub cache_checkpoint_interval_secs: u64,
-    
+
+    /// v0.8.89: Enable/disable the internal Fjall KV metadata cache for prepare operations.
+    /// The metadata cache tracks which objects have been successfully created, enabling
+    /// crash-resume for long-running prepare workloads.
+    ///
+    /// **When to disable:**
+    /// - Per-batch object count exceeds ~1 Billion: above this threshold the KV store
+    ///   becomes too large to be practical (~3.4 GB per 50M objects, ~15s scan on resume,
+    ///   ~2 GB RAM spike during checkpoint upload).
+    /// - Idempotent workloads where re-running from zero is acceptable
+    /// - Benchmarks measuring raw write throughput without metadata overhead
+    ///
+    /// **When to keep enabled (default) — sweet spot: 1M to 1B objects/run:**
+    /// - Below 1 Million objects: the cache helps but listing is fast enough to verify
+    ///   without it (~200s at 5,000 LIST/s); still useful for crash-resume.
+    /// - 1 Million to 1 Billion objects: ideal range — crash-resume value exceeds overhead.
+    /// - Above 1 Billion: disable — overhead is impractical.
+    ///
+    /// Default: true (enabled — preserves existing behavior)
+    ///
+    /// Example — disable for trillion-object populate (5,000 batches × 200M objects/batch):
+    /// ```yaml
+    /// enable_metadata_cache: false
+    /// ```
+    #[serde(default = "default_enable_metadata_cache")]
+    pub enable_metadata_cache: bool,
+
     /// Optional s3dlio optimization configuration (v0.8.63+, requires s3dlio v0.9.50+)
     /// Controls advanced s3dlio features via environment variables.
     /// These settings are applied automatically when the config is loaded.
@@ -150,6 +176,10 @@ fn default_concurrency() -> usize {
 
 pub fn default_cache_checkpoint_interval() -> u64 {
     300  // 5 minutes - protects long-running prepares from data loss
+}
+
+fn default_enable_metadata_cache() -> bool {
+    true  // Enabled by default — preserves backward compatibility
 }
 
 /// Error handling configuration (v0.8.0+)
@@ -706,7 +736,7 @@ impl EnsureSpec {
 pub enum FillPattern {
     Zero,
     Random,
-    Prand,  // Pseudo-random (faster, uses old BASE_BLOCK algorithm)
+    Prand,  // Pseudo-random (alias for Random; formerly used s3dlio::fill_controlled_data)
 }
 
 fn default_min_size() -> u64 { 

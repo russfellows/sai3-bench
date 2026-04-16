@@ -155,6 +155,7 @@ mod tests {
             perf_log: None,
             multi_endpoint: None,
             cache_checkpoint_interval_secs: crate::config::default_cache_checkpoint_interval(),
+            enable_metadata_cache: true,
             s3dlio_optimization: None,
         }
     }

@@ -53,11 +53,23 @@ impl OpHists {
         }
     }
 
-    /// Record a latency measurement in the appropriate size bucket
+    /// Record a latency measurement in the appropriate size bucket (microsecond resolution)
     pub fn record(&self, bucket: usize, duration: Duration) {
         let micros = duration.as_micros() as u64;
         let mut hist = self.buckets[bucket].lock().unwrap();
         let _ = hist.record(micros);
+    }
+
+    /// Record a latency measurement in nanoseconds.
+    /// Use this for sub-microsecond measurements (e.g., internal setup latency).
+    /// The histogram stores nanoseconds; callers must use combined_histogram_nanos()
+    /// or be aware that values are in ns rather than µs.
+    pub fn record_nanos(&self, bucket: usize, duration: Duration) {
+        let nanos = duration.as_nanos() as u64;
+        // Clamp to 1 so it doesn't fall below the histogram lower bound.
+        let nanos = nanos.max(1);
+        let mut hist = self.buckets[bucket].lock().unwrap();
+        let _ = hist.record(nanos);
     }
 
     /// Print a summary of all buckets for this operation

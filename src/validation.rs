@@ -1091,6 +1091,24 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         }
         
         println!("│");
+        println!("│");
+        // v0.8.89: enable_metadata_cache
+        if config.enable_metadata_cache {
+            println!("│ Metadata Cache (Fjall KV): ✅ ENABLED (default)");
+            println!("│   📊 Tracks per-object creation state — enables crash/resume");
+        } else {
+            println!("│ Metadata Cache (Fjall KV): 🚫 DISABLED (enable_metadata_cache: false)");
+            println!("│   ⚠️  Crash-resume NOT available for this prepare");
+            println!("│   💡 Sweet spot for cache: 1M–1B objects/run");
+            println!("│      < 1M: listing is fast enough to verify (~200s at 5K LIST/s)");
+            println!("│      > 1B: KV store too large — disable here");
+        }
+        println!("│");
+        // v0.8.90: populate_ledger is always on
+        println!("│ Populate Ledger: ✅ ALWAYS ENABLED");
+        println!("│   📋 Writes populate_ledger.tsv to results dir after every prepare");
+        println!("│   🔢 Columns: objects_created, total_bytes, avg_bytes, wall_seconds");
+        println!("│   📎 Use to validate total count without listing from storage");
         println!("│ 📝 Purpose: Isolate LSM I/O from storage under test");
         println!("│ 🎯 Benefits: Accurate performance measurements");
         println!("└──────────────────────────────────────────────────────────────────────┘");

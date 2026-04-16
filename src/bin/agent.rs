@@ -1339,6 +1339,8 @@ impl Agent for AgentSvc {
                     meta_bins: Default::default(),
                     get_hists: Default::default(),
                     put_hists: Default::default(),
+                    put_hists_setup: Default::default(),
+                    put_hists_io: Default::default(),
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
@@ -1361,6 +1363,8 @@ impl Agent for AgentSvc {
                     meta_bins: Default::default(),
                     get_hists: Default::default(),
                     put_hists: Default::default(),
+                    put_hists_setup: Default::default(),
+                    put_hists_io: Default::default(),
                     meta_hists: Default::default(),
                     total_errors: 0,
                     error_rate: 0.0,
@@ -3254,8 +3258,8 @@ async fn execute_stages_workflow(
                         agent_index,
                         num_agents,
                         shared_storage,
-                        Some(&results_dir),  // v0.8.60: Enable metadata cache
-                        Some(&config),       // v0.8.60: For config hash generation
+                        if config.enable_metadata_cache { Some(&results_dir) } else { None },  // v0.8.89: Conditional metadata cache
+                        if config.enable_metadata_cache { Some(&config) } else { None },        // v0.8.89: Conditional cache hash
                     ).await {
                         Ok((prepared, manifest, prepare_metrics)) => {
                             info!("Prepare stage complete: {} objects", prepared.len());
@@ -3267,6 +3271,24 @@ async fn execute_stages_workflow(
                             stage_put_hists = Some(prepare_metrics.put_hists.clone());
                             stage_put_bins = Some(prepare_metrics.put_bins.clone());
                             
+                            // v0.8.90: Write per-agent populate ledger (always-on, before send which moves prepare_metrics)
+                            let ledger_row = sai3_bench::populate_ledger::LedgerRow {
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                test_name: "distributed".to_string(),
+                                agent_id: agent_id.clone(),
+                                stage: stage.name.clone(),
+                                objects_created: prepare_metrics.objects_created,
+                                objects_existed: prepare_metrics.objects_existed,
+                                total_bytes: prepare_metrics.put.bytes,
+                                wall_seconds: prepare_metrics.wall_seconds,
+                            };
+                            if let Err(e) = sai3_bench::populate_ledger::append_row(&results_dir, &ledger_row) {
+                                warn!("Failed to write populate ledger: {}", e);
+                            } else {
+                                info!("Populate ledger: {} objects, {} bytes (avg {:.0} bytes/obj)",
+                                    ledger_row.objects_created, ledger_row.total_bytes, ledger_row.avg_bytes());
+                            }
+
                             // Send prepare metrics via channel (for legacy flow compatibility)
                             let _ = tx_prepare.send(prepare_metrics).await;
                             // NOTE: Do NOT reset tracker here - stats must persist until
@@ -3799,6 +3821,8 @@ async fn execute_stages_workflow(
         meta_bins: Default::default(),
         get_hists: Default::default(),
         put_hists: Default::default(),
+        put_hists_setup: Default::default(),
+        put_hists_io: Default::default(),
         meta_hists: Default::default(),
         total_errors: 0,
         error_rate: 0.0,

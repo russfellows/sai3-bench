@@ -132,6 +132,11 @@ impl ResultsDir {
         &self.path
     }
 
+    /// Get the test name used in the directory name
+    pub fn test_name(&self) -> &str {
+        &self.metadata.test_name
+    }
+
     /// Get the path for the TSV results file
     pub fn tsv_path(&self) -> PathBuf {
         self.path.join("workload_results.tsv")

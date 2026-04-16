@@ -592,10 +592,8 @@ pub(crate) async fn prepare_parallel(
                                 crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
                             }
                             FillPattern::Prand => {
-                                #[allow(unused_mut)]
-                                let mut buf = bytes::BytesMut::zeroed(task.size as usize);
-                                s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
-                                buf.freeze()
+                                // Prand: same path as Random — dgen-data replaced fill_controlled_data
+                                crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
                             }
                         };
 
@@ -756,10 +754,8 @@ pub(crate) async fn prepare_parallel(
                         crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
                     }
                     FillPattern::Prand => {
-                        #[allow(unused_mut)]
-                        let mut buf = bytes::BytesMut::zeroed(task.size as usize);
-                        s3dlio::fill_controlled_data(&mut buf, task.dedup, task.compress);
-                        buf.freeze()
+                        // Prand: same path as Random — dgen-data replaced fill_controlled_data
+                        crate::data_gen_pool::generate_data_optimized(task.size as usize, task.dedup, task.compress)
                     }
                 };
 

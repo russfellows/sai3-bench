@@ -1,6 +1,6 @@
 [package]
 name = "sai3-bench"
-version = "0.8.88"
+version = "0.8.90"
 edition = "2021"
 build   = "build.rs"
 
@@ -27,9 +27,15 @@ num_cpus = "^1.16"
 # Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
 # az:// and gs:// support even though s3dlio's own default profile is S3-focused.
 s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86", features = ["full-backends"] }
+# ⚠️ MUST keep s3dlio-oplog tag in sync with s3dlio tag above — both live in the same repo/commit.
 s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86" }
 # Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
 # Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
+
+# High-performance data generation (replaces s3dlio::fill_controlled_data in data_gen_pool.rs)
+# default-features = false: excludes PyO3 python-bindings (not needed in a pure Rust binary)
+# thread-pinning: enables core_affinity for optional CPU thread pinning (no hwloc dependency)
+dgen-data = { version = "0.2.3", default-features = false, features = ["thread-pinning"] }
 
 # gRPC (aligned with dl-driver)
 tonic = { version = "^0.13.1", features = ["transport", "codegen", "tls-webpki-roots"] }

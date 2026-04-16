@@ -1,10 +1,14 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.88-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.90-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-655%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.90)**: **`populate_ledger.tsv` + dgen-data zero-copy fills** — Every prepare phase now writes a lightweight `populate_ledger.tsv` (always-on, independent of the KV cache) recording object counts, bytes, and throughput — usable even at trillion-object scale where listing is infeasible. Data generation rewritten using [`dgen-data`](https://crates.io/crates/dgen-data) v0.2.3: a rolling-pointer pool generates one 1 MB buffer and vends zero-copy `Bytes::slice()` windows per PUT, eliminating per-object allocation. PUT latency now split into **setup** vs. **I/O** histograms for better profiling.
+
+**🚀 NEW (v0.8.89)**: **`enable_metadata_cache` config option** — disables the internal Fjall KV metadata cache for very large or simple workloads (> ~1 B objects/batch). Default `true` (fully backward-compatible). Set `false` to eliminate ~3.4 GB disk usage per 50 M objects and the ~15 s resume scan, at the cost of crash-resume capability. Both standalone and distributed dry-runs print a clear banner showing the current setting. Reference config: [`tests/configs/test_prepare_no_kvcache.yaml`](tests/configs/test_prepare_no_kvcache.yaml).
 
 **🚀 NEW (v0.8.88)**: **KV cache compact encoding + coverage observability** — KV cache entries now use [postcard](https://crates.io/crates/postcard) binary encoding (56% smaller, 2× faster scans). At startup, a one-line cache summary reports object count and total logical storage (`📊 Cache summary: N objects | X.XX GiB`). Progressive WARN messages fire if a coverage scan exceeds 10 s. Preflight now queries the cache per-spec and logs coverage. Safe write-probe cycle validates writable endpoints before any benchmark I/O. Agent port changed to **7167** (was 7761) with automatic port-conflict detection on startup. +17 new tests.
 
