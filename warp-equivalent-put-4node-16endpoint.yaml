@@ -1,0 +1,269 @@
+# warp-equivalent-put-4node-16endpoint.yaml
+#
+# Equivalent to the following warp command (controller + 4 distributed clients):
+#   warp put \
+#     --host=10.9.0.17:80,...,10.9.0.32:80 \
+#     --bucket=s3-bucket1 \
+#     --concurrent=96 \
+#     --obj.size=1KiB \
+#     --duration=1m \
+#     --noclear \
+#     --warp-client=<clients>
+#
+# Total load: 4 agents × 24 concurrent = 96 workers, all hitting 16 S3 endpoints
+#
+# HOW WARP put WORKS (from source code inspection):
+#   - Prepare: each warp client independently creates 2500 objects (--objects default)
+#     → 4 clients × 2500 = 10,000 objects total in the bucket, each ~1 MiB = ~10 GiB
+#   - Single shared pool: GET and PUT use the SAME object namespace — no separation
+#   - GET: picks a random object from the in-memory pool, reads it, returns it to pool
+#   - PUT: generates a NEW unique object name, uploads it, ADDS it to the pool
+#   - Pool grows over time (no deletes with --delete-distrib=0)
+#   - Object names: <8-char-random-prefix>/<seq>.<rand>.rnd (one prefix per worker thread)
+#
+# SAIABENCH EQUIVALENCE:
+#   - Prepare creates 10,000 objects (matching 4 × 2500 warp default) in shared data/ prefix
+#   - GET and PUT share the same data/ namespace — identical to warp behavior
+#   - PUT generates new unique names each time — identical to warp behavior
+#   - One behavioral difference that cannot be worked around without code changes:
+#     warp GETs dynamically pick from a growing pool (newly PUT objects become GET-able
+#     immediately). sai3-bench GETs read from the object list captured at execute start
+#     (the 10,000 prepared objects). In practice this has negligible impact on throughput
+#     measurement because the GET pool is already large enough to avoid hot-spotting.
+#
+# Prerequisites:
+#   1. Set credentials in environment on each agent host:
+#        export AWS_ACCESS_KEY_ID=<key>
+#        export AWS_SECRET_ACCESS_KEY=<secret>
+#   2. sai3bench-agent running on each client node (port 7761):
+#        sai3bench-agent --listen 0.0.0.0:7761
+#   3. Update agent IPs below if they differ from 172.21.4.10-13
+#   4. TLS is disabled (HTTP endpoints on port 80)
+#
+# Run:
+#   sai3-bench run --config warp-equivalent-put-4node-16endpoint.yaml
+
+concurrency: 24
+
+perf_log:
+  enabled: true
+  interval: 10s
+
+# All 16 S3 endpoints — every agent hits all 16 targets
+multi_endpoint:
+  strategy: least_connections
+  endpoints:
+    - "s3://10.9.0.17:80/s3-bucket1/"
+    - "s3://10.9.0.18:80/s3-bucket1/"
+    - "s3://10.9.0.19:80/s3-bucket1/"
+    - "s3://10.9.0.20:80/s3-bucket1/"
+    - "s3://10.9.0.21:80/s3-bucket1/"
+    - "s3://10.9.0.22:80/s3-bucket1/"
+    - "s3://10.9.0.23:80/s3-bucket1/"
+    - "s3://10.9.0.24:80/s3-bucket1/"
+    - "s3://10.9.0.25:80/s3-bucket1/"
+    - "s3://10.9.0.26:80/s3-bucket1/"
+    - "s3://10.9.0.27:80/s3-bucket1/"
+    - "s3://10.9.0.28:80/s3-bucket1/"
+    - "s3://10.9.0.29:80/s3-bucket1/"
+    - "s3://10.9.0.30:80/s3-bucket1/"
+    - "s3://10.9.0.31:80/s3-bucket1/"
+    - "s3://10.9.0.32:80/s3-bucket1/"
+    - "s3://10.9.0.17:80/s3-bucket2/"
+    - "s3://10.9.0.18:80/s3-bucket2/"
+    - "s3://10.9.0.19:80/s3-bucket2/"
+    - "s3://10.9.0.20:80/s3-bucket2/"
+    - "s3://10.9.0.21:80/s3-bucket2/"
+    - "s3://10.9.0.22:80/s3-bucket2/"
+    - "s3://10.9.0.23:80/s3-bucket2/"
+    - "s3://10.9.0.24:80/s3-bucket2/"
+    - "s3://10.9.0.25:80/s3-bucket2/"
+    - "s3://10.9.0.26:80/s3-bucket2/"
+    - "s3://10.9.0.27:80/s3-bucket2/"
+    - "s3://10.9.0.28:80/s3-bucket2/"
+    - "s3://10.9.0.29:80/s3-bucket2/"
+    - "s3://10.9.0.30:80/s3-bucket2/"
+    - "s3://10.9.0.31:80/s3-bucket2/"
+    - "s3://10.9.0.32:80/s3-bucket2/"
+    - "s3://10.9.0.17:80/s3-bucket3/"
+    - "s3://10.9.0.18:80/s3-bucket3/"
+    - "s3://10.9.0.19:80/s3-bucket3/"
+    - "s3://10.9.0.20:80/s3-bucket3/"
+    - "s3://10.9.0.21:80/s3-bucket3/"
+    - "s3://10.9.0.22:80/s3-bucket3/"
+    - "s3://10.9.0.23:80/s3-bucket3/"
+    - "s3://10.9.0.24:80/s3-bucket3/"
+    - "s3://10.9.0.25:80/s3-bucket3/"
+    - "s3://10.9.0.26:80/s3-bucket3/"
+    - "s3://10.9.0.27:80/s3-bucket3/"
+    - "s3://10.9.0.28:80/s3-bucket3/"
+    - "s3://10.9.0.29:80/s3-bucket3/"
+    - "s3://10.9.0.30:80/s3-bucket3/"
+    - "s3://10.9.0.31:80/s3-bucket3/"
+    - "s3://10.9.0.32:80/s3-bucket3/"
+    - "s3://10.9.0.17:80/s3-bucket4/"
+    - "s3://10.9.0.18:80/s3-bucket4/"
+    - "s3://10.9.0.19:80/s3-bucket4/"
+    - "s3://10.9.0.20:80/s3-bucket4/"
+    - "s3://10.9.0.21:80/s3-bucket4/"
+    - "s3://10.9.0.22:80/s3-bucket4/"
+    - "s3://10.9.0.23:80/s3-bucket4/"
+    - "s3://10.9.0.24:80/s3-bucket4/"
+    - "s3://10.9.0.25:80/s3-bucket4/"
+    - "s3://10.9.0.26:80/s3-bucket4/"
+    - "s3://10.9.0.27:80/s3-bucket4/"
+    - "s3://10.9.0.28:80/s3-bucket4/"
+    - "s3://10.9.0.29:80/s3-bucket4/"
+    - "s3://10.9.0.30:80/s3-bucket4/"
+    - "s3://10.9.0.31:80/s3-bucket4/"
+    - "s3://10.9.0.32:80/s3-bucket4/"
+
+
+# Prepare phase: populate the shared object pool.
+# Warp default is --objects=2500 per client. With 4 clients: 4 × 2500 = 10,000 total.
+# All 10,000 objects live in the same data/ prefix (warp uses no GET/PUT separation).
+# 10,000 objects × 1 MiB = ~10 GiB of initial data.
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+  ensure_objects:
+    - base_uri: "data/"
+      count: 10000
+      min_size: 1024      # 1KiB
+      max_size: 1024      # 1KiB (fixed size — matches warp --obj.size=1KiB)
+      fill: random
+      use_multi_endpoint: true
+  cleanup: false
+
+# 0/100 GET/PUT mix — mirrors warp --get-distrib=0 --put-distrib=100
+# Both ops use the same data/ prefix — identical to warp's single shared pool.
+# PUTs generate new unique object names each time, same as warp does.
+workload:
+  - op: get
+    path: "data/*"
+    weight: 0
+    use_multi_endpoint: true
+
+  - op: put
+    path: "data/"
+    weight: 100
+    object_size: 1024       # 1 KiB
+    use_multi_endpoint: true
+
+duration: 1m
+
+distributed:
+  shared_filesystem: true        # S3 is shared storage — all agents share the same namespace
+  tree_creation_mode: coordinator
+  path_selection: random
+  start_delay: 2
+
+  stages:
+    - name: "prepare"
+      order: 1
+      type: prepare
+      completion: tasks_done
+
+    - name: "execute"
+      order: 2
+      type: execute
+      completion: duration
+      duration: 1m
+  
+  barrier_sync:
+    enabled: true
+    timeout_seconds: 120
+
+  agents:
+    - address: "172.21.4.10:7761"
+      id: "agent-1"
+      concurrency_override: 24
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "s3://10.9.0.17:80/s3-bucket1/"
+          - "s3://10.9.0.18:80/s3-bucket1/"
+          - "s3://10.9.0.19:80/s3-bucket1/"
+          - "s3://10.9.0.20:80/s3-bucket1/"
+          - "s3://10.9.0.21:80/s3-bucket1/"
+          - "s3://10.9.0.22:80/s3-bucket1/"
+          - "s3://10.9.0.23:80/s3-bucket1/"
+          - "s3://10.9.0.24:80/s3-bucket1/"
+          - "s3://10.9.0.25:80/s3-bucket1/"
+          - "s3://10.9.0.26:80/s3-bucket1/"
+          - "s3://10.9.0.27:80/s3-bucket1/"
+          - "s3://10.9.0.28:80/s3-bucket1/"
+          - "s3://10.9.0.29:80/s3-bucket1/"
+          - "s3://10.9.0.30:80/s3-bucket1/"
+          - "s3://10.9.0.31:80/s3-bucket1/"
+          - "s3://10.9.0.32:80/s3-bucket1/"
+
+    - address: "172.21.4.11:7761"
+      id: "agent-2"
+      concurrency_override: 24
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "s3://10.9.0.17:80/s3-bucket2/"
+          - "s3://10.9.0.18:80/s3-bucket2/"
+          - "s3://10.9.0.19:80/s3-bucket2/"
+          - "s3://10.9.0.20:80/s3-bucket2/"
+          - "s3://10.9.0.21:80/s3-bucket2/"
+          - "s3://10.9.0.22:80/s3-bucket2/"
+          - "s3://10.9.0.23:80/s3-bucket2/"
+          - "s3://10.9.0.24:80/s3-bucket2/"
+          - "s3://10.9.0.25:80/s3-bucket2/"
+          - "s3://10.9.0.26:80/s3-bucket2/"
+          - "s3://10.9.0.27:80/s3-bucket2/"
+          - "s3://10.9.0.28:80/s3-bucket2/"
+          - "s3://10.9.0.29:80/s3-bucket2/"
+          - "s3://10.9.0.30:80/s3-bucket2/"
+          - "s3://10.9.0.31:80/s3-bucket2/"
+          - "s3://10.9.0.32:80/s3-bucket2/"
+
+    - address: "172.21.4.12:7761"
+      id: "agent-3"
+      concurrency_override: 24
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "s3://10.9.0.17:80/s3-bucket3/"
+          - "s3://10.9.0.18:80/s3-bucket3/"
+          - "s3://10.9.0.19:80/s3-bucket3/"
+          - "s3://10.9.0.20:80/s3-bucket3/"
+          - "s3://10.9.0.21:80/s3-bucket3/"
+          - "s3://10.9.0.22:80/s3-bucket3/"
+          - "s3://10.9.0.23:80/s3-bucket3/"
+          - "s3://10.9.0.24:80/s3-bucket3/"
+          - "s3://10.9.0.25:80/s3-bucket3/"
+          - "s3://10.9.0.26:80/s3-bucket3/"
+          - "s3://10.9.0.27:80/s3-bucket3/"
+          - "s3://10.9.0.28:80/s3-bucket3/"
+          - "s3://10.9.0.29:80/s3-bucket3/"
+          - "s3://10.9.0.30:80/s3-bucket3/"
+          - "s3://10.9.0.31:80/s3-bucket3/"
+          - "s3://10.9.0.32:80/s3-bucket3/"
+
+    - address: "172.21.4.13:7761"
+      id: "agent-4"
+      concurrency_override: 24
+      multi_endpoint:
+        strategy: least_connections
+        endpoints:
+          - "s3://10.9.0.17:80/s3-bucket4/"
+          - "s3://10.9.0.18:80/s3-bucket4/"
+          - "s3://10.9.0.19:80/s3-bucket4/"
+          - "s3://10.9.0.20:80/s3-bucket4/"
+          - "s3://10.9.0.21:80/s3-bucket4/"
+          - "s3://10.9.0.22:80/s3-bucket4/"
+          - "s3://10.9.0.23:80/s3-bucket4/"
+          - "s3://10.9.0.24:80/s3-bucket4/"
+          - "s3://10.9.0.25:80/s3-bucket4/"
+          - "s3://10.9.0.26:80/s3-bucket4/"
+          - "s3://10.9.0.27:80/s3-bucket4/"
+          - "s3://10.9.0.28:80/s3-bucket4/"
+          - "s3://10.9.0.29:80/s3-bucket4/"
+          - "s3://10.9.0.30:80/s3-bucket4/"
+          - "s3://10.9.0.31:80/s3-bucket4/"
+          - "s3://10.9.0.32:80/s3-bucket4/"

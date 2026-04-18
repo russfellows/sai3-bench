@@ -81,10 +81,7 @@ pub async fn validate_filesystem(
         results.push(ValidationResult::info(
             ErrorType::System,
             "mount",
-            format!(
-                "Mount type: {} ({})",
-                mount_info.fs_type, mount_info.device
-            ),
+            format!("Mount type: {} ({})", mount_info.fs_type, mount_info.device),
             format!("Mount point: {}", mount_info.mount_point.display()),
         ));
     }
@@ -195,9 +192,9 @@ pub async fn validate_filesystem(
 /// Check for protected/system directories that should not be used for testing
 fn check_protected_paths(path: &Path) -> Vec<ValidationResult> {
     let mut results = Vec::new();
-    
+
     let path_str = path.to_string_lossy();
-    
+
     // Critical system directories - ERROR
     let critical_dirs = ["/etc", "/usr", "/sys", "/proc", "/boot", "/root"];
     for critical_dir in &critical_dirs {
@@ -206,12 +203,15 @@ fn check_protected_paths(path: &Path) -> Vec<ValidationResult> {
                 ErrorType::Configuration,
                 "safety",
                 format!("Refusing to test in system directory: {}", path.display()),
-                format!("Do not use {} for benchmarking - use /tmp or a dedicated mount point", critical_dir),
+                format!(
+                    "Do not use {} for benchmarking - use /tmp or a dedicated mount point",
+                    critical_dir
+                ),
             ));
             return results; // Stop immediately
         }
     }
-    
+
     // Device directory - WARN (allow if device exists, but warn)
     if path_str.starts_with("/dev/") {
         if path.exists() && path.metadata().map(|m| m.is_file()).unwrap_or(false) {
@@ -231,7 +231,7 @@ fn check_protected_paths(path: &Path) -> Vec<ValidationResult> {
             return results;
         }
     }
-    
+
     // Sensitive writable directories - WARN
     let sensitive_dirs = ["/var/lib", "/var/log", "/var/spool"];
     for sensitive_dir in &sensitive_dirs {
@@ -240,11 +240,14 @@ fn check_protected_paths(path: &Path) -> Vec<ValidationResult> {
                 ErrorType::Configuration,
                 "safety",
                 format!("Using sensitive system directory: {}", path.display()),
-                format!("Consider using /tmp or dedicated mount point instead of {}", sensitive_dir),
+                format!(
+                    "Consider using /tmp or dedicated mount point instead of {}",
+                    sensitive_dir
+                ),
             ));
         }
     }
-    
+
     results
 }
 
@@ -268,7 +271,10 @@ fn check_user_identity() -> Vec<ValidationResult> {
     results.push(ValidationResult::info(
         ErrorType::System,
         "identity",
-        format!("Current user: uid={} ({}), gid={} ({})", uid, username, gid, groupname),
+        format!(
+            "Current user: uid={} ({}), gid={} ({})",
+            uid, username, gid, groupname
+        ),
         "Process is running with these credentials",
     ));
 
@@ -293,30 +299,24 @@ async fn test_stat_access(path: &Path) -> Result<ValidationResult> {
                 ))
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ValidationResult::error(
-                ErrorType::Configuration,
-                "stat",
-                format!("Directory does not exist: {}", path.display()),
-                "Directory must be created manually before running benchmarks for safety",
-            ))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Ok(ValidationResult::error(
-                ErrorType::Permission,
-                "stat",
-                format!("Permission denied accessing directory: {}", path.display()),
-                format!("Grant read permission: chmod +r {}", path.display()),
-            ))
-        }
-        Err(e) => {
-            Ok(ValidationResult::error(
-                ErrorType::System,
-                "stat",
-                format!("Failed to access directory: {}", e),
-                "Check filesystem health and mount status",
-            ))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ValidationResult::error(
+            ErrorType::Configuration,
+            "stat",
+            format!("Directory does not exist: {}", path.display()),
+            "Directory must be created manually before running benchmarks for safety",
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ValidationResult::error(
+            ErrorType::Permission,
+            "stat",
+            format!("Permission denied accessing directory: {}", path.display()),
+            format!("Grant read permission: chmod +r {}", path.display()),
+        )),
+        Err(e) => Ok(ValidationResult::error(
+            ErrorType::System,
+            "stat",
+            format!("Failed to access directory: {}", e),
+            "Check filesystem health and mount status",
+        )),
     }
 }
 
@@ -373,9 +373,7 @@ async fn check_directory_ownership(path: &Path) -> Result<ValidationResult> {
 /// Check if current user is in supplementary group
 fn check_supplementary_groups(target_gid: u32) -> bool {
     // Get supplementary groups count
-    let ngroups: libc::c_int = unsafe {
-        libc::getgroups(0, std::ptr::null_mut())
-    };
+    let ngroups: libc::c_int = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
 
     if ngroups <= 0 {
         return false;
@@ -392,15 +390,19 @@ fn check_supplementary_groups(target_gid: u32) -> bool {
 /// Test list access (directory listing)
 async fn test_list_access(path: &Path) -> Result<ValidationResult> {
     match fs::read_dir(path) {
-        Ok(_entries) => Ok(ValidationResult::success("list", "Directory listing successful")),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Ok(ValidationResult::error(
-                ErrorType::Permission,
-                "list",
-                format!("Permission denied listing directory: {}", path.display()),
-                format!("Grant read+execute permission: chmod +rx {}", path.display()),
-            ))
-        }
+        Ok(_entries) => Ok(ValidationResult::success(
+            "list",
+            "Directory listing successful",
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ValidationResult::error(
+            ErrorType::Permission,
+            "list",
+            format!("Permission denied listing directory: {}", path.display()),
+            format!(
+                "Grant read+execute permission: chmod +rx {}",
+                path.display()
+            ),
+        )),
         Err(e) => Ok(ValidationResult::error(
             ErrorType::System,
             "list",
@@ -422,14 +424,20 @@ async fn test_read_access(path: &Path) -> Result<ValidationResult> {
                         Ok(_) => {
                             return Ok(ValidationResult::success(
                                 "read",
-                                format!("Read access confirmed (tested {})", entry.path().display()),
+                                format!(
+                                    "Read access confirmed (tested {})",
+                                    entry.path().display()
+                                ),
                             ));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                             return Ok(ValidationResult::error(
                                 ErrorType::Permission,
                                 "read",
-                                format!("Permission denied reading file: {}", entry.path().display()),
+                                format!(
+                                    "Permission denied reading file: {}",
+                                    entry.path().display()
+                                ),
                                 "Grant read permission on files",
                             ));
                         }
@@ -503,9 +511,13 @@ async fn test_write_access(path: &Path) -> Result<ValidationResult> {
             Ok(ValidationResult::error(
                 ErrorType::Permission,
                 "write",
-                format!("Permission denied creating test file: {}", test_file.display()),
+                format!(
+                    "Permission denied creating test file: {}",
+                    test_file.display()
+                ),
                 suggestion,
-            ).with_details(format!(
+            )
+            .with_details(format!(
                 "EACCES: Permission denied - directory owner: uid={}, gid={}",
                 owner_uid, owner_gid
             )))
@@ -528,14 +540,12 @@ async fn test_mkdir_access(path: &Path) -> Result<ValidationResult> {
             "mkdir",
             "Subdirectory creation successful",
         )),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Ok(ValidationResult::error(
-                ErrorType::Permission,
-                "mkdir",
-                "Permission denied creating subdirectory",
-                format!("Grant write permission: chmod +w {}", path.display()),
-            ))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ValidationResult::error(
+            ErrorType::Permission,
+            "mkdir",
+            "Permission denied creating subdirectory",
+            format!("Grant write permission: chmod +w {}", path.display()),
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Directory already exists from previous test - this is OK
             Ok(ValidationResult::success(

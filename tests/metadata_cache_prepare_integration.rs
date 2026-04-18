@@ -7,9 +7,7 @@
 //
 // This demonstrates the 400x speedup for 64M+ file workloads.
 
-use sai3_bench::metadata_cache::{
-    extract_file_index_from_path, MetadataCache, ObjectState,
-};
+use sai3_bench::metadata_cache::{extract_file_index_from_path, MetadataCache, ObjectState};
 use sai3_bench::metadata_prefetch::MetadataPrefetcher;
 use tempfile::TempDir;
 use tokio::fs::File;
@@ -150,12 +148,17 @@ async fn test_prepare_to_workload_with_cache() {
     // Verify cache provided all sizes correctly (order may differ due to async workers)
     use std::collections::HashSet;
     let no_cache_uris: HashSet<String> = results_no_cache.iter().map(|m| m.uri.clone()).collect();
-    let with_cache_uris: HashSet<String> = results_with_cache.iter().map(|m| m.uri.clone()).collect();
+    let with_cache_uris: HashSet<String> =
+        results_with_cache.iter().map(|m| m.uri.clone()).collect();
     assert_eq!(no_cache_uris, with_cache_uris, "Both should have same URIs");
 
     // Verify all sizes are correct
     for metadata in &results_with_cache {
-        assert_eq!(metadata.size, Some(file_size), "Cache should provide correct size");
+        assert_eq!(
+            metadata.size,
+            Some(file_size),
+            "Cache should provide correct size"
+        );
     }
 }
 
@@ -247,10 +250,7 @@ fn test_file_index_extraction_patterns() {
         extract_file_index_from_path("prepared-00000042.dat"),
         Some(42)
     );
-    assert_eq!(
-        extract_file_index_from_path("file_00000999.dat"),
-        Some(999)
-    );
+    assert_eq!(extract_file_index_from_path("file_00000999.dat"), Some(999));
 
     // Full URIs
     assert_eq!(

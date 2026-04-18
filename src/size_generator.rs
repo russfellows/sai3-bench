@@ -4,8 +4,8 @@
 //
 
 use anyhow::{anyhow, Context, Result};
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_distr::{Distribution, LogNormal, Uniform};
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub enum SizeSpec {
     /// Fixed size in bytes (backward compatible with old object_size field)
     Fixed(u64),
-    
+
     /// Distribution-based size generation
     Distribution(SizeDistribution),
 }
@@ -36,15 +36,15 @@ pub struct SizeDistribution {
     /// Type of distribution
     #[serde(rename = "type")]
     pub dist_type: DistributionType,
-    
+
     /// Minimum size in bytes (floor) - supports size strings like "1MB" or "1MiB"
     #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub min: Option<u64>,
-    
+
     /// Maximum size in bytes (ceiling) - supports size strings like "16MB" or "16MiB"
     #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub max: Option<u64>,
-    
+
     /// Distribution-specific parameters
     #[serde(flatten)]
     pub params: DistributionParams,
@@ -56,7 +56,7 @@ pub struct SizeDistribution {
 pub enum DistributionType {
     /// Uniform distribution (evenly distributed between min and max)
     Uniform,
-    
+
     /// Lognormal distribution (realistic - many small, few large)
     Lognormal,
 }
@@ -67,14 +67,14 @@ pub struct DistributionParams {
     /// Mean size for lognormal distribution (in bytes) - supports size strings like "8MB" or "8MiB"
     #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub mean: Option<u64>,
-    
+
     /// Standard deviation for lognormal distribution (in bytes) - supports size strings like "1MB" or "1MiB"
     #[serde(default, deserialize_with = "crate::size_parser::deserialize_size")]
     pub std_dev: Option<u64>,
 }
 
 /// Generator for object sizes based on a specification
-/// 
+///
 /// v0.7.9: Uses seeded RNG for deterministic size generation.
 /// With the same seed, generates identical size sequences.
 pub struct SizeGenerator {
@@ -98,14 +98,14 @@ enum SizeGeneratorImpl {
 
 impl SizeGenerator {
     /// Create a new size generator from a specification with default seed (0)
-    /// 
+    ///
     /// For deterministic generation, use `new_with_seed()` instead.
     pub fn new(spec: &SizeSpec) -> Result<Self> {
         Self::new_with_seed(spec, 0)
     }
-    
+
     /// Create a new size generator with a specific seed for deterministic generation
-    /// 
+    ///
     /// The same seed with the same spec will always produce the same sequence of sizes.
     /// This enables gap-filling to recreate exact file sizes based on file index.
     pub fn new_with_seed(spec: &SizeSpec, seed: u64) -> Result<Self> {
@@ -116,19 +116,23 @@ impl SizeGenerator {
                 }
                 SizeGeneratorImpl::Fixed(*size)
             }
-            
+
             SizeSpec::Distribution(dist) => match dist.dist_type {
                 DistributionType::Uniform => {
                     let min = dist.min.unwrap_or(1024); // Default 1 KB
                     let max = dist.max.unwrap_or(1048576); // Default 1 MB
-                    
+
                     if min > max {
-                        return Err(anyhow!("Uniform distribution: min ({}) > max ({})", min, max));
+                        return Err(anyhow!(
+                            "Uniform distribution: min ({}) > max ({})",
+                            min,
+                            max
+                        ));
                     }
                     if min == 0 {
                         return Err(anyhow!("Uniform distribution: min must be > 0"));
                     }
-                    
+
                     let uniform_dist = Uniform::new_inclusive(min, max)?;
                     SizeGeneratorImpl::Uniform {
                         dist: uniform_dist,
@@ -136,49 +140,55 @@ impl SizeGenerator {
                         max,
                     }
                 }
-                
+
                 DistributionType::Lognormal => {
-                    let mean = dist.params.mean
-                        .ok_or_else(|| anyhow!("Lognormal distribution requires 'mean' parameter"))?;
-                    let std_dev = dist.params.std_dev
-                        .ok_or_else(|| anyhow!("Lognormal distribution requires 'std_dev' parameter"))?;
-                    
+                    let mean = dist.params.mean.ok_or_else(|| {
+                        anyhow!("Lognormal distribution requires 'mean' parameter")
+                    })?;
+                    let std_dev = dist.params.std_dev.ok_or_else(|| {
+                        anyhow!("Lognormal distribution requires 'std_dev' parameter")
+                    })?;
+
                     if mean == 0 {
                         return Err(anyhow!("Lognormal distribution: mean must be > 0"));
                     }
                     if std_dev == 0 {
                         return Err(anyhow!("Lognormal distribution: std_dev must be > 0"));
                     }
-                    
+
                     let min = dist.min.unwrap_or(1); // Default 1 byte
                     let max = dist.max.unwrap_or(u64::MAX); // No upper limit by default
-                    
+
                     if min > max {
-                        return Err(anyhow!("Lognormal distribution: min ({}) > max ({})", min, max));
+                        return Err(anyhow!(
+                            "Lognormal distribution: min ({}) > max ({})",
+                            min,
+                            max
+                        ));
                     }
-                    
+
                     // Convert mean and std_dev to log-space parameters
                     // For lognormal: if X ~ LogNormal(μ, σ), then E[X] = exp(μ + σ²/2)
                     // We want to specify the desired mean and std_dev in linear space
                     let mean_f = mean as f64;
                     let std_dev_f = std_dev as f64;
-                    
+
                     // Calculate log-space parameters from linear-space mean and variance
                     // Var[X] = (exp(σ²) - 1) * exp(2μ + σ²)
                     // Mean[X] = exp(μ + σ²/2)
                     let variance = std_dev_f * std_dev_f;
                     let mean_squared = mean_f * mean_f;
-                    
+
                     // φ² = ln(1 + variance/mean²)
                     let phi_squared = (1.0 + variance / mean_squared).ln();
                     let phi = phi_squared.sqrt();
-                    
+
                     // μ = ln(mean) - φ²/2
                     let mu = mean_f.ln() - phi_squared / 2.0;
-                    
+
                     let lognormal_dist = LogNormal::new(mu, phi)
                         .context("Failed to create lognormal distribution")?;
-                    
+
                     SizeGeneratorImpl::LogNormal {
                         dist: lognormal_dist,
                         min,
@@ -187,24 +197,22 @@ impl SizeGenerator {
                 }
             },
         };
-        
-        Ok(SizeGenerator { 
+
+        Ok(SizeGenerator {
             generator,
             rng: StdRng::seed_from_u64(seed),
         })
     }
-    
+
     /// Generate a single object size
-    /// 
+    ///
     /// v0.7.9: Takes &mut self to update RNG state for deterministic sequence.
     pub fn generate(&mut self) -> u64 {
         match &self.generator {
             SizeGeneratorImpl::Fixed(size) => *size,
-            
-            SizeGeneratorImpl::Uniform { dist, .. } => {
-                dist.sample(&mut self.rng)
-            }
-            
+
+            SizeGeneratorImpl::Uniform { dist, .. } => dist.sample(&mut self.rng),
+
             SizeGeneratorImpl::LogNormal { dist, min, max } => {
                 // Sample from lognormal and clamp to [min, max]
                 // Rejection sampling: keep trying until we get a value in range
@@ -213,7 +221,7 @@ impl SizeGenerator {
                 for _ in 0..MAX_ATTEMPTS {
                     let sample = dist.sample(&mut self.rng);
                     let size = sample.round() as u64;
-                    
+
                     if size >= *min && size <= *max {
                         return size;
                     }
@@ -225,9 +233,9 @@ impl SizeGenerator {
             }
         }
     }
-    
+
     /// Get the expected mean size (useful for logging/debugging)
-    /// 
+    ///
     /// v0.7.9: Takes &mut self for LogNormal case which needs to sample from RNG
     pub fn expected_mean(&mut self) -> u64 {
         match &self.generator {
@@ -241,9 +249,9 @@ impl SizeGenerator {
             }
         }
     }
-    
+
     /// Get a description of this generator (for logging)
-    /// 
+    ///
     /// v0.7.9: Takes &mut self for LogNormal case which calls expected_mean()
     pub fn description(&mut self) -> String {
         match &self.generator {
@@ -256,10 +264,12 @@ impl SizeGenerator {
                 let min_val = *min;
                 let max_val = *max;
                 let mean = self.expected_mean();
-                format!("lognormal (mean ~{}, range {}-{})", 
-                    human_bytes(mean), 
-                    human_bytes(min_val), 
-                    human_bytes(max_val))
+                format!(
+                    "lognormal (mean ~{}, range {}-{})",
+                    human_bytes(mean),
+                    human_bytes(min_val),
+                    human_bytes(max_val)
+                )
             }
         }
     }
@@ -270,12 +280,12 @@ fn human_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
     let mut unit_idx = 0;
-    
+
     while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
         size /= 1024.0;
         unit_idx += 1;
     }
-    
+
     if unit_idx == 0 {
         format!("{}{}", bytes, UNITS[0])
     } else {
@@ -286,19 +296,19 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_fixed_size() {
         let spec = SizeSpec::Fixed(1048576);
         let mut generator = SizeGenerator::new(&spec).unwrap();
-        
+
         for _ in 0..100 {
             assert_eq!(generator.generate(), 1048576);
         }
-        
+
         assert_eq!(generator.expected_mean(), 1048576);
     }
-    
+
     #[test]
     fn test_uniform_distribution() {
         let spec = SizeSpec::Distribution(SizeDistribution {
@@ -310,21 +320,25 @@ mod tests {
                 std_dev: None,
             },
         });
-        
+
         let mut generator = SizeGenerator::new(&spec).unwrap();
-        
+
         // Generate samples and verify they're in range
         for _ in 0..1000 {
             let size = generator.generate();
             assert!(size >= 1024, "Size {} below minimum", size);
             assert!(size <= 10240, "Size {} above maximum", size);
         }
-        
+
         // Check mean is approximately correct
         let mean = generator.expected_mean();
-        assert!((5000..=6500).contains(&mean), "Mean {} outside expected range", mean);
+        assert!(
+            (5000..=6500).contains(&mean),
+            "Mean {} outside expected range",
+            mean
+        );
     }
-    
+
     #[test]
     fn test_lognormal_distribution() {
         let spec = SizeSpec::Distribution(SizeDistribution {
@@ -332,13 +346,13 @@ mod tests {
             min: Some(1024),
             max: Some(10485760), // 10 MB
             params: DistributionParams {
-                mean: Some(1048576), // 1 MB
+                mean: Some(1048576),   // 1 MB
                 std_dev: Some(524288), // 512 KB
             },
         });
-        
+
         let mut generator = SizeGenerator::new(&spec).unwrap();
-        
+
         // Generate samples and verify they're in range
         let mut samples = Vec::new();
         for _ in 0..1000 {
@@ -347,45 +361,58 @@ mod tests {
             assert!(size <= 10485760, "Size {} above maximum", size);
             samples.push(size);
         }
-        
+
         // Verify distribution properties
         let mean: f64 = samples.iter().sum::<u64>() as f64 / samples.len() as f64;
-        
+
         // Mean should be reasonably close to 1 MB (allow some variance)
-        assert!((800_000.0..=1_300_000.0).contains(&mean), 
-            "Mean {} outside expected range for lognormal", mean);
-        
+        assert!(
+            (800_000.0..=1_300_000.0).contains(&mean),
+            "Mean {} outside expected range for lognormal",
+            mean
+        );
+
         // Most samples should be below the mean (characteristic of lognormal)
         let below_mean = samples.iter().filter(|&&s| (s as f64) < mean).count();
         let ratio = below_mean as f64 / samples.len() as f64;
-        assert!(ratio > 0.5, "Lognormal should have >50% samples below mean, got {}", ratio);
+        assert!(
+            ratio > 0.5,
+            "Lognormal should have >50% samples below mean, got {}",
+            ratio
+        );
     }
-    
+
     #[test]
     fn test_invalid_specs() {
         // Zero size
         let spec = SizeSpec::Fixed(0);
         assert!(SizeGenerator::new(&spec).is_err());
-        
+
         // Min > max for uniform
         let spec = SizeSpec::Distribution(SizeDistribution {
             dist_type: DistributionType::Uniform,
             min: Some(10000),
             max: Some(1000),
-            params: DistributionParams { mean: None, std_dev: None },
+            params: DistributionParams {
+                mean: None,
+                std_dev: None,
+            },
         });
         assert!(SizeGenerator::new(&spec).is_err());
-        
+
         // Lognormal missing mean
         let spec = SizeSpec::Distribution(SizeDistribution {
             dist_type: DistributionType::Lognormal,
             min: Some(1024),
             max: Some(10240),
-            params: DistributionParams { mean: None, std_dev: Some(1024) },
+            params: DistributionParams {
+                mean: None,
+                std_dev: Some(1024),
+            },
         });
         assert!(SizeGenerator::new(&spec).is_err());
     }
-    
+
     #[test]
     fn test_human_bytes() {
         assert_eq!(human_bytes(500), "500B");
@@ -394,7 +421,7 @@ mod tests {
         assert_eq!(human_bytes(1048576), "1.00MB");
         assert_eq!(human_bytes(1073741824), "1.00GB");
     }
-    
+
     #[test]
     fn test_deterministic_generation() {
         // Same seed should produce same sequence
@@ -402,24 +429,27 @@ mod tests {
             dist_type: DistributionType::Uniform,
             min: Some(1024),
             max: Some(10240),
-            params: DistributionParams { mean: None, std_dev: None },
+            params: DistributionParams {
+                mean: None,
+                std_dev: None,
+            },
         });
-        
+
         let mut gen1 = SizeGenerator::new_with_seed(&spec, 42).unwrap();
         let mut gen2 = SizeGenerator::new_with_seed(&spec, 42).unwrap();
-        
+
         // Generate 100 sizes from each - should be identical
         for _ in 0..100 {
             let size1 = gen1.generate();
             let size2 = gen2.generate();
             assert_eq!(size1, size2, "Same seed should produce same sequence");
         }
-        
+
         // Different seed should produce different sequence
         let mut gen3 = SizeGenerator::new_with_seed(&spec, 99).unwrap();
         let _size_from_gen1 = gen1.generate();
         let _size_from_gen3 = gen3.generate();
-        
+
         // Very unlikely to match (though technically possible)
         // Run this multiple times to be confident
         let mut differences = 0;
@@ -428,6 +458,9 @@ mod tests {
                 differences += 1;
             }
         }
-        assert!(differences > 40, "Different seeds should produce different sequences");
+        assert!(
+            differences > 40,
+            "Different seeds should produce different sequences"
+        );
     }
 }

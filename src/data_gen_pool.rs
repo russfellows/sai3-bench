@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use s3dlio::hardware;
 
 // dgen-data: high-performance data generation
+pub use dgen_data::constants::BLOCK_SIZE as POOL_BLOCK_SIZE;
 use dgen_data::generate_data_simple;
 use dgen_data::RollingPool;
-pub use dgen_data::constants::BLOCK_SIZE as POOL_BLOCK_SIZE;
 
 // ============================================================================
 // Global RNG Seed (Per-Agent, Per-Run Uniqueness)
@@ -91,12 +91,12 @@ thread_local! {
 
 /// Generate exactly `size` bytes of synthetic data (the main entry point).
 ///
-/// For `size` ≤ POOL_BLOCK_SIZE (1 MB):  
-///   Returns a zero-copy `Bytes::slice()` window into the shared 1 MB pool.  
+/// For `size` ≤ POOL_BLOCK_SIZE (1 MB):
+///   Returns a zero-copy `Bytes::slice()` window into the shared 1 MB pool.
 ///   The backing 1 MB allocation is Arc-shared; each returned slice holds its
 ///   own Arc reference and keeps the allocation alive until dropped.
 ///
-/// For `size` > POOL_BLOCK_SIZE:  
+/// For `size` > POOL_BLOCK_SIZE:
 ///   Generates a fresh buffer of exactly `size` bytes.  No pool caching (the
 ///   PUT itself far dominates the generation cost for large objects).
 pub fn generate_data_cached(size: usize, dedup: usize, compress: usize) -> Bytes {
@@ -114,7 +114,7 @@ pub fn generate_data_cached(size: usize, dedup: usize, compress: usize) -> Bytes
         let mut pool_opt = cell.borrow_mut();
 
         // Replace the pool entirely when the global seed changes (new agent run).
-        let seed_changed = pool_opt.as_ref().map_or(true, |(_, s)| *s != seed);
+        let seed_changed = pool_opt.as_ref().is_none_or(|(_, s)| *s != seed);
         if seed_changed {
             *pool_opt = Some((RollingPool::new(dedup, compress), seed));
         }
@@ -190,7 +190,10 @@ mod tests {
         let data = generate_data_optimized(64, 1, 1);
         assert_eq!(data.len(), 64, "64-byte object must be exactly 64 bytes");
         // Verify the buffer isn't all zeros (data was actually generated)
-        assert!(data.iter().any(|&b| b != 0), "Generated data should not be all zeros");
+        assert!(
+            data.iter().any(|&b| b != 0),
+            "Generated data should not be all zeros"
+        );
     }
 
     #[test]
@@ -341,7 +344,10 @@ mod tests {
         println!("  Objects:    {}", count);
         println!("  Total data: {} MB", total_bytes / (1024 * 1024));
         println!("  Time:       {:.3}s", elapsed.as_secs_f64());
-        println!("  Rate:       {:.0} ops/s", count as f64 / elapsed.as_secs_f64());
+        println!(
+            "  Rate:       {:.0} ops/s",
+            count as f64 / elapsed.as_secs_f64()
+        );
         println!(
             "  Throughput: {:.2} GB/s (data volume)",
             total_bytes as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0 * 1024.0)

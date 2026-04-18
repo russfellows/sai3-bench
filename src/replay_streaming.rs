@@ -19,17 +19,17 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 // Use s3dlio-oplog types instead of our own
-pub use s3dlio_oplog::{OpLogEntry, OpType, OpLogStreamReader};
+pub use s3dlio_oplog::{OpLogEntry, OpLogStreamReader, OpType};
 
-use crate::workload::{
-    StoreCache,  // v0.8.9: Use shared cache type from workload
-    get_object_cached_simple, 
-    put_object_cached_simple, 
-    delete_object_cached_simple,
-    list_objects_cached_simple,
-    stat_object_cached_simple,
-};
 use crate::remap::{RemapConfig, RemapEngine};
+use crate::workload::{
+    delete_object_cached_simple,
+    get_object_cached_simple,
+    list_objects_cached_simple,
+    put_object_cached_simple,
+    stat_object_cached_simple,
+    StoreCache, // v0.8.9: Use shared cache type from workload
+};
 
 // =============================================================================
 // Backpressure Types (v0.8.9+)
@@ -70,22 +70,22 @@ impl FlappingTracker {
             max_per_minute,
         }
     }
-    
+
     /// Record a mode transition and return true if flap limit exceeded
     pub fn record_transition(&mut self) -> bool {
         let now = Instant::now();
-        
+
         // Remove transitions older than 1 minute
         let one_minute_ago = now - Duration::from_secs(60);
         self.transitions.retain(|&t| t > one_minute_ago);
-        
+
         // Add current transition
         self.transitions.push(now);
-        
+
         // Check if we've exceeded the limit
         self.transitions.len() > self.max_per_minute as usize
     }
-    
+
     /// Get the current count of transitions in the last minute
     pub fn transition_count(&self) -> usize {
         self.transitions.len()
@@ -126,7 +126,7 @@ impl BackpressureController {
                 recovery_threshold, lag_threshold
             );
         }
-        
+
         Self {
             mode: ReplayMode::Normal,
             lag_threshold,
@@ -137,7 +137,7 @@ impl BackpressureController {
             flap_limit_exceeded: false,
         }
     }
-    
+
     /// Create from YAML backpressure config
     pub fn from_config(config: &crate::config::ReplayConfig) -> Self {
         Self::new(
@@ -147,7 +147,7 @@ impl BackpressureController {
             config.drain_timeout,
         )
     }
-    
+
     /// Create with default settings
     pub fn default_controller() -> Self {
         Self::new(
@@ -157,22 +157,22 @@ impl BackpressureController {
             crate::constants::DEFAULT_REPLAY_DRAIN_TIMEOUT,
         )
     }
-    
+
     /// Update mode based on current lag, returns true if should continue replay
     pub fn update(&mut self, current_lag: Duration) -> bool {
         let old_mode = self.mode;
-        
+
         match self.mode {
             ReplayMode::Normal => {
                 if current_lag > self.lag_threshold {
                     self.mode = ReplayMode::BestEffort;
                     self.total_transitions += 1;
-                    
+
                     info!(
                         "Backpressure: switching to best-effort mode (lag={:?} > threshold={:?})",
                         current_lag, self.lag_threshold
                     );
-                    
+
                     if self.flap_tracker.record_transition() {
                         warn!(
                             "Backpressure: flap limit exceeded ({} transitions/minute), initiating graceful exit",
@@ -187,12 +187,12 @@ impl BackpressureController {
                 if current_lag < self.recovery_threshold {
                     self.mode = ReplayMode::Normal;
                     self.total_transitions += 1;
-                    
+
                     info!(
                         "Backpressure: recovering to normal mode (lag={:?} < threshold={:?})",
                         current_lag, self.recovery_threshold
                     );
-                    
+
                     if self.flap_tracker.record_transition() {
                         warn!(
                             "Backpressure: flap limit exceeded ({} transitions/minute), initiating graceful exit",
@@ -204,7 +204,7 @@ impl BackpressureController {
                 }
             }
         }
-        
+
         // Log mode changes
         if old_mode != self.mode {
             debug!(
@@ -212,25 +212,25 @@ impl BackpressureController {
                 old_mode, self.mode, self.total_transitions
             );
         }
-        
+
         true // Continue replay
     }
-    
+
     /// Get current replay mode
     pub fn mode(&self) -> ReplayMode {
         self.mode
     }
-    
+
     /// Check if flap limit was exceeded
     pub fn is_flap_limited(&self) -> bool {
         self.flap_limit_exceeded
     }
-    
+
     /// Get drain timeout for graceful exit
     pub fn drain_timeout(&self) -> Duration {
         self.drain_timeout
     }
-    
+
     /// Get total transitions during replay
     pub fn total_transitions(&self) -> u64 {
         self.total_transitions
@@ -348,16 +348,16 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
     let mut stats = ReplayStats::default();
     let mut tasks = FuturesUnordered::new();
     let max_concurrent = config.max_concurrent.unwrap_or(1000);
-    
+
     // v0.8.9: Create backpressure controller
     let mut backpressure = match &config.backpressure {
         Some(bp_config) => BackpressureController::from_config(bp_config),
         None => BackpressureController::default_controller(),
     };
-    
+
     // Track time spent in best-effort mode
     let mut best_effort_start: Option<Instant> = None;
-    
+
     // v0.8.9: Create shared store cache to avoid per-operation store creation
     let store_cache: StoreCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
@@ -374,7 +374,7 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
 
     let first_time = first_entry.start;
     let replay_epoch = Instant::now();
-    
+
     info!(
         "Replay epoch established. First operation: {:?} at {}",
         first_entry.op, first_entry.start
@@ -443,12 +443,12 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
         } else {
             Duration::ZERO
         };
-        
+
         // Track peak lag
         if current_lag > stats.peak_lag {
             stats.peak_lag = current_lag;
         }
-        
+
         // Update backpressure mode based on lag
         let prev_mode = backpressure.mode();
         if !backpressure.update(current_lag) {
@@ -459,29 +459,28 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
                 tasks.len(),
                 backpressure.drain_timeout()
             );
-            
+
             // Drain with timeout
             let drain_start = Instant::now();
             while !tasks.is_empty() && drain_start.elapsed() < backpressure.drain_timeout() {
-                if let Ok(Some(result)) = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    tasks.next()
-                ).await {
+                if let Ok(Some(result)) =
+                    tokio::time::timeout(Duration::from_millis(100), tasks.next()).await
+                {
                     handle_task_result(result, &mut stats, true)?; // Always continue on error during drain
                 }
             }
-            
+
             if !tasks.is_empty() {
                 warn!(
                     "Backpressure: drain timeout reached, {} tasks still in-flight (abandoned)",
                     tasks.len()
                 );
             }
-            
+
             stats.flap_exit = true;
             break;
         }
-        
+
         // Track best-effort mode time
         let current_mode = backpressure.mode();
         if prev_mode != current_mode {
@@ -499,12 +498,12 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
 
         // Spawn operation with current mode
         let task = spawn_operation(
-            entry, 
-            replay_epoch, 
-            delay, 
+            entry,
+            replay_epoch,
+            delay,
             backpressure.mode(),
-            config.clone(), 
-            store_cache.clone()
+            config.clone(),
+            store_cache.clone(),
         );
         tasks.push(task);
 
@@ -526,7 +525,7 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
             );
         }
     }
-    
+
     // Finalize best-effort time if still in that mode
     if let Some(start) = best_effort_start {
         stats.best_effort_time += start.elapsed();
@@ -542,7 +541,7 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
     while let Some(result) = tasks.next().await {
         handle_task_result(result, &mut stats, config.continue_on_error)?;
     }
-    
+
     // Record backpressure stats
     stats.mode_transitions = backpressure.total_transitions();
 
@@ -553,7 +552,7 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
         stats.failed_operations,
         stats.skipped_operations
     );
-    
+
     if stats.mode_transitions > 0 || stats.peak_lag > Duration::ZERO {
         info!(
             "Backpressure stats: {} mode transitions, peak_lag={:?}, best_effort_time={:?}, flap_exit={}",
@@ -599,7 +598,8 @@ fn spawn_operation(
             // Advanced remapping with rules
             let engine = RemapEngine::new(remap_config.clone());
             let original_uri = format!("{}{}", entry.endpoint, entry.file);
-            engine.remap(&original_uri)
+            engine
+                .remap(&original_uri)
                 .context("Failed to apply remap rules")?
         } else if let Some(ref target) = config.target_uri {
             // Simple 1→1 retargeting (legacy behavior)
@@ -657,7 +657,7 @@ async fn execute_operation(entry: &OpLogEntry, uri: &str, cache: &StoreCache) ->
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             // Returns Bytes directly - zero-copy
             let data = crate::data_gen_pool::generate_data_optimized(entry.bytes as usize, 1, 1);
-            put_object_cached_simple(uri, data, cache).await?;  // Bytes passed directly
+            put_object_cached_simple(uri, data, cache).await?; // Bytes passed directly
         }
         OpType::DELETE => {
             delete_object_cached_simple(uri, cache).await?;
@@ -706,55 +706,55 @@ mod tests {
         let result = translate_uri(file, endpoint, target).unwrap();
         assert_eq!(result, "s3://bucket/prefix/tmp/test/data.bin");
     }
-    
+
     // ==========================================================================
     // Backpressure Tests (v0.8.9+)
     // ==========================================================================
-    
+
     #[test]
     fn test_replay_mode_display() {
         assert_eq!(format!("{}", ReplayMode::Normal), "normal");
         assert_eq!(format!("{}", ReplayMode::BestEffort), "best-effort");
     }
-    
+
     #[test]
     fn test_replay_mode_equality() {
         assert_eq!(ReplayMode::Normal, ReplayMode::Normal);
         assert_eq!(ReplayMode::BestEffort, ReplayMode::BestEffort);
         assert_ne!(ReplayMode::Normal, ReplayMode::BestEffort);
     }
-    
+
     #[test]
     fn test_flapping_tracker_no_flapping() {
         let mut tracker = FlappingTracker::new(3);
-        
+
         // First transition should be OK
         assert!(!tracker.record_transition());
         assert_eq!(tracker.transition_count(), 1);
-        
+
         // Second transition should be OK
         assert!(!tracker.record_transition());
         assert_eq!(tracker.transition_count(), 2);
-        
+
         // Third transition should be OK
         assert!(!tracker.record_transition());
         assert_eq!(tracker.transition_count(), 3);
     }
-    
+
     #[test]
     fn test_flapping_tracker_flap_limit() {
         let mut tracker = FlappingTracker::new(3);
-        
+
         // 3 transitions should be OK
         assert!(!tracker.record_transition());
         assert!(!tracker.record_transition());
         assert!(!tracker.record_transition());
-        
+
         // 4th transition should trigger flap limit
         assert!(tracker.record_transition());
         assert_eq!(tracker.transition_count(), 4);
     }
-    
+
     #[test]
     fn test_backpressure_controller_initial_state() {
         let controller = BackpressureController::default_controller();
@@ -762,27 +762,27 @@ mod tests {
         assert!(!controller.is_flap_limited());
         assert_eq!(controller.total_transitions(), 0);
     }
-    
+
     #[test]
     fn test_backpressure_controller_switch_to_best_effort() {
         let mut controller = BackpressureController::new(
             Duration::from_secs(5),  // lag threshold
             Duration::from_secs(1),  // recovery threshold
-            3,                        // max flaps
+            3,                       // max flaps
             Duration::from_secs(10), // drain timeout
         );
-        
+
         // Low lag - should stay in Normal mode
         assert!(controller.update(Duration::from_secs(2)));
         assert_eq!(controller.mode(), ReplayMode::Normal);
         assert_eq!(controller.total_transitions(), 0);
-        
+
         // High lag - should switch to BestEffort
         assert!(controller.update(Duration::from_secs(6)));
         assert_eq!(controller.mode(), ReplayMode::BestEffort);
         assert_eq!(controller.total_transitions(), 1);
     }
-    
+
     #[test]
     fn test_backpressure_controller_recovery() {
         let mut controller = BackpressureController::new(
@@ -791,21 +791,21 @@ mod tests {
             10, // High flap limit so we don't trigger it
             Duration::from_secs(10),
         );
-        
+
         // Switch to BestEffort
         controller.update(Duration::from_secs(6));
         assert_eq!(controller.mode(), ReplayMode::BestEffort);
-        
+
         // Still above recovery threshold - stay in BestEffort
         controller.update(Duration::from_secs(2));
         assert_eq!(controller.mode(), ReplayMode::BestEffort);
-        
+
         // Below recovery threshold - switch back to Normal
         controller.update(Duration::from_millis(500));
         assert_eq!(controller.mode(), ReplayMode::Normal);
         assert_eq!(controller.total_transitions(), 2);
     }
-    
+
     #[test]
     fn test_backpressure_controller_flap_exit() {
         let mut controller = BackpressureController::new(
@@ -814,21 +814,21 @@ mod tests {
             2, // Only allow 2 transitions per minute
             Duration::from_secs(10),
         );
-        
+
         // First cycle: Normal -> BestEffort
         assert!(controller.update(Duration::from_secs(6)));
         assert_eq!(controller.mode(), ReplayMode::BestEffort);
-        
+
         // Second transition: BestEffort -> Normal
         assert!(controller.update(Duration::from_millis(500)));
         assert_eq!(controller.mode(), ReplayMode::Normal);
-        
+
         // Third transition should trigger flap exit
         let should_continue = controller.update(Duration::from_secs(6));
         assert!(!should_continue);
         assert!(controller.is_flap_limited());
     }
-    
+
     #[test]
     fn test_backpressure_controller_from_config() {
         let config = crate::config::ReplayConfig {
@@ -838,12 +838,12 @@ mod tests {
             drain_timeout: Duration::from_secs(30),
             max_concurrent: 500,
         };
-        
+
         let controller = BackpressureController::from_config(&config);
         assert_eq!(controller.drain_timeout(), Duration::from_secs(30));
         assert_eq!(controller.mode(), ReplayMode::Normal);
     }
-    
+
     #[test]
     fn test_replay_stats_default() {
         let stats = ReplayStats::default();
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(stats.peak_lag, Duration::ZERO);
         assert_eq!(stats.best_effort_time, Duration::ZERO);
     }
-    
+
     #[test]
     fn test_replay_run_config_default() {
         let config = ReplayRunConfig::default();

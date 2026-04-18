@@ -260,8 +260,8 @@ mod barrier_defaults_tests {
     use std::collections::HashMap;
 
     use crate::config::{
-        AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig, PathSelectionStrategy,
-        StageConfig, StageSpecificConfig, TreeCreationMode,
+        AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig,
+        PathSelectionStrategy, StageConfig, StageSpecificConfig, TreeCreationMode,
     };
 
     fn build_distributed_config(
@@ -336,7 +336,10 @@ mod barrier_defaults_tests {
         assert_eq!(barrier.missed_threshold, expected.missed_threshold);
         assert_eq!(barrier.query_timeout, expected.query_timeout);
         assert_eq!(barrier.query_retries, expected.query_retries);
-        assert_eq!(barrier.agent_barrier_timeout, expected.agent_barrier_timeout);
+        assert_eq!(
+            barrier.agent_barrier_timeout,
+            expected.agent_barrier_timeout
+        );
     }
 
     #[test]

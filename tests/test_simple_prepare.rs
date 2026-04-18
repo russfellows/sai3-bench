@@ -1,6 +1,6 @@
 //! Simplified test to debug distributed prepare
 
-use sai3_bench::config::{CleanupMode, PrepareConfig, FillPattern, EnsureSpec, PrepareStrategy};
+use sai3_bench::config::{CleanupMode, EnsureSpec, FillPattern, PrepareConfig, PrepareStrategy};
 use sai3_bench::size_generator::SizeSpec;
 use sai3_bench::workload::prepare_objects;
 use std::collections::HashMap;
@@ -15,13 +15,13 @@ async fn test_single_agent_prepare() {
     println!("Temp dir created");
     let base_uri = format!("file://{}", temp_dir.path().display());
     println!("Temp dir: {}", base_uri);
-    
+
     println!("Creating config...");
     let config = PrepareConfig {
         prepare_strategy: PrepareStrategy::Sequential,
         ensure_objects: vec![EnsureSpec {
             base_uri: Some(base_uri.clone()),
-            count: 10,  // Just 10 objects
+            count: 10, // Just 10 objects
             min_size: None,
             max_size: None,
             size_spec: Some(SizeSpec::Fixed(1024)),
@@ -30,36 +30,41 @@ async fn test_single_agent_prepare() {
             compress_factor: 1,
             use_multi_endpoint: false,
         }],
-        directory_structure: None,  // No directory structure - flat files
+        directory_structure: None, // No directory structure - flat files
         skip_verification: false,
-        force_overwrite: false,  // Enable LIST to test distributed prepare
+        force_overwrite: false, // Enable LIST to test distributed prepare
         post_prepare_delay: 0,
         cleanup: false,
         cleanup_mode: CleanupMode::Tolerant,
         cleanup_only: Some(false),
     };
     println!("Config created");
-    
+
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
-    
+
     println!("About to call prepare_objects for agent 0/2...");
     let result = prepare_objects(
         &config,
         None,
         None,
-        None,  // multi_endpoint_config
+        None, // multi_endpoint_config
         &multi_ep_cache,
-        2,  // concurrency
-        0,  // agent_id
-        2,  // num_agents
-        true,  // shared_storage: agents coordinate
-        None,  // results_dir
-        None,  // full_config
-    ).await;
+        2,    // concurrency
+        0,    // agent_id
+        2,    // num_agents
+        true, // shared_storage: agents coordinate
+        None, // results_dir
+        None, // full_config
+    )
+    .await;
     println!("prepare_objects returned!");
-    
+
     let (prepared, _manifest, _metrics) = result.unwrap();
-    
+
     println!("Agent 0 prepared {} objects", prepared.len());
-    assert_eq!(prepared.len(), 5, "Agent 0 should create 5 objects (indices 0,2,4,6,8)");
+    assert_eq!(
+        prepared.len(),
+        5,
+        "Agent 0 should create 5 objects (indices 0,2,4,6,8)"
+    );
 }

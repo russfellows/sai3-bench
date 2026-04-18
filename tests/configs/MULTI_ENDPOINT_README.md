@@ -107,7 +107,7 @@ cat /mnt/nfs8/benchmark/data/file.txt  # Same file
 
 **Prerequisites**:
 ```bash
-# Mount 8 NFS endpoints (example for VAST)
+# Mount 8 NFS endpoints (example for multi-NIC storage)
 mkdir -p /mnt/nfs{1..8}/benchmark
 mount -t nfs 192.168.1.10:/export /mnt/nfs1
 mount -t nfs 192.168.1.11:/export /mnt/nfs2

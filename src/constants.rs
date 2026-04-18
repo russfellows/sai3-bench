@@ -121,11 +121,11 @@ pub const DEFAULT_WORKER_DRAIN_TIMEOUT_SECS: u64 = 150;
 
 /// Optimal chunk size for direct:// reads (4 MiB)
 /// Based on testing: 4M chunks achieve 1.73 GiB/s vs 0.01 GiB/s for whole-file
-pub const DIRECT_IO_CHUNK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB
+pub const DIRECT_IO_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Threshold for using chunked reads vs whole-file reads
 /// Files larger than this will use chunked reads for direct://
-pub const CHUNKED_READ_THRESHOLD: u64 = 8 * 1024 * 1024;  // 8 MiB
+pub const CHUNKED_READ_THRESHOLD: u64 = 8 * 1024 * 1024; // 8 MiB
 
 // =============================================================================
 // RangeEngine Defaults (s3dlio configuration)
@@ -158,15 +158,15 @@ pub const NUM_BUCKETS: usize = 9;
 /// Human-readable labels for size buckets
 /// Must match NUM_BUCKETS length
 pub const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
-    "zero",       // 0 bytes (metadata ops)
-    "1B-8KiB",    // Bucket 0
-    "8KiB-64KiB", // Bucket 1
+    "zero",         // 0 bytes (metadata ops)
+    "1B-8KiB",      // Bucket 0
+    "8KiB-64KiB",   // Bucket 1
     "64KiB-512KiB", // Bucket 2
-    "512KiB-4MiB", // Bucket 3
-    "4MiB-32MiB",  // Bucket 4
+    "512KiB-4MiB",  // Bucket 3
+    "4MiB-32MiB",   // Bucket 4
     "32MiB-256MiB", // Bucket 5
-    "256MiB-2GiB", // Bucket 6
-    ">2GiB",      // Bucket 7
+    "256MiB-2GiB",  // Bucket 6
+    ">2GiB",        // Bucket 7
 ];
 
 /// Size bucket boundaries (in bytes)
@@ -222,12 +222,12 @@ pub const PERF_LOG_FLUSH_INTERVAL_SECS: u64 = 10;
 
 /// TSV header for perf-log files (28 columns)
 /// See docs/PERF_LOG_FORMAT.md for complete column specification
-/// 
+///
 /// Columns by group:
 /// - Identity (1): agent_id
 /// - Timing (3): timestamp_epoch_ms, elapsed_s, stage
 /// - GET metrics (7): ops, bytes, iops, mbps, p50_us, p90_us, p99_us
-/// - PUT metrics (7): ops, bytes, iops, mbps, p50_us, p90_us, p99_us  
+/// - PUT metrics (7): ops, bytes, iops, mbps, p50_us, p90_us, p99_us
 /// - META metrics (5): ops, iops, p50_us, p90_us, p99_us
 /// - CPU metrics (3): cpu_user_pct, cpu_system_pct, cpu_iowait_pct
 /// - Status (2): errors, is_warmup
@@ -423,7 +423,7 @@ pub const CPU_MONITOR_TEST_SLEEP_MS: u64 = 100;
 // =============================================================================
 
 /// Maximum coordinated start delay (prevent accidental huge delays)
-pub const MAX_START_DELAY_SECS: u64 = 300;  // 5 minutes
+pub const MAX_START_DELAY_SECS: u64 = 300; // 5 minutes
 
 /// Minimum concurrency (at least 1 worker)
 pub const MIN_CONCURRENCY: usize = 1;
@@ -435,7 +435,7 @@ pub const MAX_CONCURRENCY: usize = 10_000;
 pub const MIN_DURATION_SECS: u64 = 1;
 
 /// Maximum workload duration (prevent runaway tests)
-pub const MAX_DURATION_SECS: u64 = 86400;  // 24 hours
+pub const MAX_DURATION_SECS: u64 = 86400; // 24 hours
 
 // =============================================================================
 // File Naming Conventions
@@ -522,16 +522,24 @@ mod tests {
     fn test_bucket_boundaries_sorted() {
         // Verify bucket boundaries are in ascending order
         for i in 1..BUCKET_BOUNDARIES.len() {
-            assert!(BUCKET_BOUNDARIES[i] > BUCKET_BOUNDARIES[i-1],
-                    "Bucket boundaries must be strictly increasing");
+            assert!(
+                BUCKET_BOUNDARIES[i] > BUCKET_BOUNDARIES[i - 1],
+                "Bucket boundaries must be strictly increasing"
+            );
         }
     }
 
     #[test]
     fn test_bucket_labels_match_boundaries() {
-        assert_eq!(BUCKET_LABELS.len(), BUCKET_BOUNDARIES.len(),
-                   "Number of labels must match number of boundaries");
-        assert_eq!(BUCKET_LABELS.len(), NUM_BUCKETS,
-                   "Number of labels must match NUM_BUCKETS");
+        assert_eq!(
+            BUCKET_LABELS.len(),
+            BUCKET_BOUNDARIES.len(),
+            "Number of labels must match number of boundaries"
+        );
+        assert_eq!(
+            BUCKET_LABELS.len(),
+            NUM_BUCKETS,
+            "Number of labels must match NUM_BUCKETS"
+        );
     }
 }

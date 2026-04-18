@@ -21,9 +21,9 @@
 //! Tests proceed from least to most invasive, providing detailed diagnostics
 //! at each step.
 
+pub mod distributed;
 pub mod filesystem;
-pub mod object_storage;
-pub mod distributed; // Distributed configuration validation (v0.8.23+)
+pub mod object_storage; // Distributed configuration validation (v0.8.23+)
 
 use std::fmt;
 
@@ -212,9 +212,7 @@ impl ValidationSummary {
 
     /// Check if any warnings were encountered
     pub fn has_warnings(&self) -> bool {
-        self.results
-            .iter()
-            .any(|r| r.level == ResultLevel::Warning)
+        self.results.iter().any(|r| r.level == ResultLevel::Warning)
     }
 
     /// Count total errors
@@ -301,21 +299,21 @@ pub fn display_validation_results(
 ) -> (bool, usize, usize) {
     let mut error_count = 0;
     let mut warning_count = 0;
-    
+
     for result in results {
         if result.level == ResultLevel::Error {
             error_count += 1;
         } else if result.level == ResultLevel::Warning {
             warning_count += 1;
         }
-        
+
         let icon = match result.level {
             ResultLevel::Success => "✓",
             ResultLevel::Info => "ℹ",
             ResultLevel::Warning => "⚠",
             ResultLevel::Error => "✗",
         };
-        
+
         let error_tag = if let Some(ref err_type) = result.error_type {
             match err_type {
                 ErrorType::Authentication => "[AUTH]",
@@ -328,24 +326,27 @@ pub fn display_validation_results(
         } else {
             "[UNKNOWN]"
         };
-        
+
         if let Some(agent) = agent_name {
-            println!("  {} {} {} (agent: {})", icon, error_tag, result.message, agent);
+            println!(
+                "  {} {} {} (agent: {})",
+                icon, error_tag, result.message, agent
+            );
         } else {
             println!("  {} {} {}", icon, error_tag, result.message);
         }
-        
+
         if !result.suggestion.is_empty() {
             println!("      → {}", result.suggestion);
         }
-        
+
         if let Some(ref details) = result.details {
             if !details.is_empty() {
                 println!("      Details: {}", details);
             }
         }
     }
-    
+
     let passed = error_count == 0;
     (passed, error_count, warning_count)
 }

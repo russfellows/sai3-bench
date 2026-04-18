@@ -1,7 +1,5 @@
 // tests/test_stage_config.rs
-use sai3_bench::config::{
-    CompletionCriteria, DistributedConfig, StageConfig, StageSpecificConfig,
-};
+use sai3_bench::config::{CompletionCriteria, DistributedConfig, StageConfig, StageSpecificConfig};
 use std::time::Duration;
 
 #[test]
@@ -17,7 +15,7 @@ duration: 60s
     assert_eq!(stage.name, "epoch-1");
     assert_eq!(stage.order, 1);
     assert_eq!(stage.completion, CompletionCriteria::Duration);
-    
+
     match stage.config {
         StageSpecificConfig::Execute { duration } => {
             assert_eq!(duration, Duration::from_secs(60));
@@ -39,7 +37,7 @@ expected_objects: 10000
     assert_eq!(stage.name, "prepare");
     assert_eq!(stage.order, 2);
     assert_eq!(stage.completion, CompletionCriteria::TasksDone);
-    
+
     match stage.config {
         StageSpecificConfig::Prepare { expected_objects } => {
             assert_eq!(expected_objects, Some(10000));
@@ -63,7 +61,7 @@ expected_objects: 10000
     assert_eq!(stage.order, 4);
     assert_eq!(stage.completion, CompletionCriteria::TasksDone);
     assert!(stage.optional);
-    
+
     match stage.config {
         StageSpecificConfig::Cleanup { expected_objects } => {
             assert_eq!(expected_objects, Some(10000));
@@ -86,7 +84,7 @@ args: ["--verbose", "--target", "/mnt/data"]
     assert_eq!(stage.name, "custom-sync");
     assert_eq!(stage.order, 3);
     assert_eq!(stage.completion, CompletionCriteria::ScriptExit);
-    
+
     match stage.config {
         StageSpecificConfig::Custom { command, args } => {
             assert_eq!(command, "/usr/bin/sync_data.sh");
@@ -110,9 +108,12 @@ expected_tasks: 5000
     assert_eq!(stage.name, "hybrid-stage");
     assert_eq!(stage.order, 1);
     assert_eq!(stage.completion, CompletionCriteria::DurationOrTasks);
-    
+
     match stage.config {
-        StageSpecificConfig::Hybrid { max_duration, expected_tasks } => {
+        StageSpecificConfig::Hybrid {
+            max_duration,
+            expected_tasks,
+        } => {
             assert_eq!(max_duration, Some(Duration::from_secs(300)));
             assert_eq!(expected_tasks, Some(5000));
         }
@@ -146,11 +147,11 @@ stages:
     type: cleanup
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     assert!(!config.stages.is_empty());
     let stages = &config.stages;
     assert_eq!(stages.len(), 3);
-    
+
     // Check order field (not YAML position)
     assert_eq!(stages[0].name, "prepare");
     assert_eq!(stages[0].order, 1);
@@ -190,10 +191,10 @@ stages:
     max_duration: 300s
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     let sorted = config.get_sorted_stages().unwrap();
     assert_eq!(sorted.len(), 4);
-    
+
     // Verify sorted by order field (not YAML position)
     assert_eq!(sorted[0].name, "preflight");
     assert_eq!(sorted[0].order, 1);
@@ -216,9 +217,9 @@ tree_creation_mode: coordinator
 path_selection: partitioned
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     assert!(config.stages.is_empty());
-    
+
     let err = config.get_sorted_stages().unwrap_err();
     assert!(err.contains("stages list cannot be empty"));
 }
@@ -244,7 +245,7 @@ stages:
     duration: 60s
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("duplicate stage name"));
@@ -270,7 +271,7 @@ stages:
     duration: 60s
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("duplicate stage order"));
@@ -293,7 +294,7 @@ stages:
     duration: 60s
 "#;
     let config: DistributedConfig = serde_yaml::from_str(yaml).unwrap();
-    
+
     let result = config.get_sorted_stages();
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("should use Duration"));

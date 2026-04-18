@@ -12,18 +12,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Execution stage for multi-phase workloads (v0.8.9+)
-/// 
+///
 /// Matches the WorkloadStage enum in proto/iobench.proto
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i32)]
 pub enum WorkloadStage {
     #[default]
     Unknown = 0,
-    Prepare = 1,     // Creating objects before workload
-    Workload = 2,    // Main benchmark execution
-    Cleanup = 3,     // Deleting objects after workload
-    Listing = 4,     // v0.8.14: Scanning existing objects before prepare
-    Custom = 10,     // User-defined custom stage
+    Prepare = 1,  // Creating objects before workload
+    Workload = 2, // Main benchmark execution
+    Cleanup = 3,  // Deleting objects after workload
+    Listing = 4,  // v0.8.14: Scanning existing objects before prepare
+    Custom = 10,  // User-defined custom stage
 }
 
 impl WorkloadStage {
@@ -31,7 +31,7 @@ impl WorkloadStage {
     pub fn to_proto_i32(&self) -> i32 {
         *self as i32
     }
-    
+
     /// Convert from i32 (for atomic storage)
     pub fn from_i32(value: i32) -> Self {
         match value {
@@ -43,7 +43,7 @@ impl WorkloadStage {
             _ => WorkloadStage::Unknown,
         }
     }
-    
+
     /// Default stage name for display
     pub fn default_name(&self) -> &'static str {
         match self {
@@ -70,19 +70,19 @@ pub struct LiveStatsTracker {
     put_ops: Arc<AtomicU64>,
     put_bytes: Arc<AtomicU64>,
     meta_ops: Arc<AtomicU64>,
-    
+
     // v0.7.9: Prepare phase progress tracking (DEPRECATED: use stage system)
-    in_prepare_phase: Arc<AtomicU64>,  // 0=false, 1=true (atomic bool)
+    in_prepare_phase: Arc<AtomicU64>, // 0=false, 1=true (atomic bool)
     prepare_objects_created: Arc<AtomicU64>,
     prepare_objects_total: Arc<AtomicU64>,
-    
+
     // v0.8.9: Flexible stage system
-    current_stage: Arc<AtomicU64>,       // WorkloadStage as u64
-    stage_name: Arc<Mutex<String>>,      // Custom stage name
+    current_stage: Arc<AtomicU64>,  // WorkloadStage as u64
+    stage_name: Arc<Mutex<String>>, // Custom stage name
     stage_progress_current: Arc<AtomicU64>,
     stage_progress_total: Arc<AtomicU64>,
     stage_start_time: Arc<Mutex<Instant>>,
-    
+
     // v0.8.14: Concurrency tracking for total thread count display
     concurrency: u32,
 
@@ -112,9 +112,9 @@ impl LiveStatsTracker {
     ///
     /// Histograms track latencies from 1 microsecond to 1 hour with 3 significant digits.
     pub fn new() -> Self {
-        Self::new_with_concurrency(0)  // Default to 0 (unknown)
+        Self::new_with_concurrency(0) // Default to 0 (unknown)
     }
-    
+
     /// Create new tracker with explicit concurrency value (v0.8.14)
     ///
     /// Use this when you know the concurrency at creation time (e.g., from config).
@@ -185,13 +185,13 @@ impl LiveStatsTracker {
             let _ = hist.record(us);
         }
     }
-    
+
     // =========================================================================
     // v0.8.9: Flexible stage system
     // =========================================================================
-    
+
     /// Set the current execution stage (v0.8.9+)
-    /// 
+    ///
     /// Call this when transitioning between stages (prepare → workload → cleanup).
     /// Resets stage progress counters and stage start time.
     pub fn set_stage(&self, stage: WorkloadStage, total: u64) {
@@ -200,7 +200,7 @@ impl LiveStatsTracker {
         self.stage_progress_current.store(0, Ordering::Relaxed);
         self.stage_progress_total.store(total, Ordering::Relaxed);
         *self.stage_start_time.lock() = Instant::now();
-        
+
         // Also update legacy in_prepare_phase for backward compatibility
         if stage == WorkloadStage::Prepare {
             self.in_prepare_phase.store(1, Ordering::Relaxed);
@@ -210,35 +210,37 @@ impl LiveStatsTracker {
             self.in_prepare_phase.store(0, Ordering::Relaxed);
         }
     }
-    
+
     /// Set stage with custom name (v0.8.9+)
     pub fn set_stage_with_name(&self, stage: WorkloadStage, name: &str, total: u64) {
         self.set_stage(stage, total);
         *self.stage_name.lock() = name.to_string();
     }
-    
+
     /// Update stage progress (v0.8.9+)
     #[inline]
     pub fn set_stage_progress(&self, current: u64) {
-        self.stage_progress_current.store(current, Ordering::Relaxed);
-        
+        self.stage_progress_current
+            .store(current, Ordering::Relaxed);
+
         // Also update legacy prepare progress for backward compatibility
         if self.current_stage.load(Ordering::Relaxed) == WorkloadStage::Prepare as u64 {
-            self.prepare_objects_created.store(current, Ordering::Relaxed);
+            self.prepare_objects_created
+                .store(current, Ordering::Relaxed);
         }
     }
-    
+
     /// Increment stage progress by 1 (v0.8.9+)
     #[inline]
     pub fn increment_stage_progress(&self) {
         self.stage_progress_current.fetch_add(1, Ordering::Relaxed);
-        
+
         // Also update legacy prepare progress for backward compatibility
         if self.current_stage.load(Ordering::Relaxed) == WorkloadStage::Prepare as u64 {
             self.prepare_objects_created.fetch_add(1, Ordering::Relaxed);
         }
     }
-    
+
     /// Get current stage (v0.8.9+)
     pub fn get_stage(&self) -> WorkloadStage {
         match self.current_stage.load(Ordering::Relaxed) {
@@ -249,16 +251,16 @@ impl LiveStatsTracker {
             _ => WorkloadStage::Unknown,
         }
     }
-    
+
     /// Get stage elapsed time (v0.8.9+)
     pub fn stage_elapsed(&self) -> Duration {
         self.stage_start_time.lock().elapsed()
     }
-    
+
     // =========================================================================
     // Legacy prepare phase methods (DEPRECATED - use set_stage instead)
     // =========================================================================
-    
+
     /// Set prepare phase progress (v0.7.9+, DEPRECATED)
     ///
     /// Call at start of prepare phase with total object count, then update
@@ -267,23 +269,26 @@ impl LiveStatsTracker {
     #[inline]
     pub fn set_prepare_progress(&self, created: u64, total: u64) {
         self.in_prepare_phase.store(1, Ordering::Relaxed);
-        self.prepare_objects_created.store(created, Ordering::Relaxed);
+        self.prepare_objects_created
+            .store(created, Ordering::Relaxed);
         self.prepare_objects_total.store(total, Ordering::Relaxed);
-        
+
         // Also update new stage system
-        self.current_stage.store(WorkloadStage::Prepare as u64, Ordering::Relaxed);
-        self.stage_progress_current.store(created, Ordering::Relaxed);
+        self.current_stage
+            .store(WorkloadStage::Prepare as u64, Ordering::Relaxed);
+        self.stage_progress_current
+            .store(created, Ordering::Relaxed);
         self.stage_progress_total.store(total, Ordering::Relaxed);
     }
-    
+
     /// Mark prepare phase as complete (v0.7.9+, DEPRECATED)
     #[inline]
     pub fn set_prepare_complete(&self) {
         self.in_prepare_phase.store(0, Ordering::Relaxed);
     }
-    
+
     /// Reset all counters for workload phase (v0.7.9+)
-    /// 
+    ///
     /// Call this when transitioning from prepare to workload to clear
     /// prepare phase statistics (PUT operations) that shouldn't appear
     /// in workload-only metrics.
@@ -293,7 +298,7 @@ impl LiveStatsTracker {
         self.put_ops.store(0, Ordering::Relaxed);
         self.put_bytes.store(0, Ordering::Relaxed);
         self.meta_ops.store(0, Ordering::Relaxed);
-        
+
         // Clear histograms
         self.get_hist.lock().clear();
         self.put_hist.lock().clear();
@@ -313,7 +318,7 @@ impl LiveStatsTracker {
         let put_ops = self.put_ops.load(Ordering::Relaxed);
         let put_bytes = self.put_bytes.load(Ordering::Relaxed);
         let meta_ops = self.meta_ops.load(Ordering::Relaxed);
-        
+
         // v0.7.9: Read prepare phase progress
         let in_prepare_phase = self.in_prepare_phase.load(Ordering::Relaxed) != 0;
         let prepare_objects_created = self.prepare_objects_created.load(Ordering::Relaxed);
@@ -392,7 +397,9 @@ impl LiveStatsTracker {
             prepare_objects_created,
             prepare_objects_total,
             // v0.8.9: Multi-stage tracking
-            current_stage: WorkloadStage::from_i32(self.current_stage.load(Ordering::Relaxed) as i32),
+            current_stage: WorkloadStage::from_i32(
+                self.current_stage.load(Ordering::Relaxed) as i32
+            ),
             stage_name: self.stage_name.lock().clone(),
             stage_progress_current: self.stage_progress_current.load(Ordering::Relaxed),
             stage_progress_total: self.stage_progress_total.load(Ordering::Relaxed),
@@ -401,44 +408,48 @@ impl LiveStatsTracker {
             concurrency: self.concurrency,
         }
     }
-    
+
     /// Serialize histograms for per-stage summary (v0.8.27)
     ///
     /// Returns (get_histogram_bytes, put_histogram_bytes, meta_histogram_bytes)
     /// for inclusion in StageSummary proto message.
     /// Uses V2 serialization format compatible with HDR histogram deserializer.
+    #[allow(clippy::type_complexity)]
     pub fn serialize_histograms(&self) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
         use hdrhistogram::serialization::{Serializer, V2Serializer};
-        
+
         let mut serializer = V2Serializer::new();
-        
+
         let get_bytes = {
             let hist = self.get_hist.lock();
             let mut buf = Vec::new();
-            serializer.serialize(&*hist, &mut buf)
+            serializer
+                .serialize(&*hist, &mut buf)
                 .map_err(|e| format!("Failed to serialize GET histogram: {}", e))?;
             buf
         };
-        
+
         let put_bytes = {
             let hist = self.put_hist.lock();
             let mut buf = Vec::new();
-            serializer.serialize(&*hist, &mut buf)
+            serializer
+                .serialize(&*hist, &mut buf)
                 .map_err(|e| format!("Failed to serialize PUT histogram: {}", e))?;
             buf
         };
-        
+
         let meta_bytes = {
             let hist = self.meta_hist.lock();
             let mut buf = Vec::new();
-            serializer.serialize(&*hist, &mut buf)
+            serializer
+                .serialize(&*hist, &mut buf)
                 .map_err(|e| format!("Failed to serialize META histogram: {}", e))?;
             buf
         };
-        
+
         Ok((get_bytes, put_bytes, meta_bytes))
     }
-    
+
     /// Reset stats for a new stage (v0.8.27)
     ///
     /// Unlike reset_for_workload(), this resets all counters AND resets
@@ -450,16 +461,16 @@ impl LiveStatsTracker {
         self.put_ops.store(0, Ordering::Relaxed);
         self.put_bytes.store(0, Ordering::Relaxed);
         self.meta_ops.store(0, Ordering::Relaxed);
-        
+
         // Clear histograms
         self.get_hist.lock().clear();
         self.put_hist.lock().clear();
         self.meta_hist.lock().clear();
-        
+
         // Reset progress tracking
         self.stage_progress_current.store(0, Ordering::Relaxed);
         self.stage_progress_total.store(0, Ordering::Relaxed);
-        
+
         // Reset stage tracking
         self.current_stage.store(stage as u64, Ordering::Relaxed);
         *self.stage_name.lock() = stage_name.to_string();
@@ -533,7 +544,7 @@ mod tests {
     #[test]
     fn test_tracker_basic() {
         let tracker = LiveStatsTracker::new();
-        
+
         // Record some operations
         tracker.record_get(1024, Duration::from_micros(100));
         tracker.record_get(2048, Duration::from_micros(150));
@@ -546,7 +557,7 @@ mod tests {
         assert_eq!(snapshot.put_ops, 1);
         assert_eq!(snapshot.put_bytes, 512);
         assert_eq!(snapshot.meta_ops, 1);
-        
+
         // Verify latencies are reasonable
         assert!(snapshot.get_mean_us >= 100 && snapshot.get_mean_us <= 150);
         assert!(snapshot.put_mean_us >= 180 && snapshot.put_mean_us <= 220);
@@ -583,24 +594,24 @@ mod tests {
     fn test_snapshot_to_proto() {
         let tracker = LiveStatsTracker::new();
         tracker.record_get(1024, Duration::from_micros(100));
-        
+
         let snapshot = tracker.snapshot();
-        
+
         assert_eq!(snapshot.get_ops, 1);
         assert_eq!(snapshot.get_bytes, 1024);
         assert!(snapshot.elapsed_secs() > 0.0);
     }
-    
+
     #[test]
     fn test_stage_tracking() {
         let tracker = LiveStatsTracker::new();
-        
+
         // Initially in Unknown stage
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.current_stage, WorkloadStage::Unknown);
         assert_eq!(snapshot.stage_progress_current, 0);
         assert_eq!(snapshot.stage_progress_total, 0);
-        
+
         // Set to Prepare stage with 100 total objects
         tracker.set_stage(WorkloadStage::Prepare, 100);
         let snapshot = tracker.snapshot();
@@ -608,23 +619,23 @@ mod tests {
         assert_eq!(snapshot.stage_name, "Prepare");
         assert_eq!(snapshot.stage_progress_current, 0);
         assert_eq!(snapshot.stage_progress_total, 100);
-        assert!(snapshot.in_prepare_phase);  // Legacy compat
-        
+        assert!(snapshot.in_prepare_phase); // Legacy compat
+
         // Increment progress
         tracker.increment_stage_progress();
         tracker.increment_stage_progress();
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.stage_progress_current, 2);
-        
+
         // Transition to Workload stage (time-based, total=0)
         tracker.set_stage(WorkloadStage::Workload, 0);
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.current_stage, WorkloadStage::Workload);
         assert_eq!(snapshot.stage_name, "Workload");
-        assert_eq!(snapshot.stage_progress_current, 0);  // Reset on stage change
+        assert_eq!(snapshot.stage_progress_current, 0); // Reset on stage change
         assert_eq!(snapshot.stage_progress_total, 0);
-        assert!(!snapshot.in_prepare_phase);  // Legacy compat
-        
+        assert!(!snapshot.in_prepare_phase); // Legacy compat
+
         // Transition to Cleanup stage
         tracker.set_stage(WorkloadStage::Cleanup, 50);
         let snapshot = tracker.snapshot();
@@ -632,16 +643,16 @@ mod tests {
         assert_eq!(snapshot.stage_name, "Cleanup");
         assert_eq!(snapshot.stage_progress_total, 50);
     }
-    
+
     #[test]
     fn test_stage_elapsed_time() {
         let tracker = LiveStatsTracker::new();
         tracker.set_stage(WorkloadStage::Prepare, 10);
-        
+
         // Stage elapsed should be small immediately after setting
         let snapshot = tracker.snapshot();
         assert!(snapshot.stage_elapsed_s < 0.1);
-        
+
         // Wait a bit and check elapsed increased
         std::thread::sleep(Duration::from_millis(50));
         let snapshot = tracker.snapshot();
@@ -652,7 +663,7 @@ mod tests {
     fn test_reset_for_stage() {
         // v0.8.27: Verify reset_for_stage clears all counters and sets new stage
         let tracker = LiveStatsTracker::new();
-        
+
         // Record some operations
         tracker.record_get(1024, Duration::from_micros(100));
         tracker.record_get(2048, Duration::from_micros(200));
@@ -661,7 +672,7 @@ mod tests {
         // set_stage first, then set_prepare_progress (order matters - set_stage resets created to 0)
         tracker.set_stage(WorkloadStage::Prepare, 100);
         tracker.set_prepare_progress(5, 10);
-        
+
         // Verify stats are populated
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.get_ops, 2);
@@ -670,10 +681,10 @@ mod tests {
         assert_eq!(snapshot.put_bytes, 512);
         assert_eq!(snapshot.meta_ops, 1);
         assert_eq!(snapshot.prepare_objects_created, 5);
-        
+
         // Reset for new stage
         tracker.reset_for_stage("workload", WorkloadStage::Workload);
-        
+
         // Verify all counters are reset
         let snapshot_after = tracker.snapshot();
         assert_eq!(snapshot_after.get_ops, 0, "GET ops should be reset");
@@ -681,16 +692,19 @@ mod tests {
         assert_eq!(snapshot_after.put_ops, 0, "PUT ops should be reset");
         assert_eq!(snapshot_after.put_bytes, 0, "PUT bytes should be reset");
         assert_eq!(snapshot_after.meta_ops, 0, "META ops should be reset");
-        
+
         // Verify histograms are cleared (check latencies are 0)
         assert_eq!(snapshot_after.get_mean_us, 0, "GET latency should be reset");
         assert_eq!(snapshot_after.put_mean_us, 0, "PUT latency should be reset");
-        assert_eq!(snapshot_after.meta_mean_us, 0, "META latency should be reset");
-        
+        assert_eq!(
+            snapshot_after.meta_mean_us, 0,
+            "META latency should be reset"
+        );
+
         // Verify stage was changed
         assert_eq!(snapshot_after.current_stage, WorkloadStage::Workload);
         assert_eq!(snapshot_after.stage_name, "workload");
-        
+
         // Record new operations and verify counters work correctly
         tracker.record_get(2000, Duration::from_micros(300));
         let snapshot_new = tracker.snapshot();
@@ -703,16 +717,19 @@ mod tests {
         // v0.8.27: Verify reset_for_stage resets stage elapsed time correctly
         let tracker = LiveStatsTracker::new();
         tracker.set_stage(WorkloadStage::Prepare, 10);
-        
+
         // Wait to accumulate elapsed time
         std::thread::sleep(Duration::from_millis(50));
-        
+
         let snapshot_before = tracker.snapshot();
-        assert!(snapshot_before.stage_elapsed_s >= 0.04, "Should have accumulated time");
-        
+        assert!(
+            snapshot_before.stage_elapsed_s >= 0.04,
+            "Should have accumulated time"
+        );
+
         // Reset for new stage
         tracker.reset_for_stage("workload", WorkloadStage::Workload);
-        
+
         // Stage elapsed should be reset to near-zero
         let snapshot_after = tracker.snapshot();
         assert!(
@@ -726,11 +743,12 @@ mod tests {
     fn test_serialize_histograms_empty() {
         // v0.8.27: Verify serialize_histograms works with empty histograms
         let tracker = LiveStatsTracker::new();
-        
+
         // Serialize empty histograms
-        let (get_bytes, put_bytes, meta_bytes) = tracker.serialize_histograms()
+        let (get_bytes, put_bytes, meta_bytes) = tracker
+            .serialize_histograms()
             .expect("Should serialize empty histograms");
-        
+
         // Empty histograms should still produce valid (but small) serialized data
         // HdrHistogram serialization includes header even for empty, usually ~40 bytes
         assert!(!get_bytes.is_empty(), "GET histogram should have header");
@@ -742,101 +760,120 @@ mod tests {
     fn test_serialize_histograms_with_data() {
         // v0.8.27: Verify serialize_histograms captures recorded latencies
         use hdrhistogram::serialization::Deserializer;
-        
+
         let tracker = LiveStatsTracker::new();
-        
+
         // Record operations with known latencies
         tracker.record_get(1024, Duration::from_micros(100));
         tracker.record_get(1024, Duration::from_micros(200));
         tracker.record_get(1024, Duration::from_micros(300));
         tracker.record_put(512, Duration::from_micros(500));
         tracker.record_meta(Duration::from_micros(50));
-        
+
         // Serialize histograms
-        let (get_bytes, put_bytes, meta_bytes) = tracker.serialize_histograms()
+        let (get_bytes, put_bytes, meta_bytes) = tracker
+            .serialize_histograms()
             .expect("Should serialize histograms");
-        
+
         // Verify serialization produced non-empty bytes
         assert!(!get_bytes.is_empty(), "GET histogram should have data");
         assert!(!put_bytes.is_empty(), "PUT histogram should have data");
         assert!(!meta_bytes.is_empty(), "META histogram should have data");
-        
+
         // Verify deserialized histogram contains expected data
         let mut deserializer = Deserializer::new();
         let mut cursor = std::io::Cursor::new(&get_bytes);
-        let get_hist: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+        let get_hist: hdrhistogram::Histogram<u64> = deserializer
+            .deserialize(&mut cursor)
             .expect("Should deserialize GET histogram");
-        
+
         // Verify histogram properties
         assert_eq!(get_hist.len(), 3, "GET histogram should have 3 samples");
-        assert!(get_hist.mean() >= 100.0 && get_hist.mean() <= 300.0, 
-                "GET mean should be reasonable, got {}", get_hist.mean());
+        assert!(
+            get_hist.mean() >= 100.0 && get_hist.mean() <= 300.0,
+            "GET mean should be reasonable, got {}",
+            get_hist.mean()
+        );
     }
 
     #[test]
     fn test_serialize_histograms_roundtrip() {
         // v0.8.27: Verify serialize/deserialize roundtrip preserves percentiles
         use hdrhistogram::serialization::Deserializer;
-        
+
         let tracker = LiveStatsTracker::new();
-        
+
         // Record known distribution of latencies
         for i in 0..100 {
             tracker.record_get(1024, Duration::from_micros(i as u64 * 10 + 50));
         }
-        
+
         // Serialize and deserialize
-        let (get_bytes, _, _) = tracker.serialize_histograms()
+        let (get_bytes, _, _) = tracker
+            .serialize_histograms()
             .expect("Should serialize histograms");
-        
+
         let mut deserializer = Deserializer::new();
         let mut cursor = std::io::Cursor::new(&get_bytes);
-        let hist: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+        let hist: hdrhistogram::Histogram<u64> = deserializer
+            .deserialize(&mut cursor)
             .expect("Should deserialize");
-        
+
         // Verify count preserved
         assert_eq!(hist.len(), 100, "Should have 100 samples");
-        
+
         // Verify percentiles are approximately preserved (within histogram precision)
         let p50 = hist.value_at_quantile(0.50);
         let p99 = hist.value_at_quantile(0.99);
-        
+
         // p50 should be around 500 (50 + 50*10)
-        assert!((400..=600).contains(&p50), "p50 should be around 500, got {}", p50);
+        assert!(
+            (400..=600).contains(&p50),
+            "p50 should be around 500, got {}",
+            p50
+        );
         // p99 should be around 1040 (50 + 99*10)
-        assert!((900..=1100).contains(&p99), "p99 should be around 1040, got {}", p99);
+        assert!(
+            (900..=1100).contains(&p99),
+            "p99 should be around 1040, got {}",
+            p99
+        );
     }
 
     #[test]
     fn test_reset_clears_histograms() {
         // v0.8.27: Verify reset_for_stage actually clears histograms
         use hdrhistogram::serialization::Deserializer;
-        
+
         let tracker = LiveStatsTracker::new();
-        
+
         // Record operations
         for _ in 0..50 {
             tracker.record_get(1024, Duration::from_micros(100));
         }
-        
+
         // Verify histogram has data
-        let (get_bytes_before, _, _) = tracker.serialize_histograms()
+        let (get_bytes_before, _, _) = tracker
+            .serialize_histograms()
             .expect("Should serialize before reset");
         let mut deserializer = Deserializer::new();
         let mut cursor = std::io::Cursor::new(&get_bytes_before);
-        let hist_before: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+        let hist_before: hdrhistogram::Histogram<u64> = deserializer
+            .deserialize(&mut cursor)
             .expect("Should deserialize");
         assert_eq!(hist_before.len(), 50, "Should have 50 samples before reset");
-        
+
         // Reset
         tracker.reset_for_stage("cleanup", WorkloadStage::Cleanup);
-        
+
         // Serialize again - should be empty histogram
-        let (get_bytes_after, _, _) = tracker.serialize_histograms()
+        let (get_bytes_after, _, _) = tracker
+            .serialize_histograms()
             .expect("Should serialize after reset");
-        
+
         let mut cursor = std::io::Cursor::new(&get_bytes_after);
-        let hist_after: hdrhistogram::Histogram<u64> = deserializer.deserialize(&mut cursor)
+        let hist_after: hdrhistogram::Histogram<u64> = deserializer
+            .deserialize(&mut cursor)
             .expect("Should deserialize after reset");
         assert_eq!(hist_after.len(), 0, "Histogram should be empty after reset");
     }

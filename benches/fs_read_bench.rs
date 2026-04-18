@@ -1,12 +1,12 @@
 // benches/fs_read_bench.rs
 // Run with: cargo run --release --bin fs_read_bench -- <args>
-use std::{fs, path::PathBuf, time::Instant};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use clap::Parser;
+use std::{fs, path::PathBuf, time::Instant};
 
 // Use sai3-bench's workload module for proper store creation
-use sai3_bench::workload::create_store_for_uri_with_config;
 use sai3_bench::config::PageCacheMode as ConfigPageCacheMode;
+use sai3_bench::workload::create_store_for_uri_with_config;
 
 #[derive(Parser, Debug)]
 #[command(name = "fs_read_bench")]
@@ -47,10 +47,10 @@ struct Args {
 fn parse_page_cache_mode(s: &str) -> ConfigPageCacheMode {
     match s.to_ascii_lowercase().as_str() {
         "sequential" => ConfigPageCacheMode::Sequential,
-        "random"     => ConfigPageCacheMode::Random,
-        "dontneed"   => ConfigPageCacheMode::DontNeed,
-        "normal"     => ConfigPageCacheMode::Normal,
-        _            => ConfigPageCacheMode::Auto,
+        "random" => ConfigPageCacheMode::Random,
+        "dontneed" => ConfigPageCacheMode::DontNeed,
+        "normal" => ConfigPageCacheMode::Normal,
+        _ => ConfigPageCacheMode::Auto,
     }
 }
 
@@ -80,7 +80,12 @@ async fn main() -> Result<()> {
 
     // Generate files if dir empty
     if files.is_empty() {
-        println!("Generating {} files × {} MiB in {}", args.num_files, args.file_size_mib, args.dir.display());
+        println!(
+            "Generating {} files × {} MiB in {}",
+            args.num_files,
+            args.file_size_mib,
+            args.dir.display()
+        );
         let buf = vec![0u8; args.file_size_mib * 1024 * 1024];
         for i in 0..args.num_files {
             let p = args.dir.join(format!("f{:06}.bin", i));
@@ -90,31 +95,35 @@ async fn main() -> Result<()> {
     }
 
     // Determine URI scheme and create appropriate store
-    let scheme = if args.direct_io { "direct://" } else { "file://" };
+    let scheme = if args.direct_io {
+        "direct://"
+    } else {
+        "file://"
+    };
     let page_cache_mode = parse_page_cache_mode(&args.page_cache);
-    
+
     // For direct:// URIs, we use store_for_uri() instead of FileSystemObjectStore
     // to get proper O_DIRECT support. Page cache modes don't apply to O_DIRECT.
     let page_cache_config = if args.direct_io {
-        None  // O_DIRECT bypasses page cache entirely
+        None // O_DIRECT bypasses page cache entirely
     } else {
         Some(page_cache_mode)
     };
-    
+
     // Report configuration
-    let cache_desc = if args.direct_io { 
+    let cache_desc = if args.direct_io {
         "N/A (O_DIRECT)".to_string()
-    } else { 
+    } else {
         format!("{:?}", page_cache_mode)
     };
-    println!("cfg: block_size={} bytes | scheme={} | page_cache={}",
-        args.block_size,
-        scheme,
-        cache_desc,
+    println!(
+        "cfg: block_size={} bytes | scheme={} | page_cache={}",
+        args.block_size, scheme, cache_desc,
     );
 
     let use_blocks = args.block_size > 0;
-    let total_bytes: u64 = (args.file_size_mib as u64) * 1024 * 1024 * (files.len() as u64) * (args.passes as u64);
+    let total_bytes: u64 =
+        (args.file_size_mib as u64) * 1024 * 1024 * (files.len() as u64) * (args.passes as u64);
     let mut latencies: Vec<f64> = Vec::with_capacity(files.len() * args.passes);
     let (min0, maj0) = read_faults();
 
@@ -132,7 +141,7 @@ async fn main() -> Result<()> {
         for p in &files {
             // Create URI with correct scheme (file:// or direct://)
             let uri = format!("{}{}", scheme, p.display());
-            
+
             // Create store for this URI with page cache configuration
             // For direct:// URIs, page_cache_config is None (O_DIRECT bypasses cache)
             let store = create_store_for_uri_with_config(&uri, None, page_cache_config)?;
@@ -145,13 +154,17 @@ async fn main() -> Result<()> {
                 let mut off: u64 = 0;
                 while off < meta.len() {
                     let len = std::cmp::min(args.block_size as u64, meta.len() - off);
-                    let _chunk = store.get_range(&uri, off, Some(len)).await
+                    let _chunk = store
+                        .get_range(&uri, off, Some(len))
+                        .await
                         .with_context(|| format!("get_range({}, off={}, len={})", uri, off, len))?;
                     off += len;
                 }
             } else {
                 // Whole-file read
-                let _data = store.get(&uri).await
+                let _data = store
+                    .get(&uri)
+                    .await
                     .with_context(|| format!("get({})", uri))?;
             }
 
@@ -159,7 +172,11 @@ async fn main() -> Result<()> {
             latencies.push(dt);
         }
 
-        println!("pass {} time: {:.3}s", pass + 1, pass_start.elapsed().as_secs_f64());
+        println!(
+            "pass {} time: {:.3}s",
+            pass + 1,
+            pass_start.elapsed().as_secs_f64()
+        );
     }
 
     let dt = t0.elapsed();
@@ -180,8 +197,16 @@ async fn main() -> Result<()> {
 
     println!("\n=== fs_read_bench results ===");
     println!("files: {} | passes: {}", files.len(), args.passes);
-    println!("total: {:.3} GiB in {:.3} s -> {:.2} GiB/s", gib, dt.as_secs_f64(), throughput_gib_s);
-    println!("latency per file: p50={:.4}s  p95={:.4}s  p99={:.4}s", p50, p95, p99);
+    println!(
+        "total: {:.3} GiB in {:.3} s -> {:.2} GiB/s",
+        gib,
+        dt.as_secs_f64(),
+        throughput_gib_s
+    );
+    println!(
+        "latency per file: p50={:.4}s  p95={:.4}s  p99={:.4}s",
+        p50, p95, p99
+    );
     println!("page faults (delta): minor={}  major={}", dmin, dmaj);
 
     Ok(())

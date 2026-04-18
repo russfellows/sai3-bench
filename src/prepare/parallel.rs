@@ -4,28 +4,28 @@
 //! suitable for large-scale datasets. Includes round-robin distribution for
 //! multi-endpoint configurations.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+use super::error_tracking::PrepareErrorTracker;
+use super::listing::list_existing_objects_distributed;
+use super::metrics::{PrepareMetrics, PreparedObject};
+use super::retry::retry_failed_objects;
 use crate::config::{FillPattern, PrepareConfig};
-use crate::constants::{
-    DEFAULT_PREPARE_MAX_ERRORS,
-    DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS,
-};
+use crate::constants::{DEFAULT_PREPARE_MAX_CONSECUTIVE_ERRORS, DEFAULT_PREPARE_MAX_ERRORS};
 use crate::directory_tree::TreeManifest;
 use crate::size_generator::{SizeGenerator, SizeSpec};
-use crate::workload::{MultiEndpointCache, create_store_for_uri, RetryConfig, retry_with_backoff, RetryResult};
-use super::error_tracking::PrepareErrorTracker;
-use super::retry::retry_failed_objects;
-use super::metrics::{PreparedObject, PrepareMetrics};
-use super::listing::list_existing_objects_distributed;
+use crate::workload::{
+    create_store_for_uri, retry_with_backoff, MultiEndpointCache, RetryConfig, RetryResult,
+};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_parallel(
     config: &PrepareConfig,
     needs_separate_pools: bool,
@@ -37,19 +37,18 @@ pub(crate) async fn prepare_parallel(
     concurrency: usize,
     agent_id: usize,
     num_agents: usize,
-    shared_storage: bool,  // v0.8.24: Only filter by agent_id in shared storage mode
-    metadata_cache: Option<Arc<tokio::sync::Mutex<crate::metadata_cache::MetadataCache>>>,  // v0.8.60: KV cache
+    shared_storage: bool, // v0.8.24: Only filter by agent_id in shared storage mode
+    metadata_cache: Option<Arc<tokio::sync::Mutex<crate::metadata_cache::MetadataCache>>>, // v0.8.60: KV cache
 ) -> Result<Vec<PreparedObject>> {
     use futures::stream::{FuturesUnordered, StreamExt};
-    
-    
+
     // v0.8.60: Log cache status
     if metadata_cache.is_some() {
         info!("📊 Metadata cache ENABLED for parallel prepare");
     } else {
         info!("Metadata cache disabled for parallel prepare");
     }
-    
+
     // Structure to hold complete task with URI
     struct PrepareTask {
         uri: String,
@@ -60,7 +59,7 @@ pub(crate) async fn prepare_parallel(
         compress: usize,
         file_idx: u64,
     }
-    
+
     struct PreparePlan {
         count: u64,
         size_spec: SizeSpec,
@@ -77,14 +76,14 @@ pub(crate) async fn prepare_parallel(
 
     let mut plans: Vec<PreparePlan> = Vec::new();
     let mut total_to_create: u64 = 0;
-    
+
     // Determine which pool(s) to create based on workload requirements
     let pools_to_create = if needs_separate_pools {
-        vec![("prepared", true), ("deletable", false)]  // (prefix, is_readonly)
+        vec![("prepared", true), ("deletable", false)] // (prefix, is_readonly)
     } else {
-        vec![("prepared", false)]  // Single pool (backward compatible)
+        vec![("prepared", false)] // Single pool (backward compatible)
     };
-    
+
     // Phase 1: List existing objects and build task specs for all sizes
     for spec in &config.ensure_objects {
         // Get endpoints for file distribution
@@ -94,58 +93,78 @@ pub(crate) async fn prepare_parallel(
                 multi_ep.endpoints.clone()
             } else {
                 // Fallback: use get_base_uri if no multi_endpoint config
-                vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
+                vec![spec
+                    .get_base_uri(None)
+                    .context("Failed to determine base_uri")?]
             }
         } else {
             // Single endpoint mode
             let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-            vec![spec.get_base_uri(multi_endpoint_uris).context("Failed to determine base_uri for prepare phase")?]
+            vec![spec
+                .get_base_uri(multi_endpoint_uris)
+                .context("Failed to determine base_uri for prepare phase")?]
         };
-        
+
         // Use first endpoint for listing (MultiEndpointStore will handle distribution during listing)
         let base_uri = endpoints[0].clone();
-        
+
         for (prefix, is_readonly) in &pools_to_create {
             let pool_desc = if needs_separate_pools {
-                if *is_readonly { " (readonly pool for GET/STAT)" } else { " (deletable pool for DELETE)" }
+                if *is_readonly {
+                    " (readonly pool for GET/STAT)"
+                } else {
+                    " (deletable pool for DELETE)"
+                }
             } else {
                 ""
             };
-            
-            info!("Preparing{}: {} objects at {}", pool_desc, spec.count, base_uri);
-            
+
+            info!(
+                "Preparing{}: {} objects at {}",
+                pool_desc, spec.count, base_uri
+            );
+
             // v0.8.22: Multi-endpoint support for prepare phase
             // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
             // This distributes object creation across all endpoints for maximum network bandwidth
             let store: Box<dyn s3dlio::object_store::ObjectStore> = if spec.use_multi_endpoint {
                 if let Some(multi_ep) = multi_endpoint_config {
-                    info!("  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy", 
-                          multi_ep.endpoints.len(), multi_ep.strategy);
-                    
+                    info!(
+                        "  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy",
+                        multi_ep.endpoints.len(),
+                        multi_ep.strategy
+                    );
+
                     // Create cache key for prepare phase multi-endpoint store
-                    let cache_key = format!("prepare_par:{}:{}:{}",
+                    let cache_key = format!(
+                        "prepare_par:{}:{}:{}",
                         base_uri,
                         multi_ep.strategy,
-                        multi_ep.endpoints.join(","));
-                    
+                        multi_ep.endpoints.join(",")
+                    );
+
                     // Create Arc<MultiEndpointStore> - can be used for both operations and stats
-                    let arc_multi_store = crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
-                    
+                    let arc_multi_store =
+                        crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+
                     // Store in multi_ep_cache for stats collection
                     {
                         let mut cache_lock = multi_ep_cache.lock().unwrap();
                         cache_lock.insert(cache_key, Arc::clone(&arc_multi_store));
                     }
-                    
+
                     // Wrap for Box<dyn ObjectStore>
-                    Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store)) as Box<dyn s3dlio::object_store::ObjectStore>
+                    Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store))
+                        as Box<dyn s3dlio::object_store::ObjectStore>
                 } else {
-                    anyhow::bail!("use_multi_endpoint=true but no multi_endpoint configuration provided");
+                    anyhow::bail!(
+                        "use_multi_endpoint=true but no multi_endpoint configuration provided"
+                    );
                 }
             } else {
                 create_store_for_uri(&base_uri)?
             };
-            
+
             // List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
             // v0.8.24: force_overwrite overrides skip_verification to recreate all files
@@ -160,68 +179,94 @@ pub(crate) async fn prepare_parallel(
                 } else {
                     None
                 };
-            let kv_cache_covers_all = kv_cache_coverage.as_ref().map(|c| c.covers_all).unwrap_or(false);
+            let kv_cache_covers_all = kv_cache_coverage
+                .as_ref()
+                .map(|c| c.covers_all)
+                .unwrap_or(false);
 
             let mut did_list = false;
-            let (existing_count, existing_indices) = if config.skip_verification && !config.force_overwrite {
-                info!("  ⚡ skip_verification enabled - assuming all {} objects exist", spec.count);
-                (spec.count, HashSet::new())  // Assume all files exist, no gaps
-            } else if config.force_overwrite {
-                info!("  🔨 force_overwrite enabled - creating all {} objects", spec.count);
-                (0, HashSet::new())  // Assume no files exist, create everything
-            } else if kv_cache_covers_all {
-                info!("  ⚡ KV cache checkpoint shows all {} objects already Created — skipping LIST", spec.count);
-                if let Some(cov) = &kv_cache_coverage {
-                    if let Some(&total_bytes) = cov.bytes_by_state.get(&crate::metadata_cache::ObjectState::Created) {
-                        let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                        info!("  📊 Cache summary: {} objects | {:.2} GiB total storage", cov.created_count, total_gib);
+            let (existing_count, existing_indices) =
+                if config.skip_verification && !config.force_overwrite {
+                    info!(
+                        "  ⚡ skip_verification enabled - assuming all {} objects exist",
+                        spec.count
+                    );
+                    (spec.count, HashSet::new()) // Assume all files exist, no gaps
+                } else if config.force_overwrite {
+                    info!(
+                        "  🔨 force_overwrite enabled - creating all {} objects",
+                        spec.count
+                    );
+                    (0, HashSet::new()) // Assume no files exist, create everything
+                } else if kv_cache_covers_all {
+                    info!(
+                    "  ⚡ KV cache checkpoint shows all {} objects already Created — skipping LIST",
+                    spec.count
+                );
+                    if let Some(cov) = &kv_cache_coverage {
+                        if let Some(&total_bytes) = cov
+                            .bytes_by_state
+                            .get(&crate::metadata_cache::ObjectState::Created)
+                        {
+                            let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                            info!(
+                                "  📊 Cache summary: {} objects | {:.2} GiB total storage",
+                                cov.created_count, total_gib
+                            );
+                        }
                     }
-                }
-                (spec.count, HashSet::new())
-            } else if tree_manifest.is_some() {
-                did_list = true;
-                // v0.8.14: Use distributed listing with progress updates
-                let listing_result = list_existing_objects_distributed(
-                    store.as_ref(),
-                    &base_uri,
-                    tree_manifest,
-                    agent_id,
-                    num_agents,
-                    live_stats_tracker.as_ref(),
-                    spec.count,
-                ).await.context("Failed to list existing objects")?;
-                
-                (listing_result.file_count, listing_result.indices)
-            } else {
-                // Flat file mode: use streaming list with progress
-                let pattern = if base_uri.ends_with('/') {
-                    format!("{}{}-", base_uri, prefix)
+                    (spec.count, HashSet::new())
+                } else if tree_manifest.is_some() {
+                    did_list = true;
+                    // v0.8.14: Use distributed listing with progress updates
+                    let listing_result = list_existing_objects_distributed(
+                        store.as_ref(),
+                        &base_uri,
+                        tree_manifest,
+                        agent_id,
+                        num_agents,
+                        live_stats_tracker.as_ref(),
+                        spec.count,
+                    )
+                    .await
+                    .context("Failed to list existing objects")?;
+
+                    (listing_result.file_count, listing_result.indices)
                 } else {
-                    format!("{}/{}-", base_uri, prefix)
+                    // Flat file mode: use streaming list with progress
+                    let pattern = if base_uri.ends_with('/') {
+                        format!("{}{}-", base_uri, prefix)
+                    } else {
+                        format!("{}/{}-", base_uri, prefix)
+                    };
+
+                    info!("  [Flat file mode] Listing with pattern: {}", pattern);
+                    did_list = true;
+
+                    // Use streaming list for flat mode too
+                    let listing_result = list_existing_objects_distributed(
+                        store.as_ref(),
+                        &pattern,
+                        None, // No tree manifest for flat mode
+                        agent_id,
+                        num_agents,
+                        live_stats_tracker.as_ref(),
+                        spec.count,
+                    )
+                    .await
+                    .context("Failed to list existing objects")?;
+
+                    (listing_result.file_count, listing_result.indices)
                 };
-                
-                info!("  [Flat file mode] Listing with pattern: {}", pattern);
-                did_list = true;
-                
-                // Use streaming list for flat mode too
-                let listing_result = list_existing_objects_distributed(
-                    store.as_ref(),
-                    &pattern,
-                    None,  // No tree manifest for flat mode
-                    agent_id,
-                    num_agents,
-                    live_stats_tracker.as_ref(),
-                    spec.count,
-                ).await.context("Failed to list existing objects")?;
-                
-                (listing_result.file_count, listing_result.indices)
-            };
-            
+
             // v0.8.29: Only say "Found" when an actual LIST was done
             if did_list {
-                info!("  ✓ Listed {} existing {} objects (need {})", existing_count, prefix, spec.count);
+                info!(
+                    "  ✓ Listed {} existing {} objects (need {})",
+                    existing_count, prefix, spec.count
+                );
             }
-            
+
             // Calculate how many to create
             let to_create = if existing_count >= spec.count {
                 info!("  Sufficient {} objects already exist", prefix);
@@ -231,9 +276,14 @@ pub(crate) async fn prepare_parallel(
             };
 
             let size_spec = spec.get_size_spec();
-            let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let seed = base_uri
+                .as_bytes()
+                .iter()
+                .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
-            let (actual_to_create, sample_missing) = if config.skip_verification && !config.force_overwrite {
+            let (actual_to_create, sample_missing) = if config.skip_verification
+                && !config.force_overwrite
+            {
                 (0u64, Vec::new())
             } else if config.force_overwrite {
                 let count = if shared_storage && num_agents > 1 {
@@ -249,7 +299,8 @@ pub(crate) async fn prepare_parallel(
                     if sample.len() >= 10 {
                         break;
                     }
-                    if !shared_storage || num_agents <= 1 || (idx as usize % num_agents) == agent_id {
+                    if !shared_storage || num_agents <= 1 || (idx as usize % num_agents) == agent_id
+                    {
                         sample.push(idx);
                     }
                 }
@@ -286,8 +337,10 @@ pub(crate) async fn prepare_parallel(
                         agent_id, num_agents, actual_to_create);
                 }
 
-                info!("  [v0.7.9] Identified {} missing indices (first 10: {:?})",
-                    actual_to_create, sample_missing);
+                info!(
+                    "  [v0.7.9] Identified {} missing indices (first 10: {:?})",
+                    actual_to_create, sample_missing
+                );
 
                 if actual_to_create != to_create && num_agents == 1 {
                     warn!("  Missing indices count ({}) != to_create ({}) - this indicates detection logic issue",
@@ -320,7 +373,7 @@ pub(crate) async fn prepare_parallel(
     if total_to_create == 0 {
         info!("All objects already exist - reconstructing PreparedObject list from existing files");
         let mut all_prepared = Vec::new();
-        
+
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
             // Get endpoints for file distribution (same logic as creation)
@@ -329,29 +382,32 @@ pub(crate) async fn prepare_parallel(
                 if let Some(multi_ep) = multi_endpoint_config {
                     multi_ep.endpoints.clone()
                 } else {
-                    vec![spec.get_base_uri(None).context("Failed to determine base_uri")?]
+                    vec![spec
+                        .get_base_uri(None)
+                        .context("Failed to determine base_uri")?]
                 }
             } else {
                 let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
-                vec![spec.get_base_uri(multi_endpoint_uris)
+                vec![spec
+                    .get_base_uri(multi_endpoint_uris)
                     .context("Failed to determine base_uri for reconstructing existing objects")?]
             };
-            
+
             let pools_to_create = if needs_separate_pools {
                 vec![("prepared", true), ("deletable", false)]
             } else {
                 vec![("prepared", false)]
             };
-            
+
             for (prefix, _is_readonly) in &pools_to_create {
                 let size_spec = spec.get_size_spec();
-                let mut size_generator = SizeGenerator::new(&size_spec)
-                    .context("Failed to create size generator")?;
-                
+                let mut size_generator =
+                    SizeGenerator::new(&size_spec).context("Failed to create size generator")?;
+
                 for i in 0..spec.count {
                     // Round-robin across endpoints
                     let base_uri = &endpoints[i as usize % endpoints.len()];
-                    
+
                     let uri = if let Some(manifest) = tree_manifest {
                         // Tree mode: use manifest paths
                         if let Some(rel_path) = manifest.get_file_path(i as usize) {
@@ -361,7 +417,7 @@ pub(crate) async fn prepare_parallel(
                                 format!("{}/{}", base_uri, rel_path)
                             }
                         } else {
-                            continue;  // Skip if manifest doesn't have this index
+                            continue; // Skip if manifest doesn't have this index
                         }
                     } else {
                         // Flat mode: traditional naming
@@ -372,42 +428,48 @@ pub(crate) async fn prepare_parallel(
                             format!("{}/{}", base_uri, key)
                         }
                     };
-                    
+
                     let size = size_generator.generate();
                     all_prepared.push(PreparedObject {
                         uri,
                         size,
-                        created: false,  // All existed
+                        created: false, // All existed
                     });
                 }
             }
         }
-        
-        info!("Reconstructed {} existing objects for workload", all_prepared.len());
+
+        info!(
+            "Reconstructed {} existing objects for workload",
+            all_prepared.len()
+        );
         return Ok(all_prepared);
     }
-    
+
     // Phase 2: Execute all tasks in parallel with unified progress bar
-    info!("Creating {} total objects in parallel (streaming task generation)", total_to_create);
-    
+    info!(
+        "Creating {} total objects in parallel (streaming task generation)",
+        total_to_create
+    );
+
     // Use workload concurrency for prepare phase (passed from config)
     // Note: concurrency parameter comes from Config.concurrency
-    
+
     // v0.7.9: Set prepare phase progress in live stats tracker
     if let Some(ref tracker) = live_stats_tracker {
         tracker.set_prepare_progress(0, total_to_create);
     }
-    
+
     // Create atomic counters for live stats
     let live_ops = Arc::new(AtomicU64::new(0));
     let live_bytes = Arc::new(AtomicU64::new(0));
-    
+
     let pb = ProgressBar::new(total_to_create);
     pb.set_style(ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}"
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} objects {msg}",
     )?);
     pb.set_message(format!("{} workers (starting...)", concurrency));
-    
+
     // Start live stats monitoring task
     let pb_monitor = pb.clone();
     let ops_monitor = live_ops.clone();
@@ -416,42 +478,46 @@ pub(crate) async fn prepare_parallel(
         let mut last_ops = 0u64;
         let mut last_bytes = 0u64;
         let mut last_time = Instant::now();
-        
+
         loop {
-            tokio::time::sleep(Duration::from_millis(crate::constants::PROGRESS_MONITOR_SLEEP_MS)).await;
-            
+            tokio::time::sleep(Duration::from_millis(
+                crate::constants::PROGRESS_MONITOR_SLEEP_MS,
+            ))
+            .await;
+
             // Break when all objects created
             if pb_monitor.position() >= pb_monitor.length().unwrap_or(u64::MAX) {
                 break;
             }
-            
+
             let elapsed = last_time.elapsed();
             if elapsed.as_secs_f64() >= crate::constants::PROGRESS_STATS_REFRESH_SECS {
                 let current_ops = ops_monitor.load(Ordering::Relaxed);
                 let current_bytes = bytes_monitor.load(Ordering::Relaxed);
-                
+
                 let ops_delta = current_ops.saturating_sub(last_ops);
                 let bytes_delta = current_bytes.saturating_sub(last_bytes);
                 let time_delta = elapsed.as_secs_f64();
-                
+
                 if ops_delta > 0 {
                     let ops_per_sec = ops_delta as f64 / time_delta;
                     let mib_per_sec = (bytes_delta as f64 / 1_048_576.0) / time_delta;
-                    let avg_latency_ms = (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64;
-                    
+                    let avg_latency_ms =
+                        (time_delta * 1000.0 * concurrency as f64) / ops_delta as f64;
+
                     pb_monitor.set_message(format!(
                         "{} workers | {:.0} ops/s | {:.1} MiB/s | avg {:.2}ms",
                         concurrency, ops_per_sec, mib_per_sec, avg_latency_ms
                     ));
                 }
-                
+
                 last_ops = current_ops;
                 last_bytes = current_bytes;
                 last_time = Instant::now();
             }
         }
     });
-    
+
     let sem = Arc::new(Semaphore::new(concurrency));
     let pb_clone = pb.clone();
     let tracker_clone = live_stats_tracker.clone();
@@ -471,11 +537,14 @@ pub(crate) async fn prepare_parallel(
         }
     }
     let store_cache = Arc::new(store_cache);
-    info!("Created {} cached object store(s) for prepare phase", store_cache.len());
+    info!(
+        "Created {} cached object store(s) for prepare phase",
+        store_cache.len()
+    );
 
     let mut all_prepared = Vec::with_capacity(total_to_create as usize);
     let mut error_result: Option<anyhow::Error> = None;
-    let mut yield_counter = 0u64;  // v0.8.51: Counter for periodic yields
+    let mut yield_counter = 0u64; // v0.8.51: Counter for periodic yields
 
     const TASK_CHUNK_SIZE: usize = 100_000;
 
@@ -683,7 +752,9 @@ pub(crate) async fn prepare_parallel(
                             metrics.put.ops += 1;
                             metrics.put_bins.add(size);
                             let bucket = crate::metrics::bucket_index(size as usize);
-                            metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+                            metrics
+                                .put_hists
+                                .record(bucket, Duration::from_micros(latency_us));
 
                             // Wire KV cache: record every successfully created object.
                             if let Some(ref cache_arc) = metadata_cache {
@@ -845,7 +916,9 @@ pub(crate) async fn prepare_parallel(
                     metrics.put.ops += 1;
                     metrics.put_bins.add(size);
                     let bucket = crate::metrics::bucket_index(size as usize);
-                    metrics.put_hists.record(bucket, Duration::from_micros(latency_us));
+                    metrics
+                        .put_hists
+                        .record(bucket, Duration::from_micros(latency_us));
 
                     // Wire KV cache: record every successfully created object.
                     if let Some(ref cache_arc) = metadata_cache {
@@ -880,44 +953,54 @@ pub(crate) async fn prepare_parallel(
             }
         }
     }
-    
+
     // Check if we hit the error threshold
     if let Some(e) = error_result {
         // Wait for monitoring task before returning error
         monitor_handle.await.ok();
-        
+
         // Log summary of failures
         let (total_errors, _) = error_tracker.get_stats();
         let failures = error_tracker.get_failures();
         if !failures.is_empty() {
-            warn!("Prepare phase failed with {} errors. First 5 failures:", total_errors);
+            warn!(
+                "Prepare phase failed with {} errors. First 5 failures:",
+                total_errors
+            );
             for failure in failures.iter().take(5) {
                 warn!("  - {}: {}", failure.uri, failure.error);
             }
         }
-        
+
         return Err(e);
     }
-    
+
     // Log any partial failures that didn't exceed threshold
     let (total_errors, _) = error_tracker.get_stats();
     if total_errors > 0 {
-        warn!("⚠️ Prepare completed with {} failed objects (below threshold, continuing)", total_errors);
-        
+        warn!(
+            "⚠️ Prepare completed with {} failed objects (below threshold, continuing)",
+            total_errors
+        );
+
         // v0.8.52: DEFERRED RETRY PHASE - Retry all failed objects
         // This happens AFTER the fast path completes, so no performance impact on main create loop
         let failures = error_tracker.get_failures();
         if !failures.is_empty() {
-            info!("🔄 Starting deferred retry phase for {} failed objects...", failures.len());
-            
+            info!(
+                "🔄 Starting deferred retry phase for {} failed objects...",
+                failures.len()
+            );
+
             let retry_results = retry_failed_objects(
                 failures,
                 &store_cache,
                 live_stats_tracker.as_ref(),
-                concurrency / 4,  // Use fewer workers for retries to avoid overwhelming backend
-                total_to_create as usize,  // Total attempted for adaptive retry
-            ).await;
-            
+                concurrency / 4, // Use fewer workers for retries to avoid overwhelming backend
+                total_to_create as usize, // Total attempted for adaptive retry
+            )
+            .await;
+
             // Update metrics with retry results
             for result in &retry_results.successes {
                 metrics.put.bytes += result.size;
@@ -925,40 +1008,48 @@ pub(crate) async fn prepare_parallel(
                 metrics.put_bins.add(result.size);
                 let bucket = crate::metrics::bucket_index(result.size as usize);
                 metrics.put_hists.record(bucket, result.latency);
-                
+
                 all_prepared.push(PreparedObject {
                     uri: result.uri.clone(),
                     size: result.size,
                     created: true,
                 });
             }
-            
+
             // Report retry statistics
-            info!("✅ Retry phase complete: {} succeeded, {} permanently failed", 
-                  retry_results.successes.len(), retry_results.permanent_failures.len());
-            
+            info!(
+                "✅ Retry phase complete: {} succeeded, {} permanently failed",
+                retry_results.successes.len(),
+                retry_results.permanent_failures.len()
+            );
+
             if !retry_results.permanent_failures.is_empty() {
-                warn!("❌ {} objects failed even after retries:", retry_results.permanent_failures.len());
+                warn!(
+                    "❌ {} objects failed even after retries:",
+                    retry_results.permanent_failures.len()
+                );
                 for (uri, error) in retry_results.permanent_failures.iter().take(10) {
                     warn!("  - {}: {}", uri, error);
                 }
                 if retry_results.permanent_failures.len() > 10 {
-                    warn!("  ... and {} more", retry_results.permanent_failures.len() - 10);
+                    warn!(
+                        "  ... and {} more",
+                        retry_results.permanent_failures.len() - 10
+                    );
                 }
             }
         }
     }
-    
+
     // Wait for monitoring task to complete cleanly
     monitor_handle.await.ok();
-    
+
     pb.finish_with_message(format!("created {} objects (all sizes)", total_to_create));
-    
+
     // v0.7.9: Clear prepare progress after parallel prepare complete
     if let Some(ref tracker) = live_stats_tracker {
         tracker.set_prepare_complete();
     }
-    
+
     Ok(all_prepared)
 }
-

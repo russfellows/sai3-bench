@@ -30,15 +30,15 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.distributed.is_some());
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.agents.len(), 2);
     assert_eq!(dist.agents[0].address, "localhost:7167");
     assert_eq!(dist.agents[0].id, Some("agent-1".to_string()));
     assert_eq!(dist.agents[1].address, "localhost:7168");
-    
+
     Ok(())
 }
 
@@ -77,20 +77,29 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Check first agent
-    assert_eq!(dist.agents[0].env.get("AWS_PROFILE"), Some(&"benchmark-reader".to_string()));
-    assert_eq!(dist.agents[0].env.get("RUST_LOG"), Some(&"info".to_string()));
+    assert_eq!(
+        dist.agents[0].env.get("AWS_PROFILE"),
+        Some(&"benchmark-reader".to_string())
+    );
+    assert_eq!(
+        dist.agents[0].env.get("RUST_LOG"),
+        Some(&"info".to_string())
+    );
     assert!(dist.agents[0].target_override.is_none());
-    
+
     // Check second agent with overrides
-    assert_eq!(dist.agents[1].target_override, Some("s3://bucket-2/".to_string()));
+    assert_eq!(
+        dist.agents[1].target_override,
+        Some("s3://bucket-2/".to_string())
+    );
     assert_eq!(dist.agents[1].concurrency_override, Some(128));
     assert_eq!(dist.agents[1].volumes.len(), 1);
     assert_eq!(dist.agents[1].volumes[0], "/mnt/data:/data");
-    
+
     Ok(())
 }
 
@@ -121,15 +130,15 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     let dist = config.distributed.as_ref().unwrap();
     let ssh = dist.ssh.as_ref().unwrap();
-    
+
     assert!(ssh.enabled);
     assert_eq!(ssh.user, Some("ubuntu".to_string()));
     assert_eq!(ssh.key_path, Some("~/.ssh/test_key".to_string()));
     assert_eq!(ssh.timeout, 15);
-    
+
     Ok(())
 }
 
@@ -163,17 +172,17 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     let dist = config.distributed.as_ref().unwrap();
     let deploy = dist.deployment.as_ref().unwrap();
-    
+
     assert_eq!(deploy.deploy_type, "docker");
     assert_eq!(deploy.image, "sai3bench:v0.6.11");
     assert_eq!(deploy.network_mode, "host");
     assert_eq!(deploy.pull_policy, "always");
     assert_eq!(deploy.docker_args.len(), 2);
     assert!(deploy.docker_args.contains(&"--cpus=2".to_string()));
-    
+
     Ok(())
 }
 
@@ -198,16 +207,16 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Test defaults
-    assert_eq!(dist.start_delay, 2);  // default_start_delay
-    assert_eq!(dist.path_template, "agent-{id}/");  // default_path_template
-    assert_eq!(dist.agents[0].listen_port, 7167);  // default_agent_port
+    assert_eq!(dist.start_delay, 2); // default_start_delay
+    assert_eq!(dist.path_template, "agent-{id}/"); // default_path_template
+    assert_eq!(dist.agents[0].listen_port, 7167); // default_agent_port
     assert!(dist.agents[0].env.is_empty());
     assert!(dist.agents[0].volumes.is_empty());
-    
+
     Ok(())
 }
 
@@ -226,10 +235,10 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.distributed.is_none());
     assert_eq!(config.concurrency, 32);
-    
+
     Ok(())
 }
 
@@ -239,18 +248,18 @@ fn test_parse_real_config_file() -> Result<()> {
     let config_path = "tests/configs/local_test_2agents.yaml";
     let yaml = std::fs::read_to_string(config_path)?;
     let config: Config = serde_yaml::from_str(&yaml)?;
-    
+
     assert!(config.distributed.is_some());
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.agents.len(), 2);
     assert_eq!(dist.agents[0].address, "127.0.0.1:7167");
     assert_eq!(dist.agents[0].id, Some("test-agent-1".to_string()));
-    
+
     // Verify shared filesystem settings
     assert!(dist.shared_filesystem);
     assert_eq!(dist.tree_creation_mode, TreeCreationMode::Coordinator);
-    
+
     Ok(())
 }
 
@@ -281,11 +290,11 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.agents[0].address, "vm1.example.com:7167");
     assert_eq!(dist.agents[1].address, "vm2.example.com");
     assert_eq!(dist.agents[1].listen_port, 8888);
-    
+
     Ok(())
 }
 
@@ -293,28 +302,28 @@ workload:
 fn test_example_config_parsing() -> Result<()> {
     // Parse the comprehensive example config
     let config_path = "examples/distributed-ssh-automated.yaml";
-    
+
     if std::path::Path::new(config_path).exists() {
         let yaml = std::fs::read_to_string(config_path)?;
         let config: Config = serde_yaml::from_str(&yaml)?;
-        
+
         assert!(config.distributed.is_some());
         let dist = config.distributed.as_ref().unwrap();
-        
+
         // Should have 3 agents in example
         assert_eq!(dist.agents.len(), 3);
-        
+
         // SSH should be enabled
         assert!(dist.ssh.as_ref().unwrap().enabled);
-        
+
         // Deployment config should exist
         assert!(dist.deployment.is_some());
-        
+
         println!("✓ Example config parses successfully");
     } else {
         println!("⚠ Skipping - example config not found");
     }
-    
+
     Ok(())
 }
 
@@ -368,12 +377,12 @@ workload:
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
     let env = &dist.agents[0].env;
-    
+
     assert_eq!(env.len(), 5);
     assert_eq!(env.get("AWS_ACCESS_KEY_ID"), Some(&"test-key".to_string()));
     assert_eq!(env.get("AWS_REGION"), Some(&"us-west-2".to_string()));
     assert_eq!(env.get("CUSTOM_VAR"), Some(&"custom-value".to_string()));
-    
+
     Ok(())
 }
 
@@ -404,11 +413,17 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert!(!dist.shared_filesystem);
-    assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Isolated);
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Random);
-    
+    assert_eq!(
+        dist.tree_creation_mode,
+        sai3_bench::config::TreeCreationMode::Isolated
+    );
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Random
+    );
+
     Ok(())
 }
 
@@ -436,11 +451,17 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert!(dist.shared_filesystem);
-    assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Coordinator);
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Partitioned);
-    
+    assert_eq!(
+        dist.tree_creation_mode,
+        sai3_bench::config::TreeCreationMode::Coordinator
+    );
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Partitioned
+    );
+
     Ok(())
 }
 
@@ -468,11 +489,17 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert!(dist.shared_filesystem);
-    assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Concurrent);
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Exclusive);
-    
+    assert_eq!(
+        dist.tree_creation_mode,
+        sai3_bench::config::TreeCreationMode::Concurrent
+    );
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Exclusive
+    );
+
     Ok(())
 }
 
@@ -498,9 +525,12 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Random);
-    
+
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Random
+    );
+
     Ok(())
 }
 
@@ -527,10 +557,13 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Partitioned);
+
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Partitioned
+    );
     assert_eq!(dist.partition_overlap, 0.2);
-    
+
     Ok(())
 }
 
@@ -556,9 +589,12 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Exclusive);
-    
+
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Exclusive
+    );
+
     Ok(())
 }
 
@@ -585,10 +621,13 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Weighted);
+
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Weighted
+    );
     assert_eq!(dist.partition_overlap, 0.5);
-    
+
     Ok(())
 }
 
@@ -615,10 +654,10 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Should use default_partition_overlap() = 0.3
     assert_eq!(dist.partition_overlap, 0.3);
-    
+
     Ok(())
 }
 
@@ -645,9 +684,9 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.partition_overlap, 0.0);
-    
+
     Ok(())
 }
 
@@ -674,9 +713,9 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.partition_overlap, 1.0);
-    
+
     Ok(())
 }
 
@@ -702,9 +741,9 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert!(dist.shared_filesystem);
-    
+
     Ok(())
 }
 
@@ -730,36 +769,45 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert!(!dist.shared_filesystem);
-    
+
     Ok(())
 }
 
 #[test]
 fn test_enum_equality() {
-    use sai3_bench::config::{TreeCreationMode, PathSelectionStrategy};
-    
+    use sai3_bench::config::{PathSelectionStrategy, TreeCreationMode};
+
     // TreeCreationMode equality
     assert_eq!(TreeCreationMode::Isolated, TreeCreationMode::Isolated);
     assert_ne!(TreeCreationMode::Isolated, TreeCreationMode::Coordinator);
     assert_ne!(TreeCreationMode::Coordinator, TreeCreationMode::Concurrent);
-    
+
     // PathSelectionStrategy equality
     assert_eq!(PathSelectionStrategy::Random, PathSelectionStrategy::Random);
-    assert_ne!(PathSelectionStrategy::Random, PathSelectionStrategy::Partitioned);
-    assert_ne!(PathSelectionStrategy::Partitioned, PathSelectionStrategy::Exclusive);
-    assert_ne!(PathSelectionStrategy::Exclusive, PathSelectionStrategy::Weighted);
+    assert_ne!(
+        PathSelectionStrategy::Random,
+        PathSelectionStrategy::Partitioned
+    );
+    assert_ne!(
+        PathSelectionStrategy::Partitioned,
+        PathSelectionStrategy::Exclusive
+    );
+    assert_ne!(
+        PathSelectionStrategy::Exclusive,
+        PathSelectionStrategy::Weighted
+    );
 }
 
 #[test]
 fn test_enum_clone() {
-    use sai3_bench::config::{TreeCreationMode, PathSelectionStrategy};
-    
+    use sai3_bench::config::{PathSelectionStrategy, TreeCreationMode};
+
     let mode = TreeCreationMode::Concurrent;
     let mode_clone = mode.clone();
     assert_eq!(mode, mode_clone);
-    
+
     let strategy = PathSelectionStrategy::Weighted;
     let strategy_clone = strategy.clone();
     assert_eq!(strategy, strategy_clone);
@@ -767,17 +815,26 @@ fn test_enum_clone() {
 
 #[test]
 fn test_enum_debug_format() {
-    use sai3_bench::config::{TreeCreationMode, PathSelectionStrategy};
-    
+    use sai3_bench::config::{PathSelectionStrategy, TreeCreationMode};
+
     // TreeCreationMode debug
     assert_eq!(format!("{:?}", TreeCreationMode::Isolated), "Isolated");
-    assert_eq!(format!("{:?}", TreeCreationMode::Coordinator), "Coordinator");
+    assert_eq!(
+        format!("{:?}", TreeCreationMode::Coordinator),
+        "Coordinator"
+    );
     assert_eq!(format!("{:?}", TreeCreationMode::Concurrent), "Concurrent");
-    
+
     // PathSelectionStrategy debug
     assert_eq!(format!("{:?}", PathSelectionStrategy::Random), "Random");
-    assert_eq!(format!("{:?}", PathSelectionStrategy::Partitioned), "Partitioned");
-    assert_eq!(format!("{:?}", PathSelectionStrategy::Exclusive), "Exclusive");
+    assert_eq!(
+        format!("{:?}", PathSelectionStrategy::Partitioned),
+        "Partitioned"
+    );
+    assert_eq!(
+        format!("{:?}", PathSelectionStrategy::Exclusive),
+        "Exclusive"
+    );
     assert_eq!(format!("{:?}", PathSelectionStrategy::Weighted), "Weighted");
 }
 
@@ -802,7 +859,10 @@ workload:
 "#;
 
     let result: Result<Config, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_err(), "Should fail with invalid tree_creation_mode");
+    assert!(
+        result.is_err(),
+        "Should fail with invalid tree_creation_mode"
+    );
 }
 
 #[test]
@@ -874,43 +934,47 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     // Validate all new fields
     let dist = config.distributed.as_ref().unwrap();
     assert_eq!(dist.agents.len(), 2);
     assert!(dist.shared_filesystem);
-    assert_eq!(dist.tree_creation_mode, sai3_bench::config::TreeCreationMode::Concurrent);
-    assert_eq!(dist.path_selection, sai3_bench::config::PathSelectionStrategy::Partitioned);
+    assert_eq!(
+        dist.tree_creation_mode,
+        sai3_bench::config::TreeCreationMode::Concurrent
+    );
+    assert_eq!(
+        dist.path_selection,
+        sai3_bench::config::PathSelectionStrategy::Partitioned
+    );
     assert_eq!(dist.partition_overlap, 0.25);
     assert_eq!(dist.start_delay, 3);
     assert_eq!(dist.path_template, "node-{id}/");
-    
+
     Ok(())
 }
 
 #[test]
 fn test_serialize_deserialize_round_trip() -> Result<()> {
     use sai3_bench::config::{
-      AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig,
-      PathSelectionStrategy, StageConfig, StageSpecificConfig, TreeCreationMode,
+        AgentConfig, BarrierSyncConfig, CompletionCriteria, DistributedConfig,
+        PathSelectionStrategy, StageConfig, StageSpecificConfig, TreeCreationMode,
     };
     use std::time::Duration;
-    
+
     let original_dist = DistributedConfig {
-        agents: vec![
-            AgentConfig {
-                address: "localhost:7167".to_string(),
-                id: Some("test-agent".to_string()),
-                target_override: None,
-                concurrency_override: None,
-                env: std::collections::HashMap::new(),
-                volumes: vec![],
-                path_template: None,
-                listen_port: 7167,
-                multi_endpoint: None,
-                kv_cache_dir: None,
-            }
-        ],
+        agents: vec![AgentConfig {
+            address: "localhost:7167".to_string(),
+            id: Some("test-agent".to_string()),
+            target_override: None,
+            concurrency_override: None,
+            env: std::collections::HashMap::new(),
+            volumes: vec![],
+            path_template: None,
+            listen_port: 7167,
+            multi_endpoint: None,
+            kv_cache_dir: None,
+        }],
         ssh: None,
         deployment: None,
         start_delay: 2,
@@ -921,49 +985,55 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
         partition_overlap: 0.3,
         grpc_keepalive_interval: 30,
         grpc_keepalive_timeout: 10,
-        agent_ready_timeout: 120,  // v0.8.51: Default timeout
+        agent_ready_timeout: 120, // v0.8.51: Default timeout
         barrier_sync: BarrierSyncConfig::default(),
         stages: vec![
-          StageConfig {
-            name: "preflight".to_string(),
-            order: 1,
-            completion: CompletionCriteria::ValidationPassed,
-            barrier: None,
-            timeout_secs: None,
-            optional: false,
-            config: StageSpecificConfig::Validation,
-          },
-          StageConfig {
-            name: "execute".to_string(),
-            order: 2,
-            completion: CompletionCriteria::Duration,
-            barrier: None,
-            timeout_secs: None,
-            optional: false,
-            config: StageSpecificConfig::Execute {
-              duration: Duration::from_secs(60),
+            StageConfig {
+                name: "preflight".to_string(),
+                order: 1,
+                completion: CompletionCriteria::ValidationPassed,
+                barrier: None,
+                timeout_secs: None,
+                optional: false,
+                config: StageSpecificConfig::Validation,
             },
-          },
+            StageConfig {
+                name: "execute".to_string(),
+                order: 2,
+                completion: CompletionCriteria::Duration,
+                barrier: None,
+                timeout_secs: None,
+                optional: false,
+                config: StageSpecificConfig::Execute {
+                    duration: Duration::from_secs(60),
+                },
+            },
         ],
         kv_cache_dir: None,
     };
-    
+
     // Serialize to YAML
     let yaml = serde_yaml::to_string(&original_dist)?;
-    
+
     // Deserialize back
     let deserialized: DistributedConfig = serde_yaml::from_str(&yaml)?;
-    
+
     // Verify all fields match
     assert_eq!(deserialized.agents.len(), 1);
     assert!(deserialized.shared_filesystem);
-    assert_eq!(deserialized.tree_creation_mode, TreeCreationMode::Concurrent);
-    assert_eq!(deserialized.path_selection, PathSelectionStrategy::Partitioned);
+    assert_eq!(
+        deserialized.tree_creation_mode,
+        TreeCreationMode::Concurrent
+    );
+    assert_eq!(
+        deserialized.path_selection,
+        PathSelectionStrategy::Partitioned
+    );
     assert_eq!(deserialized.partition_overlap, 0.3);
     assert_eq!(deserialized.stages.len(), 2);
     assert_eq!(deserialized.stages[0].name, "preflight");
     assert_eq!(deserialized.stages[1].name, "execute");
-    
+
     Ok(())
 }
 
@@ -975,9 +1045,9 @@ fn test_serialize_deserialize_round_trip() -> Result<()> {
 fn test_replay_config_default() {
     use sai3_bench::config::ReplayConfig;
     use std::time::Duration;
-    
+
     let config = ReplayConfig::default();
-    
+
     assert_eq!(config.lag_threshold, Duration::from_secs(5));
     assert_eq!(config.recovery_threshold, Duration::from_secs(1));
     assert_eq!(config.max_flaps_per_minute, 3);
@@ -989,7 +1059,7 @@ fn test_replay_config_default() {
 fn test_replay_config_parse_full() -> Result<()> {
     use sai3_bench::config::ReplayConfig;
     use std::time::Duration;
-    
+
     let yaml = r#"
 lag_threshold: 10s
 recovery_threshold: 2s
@@ -999,13 +1069,13 @@ max_concurrent: 500
 "#;
 
     let config: ReplayConfig = serde_yaml::from_str(yaml)?;
-    
+
     assert_eq!(config.lag_threshold, Duration::from_secs(10));
     assert_eq!(config.recovery_threshold, Duration::from_secs(2));
     assert_eq!(config.max_flaps_per_minute, 5);
     assert_eq!(config.drain_timeout, Duration::from_secs(30));
     assert_eq!(config.max_concurrent, 500);
-    
+
     Ok(())
 }
 
@@ -1013,7 +1083,7 @@ max_concurrent: 500
 fn test_replay_config_parse_partial_with_defaults() -> Result<()> {
     use sai3_bench::config::ReplayConfig;
     use std::time::Duration;
-    
+
     // Only specify some fields, others should use defaults
     let yaml = r#"
 lag_threshold: 8s
@@ -1021,13 +1091,13 @@ max_concurrent: 2000
 "#;
 
     let config: ReplayConfig = serde_yaml::from_str(yaml)?;
-    
+
     assert_eq!(config.lag_threshold, Duration::from_secs(8));
     assert_eq!(config.recovery_threshold, Duration::from_secs(1)); // default
     assert_eq!(config.max_flaps_per_minute, 3); // default
     assert_eq!(config.drain_timeout, Duration::from_secs(10)); // default
     assert_eq!(config.max_concurrent, 2000);
-    
+
     Ok(())
 }
 
@@ -1035,7 +1105,7 @@ max_concurrent: 2000
 fn test_replay_config_parse_humantime_durations() -> Result<()> {
     use sai3_bench::config::ReplayConfig;
     use std::time::Duration;
-    
+
     let yaml = r#"
 lag_threshold: 5000ms
 recovery_threshold: 500ms
@@ -1043,11 +1113,11 @@ drain_timeout: 1m
 "#;
 
     let config: ReplayConfig = serde_yaml::from_str(yaml)?;
-    
+
     assert_eq!(config.lag_threshold, Duration::from_millis(5000));
     assert_eq!(config.recovery_threshold, Duration::from_millis(500));
     assert_eq!(config.drain_timeout, Duration::from_secs(60));
-    
+
     Ok(())
 }
 
@@ -1055,7 +1125,7 @@ drain_timeout: 1m
 fn test_replay_config_serialize_deserialize() -> Result<()> {
     use sai3_bench::config::ReplayConfig;
     use std::time::Duration;
-    
+
     let original = ReplayConfig {
         lag_threshold: Duration::from_secs(7),
         recovery_threshold: Duration::from_millis(1500),
@@ -1063,19 +1133,22 @@ fn test_replay_config_serialize_deserialize() -> Result<()> {
         drain_timeout: Duration::from_secs(15),
         max_concurrent: 750,
     };
-    
+
     // Serialize to YAML
     let yaml = serde_yaml::to_string(&original)?;
-    
+
     // Deserialize back
     let deserialized: ReplayConfig = serde_yaml::from_str(&yaml)?;
-    
+
     assert_eq!(deserialized.lag_threshold, original.lag_threshold);
     assert_eq!(deserialized.recovery_threshold, original.recovery_threshold);
-    assert_eq!(deserialized.max_flaps_per_minute, original.max_flaps_per_minute);
+    assert_eq!(
+        deserialized.max_flaps_per_minute,
+        original.max_flaps_per_minute
+    );
     assert_eq!(deserialized.drain_timeout, original.drain_timeout);
     assert_eq!(deserialized.max_concurrent, original.max_concurrent);
-    
+
     Ok(())
 }
 
@@ -1098,10 +1171,13 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.warmup_period.is_some());
-    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(30));
-    
+    assert_eq!(
+        config.warmup_period.unwrap(),
+        std::time::Duration::from_secs(30)
+    );
+
     Ok(())
 }
 
@@ -1119,10 +1195,13 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.warmup_period.is_some());
-    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(120));
-    
+    assert_eq!(
+        config.warmup_period.unwrap(),
+        std::time::Duration::from_secs(120)
+    );
+
     Ok(())
 }
 
@@ -1139,9 +1218,9 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.warmup_period.is_none());
-    
+
     Ok(())
 }
 
@@ -1162,12 +1241,15 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/tmp/perf-metrics.tsv")));
+    assert_eq!(
+        perf_log.path,
+        Some(std::path::PathBuf::from("/tmp/perf-metrics.tsv"))
+    );
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(5));
-    
+
     Ok(())
 }
 
@@ -1188,12 +1270,15 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/data/metrics/benchmark.tsv.zst")));
+    assert_eq!(
+        perf_log.path,
+        Some(std::path::PathBuf::from("/data/metrics/benchmark.tsv.zst"))
+    );
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
-    
+
     Ok(())
 }
 
@@ -1214,12 +1299,12 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, None);  // No path specified
+    assert_eq!(perf_log.path, None); // No path specified
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(2));
-    
+
     Ok(())
 }
 
@@ -1239,12 +1324,12 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
     // Default interval should be 1 second
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
-    
+
     Ok(())
 }
 
@@ -1271,20 +1356,26 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     // Verify warmup
     assert!(config.warmup_period.is_some());
-    assert_eq!(config.warmup_period.unwrap(), std::time::Duration::from_secs(30));
-    
+    assert_eq!(
+        config.warmup_period.unwrap(),
+        std::time::Duration::from_secs(30)
+    );
+
     // Verify perf_log
     assert!(config.perf_log.is_some());
     let perf_log = config.perf_log.as_ref().unwrap();
-    assert_eq!(perf_log.path, Some(std::path::PathBuf::from("/data/benchmark/perf.tsv.zst")));
+    assert_eq!(
+        perf_log.path,
+        Some(std::path::PathBuf::from("/data/benchmark/perf.tsv.zst"))
+    );
     assert_eq!(perf_log.interval, std::time::Duration::from_secs(1));
-    
+
     // Verify other fields
     assert_eq!(config.duration, std::time::Duration::from_secs(300));
     assert_eq!(config.concurrency, 32);
-    
+
     Ok(())
 }

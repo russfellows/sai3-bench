@@ -30,8 +30,7 @@ use std::path::Path;
 
 pub const LEDGER_FILENAME: &str = "populate_ledger.tsv";
 
-const HEADER: &str =
-    "timestamp\ttest_name\tagent_id\tstage\tobjects_created\tobjects_existed\t\
+const HEADER: &str = "timestamp\ttest_name\tagent_id\tstage\tobjects_created\tobjects_existed\t\
 total_objects\ttotal_bytes\tavg_bytes\twall_seconds\tops_per_sec";
 
 /// A single row for the populate ledger.

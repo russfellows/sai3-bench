@@ -27,16 +27,16 @@
 //! // controller.wait_for_next().await;  // Throttle before each operation
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::time::{sleep, interval, Interval, MissedTickBehavior};
-use tokio::sync::Mutex;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Exp};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tokio::time::{interval, sleep, Interval, MissedTickBehavior};
 
-use crate::config::{IoRateConfig, IopsTarget, ArrivalDistribution};
+use crate::config::{ArrivalDistribution, IoRateConfig, IopsTarget};
 
 /// Rate controller for throttling operation starts
 ///
@@ -87,7 +87,7 @@ impl RateController {
     /// the controller will not throttle (wait_for_next returns immediately).
     pub fn new(config: IoRateConfig, workers: usize) -> Self {
         let inter_arrival_micros = match config.iops {
-            IopsTarget::Max => 0.0,  // No throttling
+            IopsTarget::Max => 0.0, // No throttling
             IopsTarget::Fixed(iops) => {
                 // Calculate per-worker inter-arrival time
                 // total_iops = workers * ops_per_worker_per_sec
@@ -96,20 +96,22 @@ impl RateController {
                 1_000_000.0 / ops_per_worker_per_sec
             }
         };
-        
+
         // Create exponential distribution if needed
         // Lambda parameter is 1 / mean inter-arrival time
-        let exp_dist = if matches!(config.distribution, ArrivalDistribution::Exponential) 
-                          && inter_arrival_micros > 0.0 {
+        let exp_dist = if matches!(config.distribution, ArrivalDistribution::Exponential)
+            && inter_arrival_micros > 0.0
+        {
             // Exponential distribution with mean = inter_arrival_micros
             Some(Exp::new(1.0 / inter_arrival_micros).unwrap())
         } else {
             None
         };
-        
+
         // Create interval timer for uniform distribution (better drift compensation)
         let uniform_interval = if matches!(config.distribution, ArrivalDistribution::Uniform)
-                                  && inter_arrival_micros > 0.0 {
+            && inter_arrival_micros > 0.0
+        {
             let duration = Duration::from_micros(inter_arrival_micros as u64);
             let mut interval_timer = interval(duration);
             // Delay: skip missed ticks (don't play catch-up)
@@ -118,7 +120,7 @@ impl RateController {
         } else {
             Mutex::new(None)
         };
-        
+
         Self {
             config,
             inter_arrival_micros,
@@ -129,7 +131,7 @@ impl RateController {
             ops_issued: Arc::new(AtomicU64::new(0)),
         }
     }
-    
+
     /// Wait until next operation should be issued
     ///
     /// Returns immediately if no rate limiting is configured (iops=max).
@@ -143,9 +145,9 @@ impl RateController {
     /// - **Deterministic**: Calculates exact delay to maintain precise rate using tokio::sleep
     pub async fn wait_for_next(&self) {
         if self.inter_arrival_micros == 0.0 {
-            return;  // No throttling
+            return; // No throttling
         }
-        
+
         match self.config.distribution {
             ArrivalDistribution::Exponential => {
                 // Poisson arrivals (realistic)
@@ -154,7 +156,7 @@ impl RateController {
                     let mut rng = self.rng.lock().await;
                     self.exp_dist.as_ref().unwrap().sample(&mut *rng)
                 };
-                
+
                 if delay_micros > 0.0 {
                     let delay = Duration::from_micros(delay_micros as u64);
                     sleep(delay).await;
@@ -176,7 +178,7 @@ impl RateController {
                 let target_time_micros = (ops as f64) * self.inter_arrival_micros;
                 let elapsed_micros = self.start_time.elapsed().as_micros() as f64;
                 let delay_micros = target_time_micros - elapsed_micros;
-                
+
                 if delay_micros > 0.0 {
                     let delay = Duration::from_micros(delay_micros as u64);
                     sleep(delay).await;
@@ -184,7 +186,7 @@ impl RateController {
             }
         }
     }
-    
+
     /// Get current actual IOPS rate (for monitoring/debugging)
     ///
     /// Returns the actual achieved IOPS based on elapsed time and
@@ -198,7 +200,7 @@ impl RateController {
         let ops = self.ops_issued.load(Ordering::Relaxed);
         (ops as f64) / elapsed
     }
-    
+
     /// Get target IOPS (for reporting)
     pub fn target_iops(&self) -> Option<u64> {
         match self.config.iops {
@@ -206,7 +208,7 @@ impl RateController {
             IopsTarget::Fixed(iops) => Some(iops),
         }
     }
-    
+
     /// Get configured distribution type (for reporting)
     pub fn distribution(&self) -> ArrivalDistribution {
         self.config.distribution
@@ -238,19 +240,19 @@ impl OptionalRateController {
         let controller = config.map(|cfg| Arc::new(RateController::new(cfg, workers)));
         Self { controller }
     }
-    
+
     /// Wait for next operation (no-op if rate control is disabled)
     pub async fn wait(&self) {
         if let Some(ref ctrl) = self.controller {
             ctrl.wait_for_next().await;
         }
     }
-    
+
     /// Check if rate control is enabled
     pub fn is_enabled(&self) -> bool {
         self.controller.is_some()
     }
-    
+
     /// Get reference to underlying controller (for statistics)
     pub fn controller(&self) -> Option<&Arc<RateController>> {
         self.controller.as_ref()
@@ -279,7 +281,7 @@ mod tests {
             distribution: ArrivalDistribution::Exponential,
         };
         let controller = RateController::new(config, 10);
-        
+
         // 1000 IOPS / 10 workers = 100 ops/sec per worker
         // Inter-arrival = 1,000,000 / 100 = 10,000 microseconds
         assert_eq!(controller.inter_arrival_micros, 10_000.0);
@@ -293,7 +295,7 @@ mod tests {
             distribution: ArrivalDistribution::Uniform,
         };
         let controller = RateController::new(config, 20);
-        
+
         // 5000 IOPS / 20 workers = 250 ops/sec per worker
         // Inter-arrival = 1,000,000 / 250 = 4,000 microseconds
         assert_eq!(controller.inter_arrival_micros, 4_000.0);

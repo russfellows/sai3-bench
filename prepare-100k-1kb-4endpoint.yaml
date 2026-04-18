@@ -1,0 +1,55 @@
+# prepare-100k-1kb-4endpoint.yaml
+#
+# Standalone (no agents) prepare benchmark: create 100,000 × 1 KiB objects
+# across 4 S3 endpoints on a single bucket, then run a short 5-second GET
+# workload to confirm the objects are readable.
+#
+# Prerequisites:
+#   export AWS_ACCESS_KEY_ID=<key>
+#   export AWS_SECRET_ACCESS_KEY=<secret>
+#
+# Dry-run first:
+#   ./target/release/sai3-bench run --config prepare-100k-1kb-4endpoint.yaml --dry-run
+#
+# Live run:
+#   ./target/release/sai3-bench run --config prepare-100k-1kb-4endpoint.yaml
+
+concurrency: 96          # 24 workers × 4 endpoints = 96 in-flight PUTs
+
+duration: 5s             # Workload stage only — prepare runs to completion first
+
+enable_metadata_cache: false   # No crash-resume needed for a short test;
+                               # eliminates per-object KV writes for max throughput
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+# 4 endpoints, 1 bucket — round-robin load balancing
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://10.9.0.17:80/s3-bucket1/"
+    - "s3://10.9.0.18:80/s3-bucket1/"
+    - "s3://10.9.0.19:80/s3-bucket1/"
+    - "s3://10.9.0.20:80/s3-bucket1/"
+
+prepare:
+  prepare_strategy: parallel
+  skip_verification: true
+  force_overwrite: true
+  ensure_objects:
+    - base_uri: "data/"        # Relative to each endpoint — objects land in <endpoint>/data/
+      count: 100000
+      min_size: 1024           # 1 KiB
+      max_size: 1024           # Fixed size
+      fill: random
+      use_multi_endpoint: true
+  cleanup: false               # Keep the objects for inspection / follow-up runs
+
+# Short GET workload — just confirms objects are reachable after prepare
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+    use_multi_endpoint: true

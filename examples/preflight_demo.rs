@@ -12,13 +12,13 @@ async fn main() -> anyhow::Result<()> {
     result.display(Some("example-agent"));
 
     println!("\n{}", "=".repeat(80));
-    
+
     // Example 2: Validate a non-existent directory (will show errors)
     println!("\n=== Example 2: Validating non-existent directory ===");
     let bad_path = PathBuf::from("/this/path/does/not/exist");
     let result = validate_filesystem(&bad_path, true, None).await?;
     result.display(Some("example-agent"));
-    
+
     println!("\n{}", "=".repeat(80));
 
     // Example 3: Validate for read-only workload (skips write tests)

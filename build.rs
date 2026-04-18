@@ -8,4 +8,3 @@ fn main() {
         .compile_protos(&["proto/iobench.proto"], &["proto"])
         .unwrap();
 }
-

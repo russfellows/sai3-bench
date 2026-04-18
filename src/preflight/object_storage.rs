@@ -68,10 +68,7 @@ pub async fn validate_object_storage(
         // Stream at most 1 key — fast even for buckets with billions of objects.
         // A network/auth error manifests as Some(Err(…)); an empty bucket as None.
         let mut stream = store.list_stream(endpoint, false);
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            stream.next(),
-        ).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
             Err(_elapsed) => {
                 results.push(ValidationResult::error(
                     ErrorType::Network,
@@ -100,11 +97,15 @@ pub async fn validate_object_storage(
                     || err_str.contains("no such bucket")
                     || err_str.contains("not found")
                 {
-                    (ErrorType::Configuration,
-                     "Bucket does not exist or the endpoint path is incorrect")
+                    (
+                        ErrorType::Configuration,
+                        "Bucket does not exist or the endpoint path is incorrect",
+                    )
                 } else {
-                    (ErrorType::Network,
-                     "Check network connectivity and storage backend availability")
+                    (
+                        ErrorType::Network,
+                        "Check network connectivity and storage backend availability",
+                    )
                 };
                 results.push(ValidationResult::error(
                     error_type,
@@ -152,7 +153,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     // known string (PROBE_CONTENT) that we verify on read-back.
     let suffix: u32 = rand::rng().random();
     let sep = if endpoint.ends_with('/') { "" } else { "/" };
-    let probe_uri = format!("{}{}sai3bench-preflight-probe-{:08x}.bin", endpoint, sep, suffix);
+    let probe_uri = format!(
+        "{}{}sai3bench-preflight-probe-{:08x}.bin",
+        endpoint, sep, suffix
+    );
 
     // ── Step 1: PUT ────────────────────────────────────────────────────────────
     let store = match store_for_uri(&probe_uri) {
@@ -161,7 +165,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
             results.push(ValidationResult::warning(
                 ErrorType::Configuration,
                 "write-probe",
-                format!("Cannot initialize store for write probe at {}: {}", endpoint, e),
+                format!(
+                    "Cannot initialize store for write probe at {}: {}",
+                    endpoint, e
+                ),
                 "Write probe skipped — check URI format",
             ));
             return results;
@@ -172,7 +179,8 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     let put_result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         store.put(&probe_uri, put_data),
-    ).await;
+    )
+    .await;
 
     match put_result {
         Err(_elapsed) => {
@@ -202,10 +210,8 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     }
 
     // ── Step 2: GET and verify content ─────────────────────────────────────────
-    let get_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        store.get(&probe_uri),
-    ).await;
+    let get_result =
+        tokio::time::timeout(std::time::Duration::from_secs(15), store.get(&probe_uri)).await;
 
     match get_result {
         Err(_elapsed) => {
@@ -247,17 +253,18 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     }
 
     // ── Step 3: DELETE ─────────────────────────────────────────────────────────
-    let del_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        store.delete(&probe_uri),
-    ).await;
+    let del_result =
+        tokio::time::timeout(std::time::Duration::from_secs(15), store.delete(&probe_uri)).await;
 
     match del_result {
         Err(_elapsed) => {
             results.push(ValidationResult::warning(
                 ErrorType::Network,
                 "write-probe-delete",
-                format!("Write probe DELETE timed out at {} — probe object may remain", endpoint),
+                format!(
+                    "Write probe DELETE timed out at {} — probe object may remain",
+                    endpoint
+                ),
                 "Manually delete: sai3bench-preflight-probe-*.bin",
             ));
         }
@@ -265,7 +272,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
             results.push(ValidationResult::warning(
                 ErrorType::Permission,
                 "write-probe-delete",
-                format!("Write probe DELETE failed at {}: {} — probe object may remain", endpoint, e),
+                format!(
+                    "Write probe DELETE failed at {}: {} — probe object may remain",
+                    endpoint, e
+                ),
                 "Manually delete: sai3bench-preflight-probe-*.bin",
             ));
         }
@@ -421,5 +431,3 @@ async fn check_azure_managed_identity() -> Result<String> {
         anyhow::bail!("No managed identity attached to instance");
     }
 }
-
-

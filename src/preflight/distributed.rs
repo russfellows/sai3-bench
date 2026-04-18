@@ -5,7 +5,7 @@
 //! - Agents accessing unavailable storage endpoints
 //! - Tree creation mode conflicts
 
-use super::{ValidationResult, ResultLevel, ErrorType};
+use super::{ErrorType, ResultLevel, ValidationResult};
 use crate::config::{Config, TreeCreationMode};
 use anyhow::Result;
 
@@ -34,17 +34,18 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
         // Validate based on shared_filesystem setting
         if let Some(ref prepare) = config.prepare {
             for spec in &prepare.ensure_objects {
-                
                 if dist.shared_filesystem {
                     // SHARED STORAGE: All agents access same underlying storage
                     // Validate that multi_endpoint configs are compatible
                     if spec.use_multi_endpoint {
                         // Check if all agents have multi_endpoint configured
-                        let agents_without_multiep: Vec<String> = dist.agents.iter()
+                        let agents_without_multiep: Vec<String> = dist
+                            .agents
+                            .iter()
                             .filter(|a| a.multi_endpoint.is_none())
                             .map(|a| a.id.as_deref().unwrap_or(&a.address).to_string())
                             .collect();
-                        
+
                         if !agents_without_multiep.is_empty() {
                             results.push(ValidationResult {
                                 level: ResultLevel::Warning,
@@ -70,11 +71,12 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                     // PER-AGENT STORAGE: Each agent has independent storage
                     // THE BUG: base_uri specified in isolated mode with use_multi_endpoint
                     // This causes listing to use base_uri instead of each agent's first endpoint
-                    if spec.use_multi_endpoint 
-                        && spec.base_uri.is_some() 
-                        && dist.tree_creation_mode == TreeCreationMode::Isolated 
+                    if spec.use_multi_endpoint
+                        && spec.base_uri.is_some()
+                        && dist.tree_creation_mode == TreeCreationMode::Isolated
                     {
-                        results.push(ValidationResult {
+                        if let Some(base_uri) = spec.base_uri.as_ref() {
+                            results.push(ValidationResult {
                             level: ResultLevel::Error,
                             error_type: Some(ErrorType::Configuration),
                             message: "base_uri should not be specified in isolated mode with per-agent storage".to_string(),
@@ -91,20 +93,21 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                                  - Remove base_uri (recommended for isolated mode)\n\
                                  - Set shared_filesystem: true (if agents actually share storage)\n\
                                  - Set tree_creation_mode: concurrent/coordinator (if sharing tree)",
-                                spec.base_uri.as_ref().unwrap()
+                                base_uri
                             ),
                             details: Some(format!(
                                 "This configuration causes agents to list objects from '{}' during\n\
                                  the prepare phase, which may not match their configured multi_endpoint.\n\
                                  This leads to h2 protocol errors or empty listings when agents try to\n\
                                  access storage they're not configured to use.",
-                                spec.base_uri.as_ref().unwrap()
+                                base_uri
                             )),
                             test_phase: "config_validation".to_string(),
                         });
+                        }
                     }
                 }
-                
+
                 // Check for missing base_uri when NOT using multi_endpoint
                 if !spec.use_multi_endpoint && spec.base_uri.is_none() {
                     results.push(ValidationResult {
@@ -130,12 +133,16 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
 mod tests {
     use super::*;
     use crate::config::{
-        Config, DistributedConfig, AgentConfig, MultiEndpointConfig, PrepareConfig, EnsureSpec,
-        FillPattern, TreeCreationMode, PathSelectionStrategy, BarrierSyncConfig,
+        AgentConfig, BarrierSyncConfig, Config, DistributedConfig, EnsureSpec, FillPattern,
+        MultiEndpointConfig, PathSelectionStrategy, PrepareConfig, TreeCreationMode,
     };
 
     /// Helper to create a minimal Config for testing
-    fn create_test_config(target: Option<String>, distributed: Option<DistributedConfig>, prepare: Option<PrepareConfig>) -> Config {
+    fn create_test_config(
+        target: Option<String>,
+        distributed: Option<DistributedConfig>,
+        prepare: Option<PrepareConfig>,
+    ) -> Config {
         Config {
             duration: std::time::Duration::from_secs(60),
             concurrency: 8,
@@ -186,23 +193,32 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
-                    create_agent("agent-3", vec!["file:///mnt/filesys9/benchmark/".to_string()]),
+                    create_agent(
+                        "agent-1",
+                        vec!["file:///mnt/filesys1/benchmark/".to_string()],
+                    ),
+                    create_agent(
+                        "agent-2",
+                        vec!["file:///mnt/filesys5/benchmark/".to_string()],
+                    ),
+                    create_agent(
+                        "agent-3",
+                        vec!["file:///mnt/filesys9/benchmark/".to_string()],
+                    ),
                 ],
                 ssh: None,
                 deployment: None,
                 start_delay: 2,
                 path_template: "agent-{id}/".to_string(),
-                shared_filesystem: false,  // Per-agent storage
-                tree_creation_mode: TreeCreationMode::Isolated,  // Each agent creates separate tree
+                shared_filesystem: false, // Per-agent storage
+                tree_creation_mode: TreeCreationMode::Isolated, // Each agent creates separate tree
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
-                agent_ready_timeout: 120,  // v0.8.51: Default timeout
-                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: Vec::new(),  // No YAML stages for tests
+                agent_ready_timeout: 120, // v0.8.51: Default timeout
+                barrier_sync: BarrierSyncConfig::default(), // No barrier sync for tests
+                stages: Vec::new(),       // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -229,12 +245,15 @@ mod tests {
         );
 
         let results = validate_distributed_config(&config).unwrap();
-        
+
         // Should detect the error
-        assert!(!results.is_empty(), "Should detect base_uri in isolated mode");
+        assert!(
+            !results.is_empty(),
+            "Should detect base_uri in isolated mode"
+        );
         let error = results.iter().find(|r| r.level == ResultLevel::Error);
         assert!(error.is_some(), "Should have an error result");
-        
+
         let error = error.unwrap();
         assert_eq!(error.error_type, Some(ErrorType::Configuration));
         assert!(error.message.contains("isolated mode"));
@@ -246,7 +265,7 @@ mod tests {
         // VALID: Shared filesystem - all agents access same storage
         // base_uri is fine here because agents are expected to share storage
         let shared_uri = "file:///shared/data/".to_string();
-        
+
         let config = create_test_config(
             Some(shared_uri.clone()),
             Some(DistributedConfig {
@@ -258,15 +277,15 @@ mod tests {
                 deployment: None,
                 start_delay: 2,
                 path_template: "agent-{id}/".to_string(),
-                shared_filesystem: true,  // SHARED - base_uri is OK
+                shared_filesystem: true, // SHARED - base_uri is OK
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
-                agent_ready_timeout: 120,  // v0.8.51: Default timeout
-                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: Vec::new(),  // No YAML stages for tests
+                agent_ready_timeout: 120, // v0.8.51: Default timeout
+                barrier_sync: BarrierSyncConfig::default(), // No barrier sync for tests
+                stages: Vec::new(),       // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -293,13 +312,19 @@ mod tests {
         );
 
         let results = validate_distributed_config(&config).unwrap();
-        
+
         // Should have NO errors or warnings - this is a valid configuration
         let has_error = results.iter().any(|r| r.level == ResultLevel::Error);
-        assert!(!has_error, "Shared filesystem with base_uri should be valid");
-        
+        assert!(
+            !has_error,
+            "Shared filesystem with base_uri should be valid"
+        );
+
         let has_warning = results.iter().any(|r| r.level == ResultLevel::Warning);
-        assert!(!has_warning, "Shared filesystem with base_uri should not warn");
+        assert!(
+            !has_warning,
+            "Shared filesystem with base_uri should not warn"
+        );
     }
 
     #[test]
@@ -310,22 +335,28 @@ mod tests {
             Some("file:///test/".to_string()),
             Some(DistributedConfig {
                 agents: vec![
-                    create_agent("agent-1", vec!["file:///mnt/filesys1/benchmark/".to_string()]),
-                    create_agent("agent-2", vec!["file:///mnt/filesys5/benchmark/".to_string()]),
+                    create_agent(
+                        "agent-1",
+                        vec!["file:///mnt/filesys1/benchmark/".to_string()],
+                    ),
+                    create_agent(
+                        "agent-2",
+                        vec!["file:///mnt/filesys5/benchmark/".to_string()],
+                    ),
                 ],
                 ssh: None,
                 deployment: None,
                 start_delay: 2,
                 path_template: "agent-{id}/".to_string(),
-                shared_filesystem: false,  // Per-agent storage
-                tree_creation_mode: TreeCreationMode::Isolated,  // Isolated trees
+                shared_filesystem: false, // Per-agent storage
+                tree_creation_mode: TreeCreationMode::Isolated, // Isolated trees
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
-                agent_ready_timeout: 120,  // v0.8.51: Default timeout
-                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: Vec::new(),  // No YAML stages for tests
+                agent_ready_timeout: 120, // v0.8.51: Default timeout
+                barrier_sync: BarrierSyncConfig::default(), // No barrier sync for tests
+                stages: Vec::new(),       // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -352,12 +383,15 @@ mod tests {
         );
 
         let results = validate_distributed_config(&config).unwrap();
-        
+
         // Should have no errors or warnings - this is the recommended pattern
-        let has_issues = results.iter().any(|r| {
-            r.level == ResultLevel::Error || r.level == ResultLevel::Warning
-        });
-        assert!(!has_issues, "Isolated mode without base_uri should be valid");
+        let has_issues = results
+            .iter()
+            .any(|r| r.level == ResultLevel::Error || r.level == ResultLevel::Warning);
+        assert!(
+            !has_issues,
+            "Isolated mode without base_uri should be valid"
+        );
     }
 
     #[test]
@@ -378,7 +412,7 @@ mod tests {
                         volumes: Vec::new(),
                         path_template: None,
                         listen_port: 7168,
-                        multi_endpoint: None,  // Missing multi_endpoint
+                        multi_endpoint: None, // Missing multi_endpoint
                         kv_cache_dir: None,
                     },
                 ],
@@ -386,15 +420,15 @@ mod tests {
                 deployment: None,
                 start_delay: 2,
                 path_template: "agent-{id}/".to_string(),
-                shared_filesystem: true,  // SHARED storage
+                shared_filesystem: true, // SHARED storage
                 tree_creation_mode: TreeCreationMode::Concurrent,
                 path_selection: PathSelectionStrategy::Random,
                 partition_overlap: 0.3,
                 grpc_keepalive_interval: 30,
                 grpc_keepalive_timeout: 10,
-                agent_ready_timeout: 120,  // v0.8.51: Default timeout
-                barrier_sync: BarrierSyncConfig::default(),  // No barrier sync for tests
-                stages: Vec::new(),  // No YAML stages for tests
+                agent_ready_timeout: 120, // v0.8.51: Default timeout
+                barrier_sync: BarrierSyncConfig::default(), // No barrier sync for tests
+                stages: Vec::new(),       // No YAML stages for tests
                 kv_cache_dir: None,
             }),
             Some(PrepareConfig {
@@ -421,16 +455,21 @@ mod tests {
         );
 
         let results = validate_distributed_config(&config).unwrap();
-        
+
         // Should have a warning about missing multi_endpoint
         let has_warning = results.iter().any(|r| {
-            r.level == ResultLevel::Warning 
-                && r.message.contains("don't have multi_endpoint")
+            r.level == ResultLevel::Warning && r.message.contains("don't have multi_endpoint")
         });
-        assert!(has_warning, "Should warn about agents without multi_endpoint in shared mode");
-        
+        assert!(
+            has_warning,
+            "Should warn about agents without multi_endpoint in shared mode"
+        );
+
         // Should NOT have errors - this is valid, just not optimal
         let has_error = results.iter().any(|r| r.level == ResultLevel::Error);
-        assert!(!has_error, "Should not error on missing multi_endpoint in shared mode");
+        assert!(
+            !has_error,
+            "Should not error on missing multi_endpoint in shared mode"
+        );
     }
 }
