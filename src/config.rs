@@ -1369,10 +1369,55 @@ pub struct S3dlioOptimizationConfig {
     /// Defaults to 4× `h2_stream_window_mb` when absent.  Clamped to 256 MiB maximum.
     #[serde(default)]
     pub h2_conn_window_mb: Option<u32>,
+
+    // ── Runtime thread counts ─────────────────────────────────────────────────
+    /// Thread count for the s3dlio global async runtime (v0.8.92)
+    ///
+    /// Sets `S3DLIO_RT_THREADS`.  The s3dlio library maintains an internal Tokio
+    /// runtime separate from the sai3-bench agent runtime.  By default it caps at
+    /// `min(num_cpus × 2, 32)`, which is far too low for high-concurrency S3 workloads.
+    ///
+    /// **Rule of thumb**: set this to at least your `concurrency` value.
+    /// For a 384-concurrency workload across 16 endpoints, 384 is a safe minimum.
+    ///
+    /// If absent and `auto_threads` (below) is `true`, this is derived automatically
+    /// from the `concurrency` field in the parent `Config` at apply time.
+    #[serde(default)]
+    pub s3dlio_rt_threads: Option<usize>,
+
+    /// Thread count for the sai3-bench agent's own Tokio runtime (v0.8.92)
+    ///
+    /// Corresponds to the `--worker-threads` CLI flag on `sai3bench-agent`.
+    /// **This field is informational only when sent via gRPC** — the agent Tokio
+    /// runtime is already running by the time the YAML config arrives.  Set the
+    /// `--worker-threads N` flag when starting the agent, or set the
+    /// `TOKIO_WORKER_THREADS` environment variable on each agent host.
+    ///
+    /// When this field is set in the YAML and the agent has not already set a thread
+    /// count, it is recorded in the perf-log header for observability.
+    ///
+    /// **Rule of thumb**: set to the same value as `s3dlio_rt_threads` (or
+    /// `concurrency`).  Default Tokio behaviour is `num_cpus` which on most servers
+    /// is 32–128 — usually sufficient for pure-async I/O but explicit is better.
+    #[serde(default)]
+    pub tokio_worker_threads: Option<usize>,
+
+    /// Auto-derive `s3dlio_rt_threads` from the parent `concurrency` if not set (v0.8.92)
+    ///
+    /// Default: `true`.  When `true` and `s3dlio_rt_threads` is absent, the apply()
+    /// method sets `S3DLIO_RT_THREADS = max(concurrency, current_s3dlio_default)`.
+    /// Set to `false` to disable auto-derivation and rely solely on the explicit
+    /// `s3dlio_rt_threads` field or the `S3DLIO_RT_THREADS` environment variable.
+    #[serde(default = "default_auto_threads")]
+    pub auto_threads: bool,
 }
 
 fn default_s3dlio_range_threshold_mb() -> u64 {
     64 // 64 MB - optimal balance per benchmarks (76% improvement)
+}
+
+fn default_auto_threads() -> bool {
+    true
 }
 
 impl S3dlioOptimizationConfig {
@@ -1513,6 +1558,74 @@ impl S3dlioOptimizationConfig {
                 conn_mb
             );
         }
+    }
+
+    /// Apply s3dlio runtime thread count, optionally auto-deriving from concurrency.
+    ///
+    /// Call this **before** any s3dlio operation so the global runtime is
+    /// initialised with the correct thread count.  The s3dlio global runtime is lazy
+    /// (initialised on first use), so setting `S3DLIO_RT_THREADS` here is effective
+    /// as long as no s3dlio call has been made yet.
+    ///
+    /// `concurrency` is the `Config.concurrency` value.
+    pub fn apply_thread_counts(&self, concurrency: usize) {
+        // Explicit YAML value takes precedence over auto-derivation and over the
+        // existing environment variable (YAML config is intentional, env var may
+        // be a stale leftover from a previous test session).
+        if let Some(explicit) = self.s3dlio_rt_threads {
+            std::env::set_var("S3DLIO_RT_THREADS", explicit.to_string());
+            tracing::info!(
+                "Set s3dlio runtime threads: {} (S3DLIO_RT_THREADS={}) [explicit YAML]",
+                explicit,
+                explicit
+            );
+            return;
+        }
+
+        // Auto-derive: if the env var is already set (e.g., by the operator on the
+        // agent host), respect it.
+        if std::env::var("S3DLIO_RT_THREADS").is_ok() {
+            tracing::debug!(
+                "S3DLIO_RT_THREADS already set in environment — skipping auto-derivation"
+            );
+            return;
+        }
+
+        if self.auto_threads && concurrency > 0 {
+            // The s3dlio global RT default caps at min(num_cpus*2, 32).
+            // For high-concurrency S3 workloads this is far too low.  Set it to
+            // `concurrency` so there is at least one RT thread per in-flight task.
+            // Add a small overhead factor (1.5×) to absorb connection management and
+            // housekeeping tasks that run alongside the PUT/GET tasks.
+            let derived = std::cmp::max(concurrency + concurrency / 2, 32);
+            std::env::set_var("S3DLIO_RT_THREADS", derived.to_string());
+            tracing::info!(
+                "Auto-set s3dlio runtime threads: {} (concurrency={}) \
+                 — set s3dlio_optimization.s3dlio_rt_threads or S3DLIO_RT_THREADS to override",
+                derived,
+                concurrency
+            );
+        }
+    }
+}
+
+/// Auto-derive and apply S3DLIO_RT_THREADS from concurrency when no explicit config is available.
+///
+/// Convenience helper for code paths where the YAML has no `s3dlio_optimization` block.
+/// Equivalent to calling `S3dlioOptimizationConfig { auto_threads: true, ..zero }.apply_thread_counts(concurrency)`.
+pub fn auto_apply_rt_threads(concurrency: usize) {
+    if std::env::var("S3DLIO_RT_THREADS").is_ok() {
+        return; // respect operator override
+    }
+    if concurrency > 0 {
+        let derived = std::cmp::max(concurrency + concurrency / 2, 32);
+        std::env::set_var("S3DLIO_RT_THREADS", derived.to_string());
+        tracing::info!(
+            "Auto-set s3dlio runtime threads: {} (concurrency={}) \
+             — set s3dlio_optimization.s3dlio_rt_threads or S3DLIO_RT_THREADS to override",
+            derived,
+            concurrency
+        );
     }
 }
 

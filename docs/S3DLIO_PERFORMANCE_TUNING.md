@@ -263,6 +263,10 @@ export S3DLIO_H2C=1           # force h2c on http:// endpoints
 # export S3DLIO_H2C=0         # force HTTP/1.1
 # unset S3DLIO_H2C            # auto-probe (default)
 
+# Thread counts (v0.8.92)
+export S3DLIO_RT_THREADS=384  # s3dlio internal runtime threads
+export TOKIO_WORKER_THREADS=384  # sai3bench-agent Tokio threads
+
 sai3-bench run --config workload.yaml
 ```
 
@@ -279,6 +283,101 @@ Or use `--env-file` on the controller to forward credentials and env vars automa
 
 ---
 
+## 🧵 Thread Count Tuning (v0.8.92)
+
+High-concurrency S3 workloads — especially small-object PUT/GET at 50k+ ops/s — require more
+threads than the defaults allow.  Two independent thread pools must be tuned together.
+
+### Background: Two Thread Pools
+
+| Pool | Default | Purpose |
+|------|---------|---------|
+| **s3dlio global RT** | `min(num_cpus × 2, 32)` | Executes every S3 API call (put, get, list…) |
+| **sai3bench-agent Tokio** | `num_cpus` | Agent gRPC server + workload coordination |
+
+For `concurrency: 384` the s3dlio RT default of 32 threads is the **primary bottleneck** —
+Little's Law requires `threads ≥ concurrency × avg_latency_s`:
+
+| Avg latency | Threads for 67k ops/s |
+|-------------|-----------------------|
+| 2 ms        | 135                   |
+| 3 ms        | 202                   |
+| 5 ms        | 338                   |
+| 5.7 ms      | 384                   |
+| 10 ms       | 675                   |
+
+### YAML Configuration (Recommended)
+
+Add under `s3dlio_optimization` in your workload YAML:
+
+```yaml
+s3dlio_optimization:
+  # ... existing fields ...
+
+  # ── Thread counts (v0.8.92) ──────────────────────────────────────────────
+  # Override the s3dlio global RT cap (default: min(num_cpus*2, 32)).
+  # Set to at least your concurrency value for small-object workloads.
+  s3dlio_rt_threads: 384
+
+  # Document the desired agent Tokio thread count.
+  # NOTE: This field is informational — start the agent with --worker-threads N.
+  tokio_worker_threads: 384
+
+  # Set false to disable automatic derivation from 'concurrency' if you prefer
+  # to always set the count explicitly.  Default: true.
+  auto_threads: true
+```
+
+**Auto-derivation** (when `auto_threads: true`, the default): if `s3dlio_rt_threads` is not
+set and `S3DLIO_RT_THREADS` is not in the environment, the agent automatically sets
+`S3DLIO_RT_THREADS = max(concurrency × 1.5, 32)` before the first s3dlio call.
+
+### Agent CLI Flag
+
+Because the sai3bench-agent Tokio runtime starts **before** the YAML config arrives from the
+controller, `tokio_worker_threads` in YAML cannot be applied automatically.  Use the CLI flag
+when starting the agent:
+
+```bash
+# Start agent with 384 Tokio worker threads
+sai3bench-agent --listen 0.0.0.0:7167 --worker-threads 384
+```
+
+Or set `TOKIO_WORKER_THREADS` in the agent's environment (lower precedence than `--worker-threads`):
+
+```bash
+TOKIO_WORKER_THREADS=384 sai3bench-agent --listen 0.0.0.0:7167
+```
+
+### Complete Example: Trillion-Object PUT Workload
+
+```yaml
+# workload.yaml — 384-concurrency small-object PUT on 16 VAST S3 endpoints
+concurrency: 384
+operation: put
+object_size: 1KiB
+
+s3dlio_optimization:
+  s3dlio_rt_threads: 384   # matches concurrency; controller sends to all agents
+  tokio_worker_threads: 384  # reminder to start agents with --worker-threads 384
+  h2c: true                # enable h2c for http:// VAST endpoints (verify VAST supports it)
+
+# ... endpoint and bucket config ...
+```
+
+Start each of the 4 agents with:
+```bash
+sai3bench-agent --listen 0.0.0.0:7167 --worker-threads 384
+```
+
+The agent logs the active thread counts at startup:
+```
+INFO Tokio runtime started with 384 worker threads (set via --worker-threads CLI flag)
+INFO Auto-set s3dlio runtime threads: 576 (concurrency=384)
+```
+
+---
+
 ## 📝 Quick Reference
 
 | Feature | YAML Config | Env Var | Benefit |
@@ -289,6 +388,9 @@ Or use `--env-file` on the controller to forward credentials and env vars automa
 | **HTTP/2 h2c** | `s3dlio_optimization.h2c: true` | `S3DLIO_H2C=1` | Lower per-request overhead |
 | **HTTP/2 auto-probe** | *(omit `h2c` field)* | *(unset `S3DLIO_H2C`)* | Try h2c, fall back |
 | **Force HTTP/1.1** | `s3dlio_optimization.h2c: false` | `S3DLIO_H2C=0` | Reproducible baselines |
+| **s3dlio RT threads** | `s3dlio_optimization.s3dlio_rt_threads: 384` | `S3DLIO_RT_THREADS=384` | Unlock 50k+ ops/s |
+| **Agent Tokio threads** | `s3dlio_optimization.tokio_worker_threads: 384` ¹ | `TOKIO_WORKER_THREADS=384` | Agent concurrency |
+| **Auto thread derive** | `s3dlio_optimization.auto_threads: true` *(default)* | — | Auto-set from concurrency |
 
 **Recommended for most workloads**:
 ```yaml
@@ -296,6 +398,17 @@ s3dlio_optimization:
   enable_range_downloads: true
   range_threshold_mb: 64
 ```
+
+**Recommended for high-concurrency small-object S3 workloads** (`concurrency: ≥64`):
+```yaml
+s3dlio_optimization:
+  enable_range_downloads: true
+  range_threshold_mb: 64
+  s3dlio_rt_threads: 384    # ≥ concurrency
+  tokio_worker_threads: 384  # ¹ start agent with --worker-threads 384
+```
+
+¹ `tokio_worker_threads` in YAML is informational — use `sai3bench-agent --worker-threads N` or `TOKIO_WORKER_THREADS=N`.
 
 ---
 

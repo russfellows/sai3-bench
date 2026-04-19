@@ -110,6 +110,21 @@ struct Cli {
     /// Note: For sorted oplogs, use 'sai3-bench sort' post-processing after capture
     #[arg(long)]
     op_log: Option<std::path::PathBuf>,
+
+    /// Number of Tokio worker threads for this agent process (v0.8.92)
+    ///
+    /// Controls how many OS threads the sai3-bench agent's async executor uses.
+    /// Defaults to the value of TOKIO_WORKER_THREADS env var, or num_cpus if
+    /// neither is set.
+    ///
+    /// For high-concurrency S3 workloads, set this to at least your `concurrency`
+    /// value (e.g. --worker-threads 384 for concurrency: 384).
+    ///
+    /// You can also set the YAML field `s3dlio_optimization.tokio_worker_threads`
+    /// as documentation, but the agent runtime is already built by the time the
+    /// YAML arrives — use this CLI flag or TOKIO_WORKER_THREADS env var instead.
+    #[arg(long)]
+    worker_threads: Option<usize>,
 }
 
 /// Agent state for workload management and cancellation
@@ -804,9 +819,15 @@ impl Agent for AgentSvc {
         apply_distributed_env(&config);
 
         // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+        // apply_thread_counts must be called FIRST so S3DLIO_RT_THREADS is set
+        // before the s3dlio global runtime is lazily initialised (v0.8.92).
         if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+            s3dlio_opt.apply_thread_counts(config.concurrency as usize);
             s3dlio_opt.apply();
             info!("Applied s3dlio optimization configuration from YAML (pre-flight)");
+        } else {
+            // No s3dlio_optimization block — still auto-derive thread counts from concurrency.
+            sai3_bench::config::auto_apply_rt_threads(config.concurrency as usize);
         }
 
         // Run filesystem validation only if target is file:// or direct://
@@ -1291,9 +1312,14 @@ impl Agent for AgentSvc {
         apply_distributed_env(&config);
 
         // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+        // apply_thread_counts must be called FIRST so S3DLIO_RT_THREADS is set
+        // before the s3dlio global runtime is lazily initialised (v0.8.92).
         if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+            s3dlio_opt.apply_thread_counts(config.concurrency as usize);
             s3dlio_opt.apply();
             info!("Applied s3dlio optimization configuration from YAML (prepare)");
+        } else {
+            sai3_bench::config::auto_apply_rt_threads(config.concurrency as usize);
         }
         // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
         config.apply_gcs_defaults();
@@ -2767,9 +2793,14 @@ impl Agent for AgentSvc {
                                             apply_distributed_env(&config);
 
                                             // Apply s3dlio optimization settings as environment variables (v0.8.63+)
+                                            // apply_thread_counts must be called FIRST so S3DLIO_RT_THREADS is set
+                                            // before the s3dlio global runtime is lazily initialised (v0.8.92).
                                             if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
+                                                s3dlio_opt.apply_thread_counts(config.concurrency as usize);
                                                 s3dlio_opt.apply();
                                                 info!("Applied s3dlio optimization configuration from YAML (workload)");
+                                            } else {
+                                                sai3_bench::config::auto_apply_rt_threads(config.concurrency as usize);
                                             }
                                             // GCS smart defaults: auto channel count + optional concurrency scaling (v0.9.65+)
                                             config.apply_gcs_defaults();
@@ -4942,11 +4973,39 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     dotenv().ok();
     let args = Cli::parse();
 
+    // Determine Tokio worker thread count (v0.8.92).
+    //
+    // Priority (highest → lowest):
+    //   1. --worker-threads CLI flag
+    //   2. TOKIO_WORKER_THREADS environment variable
+    //   3. num_cpus (Tokio default)
+    //
+    // Must be resolved here, before the runtime is built.  The YAML config
+    // field `s3dlio_optimization.tokio_worker_threads` is informational only —
+    // by the time the controller sends the YAML, the runtime is already running.
+    let worker_threads = args
+        .worker_threads
+        .or_else(|| {
+            std::env::var("TOKIO_WORKER_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or_else(num_cpus::get);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .context("Failed to build Tokio runtime")?;
+
+    rt.block_on(async_main(args, worker_threads))
+}
+
+async fn async_main(args: Cli, worker_threads: usize) -> Result<()> {
     // Initialize logging based on verbosity level
     // Map verbosity to appropriate levels for both agent/sai3_bench and s3dlio:
     // -v (1): agent=info, s3dlio=warn (default passthrough)
@@ -4967,6 +5026,17 @@ async fn main() -> Result<()> {
     fmt().with_env_filter(filter).with_target(false).init();
 
     debug!("Logging initialized at level: {}", agent_level);
+    info!(
+        "Tokio runtime started with {} worker threads (set via {})",
+        worker_threads,
+        if args.worker_threads.is_some() {
+            "--worker-threads CLI flag"
+        } else if std::env::var("TOKIO_WORKER_THREADS").is_ok() {
+            "TOKIO_WORKER_THREADS env var"
+        } else {
+            "num_cpus default"
+        }
+    );
 
     let addr: SocketAddr = args.listen.parse().context("invalid listen addr")?;
 
