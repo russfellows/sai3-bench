@@ -164,6 +164,31 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub s3dlio_optimization: Option<S3dlioOptimizationConfig>,
+
+    /// Credentials to forward to agent nodes (v0.8.92+).
+    ///
+    /// When `sai3bench-ctl` is invoked with `--env-file <path>` (or `--forward-env`),
+    /// it reads the allow-listed credential environment variables from that file and
+    /// embeds them here before serialising the config to send to each agent.  The agent
+    /// applies these key-value pairs to its own process environment before running the
+    /// workload or pre-flight validation.
+    ///
+    /// **Allowed key prefixes (hard-coded allow-list):**
+    /// - `AWS_*` — AWS SDK credentials and endpoint overrides
+    /// - `GOOGLE_APPLICATION_CREDENTIALS` — GCP service-account key path
+    /// - `AZURE_STORAGE_*` — Azure Blob Storage credentials
+    ///
+    /// **Security notes:**
+    /// - This field is **skipped when empty** (`skip_serializing_if`), so it never
+    ///   appears in user-written YAML config files.
+    /// - Credentials travel inside the gRPC `config_yaml` field.  Enable TLS
+    ///   (`--tls`) when operating over untrusted networks.
+    /// - Key names (never values) are logged at `info` level for audit purposes.
+    ///
+    /// Users should NOT set this field manually in their YAML files; use
+    /// `--env-file` on the controller command line instead.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub distributed_env: std::collections::HashMap<String, String>,
 }
 
 fn default_duration() -> std::time::Duration {

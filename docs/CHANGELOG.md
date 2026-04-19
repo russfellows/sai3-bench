@@ -6,6 +6,124 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.92] - 2026-04-18
+
+### Added
+
+- **Credential forwarding from controller to agents** (`--env-file` / `--no-forward-env`) —
+  eliminates the manual step of copying cloud credentials to each agent host.  The controller
+  reads allow-listed credential variables and embeds them in the config YAML sent over gRPC;
+  each agent applies them to its own environment before pre-flight validation and workload
+  execution.
+
+  - **Default behaviour**: forward any `AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, and
+    `AZURE_STORAGE_*` variables found in the controller's own environment.
+  - **`--env-file <path>`**: read credentials from a `.env` file instead (file is parsed by
+    `dotenvy`; the controller's own process environment is not modified).
+  - **`--no-forward-env`**: disable all forwarding (use when agents already have credentials
+    via IAM roles, Kubernetes Secrets, etc.).
+  - **Security**: hard-coded allow-list prevents arbitrary env var injection.  Key names (never
+    values) are logged at `info` level on both controller and agent for audit purposes.
+    A plaintext-connection warning is printed when `--tls` is not active.
+  - **Local env wins**: if a key already exists in the agent's environment, the forwarded value
+    is silently skipped — local configuration always takes precedence.
+  - **Never written to disk**: the `distributed_env` config field uses
+    `skip_serializing_if = "is_empty"` so credentials never appear in YAML files saved to disk.
+  - **Reference**: [docs/CREDENTIAL_FORWARDING.md](CREDENTIAL_FORWARDING.md)
+
+- **Per-agent endpoint filtering in pre-flight validation** — `extract_object_storage_endpoints_from_config`
+  now accepts `agent_id: Option<&str>` and returns **only the endpoints belonging to that agent**
+  when a per-agent `multi_endpoint` block is present.  Previously the function ignored the agent
+  ID and collected every endpoint from every agent, causing the agent to validate 64 endpoints
+  across all agents' buckets (most of which it had no access to), producing ~64 spurious errors.
+
+- **Error classification in object-storage pre-flight** — storage errors during endpoint
+  validation are now classified into four categories with actionable remediation hints:
+  - `[PERM]` — HTTP 403 / `AccessDenied` / `service error` (AWS SDK pattern for parsed S3 XML
+    error responses; the 403 status code lives only in the Debug representation, so the
+    classifier checks both Display and Debug output).
+  - `[AUTH]` — HTTP 401 / `Unauthorized` / `Unauthenticated`.
+  - `[CONF]` — HTTP 404 / `NoSuchBucket`.
+  - `[NET]`  — all other connection failures.
+
+- **Noise reduction: bucket grouping in pre-flight** — when multiple endpoints point to the same
+  bucket (e.g. 16 IPs × 4 buckets = 64 endpoints), pre-flight tests one representative per
+  bucket and emits a single `Bucket 'name' accessible — 16 endpoints` line instead of 16
+  individual lines.  Failures are similarly grouped.
+
+- **Agent version check before pre-flight** — the controller now pings all agents and prints a
+  version table before starting pre-flight validation:
+  ```
+  🔌 Agent Version Check
+  agent-1 (host1:7167) ✅ v0.8.92
+  agent-2 (host2:7167) ⚠️  v0.8.88 (controller is v0.8.92 — update recommended)
+  ```
+
+- **Distributed config validation: redundant top-level `multi_endpoint` warning** — emits a
+  `Warning` when all agents have per-agent `multi_endpoint` blocks AND a top-level
+  `multi_endpoint` is also present (the union-of-all-endpoints pattern that was the root cause
+  of the 64-error pre-flight failure described above).
+
+- **Distributed config validation: missing credentials hint** — when a config targets object
+  storage (S3/GCS/Azure) with multiple agents and the controller's local environment has no
+  cloud credentials, a `Warning` is emitted reminding operators that each agent must have
+  credentials set independently (or to use `--env-file`).
+
+- **HTTP/2 and h2c support via s3dlio v0.9.90** — the underlying s3dlio library now supports
+  HTTP/2 for S3-protocol endpoints with automatic version negotiation:
+  - **Auto mode (default)**: probes h2c (HTTP/2 prior-knowledge) on the first `http://`
+    connection and falls back to HTTP/1.1 automatically if the server refuses.  `https://`
+    endpoints negotiate HTTP/2 via TLS ALPN with no probe needed.
+  - **Force h2c** (`S3DLIO_H2C=1` or `s3dlio_optimization.h2c: true`): always use HTTP/2 on
+    plain-HTTP endpoints; `https://` still uses ALPN.
+  - **Force HTTP/1.1** (`S3DLIO_H2C=0` or `s3dlio_optimization.h2c: false`): skip the probe,
+    always use HTTP/1.1.
+  - Optional flow-control tuning via `h2_adaptive_window`, `h2_stream_window_mb`, and
+    `h2_conn_window_mb` YAML fields (all in `s3dlio_optimization`).
+  - See [docs/S3DLIO_PERFORMANCE_TUNING.md](S3DLIO_PERFORMANCE_TUNING.md) for YAML examples.
+
+### Fixed
+
+- **`service error` classification** — AWS SDK Rust wraps HTTP 4xx responses in an opaque
+  "service error" string in which the status code appears only in the `Debug` representation,
+  not in `Display`.  The pre-flight error classifier was checking only `Display`, so all SDK
+  service errors fell through to the generic `[NET]` bucket.  Now checks both.
+
+- **False-pass in pre-flight for agents without per-agent endpoints** — older agent binaries
+  (and agents with `target: null`) produced an empty endpoint list during pre-flight, which
+  caused the validation to log "Skipping filesystem validation" and report success without
+  actually testing any endpoints.  The root cause (ignoring `agent_id`) is now fixed.
+
+### Tests
+
+- **20 new unit tests** covering:
+  - `bucket_label` — correct extraction for S3 with IP:port, standard, no-path, GCS, Azure,
+    no-scheme, and host-no-path inputs
+  - `classify_storage_error` — all four error categories plus network fallback
+  - `is_credential_key` + `load_credentials_for_agents` — allow-list filtering, `.env` file
+    parsing, error on missing file, GCP key handling
+  - `extract_object_storage_endpoints_from_config` — per-agent override, global fallback,
+    `file://` exclusion, no-agent-id aggregation
+  - `apply_distributed_env` — sets missing vars, does not overwrite existing, empty-map no-op
+  - `validate_distributed_config` — redundant multi_endpoint warning, partial-agents no-warning,
+    credential hint for S3 without local creds, no hint for `file://` config
+
+### Changed
+
+- **`Config.distributed_env`** — new field on the shared `Config` struct used to carry forwarded
+  credentials between controller and agents via the gRPC config YAML payload.  Serialised only
+  when non-empty (`skip_serializing_if = "is_empty"`); defaults to an empty `HashMap` so older
+  YAML configs remain fully compatible.
+
+### Dependencies
+
+- **`s3dlio`**: updated to v0.9.90 — HTTP/2 h2c support, ForceH2c routing fix, TLS test server,
+  AIStore full TLS security, GCS delete error propagation, `list_containers()` Python API, and
+  10 new unit tests.  See [s3dlio Changelog v0.9.90](https://github.com/russfellows/s3dlio/blob/main/docs/Changelog.md).
+- **`dotenvy`**: promoted from dev-dependency to full dependency for controller `.env` file parsing.
+
+---
+
 ## [0.8.90] - 2026-04-15
 
 ### Added

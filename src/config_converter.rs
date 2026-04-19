@@ -541,6 +541,7 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         }
     }
 
@@ -701,6 +702,7 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         };
 
         let original_duration = config.duration;
@@ -788,6 +790,7 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         };
 
         convert_config(&mut config).expect("Should convert config");

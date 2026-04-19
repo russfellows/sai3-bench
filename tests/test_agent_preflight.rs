@@ -36,6 +36,7 @@ fn make_test_config(target: Option<String>) -> Config {
         cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
         enable_metadata_cache: true,
         s3dlio_optimization: None,
+        distributed_env: std::collections::HashMap::new(),
     }
 }
 

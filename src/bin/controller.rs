@@ -757,6 +757,29 @@ struct Cli {
     #[arg(long, default_value = "localhost")]
     agent_domain: String,
 
+    /// Path to a .env file whose credential variables are forwarded to every agent.
+    ///
+    /// Only allow-listed keys are forwarded: AWS_*, GOOGLE_APPLICATION_CREDENTIALS,
+    /// and AZURE_STORAGE_*.  All other variables in the file are silently ignored.
+    ///
+    /// Example:
+    ///   echo 'AWS_ACCESS_KEY_ID=AKIA...' > /etc/sai3bench/creds.env
+    ///   sai3bench-ctl --env-file /etc/sai3bench/creds.env run --config workload.yaml
+    ///
+    /// Without this flag the current process environment is checked for credential
+    /// variables and those are forwarded instead (same allow-list applies).
+    /// Pass --no-forward-env to disable all credential forwarding.
+    #[arg(long)]
+    env_file: Option<PathBuf>,
+
+    /// Disable automatic forwarding of credential environment variables to agents.
+    ///
+    /// By default the controller forwards any AWS_*, GOOGLE_APPLICATION_CREDENTIALS,
+    /// and AZURE_STORAGE_* variables it finds in its own environment.
+    /// Use this flag when agents already have credentials configured locally.
+    #[arg(long, default_value_t = false)]
+    no_forward_env: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1468,6 +1491,59 @@ async fn mk_client(
     Ok(AgentClient::new(channel))
 }
 
+// ─── Credential forwarding ────────────────────────────────────────────────────
+//
+// Allowed key prefixes — only these are ever forwarded to agents.
+// This is a hard-coded allow-list; arbitrary env var forwarding is intentionally
+// NOT supported to limit the blast radius of a misconfigured or malicious config.
+const CREDENTIAL_KEY_PREFIXES: &[&str] =
+    &["AWS_", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_STORAGE_"];
+
+fn is_credential_key(key: &str) -> bool {
+    CREDENTIAL_KEY_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix) || key == *prefix)
+}
+
+/// Load credential environment variables to forward to agents.
+///
+/// If `env_file` is `Some(path)`, parses that file with `dotenvy` and collects
+/// credential variables from it (the file does NOT change the controller's own env).
+/// If `env_file` is `None`, collects credential variables from the controller's
+/// current process environment.
+///
+/// Only keys matching `CREDENTIAL_KEY_PREFIXES` are collected.  All other
+/// variables are silently ignored.
+///
+/// Returns `(vars, source_description)` where `vars` is the map to embed in the
+/// config and `source_description` is a human-readable string for logging.
+fn load_credentials_for_agents(
+    env_file: Option<&std::path::Path>,
+) -> Result<(std::collections::HashMap<String, String>, String)> {
+    let mut vars = std::collections::HashMap::new();
+
+    if let Some(path) = env_file {
+        // Parse the .env file without modifying the current process environment.
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Cannot read env file: {}", path.display()))?;
+        for item in dotenvy::Iter::new(content.as_bytes()) {
+            let (key, value) = item.context("Malformed line in env file")?;
+            if is_credential_key(&key) {
+                vars.insert(key, value);
+            }
+        }
+        Ok((vars, format!("env file '{}'", path.display())))
+    } else {
+        // Collect from the current process environment.
+        for (key, value) in std::env::vars() {
+            if is_credential_key(&key) {
+                vars.insert(key, value);
+            }
+        }
+        Ok((vars, "controller environment".to_string()))
+    }
+}
+
 fn split_put_uri(uri: &str) -> (String, String) {
     let normalized = if uri.ends_with('/') {
         uri.to_string()
@@ -1813,6 +1889,8 @@ async fn main() -> Result<()> {
                 !cli.tls,
                 cli.agent_ca.as_ref(),
                 &cli.agent_domain,
+                cli.env_file.as_deref(),
+                cli.no_forward_env,
             )
             .await?;
         }
@@ -2644,6 +2722,8 @@ async fn run_distributed_workload(
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
+    env_file: Option<&std::path::Path>,
+    no_forward_env: bool,
 ) -> Result<()> {
     info!("Starting distributed workload execution");
     debug!("Config file: {}", config_path.display());
@@ -2714,6 +2794,38 @@ async fn run_distributed_workload(
 
     sai3_bench::validation::apply_directory_tree_counts(&mut config)
         .context("Directory tree count validation failed")?;
+
+    // v0.8.92: Load and embed credential env vars for forwarding to agents.
+    if !no_forward_env {
+        let (creds, source) = load_credentials_for_agents(env_file)
+            .context("Failed to load credentials for agent forwarding")?;
+
+        if !creds.is_empty() {
+            let key_names: Vec<&str> = creds.keys().map(String::as_str).collect();
+            println!(
+                "\n🔑 Forwarding {} credential variable{} from {} to all agents: {}",
+                creds.len(),
+                if creds.len() == 1 { "" } else { "s" },
+                source,
+                key_names.join(", ")
+            );
+            if insecure {
+                println!(
+                    "  ⚠️  Credentials are being sent over an unencrypted (plaintext) gRPC connection."
+                );
+                println!(
+                    "     Enable --tls when operating over untrusted networks to protect credentials in transit."
+                );
+            }
+            config.distributed_env = creds;
+        } else {
+            debug!(
+                "No credential variables found in {} — agents will use their own environment",
+                source
+            );
+        }
+    }
+
     config_yaml = serde_yaml::to_string(&config)
         .context("Failed to serialize config with directory tree counts")?;
 
@@ -2905,7 +3017,48 @@ async fn run_distributed_workload(
         .map(|(id, client)| (id.clone(), client.clone()))
         .collect();
 
-    // v0.8.23: DISTRIBUTED CONFIG VALIDATION - Check for common configuration errors
+    // v0.8.92: Ping every agent and compare versions with the controller.
+    // A mismatch is a very common source of mysterious failures and is printed
+    // prominently so the operator knows before wasting time on a full run.
+    {
+        let controller_version = env!("CARGO_PKG_VERSION");
+        let mut mismatch = false;
+        println!("\n🔌 Agent Version Check");
+        println!("━━━━━━━━━━━━━━━━━━━━━━");
+        for (agent_id, client) in agent_clients.iter_mut() {
+            match client.ping(Empty {}).await {
+                Ok(resp) => {
+                    let agent_ver = resp.into_inner().version;
+                    if agent_ver == controller_version {
+                        println!("  ✅ {} — v{}", agent_id, agent_ver);
+                    } else {
+                        println!(
+                            "  ⚠️  {} — v{} ← agent version DOES NOT MATCH controller v{}",
+                            agent_id, agent_ver, controller_version
+                        );
+                        mismatch = true;
+                    }
+                }
+                Err(e) => {
+                    println!("  ❌ {} — ping failed: {}", agent_id, e);
+                    bail!(
+                        "Cannot reach agent {} — is sai3bench-agent running?",
+                        agent_id
+                    );
+                }
+            }
+        }
+        if mismatch {
+            println!();
+            println!("  ⚠️  Version mismatch! Rebuild and restart ALL agents before retrying:");
+            println!("       cargo build --release && sai3bench-agent --listen 0.0.0.0:7761");
+            println!();
+            // Warn but do not hard-fail — operator may have intentionally mixed versions
+        } else {
+            println!("  All agents running v{}", controller_version);
+        }
+    }
+
     // Validates base_uri usage with multi-endpoint in isolated mode
     info!("Validating distributed configuration");
     match sai3_bench::preflight::distributed::validate_distributed_config(&config) {
@@ -7823,6 +7976,130 @@ workload:
             // A clean list with no zeros passes
             let ok = parse_csv_u32("1,2,4").unwrap();
             assert!(!ok.iter().any(|&v| v == 0));
+        }
+    }
+
+    // ── Credential forwarding helpers (v0.8.92) ───────────────────────────────
+
+    mod credential_forwarding {
+        use super::super::{is_credential_key, load_credentials_for_agents};
+        use std::io::Write;
+
+        // ── is_credential_key ─────────────────────────────────────────────────
+
+        #[test]
+        fn test_is_credential_key_aws_prefix() {
+            assert!(is_credential_key("AWS_ACCESS_KEY_ID"));
+            assert!(is_credential_key("AWS_SECRET_ACCESS_KEY"));
+            assert!(is_credential_key("AWS_SESSION_TOKEN"));
+            assert!(is_credential_key("AWS_DEFAULT_REGION"));
+            assert!(is_credential_key("AWS_ENDPOINT_URL"));
+        }
+
+        #[test]
+        fn test_is_credential_key_gcp_exact() {
+            // Exact match — no trailing chars should still match (starts_with covers it)
+            assert!(is_credential_key("GOOGLE_APPLICATION_CREDENTIALS"));
+            // A longer key that starts with the same prefix but has extra chars is
+            // allowed (starts_with matches), which is intentional.
+            assert!(is_credential_key("GOOGLE_APPLICATION_CREDENTIALS_JSON"));
+        }
+
+        #[test]
+        fn test_is_credential_key_azure_prefix() {
+            assert!(is_credential_key("AZURE_STORAGE_ACCOUNT"));
+            assert!(is_credential_key("AZURE_STORAGE_KEY"));
+            assert!(is_credential_key("AZURE_STORAGE_CONNECTION_STRING"));
+            assert!(is_credential_key("AZURE_STORAGE_SAS_TOKEN"));
+        }
+
+        #[test]
+        fn test_is_credential_key_rejects_arbitrary_vars() {
+            // Should not match — these are not cloud credentials
+            assert!(!is_credential_key("HOME"));
+            assert!(!is_credential_key("PATH"));
+            assert!(!is_credential_key("USER"));
+            assert!(!is_credential_key("HOSTNAME"));
+            assert!(!is_credential_key("GOOGLE_CLOUD_PROJECT")); // not in allow-list
+            assert!(!is_credential_key("AZURE_CLIENT_ID")); // not AZURE_STORAGE_*
+        }
+
+        #[test]
+        fn test_is_credential_key_empty_string() {
+            assert!(!is_credential_key(""));
+        }
+
+        // ── load_credentials_for_agents (env-file path) ───────────────────────
+
+        #[test]
+        fn test_load_from_env_file_returns_credential_keys_only() {
+            // Write a temporary .env file with a mix of cred and non-cred vars
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE").unwrap();
+            writeln!(f, "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG").unwrap();
+            writeln!(f, "HOME=/root").unwrap(); // should be filtered out
+            writeln!(f, "AZURE_STORAGE_ACCOUNT=myaccount").unwrap();
+            writeln!(f, "SOME_OTHER_VAR=ignored").unwrap();
+
+            let (vars, source) = load_credentials_for_agents(Some(f.path())).unwrap();
+
+            assert_eq!(
+                vars.get("AWS_ACCESS_KEY_ID").map(String::as_str),
+                Some("AKIAIOSFODNN7EXAMPLE")
+            );
+            assert_eq!(
+                vars.get("AWS_SECRET_ACCESS_KEY").map(String::as_str),
+                Some("wJalrXUtnFEMI/K7MDENG")
+            );
+            assert_eq!(
+                vars.get("AZURE_STORAGE_ACCOUNT").map(String::as_str),
+                Some("myaccount")
+            );
+            // Non-credential keys must be absent
+            assert!(!vars.contains_key("HOME"));
+            assert!(!vars.contains_key("SOME_OTHER_VAR"));
+            assert_eq!(vars.len(), 3);
+            assert!(source.contains("env file"));
+        }
+
+        #[test]
+        fn test_load_from_env_file_all_non_creds_returns_empty() {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "FOO=bar").unwrap();
+            writeln!(f, "BAZ=qux").unwrap();
+
+            let (vars, _) = load_credentials_for_agents(Some(f.path())).unwrap();
+            assert!(vars.is_empty(), "No credential keys should be returned");
+        }
+
+        #[test]
+        fn test_load_from_env_file_not_found_returns_error() {
+            let result = load_credentials_for_agents(Some(std::path::Path::new(
+                "/tmp/__nonexistent_sai3bench_test_creds.env",
+            )));
+            assert!(
+                result.is_err(),
+                "Missing env file should return an error, not panic"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("Cannot read env file") || msg.contains("nonexistent"),
+                "Error message should mention the file: {}",
+                msg
+            );
+        }
+
+        #[test]
+        fn test_load_from_env_file_gcp_key() {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json").unwrap();
+
+            let (vars, _) = load_credentials_for_agents(Some(f.path())).unwrap();
+            assert_eq!(
+                vars.get("GOOGLE_APPLICATION_CREDENTIALS")
+                    .map(String::as_str),
+                Some("/path/to/sa-key.json")
+            );
         }
     }
 }

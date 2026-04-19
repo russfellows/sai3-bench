@@ -566,28 +566,56 @@ impl AgentSvc {
 /// Extract all object storage URIs from config (s3://, gs://, az://)
 fn extract_object_storage_endpoints_from_config(
     config: &sai3_bench::config::Config,
+    agent_id: Option<&str>,
 ) -> Vec<String> {
-    let mut endpoints = Vec::new();
     let object_storage_schemes = ["s3://", "gs://", "az://"];
     let is_object_storage = |uri: &str| object_storage_schemes.iter().any(|s| uri.starts_with(s));
 
-    // config.target (standalone mode)
+    // When called for a specific agent: check if that agent has per-agent endpoints.
+    // If so, validate ONLY those — not the full global list.
+    if let (Some(id), Some(ref distributed)) = (agent_id, &config.distributed) {
+        for agent in &distributed.agents {
+            let matches = agent.id.as_deref() == Some(id) || agent.address == id;
+            if matches {
+                let mut per_agent = Vec::new();
+                if let Some(ref target) = agent.target_override {
+                    if is_object_storage(target) {
+                        per_agent.push(target.clone());
+                    }
+                }
+                if let Some(ref multi) = agent.multi_endpoint {
+                    for ep in &multi.endpoints {
+                        if is_object_storage(ep) && !per_agent.contains(ep) {
+                            per_agent.push(ep.clone());
+                        }
+                    }
+                }
+                if !per_agent.is_empty() {
+                    return per_agent;
+                }
+                // Agent found but has no per-agent endpoints — fall through to global
+                break;
+            }
+        }
+    }
+
+    // Fall back: collect from top-level config (standalone mode or no per-agent override)
+    let mut endpoints = Vec::new();
+
     if let Some(ref target) = config.target {
         if is_object_storage(target) {
             endpoints.push(target.clone());
         }
     }
 
-    // multi_endpoint.endpoints
     if let Some(ref multi) = config.multi_endpoint {
         for ep in &multi.endpoints {
-            if is_object_storage(ep) {
+            if is_object_storage(ep) && !endpoints.contains(ep) {
                 endpoints.push(ep.clone());
             }
         }
     }
 
-    // prepare.ensure_objects[].base_uri
     if let Some(ref prepare) = config.prepare {
         for ensure in &prepare.ensure_objects {
             if let Some(ref uri) = ensure.base_uri {
@@ -598,18 +626,21 @@ fn extract_object_storage_endpoints_from_config(
         }
     }
 
-    // distributed.agents[].target_override / multi_endpoint
-    if let Some(ref distributed) = config.distributed {
-        for agent in &distributed.agents {
-            if let Some(ref target) = agent.target_override {
-                if is_object_storage(target) && !endpoints.contains(target) {
-                    endpoints.push(target.clone());
+    // When no specific agent_id, also collect all per-agent endpoints
+    // (used for config inspection, not for per-agent preflight)
+    if agent_id.is_none() {
+        if let Some(ref distributed) = config.distributed {
+            for agent in &distributed.agents {
+                if let Some(ref target) = agent.target_override {
+                    if is_object_storage(target) && !endpoints.contains(target) {
+                        endpoints.push(target.clone());
+                    }
                 }
-            }
-            if let Some(ref multi) = agent.multi_endpoint {
-                for ep in &multi.endpoints {
-                    if is_object_storage(ep) && !endpoints.contains(ep) {
-                        endpoints.push(ep.clone());
+                if let Some(ref multi) = agent.multi_endpoint {
+                    for ep in &multi.endpoints {
+                        if is_object_storage(ep) && !endpoints.contains(ep) {
+                            endpoints.push(ep.clone());
+                        }
                     }
                 }
             }
@@ -617,6 +648,55 @@ fn extract_object_storage_endpoints_from_config(
     }
 
     endpoints
+}
+
+/// Apply credential environment variables forwarded by the controller.
+///
+/// The controller embeds allow-listed credential env vars in `config.distributed_env`
+/// before serialising the config to YAML and sending it to agents.  This function
+/// applies them to the current process environment so that storage SDK clients
+/// (aws-sdk, gcp-storage, azure-sdk) pick them up automatically.
+///
+/// Key names (never values) are logged at `info` level for audit purposes.
+/// Variables that are already set in the agent's own environment are NOT overwritten
+/// — local config always wins.
+fn apply_distributed_env(config: &sai3_bench::config::Config) {
+    if config.distributed_env.is_empty() {
+        return;
+    }
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+    for (key, value) in &config.distributed_env {
+        if std::env::var(key).is_ok() {
+            // Already set locally — do not overwrite
+            skipped.push(key.as_str());
+        } else {
+            // SAFETY: single-threaded at this point; no other thread reads env vars.
+            // std::env::set_var is documented as unsafe in Rust 2024 edition but is
+            // the correct mechanism here.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            applied.push(key.as_str());
+        }
+    }
+    if !applied.is_empty() {
+        info!(
+            "Applied {} forwarded credential variable{} from controller: {}",
+            applied.len(),
+            if applied.len() == 1 { "" } else { "s" },
+            applied.join(", ")
+        );
+    }
+    if !skipped.is_empty() {
+        info!(
+            "Skipped {} forwarded credential variable{} already set in agent environment: {}",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            skipped.join(", ")
+        );
+    }
 }
 
 fn extract_filesystem_path_from_config(
@@ -720,6 +800,9 @@ impl Agent for AgentSvc {
                 Status::invalid_argument(format!("Invalid YAML config: {}", e))
             })?;
 
+        // Apply credentials forwarded from the controller (v0.8.92+)
+        apply_distributed_env(&config);
+
         // Apply s3dlio optimization settings as environment variables (v0.8.63+)
         if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
             s3dlio_opt.apply();
@@ -740,8 +823,11 @@ impl Agent for AgentSvc {
                 Status::internal(format!("Filesystem validation error: {}", e))
             })?
         } else {
-            // Object storage target — do a quick bucket accessibility check
-            let obj_endpoints = extract_object_storage_endpoints_from_config(&config);
+            // Object storage target — do a quick bucket accessibility check.
+            // Pass agent_id so we validate ONLY this agent's own endpoints, not the full
+            // global multi_endpoint list (which may cover all agents' buckets).
+            let obj_endpoints =
+                extract_object_storage_endpoints_from_config(&config, Some(&agent_id));
             if !obj_endpoints.is_empty() {
                 // Run a write probe only when the workload has PUT/DELETE ops.
                 // Skip for GET-only workloads where write permission is irrelevant.
@@ -1200,6 +1286,9 @@ impl Agent for AgentSvc {
                 error!("Failed to parse YAML config: {}", e);
                 Status::invalid_argument(format!("Invalid YAML config: {}", e))
             })?;
+
+        // Apply credentials forwarded from the controller (v0.8.92+)
+        apply_distributed_env(&config);
 
         // Apply s3dlio optimization settings as environment variables (v0.8.63+)
         if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
@@ -2673,6 +2762,9 @@ impl Agent for AgentSvc {
                                                     return;
                                                 }
                                             };
+
+                                            // Apply credentials forwarded from the controller (v0.8.92+)
+                                            apply_distributed_env(&config);
 
                                             // Apply s3dlio optimization settings as environment variables (v0.8.63+)
                                             if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
@@ -5383,5 +5475,308 @@ distributed:
             "Should extract first filesystem path from mixed endpoints"
         );
         assert_eq!(path.unwrap(), std::path::PathBuf::from("/mnt/data/"));
+    }
+
+    // ── extract_object_storage_endpoints_from_config (v0.8.92) ────────────────
+
+    #[test]
+    fn test_extract_endpoints_per_agent_override_used() {
+        // When a specific agent_id is provided AND that agent has per-agent
+        // multi_endpoint, only those endpoints should be returned.
+        let yaml = r#"
+duration: 30s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://10.0.0.1:80/bucket-a/"
+    - "s3://10.0.0.2:80/bucket-a/"
+    - "s3://10.0.0.3:80/bucket-b/"
+    - "s3://10.0.0.4:80/bucket-b/"
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "host1:7167"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://10.0.0.1:80/bucket-a/"
+          - "s3://10.0.0.2:80/bucket-a/"
+    - address: "host2:7167"
+      id: "agent-2"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://10.0.0.3:80/bucket-b/"
+          - "s3://10.0.0.4:80/bucket-b/"
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+
+        let agent1_eps = extract_object_storage_endpoints_from_config(&config, Some("agent-1"));
+        assert_eq!(
+            agent1_eps,
+            vec![
+                "s3://10.0.0.1:80/bucket-a/".to_string(),
+                "s3://10.0.0.2:80/bucket-a/".to_string(),
+            ],
+            "agent-1 should only see its own two endpoints"
+        );
+
+        let agent2_eps = extract_object_storage_endpoints_from_config(&config, Some("agent-2"));
+        assert_eq!(
+            agent2_eps,
+            vec![
+                "s3://10.0.0.3:80/bucket-b/".to_string(),
+                "s3://10.0.0.4:80/bucket-b/".to_string(),
+            ],
+            "agent-2 should only see its own two endpoints"
+        );
+    }
+
+    #[test]
+    fn test_extract_endpoints_falls_back_to_global_when_no_per_agent() {
+        // Agent in the distributed list but has no multi_endpoint → fall through to
+        // the global multi_endpoint.
+        let yaml = r#"
+duration: 30s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://shared/bucket/"
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: concurrent
+  path_selection: random
+  agents:
+    - address: "host1:7167"
+      id: "agent-1"
+      # No per-agent multi_endpoint
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+
+        let eps = extract_object_storage_endpoints_from_config(&config, Some("agent-1"));
+        assert_eq!(
+            eps,
+            vec!["s3://shared/bucket/".to_string()],
+            "Should fall back to global multi_endpoint when agent has none"
+        );
+    }
+
+    #[test]
+    fn test_extract_endpoints_filters_out_file_scheme() {
+        // file:// and direct:// URIs must never appear in the object-storage list
+        let yaml = r#"
+duration: 30s
+concurrency: 4
+
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "file:///mnt/data/"
+    - "s3://10.0.0.1/bucket/"
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+
+        let eps = extract_object_storage_endpoints_from_config(&config, None);
+        assert_eq!(
+            eps,
+            vec!["s3://10.0.0.1/bucket/".to_string()],
+            "file:// endpoints must be excluded from object-storage list"
+        );
+    }
+
+    #[test]
+    fn test_extract_endpoints_no_agent_id_collects_all() {
+        // When agent_id is None (standalone mode) all object-storage endpoints from
+        // all agents and the global config are aggregated without duplicates.
+        let yaml = r#"
+duration: 30s
+concurrency: 4
+
+distributed:
+  shared_filesystem: false
+  tree_creation_mode: isolated
+  path_selection: random
+  agents:
+    - address: "host1:7167"
+      id: "agent-1"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://10.0.0.1/bucket-a/"
+    - address: "host2:7167"
+      id: "agent-2"
+      multi_endpoint:
+        strategy: round_robin
+        endpoints:
+          - "s3://10.0.0.2/bucket-b/"
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 100
+"#;
+        let config: sai3_bench::config::Config = serde_yaml::from_str(yaml).unwrap();
+
+        let eps = extract_object_storage_endpoints_from_config(&config, None);
+        assert!(
+            eps.contains(&"s3://10.0.0.1/bucket-a/".to_string()),
+            "Should include agent-1 endpoint"
+        );
+        assert!(
+            eps.contains(&"s3://10.0.0.2/bucket-b/".to_string()),
+            "Should include agent-2 endpoint"
+        );
+        assert_eq!(eps.len(), 2, "Should have exactly two unique endpoints");
+    }
+
+    // ── apply_distributed_env (v0.8.92) ───────────────────────────────────────
+    //
+    // Note: tests that call std::env::set_var / std::env::remove_var are
+    // inherently process-global.  We use unique key names per test so tests
+    // running in parallel don't interfere with each other.
+
+    #[test]
+    fn test_apply_distributed_env_sets_missing_vars() {
+        let key = "SAITEST_CRED_APPLY_NEW_VAR";
+        // Ensure it's not set before the test
+        unsafe { std::env::remove_var(key) };
+
+        let mut env_map = std::collections::HashMap::new();
+        env_map.insert(key.to_string(), "test_value_abc".to_string());
+
+        let config = sai3_bench::config::Config {
+            duration: std::time::Duration::from_secs(1),
+            concurrency: 1,
+            target: None,
+            workload: vec![],
+            prepare: None,
+            range_engine: None,
+            page_cache_mode: None,
+            distributed: None,
+            io_rate: None,
+            processes: None,
+            processing_mode: sai3_bench::config::ProcessingMode::MultiRuntime,
+            live_stats_tracker: None,
+            error_handling: sai3_bench::config::ErrorHandlingConfig::default(),
+            op_log_path: None,
+            warmup_period: None,
+            perf_log: None,
+            multi_endpoint: None,
+            cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
+            enable_metadata_cache: true,
+            s3dlio_optimization: None,
+            distributed_env: env_map,
+        };
+
+        apply_distributed_env(&config);
+
+        assert_eq!(
+            std::env::var(key).unwrap(),
+            "test_value_abc",
+            "Forwarded variable should be set in process environment"
+        );
+
+        // Cleanup
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn test_apply_distributed_env_does_not_overwrite_existing() {
+        let key = "SAITEST_CRED_NO_OVERWRITE_VAR";
+        // Pre-set the variable to simulate an agent that already has credentials
+        unsafe { std::env::set_var(key, "original_value") };
+
+        let mut env_map = std::collections::HashMap::new();
+        env_map.insert(key.to_string(), "forwarded_value".to_string());
+
+        let config = sai3_bench::config::Config {
+            duration: std::time::Duration::from_secs(1),
+            concurrency: 1,
+            target: None,
+            workload: vec![],
+            prepare: None,
+            range_engine: None,
+            page_cache_mode: None,
+            distributed: None,
+            io_rate: None,
+            processes: None,
+            processing_mode: sai3_bench::config::ProcessingMode::MultiRuntime,
+            live_stats_tracker: None,
+            error_handling: sai3_bench::config::ErrorHandlingConfig::default(),
+            op_log_path: None,
+            warmup_period: None,
+            perf_log: None,
+            multi_endpoint: None,
+            cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
+            enable_metadata_cache: true,
+            s3dlio_optimization: None,
+            distributed_env: env_map,
+        };
+
+        apply_distributed_env(&config);
+
+        assert_eq!(
+            std::env::var(key).unwrap(),
+            "original_value",
+            "Local environment variable must not be overwritten by forwarded value"
+        );
+
+        // Cleanup
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn test_apply_distributed_env_empty_map_is_noop() {
+        // Calling with an empty map should not panic or alter environment
+        let config = sai3_bench::config::Config {
+            duration: std::time::Duration::from_secs(1),
+            concurrency: 1,
+            target: None,
+            workload: vec![],
+            prepare: None,
+            range_engine: None,
+            page_cache_mode: None,
+            distributed: None,
+            io_rate: None,
+            processes: None,
+            processing_mode: sai3_bench::config::ProcessingMode::MultiRuntime,
+            live_stats_tracker: None,
+            error_handling: sai3_bench::config::ErrorHandlingConfig::default(),
+            op_log_path: None,
+            warmup_period: None,
+            perf_log: None,
+            multi_endpoint: None,
+            cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
+            enable_metadata_cache: true,
+            s3dlio_optimization: None,
+            distributed_env: std::collections::HashMap::new(),
+        };
+
+        // Should complete without panic
+        apply_distributed_env(&config);
     }
 }
