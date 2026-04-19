@@ -21,7 +21,7 @@ mod blocking_io_regression_tests {
     async fn test_checkpoint_does_not_block_executor() {
         let temp_dir = tempfile::tempdir().unwrap();
         let results_dir = temp_dir.path();
-        
+
         // Create cache with some data
         let endpoint_uri = format!("file://{}", temp_dir.path().join("storage").display());
         let cache = MetadataCache::new(
@@ -42,7 +42,7 @@ mod blocking_io_regression_tests {
         // Spawn concurrent "heartbeat" task that must continue while checkpoint runs
         let heartbeat_flag = Arc::new(AtomicBool::new(false));
         let flag_clone = heartbeat_flag.clone();
-        
+
         let heartbeat = tokio::spawn(async move {
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -73,17 +73,17 @@ mod blocking_io_regression_tests {
     #[tokio::test]
     async fn test_concurrent_checkpoints_from_multiple_agents() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         // Create 4 agent caches (simulating 4-agent distributed test)
         let mut handles = Vec::new();
-        
+
         for agent_id in 0..4 {
             let temp_path = temp_dir.path().to_path_buf();
-            
+
             let handle = tokio::spawn(async move {
                 let results_dir = temp_path.join(format!("agent-{}", agent_id));
                 std::fs::create_dir_all(&results_dir).unwrap();
-                
+
                 let endpoint_uri = format!("file://{}", temp_path.join("storage").display());
                 let cache = MetadataCache::new(
                     &results_dir,
@@ -103,7 +103,7 @@ mod blocking_io_regression_tests {
                 // Create checkpoint
                 cache.lock().await.endpoints()[0].1.write_checkpoint(Some(agent_id)).await
             });
-            
+
             handles.push(handle);
         }
 
@@ -115,10 +115,10 @@ mod blocking_io_regression_tests {
         .await;
 
         assert!(results.is_ok(), "All 4 concurrent checkpoints should complete without timeout");
-        
+
         let checkpoint_results: Vec<_> = results.unwrap().into_iter().collect();
         assert_eq!(checkpoint_results.len(), 4, "All 4 agents should complete");
-        
+
         for (agent_id, result) in checkpoint_results.iter().enumerate() {
             assert!(result.is_ok(), "Agent {} checkpoint task should not panic", agent_id);
             assert!(result.as_ref().unwrap().is_ok(), "Agent {} checkpoint should succeed", agent_id);
@@ -132,7 +132,7 @@ mod blocking_io_regression_tests {
     async fn test_checkpoint_timeout_protection() {
         // This test is harder to implement without mocking filesystem
         // For now, we verify that timeout values are reasonable
-        
+
         let archive_sizes = vec![
             (1 * 1024 * 1024, "1 MB"),          // 1 MB
             (64 * 1024 * 1024, "64 MB"),        // 64 MB
@@ -142,17 +142,17 @@ mod blocking_io_regression_tests {
         for (size, label) in archive_sizes {
             // Calculate timeout based on 10 MB/s minimum speed
             let timeout_secs = std::cmp::max(10, (size / 10_000_000) + 4);
-            
+
             // Verify timeout is reasonable
             assert!(
                 timeout_secs >= 10,
                 "Timeout for {} should be at least 10 seconds", label
             );
-            
+
             // At 10 MB/s, verify timeout allows completion with buffer
             let min_time_at_10mbs = (size as f64 / 10_000_000.0).ceil() as u64;
             let buffer_time = timeout_secs - min_time_at_10mbs;
-            
+
             assert!(
                 buffer_time >= 4,
                 "Timeout for {} should have at least 4s buffer (got {}s)",
@@ -169,7 +169,7 @@ mod blocking_io_regression_tests {
     async fn test_periodic_checkpoint_does_not_starve_prepare() {
         let temp_dir = tempfile::tempdir().unwrap();
         let results_dir = temp_dir.path();
-        
+
         let endpoint_uri = format!("file://{}", temp_dir.path().join("storage").display());
         let cache = MetadataCache::new(
             results_dir,
@@ -188,7 +188,7 @@ mod blocking_io_regression_tests {
         // Simulate prepare operations continuing
         let prepare_flag = Arc::new(AtomicBool::new(true));
         let flag_clone = prepare_flag.clone();
-        
+
         let prepare_task = tokio::spawn(async move {
             for i in 0..200 {
                 if !flag_clone.load(Ordering::Relaxed) {
@@ -202,13 +202,13 @@ mod blocking_io_regression_tests {
 
         // Let it run for 3 seconds (should trigger 2-3 periodic checkpoints)
         tokio::time::sleep(Duration::from_secs(3)).await;
-        
+
         // Stop prepare simulation
         prepare_flag.store(false, Ordering::Relaxed);
-        
+
         // Cancel periodic checkpoint
         checkpoint_handle.abort();
-        
+
         // Verify prepare completed
         let prepare_result = timeout(Duration::from_secs(2), prepare_task).await;
         assert!(
@@ -222,7 +222,7 @@ mod blocking_io_regression_tests {
     async fn test_checkpoint_write_speed_reporting() {
         let temp_dir = tempfile::tempdir().unwrap();
         let results_dir = temp_dir.path();
-        
+
         let endpoint_uri = format!("file://{}", temp_dir.path().join("storage").display());
         let cache = MetadataCache::new(
             results_dir,
@@ -245,7 +245,7 @@ mod blocking_io_regression_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Checkpoint should succeed");
-        
+
         // Verify it completed in reasonable time (< 10 seconds for small test)
         assert!(
             elapsed.as_secs() < 10,

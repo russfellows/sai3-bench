@@ -69,12 +69,16 @@ pub struct ResultsDir {
 
 impl ResultsDir {
     /// Create a new results directory with the standard naming convention
-    /// 
+    ///
     /// # Arguments
     /// * `config_path` - Path to the config file (used for default test name)
     /// * `custom_name` - Optional custom name to use instead of config filename
     /// * `base_dir` - Optional base directory (defaults to current directory)
-    pub fn create(config_path: &Path, custom_name: Option<&str>, base_dir: Option<&Path>) -> Result<Self> {
+    pub fn create(
+        config_path: &Path,
+        custom_name: Option<&str>,
+        base_dir: Option<&Path>,
+    ) -> Result<Self> {
         // Extract test name from config filename or use custom name
         let test_name = if let Some(name) = custom_name {
             name.to_string()
@@ -88,19 +92,16 @@ impl ResultsDir {
 
         // Generate directory name: sai3-{YYYYMMDD}-{HHMM}-{test_name}
         let now = Local::now();
-        let dir_name = format!(
-            "sai3-{}-{}",
-            now.format("%Y%m%d-%H%M"),
-            test_name
-        );
+        let dir_name = format!("sai3-{}-{}", now.format("%Y%m%d-%H%M"), test_name);
 
         // Determine base directory
         let base = base_dir.unwrap_or_else(|| Path::new("."));
         let dir_path = base.join(&dir_name);
 
         // Create directory
-        fs::create_dir_all(&dir_path)
-            .with_context(|| format!("Failed to create results directory: {}", dir_path.display()))?;
+        fs::create_dir_all(&dir_path).with_context(|| {
+            format!("Failed to create results directory: {}", dir_path.display())
+        })?;
 
         // Copy config file
         let config_dest = dir_path.join("config.yaml");
@@ -108,10 +109,7 @@ impl ResultsDir {
             .with_context(|| "Failed to copy config to results directory".to_string())?;
 
         // Create metadata
-        let metadata = RunMetadata::new(
-            test_name,
-            config_path.to_string_lossy().to_string(),
-        );
+        let metadata = RunMetadata::new(test_name, config_path.to_string_lossy().to_string());
 
         // Create console log file
         let console_log_path = dir_path.join("console_log.txt");
@@ -165,8 +163,7 @@ impl ResultsDir {
     /// Write a line to the console log
     pub fn write_console(&mut self, line: &str) -> Result<()> {
         if let Some(ref mut log) = self.console_log {
-            writeln!(log, "{}", line)
-                .with_context(|| "Failed to write to console_log.txt")?;
+            writeln!(log, "{}", line).with_context(|| "Failed to write to console_log.txt")?;
         }
         Ok(())
     }
@@ -185,7 +182,7 @@ impl ResultsDir {
     pub fn finalize(&mut self, duration_secs: f64) -> Result<()> {
         self.metadata.finalize(duration_secs);
         self.write_metadata()?;
-        
+
         // Flush and close console log
         if let Some(mut log) = self.console_log.take() {
             log.flush()?;
@@ -199,8 +196,7 @@ impl ResultsDir {
     pub fn create_agents_dir(&mut self) -> Result<PathBuf> {
         self.metadata.distributed = true;
         let agents_dir = self.path.join("agents");
-        fs::create_dir_all(&agents_dir)
-            .with_context(|| "Failed to create agents subdirectory")?;
+        fs::create_dir_all(&agents_dir).with_context(|| "Failed to create agents subdirectory")?;
         Ok(agents_dir)
     }
 

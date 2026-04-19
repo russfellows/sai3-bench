@@ -27,8 +27,13 @@ fn test_bucket_index_boundaries() {
         (2 * 1024 * 1024 * 1024 + 1, 8),
     ];
     for (nbytes, expected) in bounds {
-        assert_eq!(bucket_index(nbytes), expected,
-            "bucket_index({}) should be {}", nbytes, expected);
+        assert_eq!(
+            bucket_index(nbytes),
+            expected,
+            "bucket_index({}) should be {}",
+            nbytes,
+            expected
+        );
     }
 }
 
@@ -43,4 +48,3 @@ fn test_glob_to_regex() {
     assert!(re.is_match("foobar"));
     assert!(!re.is_match("barbaz"));
 }
-

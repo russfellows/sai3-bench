@@ -6,7 +6,8 @@ use std::path::PathBuf;
 /// Helper function to extract filesystem path (duplicated from agent.rs for testing)
 fn extract_filesystem_path_from_config(config: &Config) -> Option<PathBuf> {
     config.target.as_ref().and_then(|target| {
-        target.strip_prefix("file://")
+        target
+            .strip_prefix("file://")
             .or_else(|| target.strip_prefix("direct://"))
             .map(PathBuf::from)
     })
@@ -35,6 +36,7 @@ fn make_test_config(target: Option<String>) -> Config {
         cache_checkpoint_interval_secs: sai3_bench::config::default_cache_checkpoint_interval(),
         enable_metadata_cache: true,
         s3dlio_optimization: None,
+        distributed_env: std::collections::HashMap::new(),
     }
 }
 
@@ -80,7 +82,7 @@ fn test_extract_filesystem_path_no_target() {
 
 #[test]
 fn test_validation_result_to_proto_success() {
-    use sai3_bench::preflight::{ValidationResult, ResultLevel};
+    use sai3_bench::preflight::{ResultLevel, ValidationResult};
 
     let result = ValidationResult {
         level: ResultLevel::Success,
@@ -100,7 +102,7 @@ fn test_validation_result_to_proto_success() {
 
 #[test]
 fn test_validation_result_to_proto_error() {
-    use sai3_bench::preflight::{ValidationResult, ResultLevel, ErrorType};
+    use sai3_bench::preflight::{ErrorType, ResultLevel, ValidationResult};
 
     let result = ValidationResult {
         level: ResultLevel::Error,
@@ -122,7 +124,7 @@ fn test_validation_result_to_proto_error() {
 
 #[test]
 fn test_validation_summary_error_count() {
-    use sai3_bench::preflight::{ValidationResult, ValidationSummary, ResultLevel, ErrorType};
+    use sai3_bench::preflight::{ErrorType, ResultLevel, ValidationResult, ValidationSummary};
 
     let results = vec![
         ValidationResult {
@@ -152,7 +154,7 @@ fn test_validation_summary_error_count() {
     ];
 
     let summary = ValidationSummary::new(results);
-    
+
     assert_eq!(summary.error_count(), 1);
     assert_eq!(summary.warning_count(), 1);
     assert_eq!(summary.success_count(), 1);
@@ -162,21 +164,19 @@ fn test_validation_summary_error_count() {
 
 #[test]
 fn test_validation_summary_no_errors() {
-    use sai3_bench::preflight::{ValidationResult, ValidationSummary, ResultLevel};
+    use sai3_bench::preflight::{ResultLevel, ValidationResult, ValidationSummary};
 
-    let results = vec![
-        ValidationResult {
-            level: ResultLevel::Success,
-            error_type: None,
-            message: "All tests passed".to_string(),
-            suggestion: String::new(),
-            details: None,
-            test_phase: "complete".to_string(),
-        },
-    ];
+    let results = vec![ValidationResult {
+        level: ResultLevel::Success,
+        error_type: None,
+        message: "All tests passed".to_string(),
+        suggestion: String::new(),
+        details: None,
+        test_phase: "complete".to_string(),
+    }];
 
     let summary = ValidationSummary::new(results);
-    
+
     assert_eq!(summary.error_count(), 0);
     assert_eq!(summary.warning_count(), 0);
     assert!(!summary.has_errors());

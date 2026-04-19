@@ -6,26 +6,28 @@
 // repeated READY messages and enable proper PING/PONG, ABORT, and state management.
 // Replaces old run_workload_with_live_stats unidirectional streaming approach.
 
-use anyhow::{anyhow, Context, Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use dotenvy::dotenv;
-use tokio_stream::wrappers::ReceiverStream;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
-use serde::Deserialize;
 
 // Results directory for v0.6.4+
 use sai3_bench::results_dir::ResultsDir;
 // Import BUCKET_LABELS and NUM_BUCKETS from constants module
-use sai3_bench::constants::{BUCKET_LABELS, CONTROLLER_PERF_LOG_INTERVAL_MS, CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS};
+use sai3_bench::constants::{
+    BUCKET_LABELS, CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS, CONTROLLER_PERF_LOG_INTERVAL_MS,
+};
 // v0.8.15: Performance logging
-use sai3_bench::perf_log::{PerfLogWriter, PerfLogDeltaTracker};
 use sai3_bench::live_stats::WorkloadStage as LiveWorkloadStage;
+use sai3_bench::perf_log::{PerfLogDeltaTracker, PerfLogWriter};
 
 pub mod pb {
     pub mod iobench {
@@ -34,17 +36,21 @@ pub mod pb {
 }
 
 use pb::iobench::agent_client::AgentClient;
-use pb::iobench::{ControlMessage, Empty, LiveStats, PrepareSummary, RunGetRequest, RunPutRequest, TriStateToggle, WorkloadSummary, control_message, live_stats::WorkloadStage, PreFlightRequest, AgentQueryRequest, AgentQueryResponse, PhaseProgress, StageSummary, WorkloadPhase};
+use pb::iobench::{
+    control_message, live_stats::WorkloadStage, AgentQueryRequest, AgentQueryResponse,
+    ControlMessage, Empty, LiveStats, PhaseProgress, PreFlightRequest, PrepareSummary,
+    RunGetRequest, RunPutRequest, StageSummary, TriStateToggle, WorkloadPhase, WorkloadSummary,
+};
 // Note: BarrierRequest/BarrierResponse not yet used - planned for explicit barrier RPC (currently using PhaseProgress in LiveStats)
 // Note: WorkloadPhase imported locally in test module (line 4574) where it's actually used
 
 // v0.8.25: Barrier synchronization
-use std::time::Instant;
-use std::collections::HashSet;
 use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
+use std::collections::HashSet;
+use std::time::Instant;
 
 /// v0.7.13: Controller's view of agent states
-/// 
+///
 /// Controller tracks more states than agents report because it sees the full lifecycle:
 /// - Connecting: Stream opened, waiting for first message
 /// - Validating: First message received, validation in progress
@@ -124,7 +130,7 @@ impl ControllerAgentState {
 }
 
 /// v0.7.13: Tracks state and metadata for a single agent
-/// 
+///
 /// Replaces ad-hoc HashSets (ready_agents, completed_agents, dead_agents)
 /// with structured state tracking and validation.
 struct AgentTracker {
@@ -133,20 +139,20 @@ struct AgentTracker {
     last_seen: std::time::Instant,
     error_message: Option<String>,
     latest_stats: Option<LiveStats>,
-    reconnect_count: usize,  // v0.8.2: Count of disconnections followed by reconnection
-    clock_offset_ns: Option<i64>,  // v0.8.4: Agent clock offset (agent_time - controller_time)
+    reconnect_count: usize, // v0.8.2: Count of disconnections followed by reconnection
+    clock_offset_ns: Option<i64>, // v0.8.4: Agent clock offset (agent_time - controller_time)
 }
 
 impl AgentTracker {
     fn new(agent_id: String) -> Self {
         Self {
             agent_id,
-            state: ControllerAgentState::Connecting,  // v0.7.13: Stream opened, waiting for first message
+            state: ControllerAgentState::Connecting, // v0.7.13: Stream opened, waiting for first message
             last_seen: std::time::Instant::now(),
             error_message: None,
             latest_stats: None,
-            reconnect_count: 0,  // v0.8.2: Track disconnect/reconnect events
-            clock_offset_ns: None,  // v0.8.4: Calculated when READY message received
+            reconnect_count: 0,    // v0.8.2: Track disconnect/reconnect events
+            clock_offset_ns: None, // v0.8.4: Calculated when READY message received
         }
     }
 
@@ -177,11 +183,11 @@ impl AgentTracker {
 
     /// Check if agent is in a terminal state (won't send more updates)
     /// v0.8.2: Disconnected is NOT terminal - agents can recover
-    /// 
+    ///
     /// BUG FIX: Previously included Disconnected as terminal state
     /// This prevented processing recovery messages from agents that timed out
     /// but later resumed (e.g., after gRPC backpressure resolved)
-    /// 
+    ///
     /// Only Completed and Failed are truly terminal - no further messages expected
     fn is_terminal(&self) -> bool {
         matches!(
@@ -205,7 +211,7 @@ impl AgentTracker {
 }
 
 /// v0.7.5: Aggregator for live stats from multiple agents
-/// 
+///
 /// Collects LiveStats messages from all agent streams and computes weighted aggregate metrics.
 /// Uses weighted averaging for latencies (weighted by operation count).
 /// v0.7.12: Tracks previous snapshot for windowed throughput calculation
@@ -238,12 +244,12 @@ impl LiveStatsAggregator {
             stats.completed = true;
         }
     }
-    
+
     /// Reset all accumulated stats (v0.7.9+)
     /// Call this when transitioning from prepare to workload phase
     fn reset_stats(&mut self) {
         self.agent_stats.clear();
-        self.previous_aggregate = None;  // v0.7.12: Reset windowed tracking
+        self.previous_aggregate = None; // v0.7.12: Reset windowed tracking
     }
 
     /// Check if all agents have completed
@@ -292,7 +298,7 @@ impl LiveStatsAggregator {
         let mut cpu_system_sum = 0.0f64;
         let mut cpu_iowait_sum = 0.0f64;
         let mut cpu_total_sum = 0.0f64;
-        
+
         // v0.8.14: Total concurrency across all agents
         let mut total_concurrency = 0u32;
 
@@ -329,23 +335,39 @@ impl LiveStatsAggregator {
                 meta_p90_weighted += stats.meta_p90_us * weight;
                 meta_p99_weighted += stats.meta_p99_us * weight;
             }
-            
+
             // v0.7.11: Accumulate CPU metrics
             cpu_user_sum += stats.cpu_user_percent;
             cpu_system_sum += stats.cpu_system_percent;
             cpu_iowait_sum += stats.cpu_iowait_percent;
             cpu_total_sum += stats.cpu_total_percent;
-            
+
             // v0.8.14: Accumulate concurrency
             total_concurrency += stats.concurrency;
         }
 
         // Calculate weighted averages
         let num_agents = self.agent_stats.len() as f64;
-        let cpu_user_percent = if num_agents > 0.0 { cpu_user_sum / num_agents } else { 0.0 };
-        let cpu_system_percent = if num_agents > 0.0 { cpu_system_sum / num_agents } else { 0.0 };
-        let cpu_iowait_percent = if num_agents > 0.0 { cpu_iowait_sum / num_agents } else { 0.0 };
-        let cpu_total_percent = if num_agents > 0.0 { cpu_total_sum / num_agents } else { 0.0 };
+        let cpu_user_percent = if num_agents > 0.0 {
+            cpu_user_sum / num_agents
+        } else {
+            0.0
+        };
+        let cpu_system_percent = if num_agents > 0.0 {
+            cpu_system_sum / num_agents
+        } else {
+            0.0
+        };
+        let cpu_iowait_percent = if num_agents > 0.0 {
+            cpu_iowait_sum / num_agents
+        } else {
+            0.0
+        };
+        let cpu_total_percent = if num_agents > 0.0 {
+            cpu_total_sum / num_agents
+        } else {
+            0.0
+        };
 
         // Calculate weighted averages
         let get_mean_us = if total_get_ops > 0 {
@@ -420,10 +442,11 @@ impl LiveStatsAggregator {
         };
 
         // v0.7.12: Compute windowed (current) throughput from delta since last update
-        let (windowed_get_ops_s, windowed_get_bytes, windowed_put_ops_s, windowed_put_bytes) = 
+        let (windowed_get_ops_s, windowed_get_bytes, windowed_put_ops_s, windowed_put_bytes) =
             if let Some(ref prev) = self.previous_aggregate {
                 let delta_time = max_elapsed - prev.elapsed_s;
-                if delta_time > 0.1 {  // Only compute if >= 100ms elapsed
+                if delta_time > 0.1 {
+                    // Only compute if >= 100ms elapsed
                     let delta_get_ops = total_get_ops.saturating_sub(prev.total_get_ops);
                     let delta_get_bytes = total_get_bytes.saturating_sub(prev.total_get_bytes);
                     let delta_put_ops = total_put_ops.saturating_sub(prev.total_put_ops);
@@ -432,19 +455,19 @@ impl LiveStatsAggregator {
                         delta_get_ops as f64 / delta_time,
                         delta_get_bytes,
                         delta_put_ops as f64 / delta_time,
-                        delta_put_bytes
+                        delta_put_bytes,
                     )
                 } else {
-                    (0.0, 0, 0.0, 0)  // Not enough time elapsed
+                    (0.0, 0, 0.0, 0) // Not enough time elapsed
                 }
             } else {
                 // First update: use cumulative
-                (0.0, 0, 0.0, 0)  // No previous data yet
+                (0.0, 0, 0.0, 0) // No previous data yet
             };
 
         let aggregate = AggregateStats {
             num_agents: self.agent_stats.len(),
-            expected_agents: self.expected_agents,  // v0.8.2: Track expected count
+            expected_agents: self.expected_agents, // v0.8.2: Track expected count
             total_get_ops,
             total_get_bytes,
             get_mean_us,
@@ -473,11 +496,10 @@ impl LiveStatsAggregator {
             windowed_get_bytes,
             windowed_put_ops_s,
             windowed_put_bytes,
-            windowed_delta_time: if self.previous_aggregate.is_some() {
-                max_elapsed - self.previous_aggregate.as_ref().unwrap().elapsed_s
-            } else {
-                0.0
-            },
+            windowed_delta_time: self
+                .previous_aggregate
+                .as_ref()
+                .map_or(0.0, |prev| max_elapsed - prev.elapsed_s),
             // v0.8.14: Total concurrency
             total_concurrency,
         };
@@ -493,7 +515,7 @@ impl LiveStatsAggregator {
 #[derive(Debug, Clone)]
 struct AggregateStats {
     num_agents: usize,
-    expected_agents: usize,  // v0.8.2: For "X of Y Agents" display
+    expected_agents: usize, // v0.8.2: For "X of Y Agents" display
     total_get_ops: u64,
     total_get_bytes: u64,
     get_mean_us: f64,
@@ -536,19 +558,39 @@ impl AggregateStats {
         // v0.7.12: Use windowed rates if available (more responsive to current performance)
         // Fall back to cumulative if windowed not yet available
         let (get_ops_s, get_bandwidth) = if self.windowed_get_ops_s > 0.0 {
-            (self.windowed_get_ops_s, format_bandwidth(self.windowed_get_bytes, self.windowed_delta_time))
+            (
+                self.windowed_get_ops_s,
+                format_bandwidth(self.windowed_get_bytes, self.windowed_delta_time),
+            )
         } else {
-            let ops_s = if self.elapsed_s > 0.0 { self.total_get_ops as f64 / self.elapsed_s } else { 0.0 };
-            (ops_s, format_bandwidth(self.total_get_bytes, self.elapsed_s))
+            let ops_s = if self.elapsed_s > 0.0 {
+                self.total_get_ops as f64 / self.elapsed_s
+            } else {
+                0.0
+            };
+            (
+                ops_s,
+                format_bandwidth(self.total_get_bytes, self.elapsed_s),
+            )
         };
-        
+
         let (put_ops_s, put_bandwidth) = if self.windowed_put_ops_s > 0.0 {
-            (self.windowed_put_ops_s, format_bandwidth(self.windowed_put_bytes, self.windowed_delta_time))
+            (
+                self.windowed_put_ops_s,
+                format_bandwidth(self.windowed_put_bytes, self.windowed_delta_time),
+            )
         } else {
-            let ops_s = if self.elapsed_s > 0.0 { self.total_put_ops as f64 / self.elapsed_s } else { 0.0 };
-            (ops_s, format_bandwidth(self.total_put_bytes, self.elapsed_s))
+            let ops_s = if self.elapsed_s > 0.0 {
+                self.total_put_ops as f64 / self.elapsed_s
+            } else {
+                0.0
+            };
+            (
+                ops_s,
+                format_bandwidth(self.total_put_bytes, self.elapsed_s),
+            )
         };
-        
+
         let meta_ops_s = if self.elapsed_s > 0.0 {
             self.total_meta_ops as f64 / self.elapsed_s
         } else {
@@ -557,8 +599,13 @@ impl AggregateStats {
 
         // v0.7.11: Build CPU line (only if we have CPU data)
         let cpu_line = if self.cpu_total_percent > 0.0 {
-            format!("\n  CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
-                    self.cpu_total_percent, self.cpu_user_percent, self.cpu_system_percent, self.cpu_iowait_percent)
+            format!(
+                "\n  CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
+                self.cpu_total_percent,
+                self.cpu_user_percent,
+                self.cpu_system_percent,
+                self.cpu_iowait_percent
+            )
         } else {
             String::new()
         };
@@ -579,7 +626,7 @@ impl AggregateStats {
         } else {
             String::new()
         };
-        
+
         format!(
             "{} of {} Agents{}\n  GET: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  PUT: {:.0} ops/s, {} (mean: {}, p50: {}, p95: {})\n  META: {:.0} ops/s (mean: {}){}",
                 self.num_agents,
@@ -617,9 +664,9 @@ fn format_bandwidth(bytes: u64, seconds: f64) -> String {
     if seconds <= 0.0 {
         return "0 B/s".to_string();
     }
-    
+
     let bytes_per_sec = bytes as f64 / seconds;
-    
+
     if bytes_per_sec >= 1_073_741_824.0 {
         // >= 1 GiB/s
         format!("{:.2} GiB/s", bytes_per_sec / 1_073_741_824.0)
@@ -635,13 +682,13 @@ fn format_bandwidth(bytes: u64, seconds: f64) -> String {
 }
 
 /// Run sai3-analyze to generate Excel summary of results
-/// 
+///
 /// This function attempts to find and execute the sai3-analyze binary to create
 /// a consolidated Excel file in the results directory. If it fails, a warning
 /// is logged but the overall benchmark is considered successful.
 fn run_sai3_analyze(results_dir: &std::path::Path) -> Result<()> {
     use std::process::Command;
-    
+
     // Try to find sai3-analyze binary in the same directory as current executable
     let analyze_binary = if let Ok(current_exe) = std::env::current_exe() {
         if let Some(parent) = current_exe.parent() {
@@ -658,29 +705,33 @@ fn run_sai3_analyze(results_dir: &std::path::Path) -> Result<()> {
     } else {
         std::path::PathBuf::from("sai3-analyze")
     };
-    
+
     let output_file = results_dir.join("Summary-Results.xlsx");
-    
+
     // Execute sai3-analyze with the results directory
     let output = Command::new(&analyze_binary)
         .arg("--dirs")
         .arg(results_dir)
         .arg("--output")
         .arg(&output_file)
-        .arg("--overwrite")  // Overwrite if file already exists
+        .arg("--overwrite") // Overwrite if file already exists
         .output()
         .context("Failed to execute sai3-analyze")?;
-    
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("sai3-analyze failed: {}", stderr);
     }
-    
+
     Ok(())
 }
 
 #[derive(Parser)]
-#[command(name = "sai3bench-ctl", version, about = "SAI3 Benchmark Controller (gRPC)")]
+#[command(
+    name = "sai3bench-ctl",
+    version,
+    about = "SAI3 Benchmark Controller (gRPC)"
+)]
 struct Cli {
     /// Increase verbosity (-v = info, -vv = debug, -vvv = trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -706,6 +757,29 @@ struct Cli {
     #[arg(long, default_value = "localhost")]
     agent_domain: String,
 
+    /// Path to a .env file whose credential variables are forwarded to every agent.
+    ///
+    /// Only allow-listed keys are forwarded: AWS_*, GOOGLE_APPLICATION_CREDENTIALS,
+    /// and AZURE_STORAGE_*.  All other variables in the file are silently ignored.
+    ///
+    /// Example:
+    ///   echo 'AWS_ACCESS_KEY_ID=AKIA...' > /etc/sai3bench/creds.env
+    ///   sai3bench-ctl --env-file /etc/sai3bench/creds.env run --config workload.yaml
+    ///
+    /// Without this flag the current process environment is checked for credential
+    /// variables and those are forwarded instead (same allow-list applies).
+    /// Pass --no-forward-env to disable all credential forwarding.
+    #[arg(long)]
+    env_file: Option<PathBuf>,
+
+    /// Disable automatic forwarding of credential environment variables to agents.
+    ///
+    /// By default the controller forwards any AWS_*, GOOGLE_APPLICATION_CREDENTIALS,
+    /// and AZURE_STORAGE_* variables it finds in its own environment.
+    /// Use this flag when agents already have credentials configured locally.
+    #[arg(long, default_value_t = false)]
+    no_forward_env: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -714,7 +788,7 @@ struct Cli {
 enum Commands {
     /// Simple reachability check (ping) against all agents
     Ping,
-    
+
     /// SSH setup wizard for distributed testing (v0.6.11+)
     /// Automates SSH key generation, distribution, and verification
     SshSetup {
@@ -722,24 +796,24 @@ enum Commands {
         /// Example: "ubuntu@vm1.example.com,ubuntu@vm2.example.com"
         #[arg(long)]
         hosts: String,
-        
+
         /// Default SSH user if not specified in host (default: current user)
         #[arg(long)]
         user: Option<String>,
-        
+
         /// SSH key path (default: ~/.ssh/sai3bench_id_rsa)
         #[arg(long)]
         key_path: Option<PathBuf>,
-        
+
         /// Interactive mode: prompt for passwords (default: true)
         #[arg(long, default_value_t = true)]
         interactive: bool,
-        
+
         /// Test connectivity only (don't setup)
         #[arg(long, default_value_t = false)]
         test_only: bool,
     },
-    
+
     /// Distributed GET
     Get {
         #[arg(long)]
@@ -769,28 +843,28 @@ enum Commands {
         /// Path to YAML workload configuration file
         #[arg(long)]
         config: PathBuf,
-        
+
         /// Validate configuration without executing workload
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-        
+
         /// Path prefix template for agent isolation (e.g., "agent-{id}/")
         /// Use {id} as placeholder for agent number (1, 2, 3, ...)
         /// Default: "agent-{id}/"
         #[arg(long, default_value = "agent-{id}/")]
         path_template: String,
-        
+
         /// Explicit agent IDs (comma-separated, optional)
         /// If not provided, agents will be numbered: agent-1, agent-2, agent-3, etc.
         /// Example: "node-a,node-b,node-c"
         #[arg(long)]
         agent_ids: Option<String>,
-        
+
         /// Delay in seconds before coordinated start (default: 2)
         /// Allows time for all agents to receive config and prepare
         #[arg(long, default_value_t = 2)]
         start_delay: u64,
-        
+
         /// Use shared storage for prepare phase (default: auto-detect)
         /// When true: prepare phase runs once, all agents use same data (S3, GCS, Azure, NFS)
         /// When false: each agent prepares its own local data (file://, direct://)
@@ -807,15 +881,15 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
-    
+
     /// Convert legacy YAML configs to explicit stages format (v0.8.61+)
-    /// 
+    ///
     /// Converts old implicit-stage configs (top-level duration/workload) to new
     /// explicit-stage format (distributed.stages array).
-    /// 
+    ///
     /// Creates backup files (.yaml.bak) before conversion.
     /// Validates converted configs before replacing original.
-    /// 
+    ///
     /// Examples:
     ///   sai3bench-ctl convert --config mixed.yaml
     ///   sai3bench-ctl convert --config mixed.yaml --dry-run
@@ -825,15 +899,15 @@ enum Commands {
         /// Single config file to convert
         #[arg(long, conflicts_with = "files")]
         config: Option<PathBuf>,
-        
+
         /// Multiple config files to convert
         #[arg(long, conflicts_with = "config", num_args = 1..)]
         files: Option<Vec<PathBuf>>,
-        
+
         /// Show what would be converted without making changes
         #[arg(long)]
         dry_run: bool,
-        
+
         /// Skip validation after conversion (faster but risky)
         #[arg(long)]
         no_validate: bool,
@@ -921,7 +995,10 @@ fn parse_csv_u32(input: &str) -> Result<Vec<u32>> {
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<u32>().with_context(|| format!("Invalid integer: {}", s)))
+        .map(|s| {
+            s.parse::<u32>()
+                .with_context(|| format!("Invalid integer: {}", s))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if vals.is_empty() {
         bail!("Expected at least one thread value");
@@ -1013,8 +1090,8 @@ async fn controller_autotune(
             cfg_path.display()
         )
     })?;
-    let cfg: ControllerAutotuneConfig = serde_yaml::from_value(block.clone())
-        .with_context(|| {
+    let cfg: ControllerAutotuneConfig =
+        serde_yaml::from_value(block.clone()).with_context(|| {
             format!(
                 "Failed to parse 'autotune' block in YAML: {}",
                 cfg_path.display()
@@ -1036,12 +1113,15 @@ async fn controller_autotune(
     // Channel sweep: absolute counts (channels=) OR per-thread multiplier (channels_per_thread=).
     // channels_per_thread must be a CSV of positive integers (≥ 1).  Practical range: 1–8.
     // Default when neither key is set: 1 (one channel per thread; effective = threads × 1).
-    enum CtChannelSpec { Absolute(Vec<u32>), PerThread(Vec<u32>) }
+    enum CtChannelSpec {
+        Absolute(Vec<u32>),
+        PerThread(Vec<u32>),
+    }
 
     let channel_spec: CtChannelSpec = if is_gcs {
         if let Some(cpt_str) = cfg.channels_per_thread.as_deref() {
             let cpts = parse_csv_u32(cpt_str)?;
-            if cpts.iter().any(|&v| v == 0) {
+            if cpts.contains(&0) {
                 bail!("channels_per_thread: all values must be ≥ 1 (0 is not a valid channel multiplier)");
             }
             CtChannelSpec::PerThread(cpts)
@@ -1055,10 +1135,16 @@ async fn controller_autotune(
         CtChannelSpec::Absolute(vec![0])
     };
 
-    let range_enabled_values = parse_csv_bool(cfg.range_enabled.as_deref().unwrap_or("false,true"))?;
-    let range_threshold_values = parse_csv_u32(cfg.range_thresholds_mb.as_deref().unwrap_or("32,64"))?;
+    let range_enabled_values =
+        parse_csv_bool(cfg.range_enabled.as_deref().unwrap_or("false,true"))?;
+    let range_threshold_values =
+        parse_csv_u32(cfg.range_thresholds_mb.as_deref().unwrap_or("32,64"))?;
     let gcs_write_chunk_values = if is_gcs {
-        parse_csv_u32(cfg.gcs_write_chunk_sizes.as_deref().unwrap_or("2097152,4194304"))?
+        parse_csv_u32(
+            cfg.gcs_write_chunk_sizes
+                .as_deref()
+                .unwrap_or("2097152,4194304"),
+        )?
     } else {
         vec![0]
     };
@@ -1074,7 +1160,9 @@ async fn controller_autotune(
         for th in &thread_values {
             let ch_pairs: Vec<(u32, Option<u32>)> = match &channel_spec {
                 CtChannelSpec::Absolute(vals) => vals.iter().map(|&v| (v, None)).collect(),
-                CtChannelSpec::PerThread(cpts) => cpts.iter().map(|&cpt| (th * cpt, Some(cpt))).collect(),
+                CtChannelSpec::PerThread(cpts) => {
+                    cpts.iter().map(|&cpt| (th * cpt, Some(cpt))).collect()
+                }
             };
             for (ch, cpt) in &ch_pairs {
                 for range_enabled in &range_enabled_values {
@@ -1102,7 +1190,10 @@ async fn controller_autotune(
 
     println!(
         "Controller autotune: {} case(s) × {} trial(s), objective={:?}, ops={:?}",
-        cases.len(), trials, objective, ops
+        cases.len(),
+        trials,
+        objective,
+        ops
     );
     println!("URI: {}", cfg.uri);
 
@@ -1122,24 +1213,28 @@ async fn controller_autotune(
                         .await
                         .with_context(|| format!("connect to {}", a))?;
                     let (bucket, prefix) = split_put_uri(&cfg.uri);
-                    let r = c.run_put(RunPutRequest {
-                        bucket,
-                        prefix,
-                        object_size: case.size_bytes,
-                        objects,
-                        concurrency: case.threads,
-                        gcs_rapid_mode: rapid_toggle,
-                        gcs_channel_count: case.channels,
-                        gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
-                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
-                    }).await?.into_inner();
+                    let r = c
+                        .run_put(RunPutRequest {
+                            bucket,
+                            prefix,
+                            object_size: case.size_bytes,
+                            objects,
+                            concurrency: case.threads,
+                            gcs_rapid_mode: rapid_toggle,
+                            gcs_channel_count: case.channels,
+                            gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                            gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
+                        })
+                        .await?
+                        .into_inner();
                     total_bytes += r.total_bytes as f64;
                     total_secs += r.seconds;
                 }
                 if total_secs > 0.0 {
                     let mbps = (total_bytes / 1_048_576.0) / total_secs;
                     put_mbps_samples.push(mbps);
-                    put_avg_ms_samples.push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
+                    put_avg_ms_samples
+                        .push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
                 }
             }
 
@@ -1150,29 +1245,37 @@ async fn controller_autotune(
                     let mut c = mk_client(a, insecure, agent_ca, agent_domain, 30, 10)
                         .await
                         .with_context(|| format!("connect to {}", a))?;
-                    let r = c.run_get(RunGetRequest {
-                        uri: cfg.uri.clone(),
-                        jobs: case.threads,
-                        gcs_rapid_mode: rapid_toggle,
-                        gcs_channel_count: case.channels,
-                        enable_range_downloads: to_pb_toggle(Some(case.range_enabled)),
-                        range_threshold_mb: case.range_threshold_mb,
-                        gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
-                        gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
-                    }).await?.into_inner();
+                    let r = c
+                        .run_get(RunGetRequest {
+                            uri: cfg.uri.clone(),
+                            jobs: case.threads,
+                            gcs_rapid_mode: rapid_toggle,
+                            gcs_channel_count: case.channels,
+                            enable_range_downloads: to_pb_toggle(Some(case.range_enabled)),
+                            range_threshold_mb: case.range_threshold_mb,
+                            gcs_write_chunk_size_bytes: case.gcs_write_chunk_size,
+                            gcs_project: cfg.gcs_project.clone().unwrap_or_default(),
+                        })
+                        .await?
+                        .into_inner();
                     total_bytes += r.total_bytes as f64;
                     total_secs += r.seconds;
                 }
                 if total_secs > 0.0 {
                     let mbps = (total_bytes / 1_048_576.0) / total_secs;
                     get_mbps_samples.push(mbps);
-                    get_avg_ms_samples.push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
+                    get_avg_ms_samples
+                        .push((total_secs * 1000.0) / (agents.len() as f64 * objects as f64));
                 }
             }
         }
 
         let mean = |vals: &[f64]| -> Option<f64> {
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f64>() / vals.len() as f64)
+            }
         };
 
         results.push(CtTuneResult {
@@ -1189,16 +1292,36 @@ async fn controller_autotune(
             CtOptimizeFor::Throughput => {
                 let mut total = 0.0;
                 let mut n = 0.0;
-                if let Some(v) = r.put_mbps { total += v; n += 1.0; }
-                if let Some(v) = r.get_mbps { total += v; n += 1.0; }
-                if n == 0.0 { 0.0 } else { total / n }
+                if let Some(v) = r.put_mbps {
+                    total += v;
+                    n += 1.0;
+                }
+                if let Some(v) = r.get_mbps {
+                    total += v;
+                    n += 1.0;
+                }
+                if n == 0.0 {
+                    0.0
+                } else {
+                    total / n
+                }
             }
             CtOptimizeFor::Latency => {
                 let mut total = 0.0;
                 let mut n = 0.0;
-                if let Some(v) = r.put_avg_ms { total += v; n += 1.0; }
-                if let Some(v) = r.get_avg_ms { total += v; n += 1.0; }
-                if n == 0.0 { f64::INFINITY } else { total / n }
+                if let Some(v) = r.put_avg_ms {
+                    total += v;
+                    n += 1.0;
+                }
+                if let Some(v) = r.get_avg_ms {
+                    total += v;
+                    n += 1.0;
+                }
+                if n == 0.0 {
+                    f64::INFINITY
+                } else {
+                    total / n
+                }
             }
         }
     };
@@ -1206,11 +1329,19 @@ async fn controller_autotune(
     let best = match objective {
         CtOptimizeFor::Throughput => results
             .iter()
-            .max_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                score(a)
+                    .partial_cmp(&score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .ok_or_else(|| anyhow!("No best result found"))?,
         CtOptimizeFor::Latency => results
             .iter()
-            .min_by(|a, b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                score(a)
+                    .partial_cmp(&score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .ok_or_else(|| anyhow!("No best result found"))?,
     };
 
@@ -1219,11 +1350,17 @@ async fn controller_autotune(
     println!("threads/jobs: {}", best.case.threads);
     println!("channels: {}", best.case.channels);
     if let Some(cpt) = best.case.channels_per_thread {
-        println!("channels_per_thread: {}  (= {} threads × {})", best.case.channels, best.case.threads, cpt);
+        println!(
+            "channels_per_thread: {}  (= {} threads × {})",
+            best.case.channels, best.case.threads, cpt
+        );
     }
     println!("range_enabled: {}", best.case.range_enabled);
     println!("range_threshold_mb: {}", best.case.range_threshold_mb);
-    println!("gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+    println!(
+        "gcs_write_chunk_size_bytes: {}",
+        best.case.gcs_write_chunk_size
+    );
     println!("gcs_rapid_mode: {:?}", rapid_mode);
     println!("put_mbps: {:.2?}", best.put_mbps);
     println!("get_mbps: {:.2?}", best.get_mbps);
@@ -1237,7 +1374,10 @@ async fn controller_autotune(
     println!("  range_threshold_mb: {}", best.case.range_threshold_mb);
     if is_gcs {
         println!("  gcs_channel_count: {}", best.case.channels);
-        println!("  gcs_write_chunk_size_bytes: {}", best.case.gcs_write_chunk_size);
+        println!(
+            "  gcs_write_chunk_size_bytes: {}",
+            best.case.gcs_write_chunk_size
+        );
         match rapid_mode {
             CtRapidMode::On => println!("  gcs_rapid_mode: true"),
             CtRapidMode::Off => println!("  gcs_rapid_mode: false"),
@@ -1257,42 +1397,46 @@ async fn abort_all_agents(
     agent_domain: &str,
 ) {
     eprintln!("⚠️  Sending abort signal to all agents...");
-    
+
     // v0.7.13: Transition active agents to Aborting state
     for addr in agent_addrs {
         if let Some(tracker) = agent_trackers.get_mut(addr) {
-            if matches!(tracker.state, ControllerAgentState::Ready | ControllerAgentState::Preparing | ControllerAgentState::Running) {
+            if matches!(
+                tracker.state,
+                ControllerAgentState::Ready
+                    | ControllerAgentState::Preparing
+                    | ControllerAgentState::Running
+            ) {
                 let _ = tracker.transition_to(ControllerAgentState::Aborting, "abort RPC sent");
             }
         }
     }
-    
+
     let mut abort_tasks = Vec::new();
-    
+
     for addr in agent_addrs {
         let addr = addr.clone();
-        let ca = agent_ca.cloned();  // Clone PathBuf if present
+        let ca = agent_ca.cloned(); // Clone PathBuf if present
         let domain = agent_domain.to_string();
-        
+
         let task = tokio::spawn(async move {
             match mk_client(&addr, insecure, ca.as_ref(), &domain, 30, 10).await {
-                Ok(mut client) => {
-                    match client.abort_workload(Empty {}).await {
-                        Ok(_) => debug!("Abort signal sent to agent {}", addr),
-                        Err(e) => warn!("Failed to abort agent {}: {}", addr, e),
-                    }
-                }
+                Ok(mut client) => match client.abort_workload(Empty {}).await {
+                    Ok(_) => debug!("Abort signal sent to agent {}", addr),
+                    Err(e) => warn!("Failed to abort agent {}: {}", addr, e),
+                },
                 Err(e) => warn!("Failed to connect to agent {} for abort: {}", addr, e),
             }
         });
         abort_tasks.push(task);
     }
-    
+
     // Wait for all abort calls (with short timeout)
     let _ = tokio::time::timeout(
         tokio::time::Duration::from_secs(2),
-        futures::future::join_all(abort_tasks)
-    ).await;
+        futures::future::join_all(abort_tasks),
+    )
+    .await;
 }
 
 async fn mk_client(
@@ -1315,7 +1459,7 @@ async fn mk_client(
             // v0.8.27: Made configurable via distributed.grpc_keepalive_* (defaults: 30s/10s)
             .http2_keep_alive_interval(Duration::from_secs(keepalive_interval_secs))
             .keep_alive_timeout(Duration::from_secs(keepalive_timeout_secs))
-            .keep_alive_while_idle(true)                         // Keep alive even when idle
+            .keep_alive_while_idle(true) // Keep alive even when idle
             .connect()
             .await?;
         return Ok(AgentClient::new(channel));
@@ -1345,6 +1489,59 @@ async fn mk_client(
         .connect()
         .await?;
     Ok(AgentClient::new(channel))
+}
+
+// ─── Credential forwarding ────────────────────────────────────────────────────
+//
+// Allowed key prefixes — only these are ever forwarded to agents.
+// This is a hard-coded allow-list; arbitrary env var forwarding is intentionally
+// NOT supported to limit the blast radius of a misconfigured or malicious config.
+const CREDENTIAL_KEY_PREFIXES: &[&str] =
+    &["AWS_", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_STORAGE_"];
+
+fn is_credential_key(key: &str) -> bool {
+    CREDENTIAL_KEY_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix) || key == *prefix)
+}
+
+/// Load credential environment variables to forward to agents.
+///
+/// If `env_file` is `Some(path)`, parses that file with `dotenvy` and collects
+/// credential variables from it (the file does NOT change the controller's own env).
+/// If `env_file` is `None`, collects credential variables from the controller's
+/// current process environment.
+///
+/// Only keys matching `CREDENTIAL_KEY_PREFIXES` are collected.  All other
+/// variables are silently ignored.
+///
+/// Returns `(vars, source_description)` where `vars` is the map to embed in the
+/// config and `source_description` is a human-readable string for logging.
+fn load_credentials_for_agents(
+    env_file: Option<&std::path::Path>,
+) -> Result<(std::collections::HashMap<String, String>, String)> {
+    let mut vars = std::collections::HashMap::new();
+
+    if let Some(path) = env_file {
+        // Parse the .env file without modifying the current process environment.
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Cannot read env file: {}", path.display()))?;
+        for item in dotenvy::Iter::new(content.as_bytes()) {
+            let (key, value) = item.context("Malformed line in env file")?;
+            if is_credential_key(&key) {
+                vars.insert(key, value);
+            }
+        }
+        Ok((vars, format!("env file '{}'", path.display())))
+    } else {
+        // Collect from the current process environment.
+        for (key, value) in std::env::vars() {
+            if is_credential_key(&key) {
+                vars.insert(key, value);
+            }
+        }
+        Ok((vars, "controller environment".to_string()))
+    }
 }
 
 fn split_put_uri(uri: &str) -> (String, String) {
@@ -1378,37 +1575,48 @@ async fn main() -> Result<()> {
         2 => ("debug", "info"),  // -vv: debug controller, info s3dlio
         _ => ("trace", "debug"), // -vvv+: trace controller, debug s3dlio
     };
-    
+
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::new(format!("sai3bench_ctl={},s3dlio={}", ctl_level, s3dlio_level));
-    fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    let filter = EnvFilter::new(format!(
+        "sai3bench_ctl={},s3dlio={}",
+        ctl_level, s3dlio_level
+    ));
+    fmt().with_env_filter(filter).with_target(false).init();
 
     debug!("Logging initialized at level: {}", ctl_level);
 
     let agents: Vec<String> = cli
         .agents
         .as_ref()
-        .map(|a| a.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect())
+        .map(|a| {
+            a.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
 
-    info!("Controller starting with {} agent(s) from CLI", agents.len());
+    info!(
+        "Controller starting with {} agent(s) from CLI",
+        agents.len()
+    );
     debug!("Agent addresses: {:?}", agents);
 
     match &cli.command {
-        Commands::SshSetup { hosts, user, key_path, interactive, test_only } => {
-            use sai3_bench::ssh_setup::{SshSetup, test_connectivity, print_setup_instructions};
-            
+        Commands::SshSetup {
+            hosts,
+            user,
+            key_path,
+            interactive,
+            test_only,
+        } => {
+            use sai3_bench::ssh_setup::{print_setup_instructions, test_connectivity, SshSetup};
+
             // Parse hosts
-            let default_user = user.clone().unwrap_or_else(|| {
-                std::env::var("USER").unwrap_or_else(|_| "ubuntu".to_string())
-            });
-            
+            let default_user = user
+                .clone()
+                .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "ubuntu".to_string()));
+
             let parsed_hosts: Vec<(String, String)> = hosts
                 .split(',')
                 .map(|h| h.trim())
@@ -1422,16 +1630,16 @@ async fn main() -> Result<()> {
                     }
                 })
                 .collect();
-            
+
             if parsed_hosts.is_empty() {
                 bail!("No hosts specified. Use --hosts user@host1,user@host2");
             }
-            
+
             let mut setup = SshSetup::default();
             if let Some(kp) = key_path {
                 setup.key_path = kp.clone();
             }
-            
+
             if *test_only {
                 // Test connectivity only
                 test_connectivity(&parsed_hosts, &setup.key_path)?;
@@ -1446,24 +1654,38 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            
+
             return Ok(());
         }
-        
+
         Commands::Ping => {
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
-                    .await
-                    .with_context(|| format!("connect to {}", a))?;
+                let mut c = mk_client(
+                    a,
+                    !cli.tls,
+                    cli.agent_ca.as_ref(),
+                    &cli.agent_domain,
+                    30,
+                    10,
+                )
+                .await
+                .with_context(|| format!("connect to {}", a))?;
                 let r = c.ping(Empty {}).await?.into_inner();
                 eprintln!("connected to {} (agent version {})", a, r.version);
             }
         }
         Commands::Get { uri, jobs } => {
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
-                    .await
-                    .with_context(|| format!("connect to {}", a))?;
+                let mut c = mk_client(
+                    a,
+                    !cli.tls,
+                    cli.agent_ca.as_ref(),
+                    &cli.agent_domain,
+                    30,
+                    10,
+                )
+                .await
+                .with_context(|| format!("connect to {}", a))?;
                 let r = c
                     .run_get(RunGetRequest {
                         uri: uri.clone(),
@@ -1494,15 +1716,22 @@ async fn main() -> Result<()> {
         } => {
             let (bucket, prefix) = split_put_uri(uri);
             for a in &agents {
-                let mut c = mk_client(a, !cli.tls, cli.agent_ca.as_ref(), &cli.agent_domain, 30, 10)
-                    .await
-                    .with_context(|| format!("connect to {}", a))?;
+                let mut c = mk_client(
+                    a,
+                    !cli.tls,
+                    cli.agent_ca.as_ref(),
+                    &cli.agent_domain,
+                    30,
+                    10,
+                )
+                .await
+                .with_context(|| format!("connect to {}", a))?;
                 let r = c
                     .run_put(RunPutRequest {
                         bucket: bucket.clone(),
                         prefix: prefix.clone(),
                         object_size: *object_size,
-                        objects: *objects as u32,         // <-- proto expects u32
+                        objects: *objects as u32, // <-- proto expects u32
                         concurrency: *concurrency as u32, // <-- proto expects u32
                         gcs_rapid_mode: TriStateToggle::Unspecified as i32,
                         gcs_channel_count: 0,
@@ -1541,12 +1770,12 @@ async fn main() -> Result<()> {
             // Read config to check for distributed.agents
             let config_yaml = fs::read_to_string(config)
                 .with_context(|| format!("Failed to read config file: {}", config.display()))?;
-            let mut parsed_config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
-                .context("Failed to parse YAML config")?;
+            let mut parsed_config: sai3_bench::config::Config =
+                serde_yaml::from_str(&config_yaml).context("Failed to parse YAML config")?;
 
             sai3_bench::validation::apply_directory_tree_counts(&mut parsed_config)
                 .context("Directory tree count validation failed")?;
-            
+
             // v0.7.12: Use comprehensive validation display (same as standalone binary)
             if *dry_run {
                 // v0.7.13: Validate workload configuration FIRST (before printing "Configuration is valid")
@@ -1554,23 +1783,31 @@ async fn main() -> Result<()> {
                     eprintln!("❌ Configuration validation failed: {}", e);
                     bail!("Configuration validation failed: {}", e);
                 }
-                
+
                 // v0.8.60: CRITICAL - Validate distributed configuration during dry-run
                 // This catches base_uri conflicts, multi-endpoint issues, etc. BEFORE runtime
-                match sai3_bench::preflight::distributed::validate_distributed_config(&parsed_config) {
+                match sai3_bench::preflight::distributed::validate_distributed_config(
+                    &parsed_config,
+                ) {
                     Ok(validation_results) => {
                         if !validation_results.is_empty() {
                             eprintln!("\n🔍 Distributed Config Validation (dry-run)");
                             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                            
-                            let (passed, errors, warnings) = 
-                                sai3_bench::preflight::display_validation_results(&validation_results, None);
-                            
+
+                            let (passed, errors, warnings) =
+                                sai3_bench::preflight::display_validation_results(
+                                    &validation_results,
+                                    None,
+                                );
+
                             if !passed {
                                 eprintln!("\n❌ Distributed configuration validation FAILED");
                                 eprintln!("   {} errors, {} warnings", errors, warnings);
                                 eprintln!("\nFix the above configuration errors before running.");
-                                bail!("Distributed configuration validation failed with {} errors", errors);
+                                bail!(
+                                    "Distributed configuration validation failed with {} errors",
+                                    errors
+                                );
                             } else if warnings > 0 {
                                 eprintln!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
                                 eprintln!();
@@ -1582,47 +1819,65 @@ async fn main() -> Result<()> {
                         bail!("Failed to validate distributed configuration: {}", e);
                     }
                 }
-                
+
                 // Only print full summary with "Configuration is valid" if validation passed
-                sai3_bench::validation::display_config_summary(&parsed_config, &config.display().to_string())?;
-                
+                sai3_bench::validation::display_config_summary(
+                    &parsed_config,
+                    &config.display().to_string(),
+                )?;
+
                 return Ok(());
             }
-            
+
             // Determine agent addresses: config.distributed.agents takes precedence over CLI --agents
-            let (agent_addrs, ssh_deployment) = if let Some(ref dist_config) = parsed_config.distributed {
-                // Use agents from config
-                let addrs: Vec<String> = dist_config.agents.iter()
-                    .map(|a| {
-                        // If SSH deployment, use address without port (we'll add listen_port)
-                        if dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false) {
-                            // SSH mode: address might be just hostname
-                            if a.address.contains(':') {
-                                a.address.clone()
+            let (agent_addrs, ssh_deployment) =
+                if let Some(ref dist_config) = parsed_config.distributed {
+                    // Use agents from config
+                    let addrs: Vec<String> = dist_config
+                        .agents
+                        .iter()
+                        .map(|a| {
+                            // If SSH deployment, use address without port (we'll add listen_port)
+                            if dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false) {
+                                // SSH mode: address might be just hostname
+                                if a.address.contains(':') {
+                                    a.address.clone()
+                                } else {
+                                    format!("{}:{}", a.address, a.listen_port)
+                                }
                             } else {
-                                format!("{}:{}", a.address, a.listen_port)
+                                // Direct gRPC mode: use address as-is
+                                a.address.clone()
                             }
+                        })
+                        .collect();
+
+                    info!(
+                        "Using {} agents from config.distributed.agents",
+                        addrs.len()
+                    );
+
+                    // Check if SSH deployment is enabled
+                    let ssh_enabled = dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false);
+
+                    (
+                        addrs,
+                        if ssh_enabled {
+                            Some(dist_config.clone())
                         } else {
-                            // Direct gRPC mode: use address as-is
-                            a.address.clone()
-                        }
-                    })
-                    .collect();
-                
-                info!("Using {} agents from config.distributed.agents", addrs.len());
-                
-                // Check if SSH deployment is enabled
-                let ssh_enabled = dist_config.ssh.as_ref().map(|s| s.enabled).unwrap_or(false);
-                
-                (addrs, if ssh_enabled { Some(dist_config.clone()) } else { None })
-            } else if !agents.is_empty() {
-                // Fallback to CLI --agents (backward compatibility)
-                info!("Using {} agents from CLI --agents argument", agents.len());
-                (agents.clone(), None)
-            } else {
-                bail!("No agents specified. Use --agents on CLI or distributed.agents in config YAML");
-            };
-            
+                            None
+                        },
+                    )
+                } else if !agents.is_empty() {
+                    // Fallback to CLI --agents (backward compatibility)
+                    info!("Using {} agents from CLI --agents argument", agents.len());
+                    (agents.clone(), None)
+                } else {
+                    bail!(
+                    "No agents specified. Use --agents on CLI or distributed.agents in config YAML"
+                );
+                };
+
             run_distributed_workload(
                 &agent_addrs,
                 config,
@@ -1634,13 +1889,20 @@ async fn main() -> Result<()> {
                 !cli.tls,
                 cli.agent_ca.as_ref(),
                 &cli.agent_domain,
+                cli.env_file.as_deref(),
+                cli.no_forward_env,
             )
             .await?;
         }
-        
-        Commands::Convert { config, files, dry_run, no_validate } => {
+
+        Commands::Convert {
+            config,
+            files,
+            dry_run,
+            no_validate,
+        } => {
             use sai3_bench::config_converter::{convert_yaml_file, ConversionResult};
-            
+
             // Determine files to process
             let files_to_convert: Vec<PathBuf> = if let Some(single_config) = config {
                 vec![single_config.clone()]
@@ -1649,39 +1911,39 @@ async fn main() -> Result<()> {
             } else {
                 bail!("Must specify either --config or --files");
             };
-            
+
             if files_to_convert.is_empty() {
                 bail!("No files provided for conversion");
             }
-            
+
             println!("╔═══════════════════════════════════════════════════════════════════════╗");
             println!("║        YAML Config Converter: Legacy → Explicit Stages              ║");
             println!("╚═══════════════════════════════════════════════════════════════════════╝");
             println!();
-            
+
             if *dry_run {
                 println!("🔍 DRY RUN MODE - No changes will be made");
             } else if *no_validate {
                 println!("⚠️  VALIDATION DISABLED - Configs will NOT be validated");
             }
-            
+
             println!();
             println!("Processing {} file(s)...", files_to_convert.len());
             println!();
-            
+
             let mut success_count = 0;
             let mut skip_count = 0;
             let mut fail_count = 0;
-            
+
             for file_path in &files_to_convert {
                 println!("📄 {}", file_path.display());
-                
+
                 if !file_path.exists() {
                     println!("  ❌ File does not exist");
                     fail_count += 1;
                     continue;
                 }
-                
+
                 match convert_yaml_file(file_path, !no_validate, *dry_run) {
                     Ok(ConversionResult::AlreadyHasStages) => {
                         println!("  ℹ️  Already has stages section - skipping");
@@ -1695,7 +1957,10 @@ async fn main() -> Result<()> {
                         println!("  🔄 Would convert → {} stages", stage_count);
                         success_count += 1;
                     }
-                    Ok(ConversionResult::Converted { stage_count, backup_path }) => {
+                    Ok(ConversionResult::Converted {
+                        stage_count,
+                        backup_path,
+                    }) => {
                         println!("  ✅ Converted → {} stages", stage_count);
                         println!("  💾 Backup: {}", backup_path);
                         success_count += 1;
@@ -1708,10 +1973,10 @@ async fn main() -> Result<()> {
                         fail_count += 1;
                     }
                 }
-                
+
                 println!();
             }
-            
+
             // Summary
             println!("╔═══════════════════════════════════════════════════════════════════════╗");
             println!("║                     CONVERSION SUMMARY                               ║");
@@ -1722,13 +1987,13 @@ async fn main() -> Result<()> {
             println!("❌ Failed:    {}", fail_count);
             println!("📁 Total:     {}", files_to_convert.len());
             println!();
-            
+
             if !dry_run && success_count > 0 {
                 println!("💾 Backups saved with .yaml.bak extension");
                 println!("   To restore: mv <file>.yaml.bak <file>.yaml");
                 println!();
             }
-            
+
             if fail_count > 0 {
                 bail!("{} file(s) failed to convert", fail_count);
             }
@@ -1739,16 +2004,14 @@ async fn main() -> Result<()> {
 }
 
 /// v0.7.13: Wait for shutdown signals (SIGINT or SIGTERM)
-/// 
+///
 /// Returns signal name for logging. Provides graceful shutdown on Ctrl-C or systemd/Docker stop.
 async fn wait_for_shutdown_signal() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
-    
-    let mut sigint = signal(SignalKind::interrupt())
-        .expect("failed to install SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate())
-        .expect("failed to install SIGTERM handler");
-    
+
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+
     tokio::select! {
         _ = sigint.recv() => "SIGINT",
         _ = sigterm.recv() => "SIGTERM",
@@ -1756,73 +2019,107 @@ async fn wait_for_shutdown_signal() -> &'static str {
 }
 
 /// Run pre-flight validation on all agents
-/// 
+///
 /// Returns Ok(()) if all agents pass validation (errors=0)
 /// Returns Err if any agent reports errors
 async fn run_preflight_validation(
     agent_clients: &mut [(String, AgentClient<Channel>)],
     config_yaml: &str,
 ) -> Result<()> {
-    info!("Running pre-flight validation on {} agents", agent_clients.len());
+    info!(
+        "Running pre-flight validation on {} agents",
+        agent_clients.len()
+    );
     println!("\n🔍 Pre-flight Validation");
     println!("━━━━━━━━━━━━━━━━━━━━━━");
-    
+
     let mut all_passed = true;
     let mut total_errors = 0;
     let mut total_warnings = 0;
-    
+
     for (agent_id, client) in agent_clients.iter_mut() {
         // Send pre-flight request
         let request = PreFlightRequest {
             config_yaml: config_yaml.to_string(),
             agent_id: agent_id.clone(),
         };
-        
+
         match client.pre_flight_validation(request).await {
             Ok(response) => {
                 let result = response.into_inner();
-                
+
                 // Display agent results
                 let status_icon = if result.passed { "✅" } else { "❌" };
                 println!("\n{} Agent: {}", status_icon, agent_id);
-                
+
                 if result.error_count > 0 || result.warning_count > 0 || result.info_count > 0 {
                     // Convert proto results to internal ValidationResult for shared display
                     use sai3_bench::preflight::ValidationResult;
-                    
-                    let validation_results: Vec<ValidationResult> = result.results.iter().map(|vr| {
-                        let level = match pb::iobench::ResultLevel::try_from(vr.level) {
-                            Ok(pb::iobench::ResultLevel::Success) => sai3_bench::preflight::ResultLevel::Success,
-                            Ok(pb::iobench::ResultLevel::Info) => sai3_bench::preflight::ResultLevel::Info,
-                            Ok(pb::iobench::ResultLevel::Warning) => sai3_bench::preflight::ResultLevel::Warning,
-                            Ok(pb::iobench::ResultLevel::Error) => sai3_bench::preflight::ResultLevel::Error,
-                            _ => sai3_bench::preflight::ResultLevel::Error,
-                        };
-                        
-                        let error_type = match pb::iobench::ErrorType::try_from(vr.error_type) {
-                            Ok(pb::iobench::ErrorType::Authentication) => Some(sai3_bench::preflight::ErrorType::Authentication),
-                            Ok(pb::iobench::ErrorType::Permission) => Some(sai3_bench::preflight::ErrorType::Permission),
-                            Ok(pb::iobench::ErrorType::Network) => Some(sai3_bench::preflight::ErrorType::Network),
-                            Ok(pb::iobench::ErrorType::Configuration) => Some(sai3_bench::preflight::ErrorType::Configuration),
-                            Ok(pb::iobench::ErrorType::Resource) => Some(sai3_bench::preflight::ErrorType::Resource),
-                            Ok(pb::iobench::ErrorType::System) => Some(sai3_bench::preflight::ErrorType::System),
-                            _ => None,
-                        };
-                        
-                        ValidationResult {
-                            level,
-                            error_type,
-                            message: vr.message.clone(),
-                            suggestion: vr.suggestion.clone(),
-                            details: if vr.details.is_empty() { None } else { Some(vr.details.clone()) },
-                            test_phase: vr.test_phase.clone(),
-                        }
-                    }).collect();
-                    
+
+                    let validation_results: Vec<ValidationResult> = result
+                        .results
+                        .iter()
+                        .map(|vr| {
+                            let level = match pb::iobench::ResultLevel::try_from(vr.level) {
+                                Ok(pb::iobench::ResultLevel::Success) => {
+                                    sai3_bench::preflight::ResultLevel::Success
+                                }
+                                Ok(pb::iobench::ResultLevel::Info) => {
+                                    sai3_bench::preflight::ResultLevel::Info
+                                }
+                                Ok(pb::iobench::ResultLevel::Warning) => {
+                                    sai3_bench::preflight::ResultLevel::Warning
+                                }
+                                Ok(pb::iobench::ResultLevel::Error) => {
+                                    sai3_bench::preflight::ResultLevel::Error
+                                }
+                                _ => sai3_bench::preflight::ResultLevel::Error,
+                            };
+
+                            let error_type = match pb::iobench::ErrorType::try_from(vr.error_type) {
+                                Ok(pb::iobench::ErrorType::Authentication) => {
+                                    Some(sai3_bench::preflight::ErrorType::Authentication)
+                                }
+                                Ok(pb::iobench::ErrorType::Permission) => {
+                                    Some(sai3_bench::preflight::ErrorType::Permission)
+                                }
+                                Ok(pb::iobench::ErrorType::Network) => {
+                                    Some(sai3_bench::preflight::ErrorType::Network)
+                                }
+                                Ok(pb::iobench::ErrorType::Configuration) => {
+                                    Some(sai3_bench::preflight::ErrorType::Configuration)
+                                }
+                                Ok(pb::iobench::ErrorType::Resource) => {
+                                    Some(sai3_bench::preflight::ErrorType::Resource)
+                                }
+                                Ok(pb::iobench::ErrorType::System) => {
+                                    Some(sai3_bench::preflight::ErrorType::System)
+                                }
+                                _ => None,
+                            };
+
+                            ValidationResult {
+                                level,
+                                error_type,
+                                message: vr.message.clone(),
+                                suggestion: vr.suggestion.clone(),
+                                details: if vr.details.is_empty() {
+                                    None
+                                } else {
+                                    Some(vr.details.clone())
+                                },
+                                test_phase: vr.test_phase.clone(),
+                            }
+                        })
+                        .collect();
+
                     // Use shared display function
-                    let (passed, _errors, _warnings) = 
-                        sai3_bench::preflight::display_validation_results(&validation_results, None);
-                    
+                    let (passed, _errors, _warnings) =
+                        sai3_bench::preflight::display_validation_results(
+                            &validation_results,
+                            None,
+                        );
+
                     // Update totals (use proto counts which are authoritative)
                     total_errors += result.error_count;
                     total_warnings += result.warning_count;
@@ -1846,18 +2143,26 @@ async fn run_preflight_validation(
             }
         }
     }
-    
+
     // Display summary
     println!("\n━━━━━━━━━━━━━━━━━━━━━━");
     if all_passed {
-        println!("✅ Pre-flight validation passed ({} agents)", agent_clients.len());
+        println!(
+            "✅ Pre-flight validation passed ({} agents)",
+            agent_clients.len()
+        );
         if total_warnings > 0 {
             println!("⚠️  {} warnings detected (non-fatal)", total_warnings);
         }
         Ok(())
     } else {
         println!("❌ Pre-flight validation FAILED");
-        println!("   {} errors, {} warnings across {} agents", total_errors, total_warnings, agent_clients.len());
+        println!(
+            "   {} errors, {} warnings across {} agents",
+            total_errors,
+            total_warnings,
+            agent_clients.len()
+        );
         println!("\nFix the above errors before running the workload.");
         bail!("Pre-flight validation failed with {} errors", total_errors)
     }
@@ -1881,10 +2186,10 @@ struct AgentHeartbeat {
 /// Barrier status result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BarrierStatus {
-    Ready,     // All required agents at barrier
-    Waiting,   // Still waiting for agents
-    Degraded,  // Some failed, proceeding with survivors
-    Failed,    // Insufficient agents ready
+    Ready,    // All required agents at barrier
+    Waiting,  // Still waiting for agents
+    Degraded, // Some failed, proceeding with survivors
+    Failed,   // Insufficient agents ready
 }
 
 /// Barrier manager coordinates phase transitions across distributed agents
@@ -1901,7 +2206,7 @@ struct BarrierManager {
 /// v0.8.26: State tracking for a specific named barrier
 #[derive(Debug, Default)]
 struct BarrierState {
-    ready_agents: HashMap<String, u32>,  // agent_id -> barrier_sequence
+    ready_agents: HashMap<String, u32>, // agent_id -> barrier_sequence
     released: bool,
 }
 
@@ -1910,7 +2215,7 @@ struct BarrierState {
 /// Note: barrier_sequence removed - retry counting is agent-local, not in proto
 #[derive(Debug)]
 struct BarrierReleaseInfo {
-    barrier_index: u32,  // Numeric stage index (0, 1, 2...)
+    barrier_index: u32, // Numeric stage index (0, 1, 2...)
     ready_agents: Vec<String>,
 }
 
@@ -1919,62 +2224,65 @@ impl BarrierManager {
     fn new(agent_ids: Vec<String>, config: PhaseBarrierConfig) -> Self {
         let mut agents = HashMap::new();
         for id in agent_ids {
-            agents.insert(id, AgentHeartbeat {
-                last_heartbeat: Instant::now(),
-                last_progress: None,
-                missed_count: 0,
-                is_alive: true,
-                query_in_progress: false,
-            });
+            agents.insert(
+                id,
+                AgentHeartbeat {
+                    last_heartbeat: Instant::now(),
+                    last_progress: None,
+                    missed_count: 0,
+                    is_alive: true,
+                    query_in_progress: false,
+                },
+            );
         }
-        
+
         Self {
             agents,
             config,
             ready_agents: HashSet::new(),
             failed_agents: HashSet::new(),
-            barrier_agents: HashMap::new(),  // v0.8.26: Per-barrier tracking
+            barrier_agents: HashMap::new(), // v0.8.26: Per-barrier tracking
         }
     }
-    
+
     /// Process heartbeat from agent
     fn process_heartbeat(&mut self, agent_id: &str, progress: PhaseProgress) {
         if let Some(hb) = self.agents.get_mut(agent_id) {
             hb.last_heartbeat = Instant::now();
             hb.last_progress = Some(progress.clone());
-            hb.missed_count = 0;  // Reset missed counter
+            hb.missed_count = 0; // Reset missed counter
             hb.is_alive = true;
             hb.query_in_progress = false;
-            
+
             // Check if agent reached barrier (phase completed)
             if progress.phase_completed || progress.at_barrier {
                 self.ready_agents.insert(agent_id.to_string());
             }
         }
     }
-    
+
     /// Check for agents with missed heartbeats and query them
     async fn check_liveness(&mut self, client_pool: &HashMap<String, AgentClient<Channel>>) {
         let now = Instant::now();
         let heartbeat_interval = Duration::from_secs(self.config.heartbeat_interval);
-        
+
         // First pass: identify agents to query (avoid borrow checker issues)
         let mut agents_to_query = Vec::new();
-        
+
         for (agent_id, hb) in self.agents.iter_mut() {
             // Skip agents already marked as failed
             if self.failed_agents.contains(agent_id) {
                 continue;
             }
-            
+
             // Skip if heartbeat is recent
             if now.duration_since(hb.last_heartbeat) < heartbeat_interval {
                 continue;
             }
-            
+
             // Increment missed count
             hb.missed_count += 1;
-            
+
             // If threshold exceeded and no query in progress, mark for querying
             if hb.missed_count >= self.config.missed_threshold && !hb.query_in_progress {
                 warn!(
@@ -1983,17 +2291,20 @@ impl BarrierManager {
                     hb.missed_count,
                     now.duration_since(hb.last_heartbeat).as_secs()
                 );
-                
+
                 hb.query_in_progress = true;
                 agents_to_query.push(agent_id.clone());
             }
         }
-        
+
         // Second pass: query agents (can now call &self methods)
         for agent_id in agents_to_query {
             match self.query_agent_with_retry(&agent_id, client_pool).await {
                 Ok(response) => {
-                    info!("✅ Agent {} responded to query: {}", agent_id, response.status_message);
+                    info!(
+                        "✅ Agent {} responded to query: {}",
+                        agent_id, response.status_message
+                    );
                     if let Some(progress) = response.current_progress {
                         self.process_heartbeat(&agent_id, progress);
                     }
@@ -2012,29 +2323,32 @@ impl BarrierManager {
             }
         }
     }
-    
+
     /// Query agent with exponential backoff retry
     async fn query_agent_with_retry(
         &self,
         agent_id: &str,
         client_pool: &HashMap<String, AgentClient<Channel>>,
     ) -> Result<AgentQueryResponse> {
-        let client = client_pool.get(agent_id)
+        let client = client_pool
+            .get(agent_id)
             .ok_or_else(|| anyhow!("No client for agent {}", agent_id))?;
-        
+
         let mut retries = 0;
-        let mut backoff_ms = 1000;  // Start with 1s
-        
+        let mut backoff_ms = 1000; // Start with 1s
+
         loop {
             let request = AgentQueryRequest {
                 agent_id: agent_id.to_string(),
                 reason: "missed_heartbeats".to_string(),
             };
-            
+
             match tokio::time::timeout(
                 Duration::from_secs(self.config.query_timeout),
-                client.clone().query_agent_status(request)
-            ).await {
+                client.clone().query_agent_status(request),
+            )
+            .await
+            {
                 Ok(Ok(response)) => return Ok(response.into_inner()),
                 Ok(Err(e)) => {
                     if retries >= self.config.query_retries {
@@ -2042,7 +2356,10 @@ impl BarrierManager {
                     }
                     warn!(
                         "Query attempt {} failed for {}: {}, retrying in {}ms",
-                        retries + 1, agent_id, e, backoff_ms
+                        retries + 1,
+                        agent_id,
+                        e,
+                        backoff_ms
                     );
                 }
                 Err(_) => {
@@ -2051,24 +2368,26 @@ impl BarrierManager {
                     }
                     warn!(
                         "Query attempt {} timeout for {}, retrying in {}ms",
-                        retries + 1, agent_id, backoff_ms
+                        retries + 1,
+                        agent_id,
+                        backoff_ms
                     );
                 }
             }
-            
+
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             retries += 1;
-            backoff_ms = (backoff_ms * 2).min(10_000);  // Cap at 10s
+            backoff_ms = (backoff_ms * 2).min(10_000); // Cap at 10s
         }
     }
-    
+
     /// Check if barrier is satisfied (all/majority/best-effort)
     fn check_barrier(&self) -> BarrierStatus {
         let ready_count = self.ready_agents.len();
         let total_count = self.agents.len();
         let failed_count = self.failed_agents.len();
         let alive_count = total_count - failed_count;
-        
+
         match self.config.barrier_type {
             BarrierType::AllOrNothing => {
                 // Check for failures FIRST - any failure means abort
@@ -2083,7 +2402,7 @@ impl BarrierManager {
                     BarrierStatus::Waiting
                 }
             }
-            
+
             BarrierType::Majority => {
                 // Check if majority is even possible with current alive count
                 if alive_count <= total_count / 2 {
@@ -2102,7 +2421,7 @@ impl BarrierManager {
                     BarrierStatus::Waiting
                 }
             }
-            
+
             BarrierType::BestEffort => {
                 if alive_count == 0 {
                     // All agents dead = failure
@@ -2120,9 +2439,9 @@ impl BarrierManager {
             }
         }
     }
-    
+
     /// Wait for barrier with heartbeat-based liveness checking
-    /// 
+    ///
     /// v0.8.60: CRITICAL - Added timeout using agent_barrier_timeout config
     /// Returns BarrierStatus::Failed + error if timeout exceeded (prevents infinite wait)
     async fn wait_for_barrier(
@@ -2132,14 +2451,15 @@ impl BarrierManager {
     ) -> Result<BarrierStatus> {
         let start = Instant::now();
         let mut last_liveness_check = Instant::now();
-        let liveness_check_interval = Duration::from_secs(
-            self.config.heartbeat_interval.max(10)
-        );
-        
+        let liveness_check_interval = Duration::from_secs(self.config.heartbeat_interval.max(10));
+
         // v0.8.60: Barrier timeout from config (default 120s)
         let barrier_timeout = Duration::from_secs(self.config.agent_barrier_timeout);
-        info!("Barrier '{}': timeout set to {:?}", phase_name, barrier_timeout);
-        
+        info!(
+            "Barrier '{}': timeout set to {:?}",
+            phase_name, barrier_timeout
+        );
+
         loop {
             // v0.8.60: CHECK TIMEOUT FIRST - prevents infinite wait if agents desynchronized
             if start.elapsed() >= barrier_timeout {
@@ -2151,16 +2471,25 @@ impl BarrierManager {
                     self.agents.len(),
                     self.failed_agents.len()
                 );
-                
+
                 // List which agents are stuck
-                let stuck_agents: Vec<_> = self.agents.keys()
+                let stuck_agents: Vec<_> = self
+                    .agents
+                    .keys()
                     .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
                     .map(|s| {
                         let hb = &self.agents[s];
-                        let prog = hb.last_progress.as_ref()
-                            .map(|p| format!("phase: {:?}, ops: {}", 
-                                WorkloadPhase::try_from(p.current_phase).unwrap_or(WorkloadPhase::PhaseIdle),
-                                p.operations_completed))
+                        let prog = hb
+                            .last_progress
+                            .as_ref()
+                            .map(|p| {
+                                format!(
+                                    "phase: {:?}, ops: {}",
+                                    WorkloadPhase::try_from(p.current_phase)
+                                        .unwrap_or(WorkloadPhase::PhaseIdle),
+                                    p.operations_completed
+                                )
+                            })
                             .unwrap_or_else(|| "no progress".to_string());
                         format!(
                             "{} ({}s since heartbeat, {})",
@@ -2170,26 +2499,26 @@ impl BarrierManager {
                         )
                     })
                     .collect();
-                
+
                 error!(
                     "Stuck agents ({}): {}",
                     stuck_agents.len(),
                     stuck_agents.join(", ")
                 );
-                
+
                 // v0.8.60: Reset barrier state on timeout to enable recovery
                 self.reset_barrier_state();
-                
+
                 return Err(anyhow!(
                     "Barrier '{}' timeout after {:?} - agents may be desynchronized. Use RESET to recover.",
                     phase_name,
                     start.elapsed()
                 ));
             }
-            
+
             // Check barrier status
             let status = self.check_barrier();
-            
+
             match status {
                 BarrierStatus::Ready => {
                     info!(
@@ -2200,7 +2529,7 @@ impl BarrierManager {
                     );
                     return Ok(status);
                 }
-                
+
                 BarrierStatus::Degraded => {
                     warn!(
                         "⚠️  Barrier '{}' degraded: {}/{} agents ready, {} failed (elapsed: {:?})",
@@ -2212,7 +2541,7 @@ impl BarrierManager {
                     );
                     return Ok(status);
                 }
-                
+
                 BarrierStatus::Failed => {
                     error!(
                         "❌ Barrier '{}' failed: only {}/{} agents ready, {} failed",
@@ -2223,24 +2552,32 @@ impl BarrierManager {
                     );
                     return Err(anyhow!("Barrier failed - insufficient agents"));
                 }
-                
+
                 BarrierStatus::Waiting => {
                     // Check liveness periodically
                     if last_liveness_check.elapsed() >= liveness_check_interval {
                         self.check_liveness(client_pool).await;
                         last_liveness_check = Instant::now();
                     }
-                    
+
                     // Poll every 100ms
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    
+
                     // Log progress every 10 seconds
-                    if start.elapsed().as_secs().is_multiple_of(10) && start.elapsed().as_millis() % 10000 < 100 {
-                        let waiting: Vec<_> = self.agents.keys()
-                            .filter(|a| !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a))
+                    if start.elapsed().as_secs().is_multiple_of(10)
+                        && start.elapsed().as_millis() % 10000 < 100
+                    {
+                        let waiting: Vec<_> = self
+                            .agents
+                            .keys()
+                            .filter(|a| {
+                                !self.ready_agents.contains(*a) && !self.failed_agents.contains(*a)
+                            })
                             .map(|s| {
                                 let hb = &self.agents[s];
-                                let prog = hb.last_progress.as_ref()
+                                let prog = hb
+                                    .last_progress
+                                    .as_ref()
                                     .map(|p| p.operations_completed)
                                     .unwrap_or(0);
                                 format!(
@@ -2251,7 +2588,7 @@ impl BarrierManager {
                                 )
                             })
                             .collect();
-                        
+
                         info!(
                             "Barrier '{}': {}/{} ready, waiting for: {}",
                             phase_name,
@@ -2264,43 +2601,48 @@ impl BarrierManager {
             }
         }
     }
-    
+
     /// v0.8.61: Mark agent as ready at a specific barrier (NUMERIC index only)
     fn agent_at_barrier(&mut self, agent_id: &str, barrier_index: u32, barrier_sequence: u32) {
-        let barrier_state = self.barrier_agents
-            .entry(barrier_index)
-            .or_default();
-        
+        let barrier_state = self.barrier_agents.entry(barrier_index).or_default();
+
         // Only update if this is a newer sequence number or agent not yet tracked
         let should_update = match barrier_state.ready_agents.get(agent_id) {
             Some(&existing_seq) => barrier_sequence > existing_seq,
             None => true,
         };
-        
+
         if should_update {
-            barrier_state.ready_agents.insert(agent_id.to_string(), barrier_sequence);
-            debug!("Barrier {}: agent {} ready (sequence {}), total {}/{} ready",
-                   barrier_index, agent_id, barrier_sequence,
-                   barrier_state.ready_agents.len(), self.agents.len());
+            barrier_state
+                .ready_agents
+                .insert(agent_id.to_string(), barrier_sequence);
+            debug!(
+                "Barrier {}: agent {} ready (sequence {}), total {}/{} ready",
+                barrier_index,
+                agent_id,
+                barrier_sequence,
+                barrier_state.ready_agents.len(),
+                self.agents.len()
+            );
         }
     }
-    
+
     /// v0.8.61: Check if a barrier can be released based on barrier policy
     /// Returns release info if barrier is ready, None otherwise
     /// Uses NUMERIC stage index only - NO string names
     fn check_barrier_ready(&self, barrier_index: u32) -> Option<BarrierReleaseInfo> {
         let barrier_state = self.barrier_agents.get(&barrier_index)?;
-        
+
         // Don't release already-released barriers
         if barrier_state.released {
             return None;
         }
-        
+
         let ready_count = barrier_state.ready_agents.len();
         let total_count = self.agents.len();
         let failed_count = self.failed_agents.len();
         let alive_count = total_count - failed_count;
-        
+
         let can_release = match self.config.barrier_type {
             BarrierType::AllOrNothing => {
                 // All alive agents must be ready
@@ -2315,19 +2657,19 @@ impl BarrierManager {
                 ready_count == alive_count && alive_count > 0
             }
         };
-        
+
         if can_release {
             let ready_agents: Vec<String> = barrier_state.ready_agents.keys().cloned().collect();
-            
+
             Some(BarrierReleaseInfo {
-                barrier_index,  // Stage index is the barrier ID
+                barrier_index, // Stage index is the barrier ID
                 ready_agents,
             })
         } else {
             None
         }
     }
-    
+
     /// v0.8.61: Clear a barrier after release (prevent re-release)
     /// Uses NUMERIC stage index only
     fn clear_barrier(&mut self, barrier_index: u32) {
@@ -2336,19 +2678,19 @@ impl BarrierManager {
             info!("Barrier {} cleared (will not release again)", barrier_index);
         }
     }
-    
+
     /// v0.8.60: CRITICAL - Reset barrier manager state (called after sending RESET to agents)
-    /// 
+    ///
     /// Clears all barriers, ready/failed agent tracking, and resets heartbeats.
     /// Controller must send RESET commands via tx_control channels BEFORE calling this.
     fn reset_barrier_state(&mut self) {
         warn!("🔄 Resetting barrier manager state (desync recovery)");
-        
+
         // Clear barrier manager state
         self.ready_agents.clear();
         self.failed_agents.clear();
         self.barrier_agents.clear();
-        
+
         // Reset heartbeats
         let now = Instant::now();
         for (_, hb) in self.agents.iter_mut() {
@@ -2358,7 +2700,7 @@ impl BarrierManager {
             hb.is_alive = true;
             hb.query_in_progress = false;
         }
-        
+
         info!("✅ Barrier manager state reset complete");
     }
 }
@@ -2380,43 +2722,51 @@ async fn run_distributed_workload(
     insecure: bool,
     agent_ca: Option<&PathBuf>,
     agent_domain: &str,
+    env_file: Option<&std::path::Path>,
+    no_forward_env: bool,
 ) -> Result<()> {
     info!("Starting distributed workload execution");
     debug!("Config file: {}", config_path.display());
     debug!("Path template: {}", path_template);
     debug!("Start delay: {}s", start_delay_secs);
-    
+
     // Create results directory for distributed run (v0.6.4+)
     let mut results_dir = ResultsDir::create(config_path, None, None)
         .context("Failed to create results directory for distributed run")?;
-    
+
     // Mark as distributed and create agents subdirectory
     let agents_dir = results_dir.create_agents_dir()?;
     info!("Created agents directory: {}", agents_dir.display());
-    
+
     // SSH Deployment: Start agent containers if enabled (v0.6.11+)
     let mut deployments: Vec<sai3_bench::ssh_deploy::AgentDeployment> = Vec::new();
     if let Some(ref dist_config) = ssh_deployment {
-        if let (Some(ref ssh_config), Some(ref deployment_config)) = 
-            (&dist_config.ssh, &dist_config.deployment) {
-            
+        if let (Some(ref ssh_config), Some(ref deployment_config)) =
+            (&dist_config.ssh, &dist_config.deployment)
+        {
             if ssh_config.enabled {
                 info!("SSH deployment enabled - starting agent containers");
-                
-                let deploy_msg = format!("Deploying {} agents via SSH + Docker...", dist_config.agents.len());
+
+                let deploy_msg = format!(
+                    "Deploying {} agents via SSH + Docker...",
+                    dist_config.agents.len()
+                );
                 println!("{}", deploy_msg);
                 results_dir.write_console(&deploy_msg)?;
-                
+
                 // Deploy agents
                 use sai3_bench::ssh_deploy;
-                match ssh_deploy::deploy_agents(&dist_config.agents, deployment_config, ssh_config).await {
+                match ssh_deploy::deploy_agents(&dist_config.agents, deployment_config, ssh_config)
+                    .await
+                {
                     Ok(deployed) => {
                         info!("Successfully deployed {} agents", deployed.len());
-                        
-                        let success_msg = format!("✓ All {} agents deployed and ready", deployed.len());
+
+                        let success_msg =
+                            format!("✓ All {} agents deployed and ready", deployed.len());
                         println!("{}", success_msg);
                         results_dir.write_console(&success_msg)?;
-                        
+
                         deployments = deployed;
                     }
                     Err(e) => {
@@ -2424,26 +2774,58 @@ async fn run_distributed_workload(
                         bail!("Failed to deploy agents via SSH: {}", e);
                     }
                 }
-                
+
                 // Wait a moment for agents to be fully ready
                 info!("Waiting 2s for agents to initialize...");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     }
-    
+
     // Read YAML configuration
     let mut config_yaml = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
     debug!("Config YAML loaded, {} bytes", config_yaml.len());
-    
+
     // Parse config early so we can use it for progress bar and storage detection
-    let mut config: sai3_bench::config::Config = serde_yaml::from_str(&config_yaml)
-        .context("Failed to parse config")?;
+    let mut config: sai3_bench::config::Config =
+        serde_yaml::from_str(&config_yaml).context("Failed to parse config")?;
 
     sai3_bench::validation::apply_directory_tree_counts(&mut config)
         .context("Directory tree count validation failed")?;
+
+    // v0.8.92: Load and embed credential env vars for forwarding to agents.
+    if !no_forward_env {
+        let (creds, source) = load_credentials_for_agents(env_file)
+            .context("Failed to load credentials for agent forwarding")?;
+
+        if !creds.is_empty() {
+            let key_names: Vec<&str> = creds.keys().map(String::as_str).collect();
+            println!(
+                "\n🔑 Forwarding {} credential variable{} from {} to all agents: {}",
+                creds.len(),
+                if creds.len() == 1 { "" } else { "s" },
+                source,
+                key_names.join(", ")
+            );
+            if insecure {
+                println!(
+                    "  ⚠️  Credentials are being sent over an unencrypted (plaintext) gRPC connection."
+                );
+                println!(
+                    "     Enable --tls when operating over untrusted networks to protect credentials in transit."
+                );
+            }
+            config.distributed_env = creds;
+        } else {
+            debug!(
+                "No credential variables found in {} — agents will use their own environment",
+                source
+            );
+        }
+    }
+
     config_yaml = serde_yaml::to_string(&config)
         .context("Failed to serialize config with directory tree counts")?;
 
@@ -2455,40 +2837,53 @@ async fn run_distributed_workload(
         debug!("Using explicit --shared-prepare CLI flag: {}", explicit);
         explicit
     } else if let Some(ref distributed) = config.distributed {
-        debug!("Using config file's shared_filesystem setting: {}", distributed.shared_filesystem);
+        debug!(
+            "Using config file's shared_filesystem setting: {}",
+            distributed.shared_filesystem
+        );
         distributed.shared_filesystem
     } else {
         bail!("Distributed execution requires either --shared-prepare CLI flag or distributed.shared_filesystem in config.\n\nExample config:\n  distributed:\n    shared_filesystem: true  # or false for per-agent storage\n    tree_creation_mode: concurrent\n    path_selection: random");
     };
-    
+
     // v0.8.27: Extract gRPC keep-alive settings from config (defaults: 30s interval, 10s timeout)
     let (keepalive_interval, keepalive_timeout) = if let Some(ref dist) = config.distributed {
         (dist.grpc_keepalive_interval, dist.grpc_keepalive_timeout)
     } else {
-        (30, 10)  // Fallback defaults if no distributed config
+        (30, 10) // Fallback defaults if no distributed config
     };
-    debug!("gRPC keep-alive: interval={}s, timeout={}s", keepalive_interval, keepalive_timeout);
+    debug!(
+        "gRPC keep-alive: interval={}s, timeout={}s",
+        keepalive_interval, keepalive_timeout
+    );
 
     let header = "=== Distributed Workload ===";
     println!("{}", header);
     results_dir.write_console(header)?;
-    
+
     let config_msg = format!("Config: {}", config_path.display());
     println!("{}", config_msg);
     results_dir.write_console(&config_msg)?;
-    
+
     let agents_msg = format!("Agents: {}", agent_addrs.len());
     println!("{}", agents_msg);
     results_dir.write_console(&agents_msg)?;
-    
+
     let delay_msg = format!("Start delay: {}s", start_delay_secs);
     println!("{}", delay_msg);
     results_dir.write_console(&delay_msg)?;
-    
-    let storage_msg = format!("Storage mode: {}", if is_shared_storage { "shared (all agents access same data)" } else { "per-agent (isolated storage)" });
+
+    let storage_msg = format!(
+        "Storage mode: {}",
+        if is_shared_storage {
+            "shared (all agents access same data)"
+        } else {
+            "per-agent (isolated storage)"
+        }
+    );
     println!("{}", storage_msg);
     results_dir.write_console(&storage_msg)?;
-    
+
     println!();
     results_dir.write_console("")?;
 
@@ -2514,7 +2909,7 @@ async fn run_distributed_workload(
             agent_addrs.len()
         );
     }
-    
+
     // Register agents in metadata
     for (idx, agent_id) in ids.iter().enumerate() {
         results_dir.add_agent(format!("{} ({})", agent_id, agent_addrs[idx]));
@@ -2525,23 +2920,26 @@ async fn run_distributed_workload(
     let coordinated_start_delay = 10;
     let total_delay_secs = coordinated_start_delay + start_delay_secs;
     let start_time = SystemTime::now() + Duration::from_secs(total_delay_secs);
-    let start_ns = start_time
-        .duration_since(UNIX_EPOCH)?
-        .as_nanos() as i64;
+    let start_ns = start_time.duration_since(UNIX_EPOCH)?.as_nanos() as i64;
 
-    debug!("Coordinated start time: {} ns since epoch (coordinated: {}s, user delay: {}s)", 
-           start_ns, coordinated_start_delay, start_delay_secs);
+    debug!(
+        "Coordinated start time: {} ns since epoch (coordinated: {}s, user delay: {}s)",
+        start_ns, coordinated_start_delay, start_delay_secs
+    );
 
     // v0.7.5: Use streaming RPC for live progress updates
-    let msg = format!("Starting workload on {} agents with live stats...", agent_addrs.len());
+    let msg = format!(
+        "Starting workload on {} agents with live stats...",
+        agent_addrs.len()
+    );
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    println!();  // Blank line before progress display
-    
+    println!(); // Blank line before progress display
+
     // Create progress display using indicatif
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
     let multi_progress = MultiProgress::new();
-    
+
     // v0.7.6: Use progress bar with duration (not spinner) for better visibility
     let duration_secs = config.duration.as_secs();
     let progress_bar = multi_progress.add(ProgressBar::new(duration_secs));
@@ -2549,10 +2947,10 @@ async fn run_distributed_workload(
         ProgressStyle::default_bar()
             .template("{bar:40.cyan/blue} {pos:>7}/{len:7} {unit}\n{msg}")
             .expect("Invalid progress template")
-            .progress_chars("█▓▒░ ")
+            .progress_chars("█▓▒░ "),
     );
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
-    
+
     // v0.7.6: Create channel BEFORE spawning tasks (tasks need tx)
     // BUG FIX v0.8.3: Use unbounded channel to prevent backpressure deadlock
     // Previous: bounded channel with buffer=100 caused stream tasks to block/fail
@@ -2568,42 +2966,99 @@ async fn run_distributed_workload(
     //   - Main loop does heavy processing (aggregation, UI, file I/O)
     //   - Guarantees: tracker.touch() happens immediately, agents never timeout due to slow processing
     let (tx_stats, mut rx_stats) = tokio::sync::mpsc::unbounded_channel::<LiveStats>();
-    
+
     // v0.8.26: Broadcast channel for sending control messages (like RELEASE_BARRIER) to all agents
     // Each agent task subscribes and filters for its agent_id
-    let (tx_control_broadcast, _rx_control_broadcast) = tokio::sync::broadcast::channel::<ControlMessage>(64);
-    
+    let (tx_control_broadcast, _rx_control_broadcast) =
+        tokio::sync::broadcast::channel::<ControlMessage>(64);
+
     // v0.8.7: Calculate num_agents once outside the loop (avoid borrowing agent_addrs in async tasks)
     let num_agents = agent_addrs.len() as u32;
-    
+
     // v0.8.23: PRE-FLIGHT VALIDATION - Connect to all agents and validate before spawning streams
-    info!("Connecting to {} agents for pre-flight validation", agent_addrs.len());
+    info!(
+        "Connecting to {} agents for pre-flight validation",
+        agent_addrs.len()
+    );
     let mut agent_clients_vec: Vec<(String, AgentClient<Channel>)> = Vec::new();
-    
+
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
         debug!("Connecting to agent {} at {}", agent_id, agent_addr);
-        
-        match mk_client(agent_addr, insecure, agent_ca, agent_domain, keepalive_interval, keepalive_timeout).await {
+
+        match mk_client(
+            agent_addr,
+            insecure,
+            agent_ca,
+            agent_domain,
+            keepalive_interval,
+            keepalive_timeout,
+        )
+        .await
+        {
             Ok(client) => {
                 agent_clients_vec.push((agent_id.clone(), client));
                 debug!("Connected to agent {} successfully", agent_id);
             }
             Err(e) => {
-                error!("Failed to connect to agent {} at {}: {}", agent_id, agent_addr, e);
+                error!(
+                    "Failed to connect to agent {} at {}: {}",
+                    agent_id, agent_addr, e
+                );
                 bail!("Failed to connect to agent {}: {}", agent_id, e);
             }
         }
     }
-    
+
     // v0.8.25: Convert to HashMap for barrier manager AND keep for preflight (need mutable reference)
     let mut agent_clients = agent_clients_vec;
     let agent_clients_map: HashMap<String, AgentClient<Channel>> = agent_clients
         .iter()
         .map(|(id, client)| (id.clone(), client.clone()))
         .collect();
-    
-    // v0.8.23: DISTRIBUTED CONFIG VALIDATION - Check for common configuration errors
+
+    // v0.8.92: Ping every agent and compare versions with the controller.
+    // A mismatch is a very common source of mysterious failures and is printed
+    // prominently so the operator knows before wasting time on a full run.
+    {
+        let controller_version = env!("CARGO_PKG_VERSION");
+        let mut mismatch = false;
+        println!("\n🔌 Agent Version Check");
+        println!("━━━━━━━━━━━━━━━━━━━━━━");
+        for (agent_id, client) in agent_clients.iter_mut() {
+            match client.ping(Empty {}).await {
+                Ok(resp) => {
+                    let agent_ver = resp.into_inner().version;
+                    if agent_ver == controller_version {
+                        println!("  ✅ {} — v{}", agent_id, agent_ver);
+                    } else {
+                        println!(
+                            "  ⚠️  {} — v{} ← agent version DOES NOT MATCH controller v{}",
+                            agent_id, agent_ver, controller_version
+                        );
+                        mismatch = true;
+                    }
+                }
+                Err(e) => {
+                    println!("  ❌ {} — ping failed: {}", agent_id, e);
+                    bail!(
+                        "Cannot reach agent {} — is sai3bench-agent running?",
+                        agent_id
+                    );
+                }
+            }
+        }
+        if mismatch {
+            println!();
+            println!("  ⚠️  Version mismatch! Rebuild and restart ALL agents before retrying:");
+            println!("       cargo build --release && sai3bench-agent --listen 0.0.0.0:7761");
+            println!();
+            // Warn but do not hard-fail — operator may have intentionally mixed versions
+        } else {
+            println!("  All agents running v{}", controller_version);
+        }
+    }
+
     // Validates base_uri usage with multi-endpoint in isolated mode
     info!("Validating distributed configuration");
     match sai3_bench::preflight::distributed::validate_distributed_config(&config) {
@@ -2611,17 +3066,23 @@ async fn run_distributed_workload(
             if !validation_results.is_empty() {
                 println!("\n🔍 Distributed Config Validation");
                 println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                
-                let (passed, errors, warnings) = 
+
+                let (passed, errors, warnings) =
                     sai3_bench::preflight::display_validation_results(&validation_results, None);
-                
+
                 if !passed {
                     println!("\n❌ Distributed configuration validation FAILED");
                     println!("   {} errors, {} warnings", errors, warnings);
                     println!("\nFix the above configuration errors before running the workload.");
-                    bail!("Distributed configuration validation failed with {} errors", errors);
+                    bail!(
+                        "Distributed configuration validation failed with {} errors",
+                        errors
+                    );
                 } else if warnings > 0 {
-                    println!("\n⚠️  {} warnings detected in distributed configuration (non-fatal)", warnings);
+                    println!(
+                        "\n⚠️  {} warnings detected in distributed configuration (non-fatal)",
+                        warnings
+                    );
                     println!();
                 }
             } else {
@@ -2633,40 +3094,48 @@ async fn run_distributed_workload(
             bail!("Failed to validate distributed configuration: {}", e);
         }
     }
-    
+
     // Run pre-flight validation on all connected agents
     run_preflight_validation(&mut agent_clients, &config_yaml).await?;
-    
+
     info!("Pre-flight validation passed - proceeding with workload execution");
-    
+
     // v0.8.61: Log concurrency configuration for each agent (CRITICAL for debugging performance)
     info!("=== Concurrency Configuration ===");
     if let Some(ref distributed) = config.distributed {
         for agent_cfg in distributed.agents.iter() {
             let agent_id = agent_cfg.id.as_deref().unwrap_or("unknown");
-            
+
             // Determine effective concurrency (override or global)
-            let effective_concurrency = agent_cfg.concurrency_override.unwrap_or(config.concurrency);
-            
+            let effective_concurrency =
+                agent_cfg.concurrency_override.unwrap_or(config.concurrency);
+
             // Count endpoints for this agent
-            let num_endpoints = agent_cfg.multi_endpoint.as_ref()
+            let num_endpoints = agent_cfg
+                .multi_endpoint
+                .as_ref()
                 .map(|m| m.endpoints.len())
-                .unwrap_or(1);  // Single endpoint if no multi_endpoint
-            
+                .unwrap_or(1); // Single endpoint if no multi_endpoint
+
             // CRITICAL VALIDATION: Concurrency must be >= num_endpoints (1 thread per endpoint minimum)
             if effective_concurrency < num_endpoints {
-                error!("Agent '{}': concurrency={} is LESS than endpoints={}", 
-                       agent_id, effective_concurrency, num_endpoints);
+                error!(
+                    "Agent '{}': concurrency={} is LESS than endpoints={}",
+                    agent_id, effective_concurrency, num_endpoints
+                );
                 error!("  This will cause poor performance - some endpoints will be idle!");
-                error!("  RECOMMENDATION: Set concurrency >= {} (at least 1 thread per endpoint)", num_endpoints);
-                bail!("Agent '{}' has insufficient concurrency ({}) for {} endpoints. Minimum required: {}", 
+                error!(
+                    "  RECOMMENDATION: Set concurrency >= {} (at least 1 thread per endpoint)",
+                    num_endpoints
+                );
+                bail!("Agent '{}' has insufficient concurrency ({}) for {} endpoints. Minimum required: {}",
                       agent_id, effective_concurrency, num_endpoints, num_endpoints);
             }
-            
+
             // Log concurrency details
             if agent_cfg.concurrency_override.is_some() {
                 info!("  Agent {}: {} threads (concurrency_override), {} endpoints → {:.1} threads/endpoint",
-                      agent_id, effective_concurrency, num_endpoints, 
+                      agent_id, effective_concurrency, num_endpoints,
                       effective_concurrency as f64 / num_endpoints as f64);
             } else {
                 info!("  Agent {}: {} threads (global concurrency), {} endpoints → {:.1} threads/endpoint",
@@ -2674,50 +3143,62 @@ async fn run_distributed_workload(
                       effective_concurrency as f64 / num_endpoints as f64);
             }
         }
-        
+
         // Calculate total concurrency across all agents
-        let total_concurrency: usize = distributed.agents.iter()
+        let total_concurrency: usize = distributed
+            .agents
+            .iter()
             .map(|a| a.concurrency_override.unwrap_or(config.concurrency))
             .sum();
-        
-        info!("  TOTAL: {} threads across {} agents", total_concurrency, distributed.agents.len());
+
+        info!(
+            "  TOTAL: {} threads across {} agents",
+            total_concurrency,
+            distributed.agents.len()
+        );
     } else {
         info!("  Single-node mode: {} threads", config.concurrency);
     }
     info!("=================================");
-    
+
     // v0.8.51: Extract ready_timeout from config before spawning tasks
-    let agent_ready_timeout_secs = config.distributed.as_ref()
+    let agent_ready_timeout_secs = config
+        .distributed
+        .as_ref()
         .map(|d| d.agent_ready_timeout)
         .unwrap_or(120);
-    
+
     // v0.8.61: Check if using YAML-driven stages (determines whether to send Phase 2 START)
-    let using_yaml_stages = config.distributed.as_ref()
+    let using_yaml_stages = config
+        .distributed
+        .as_ref()
         .map(|d| !d.stages.is_empty())
         .unwrap_or(false);
-    
+
     if using_yaml_stages {
-        info!("Using YAML-driven stages - Phase 2 START will be skipped (barrier coordination mode)");
+        info!(
+            "Using YAML-driven stages - Phase 2 START will be skipped (barrier coordination mode)"
+        );
     } else {
         info!("Using legacy workload format - Phase 2 START will be sent");
     }
-    
+
     // Spawn tasks to consume agent streams
     let mut stream_handles = Vec::new();
     for (idx, agent_addr) in agent_addrs.iter().enumerate() {
         let agent_id = ids[idx].clone();
         let path_prefix = path_template.replace("{id}", &(idx + 1).to_string());
-        
+
         // v0.7.9: For shared storage (GCS/S3/Azure), don't use path prefix - all agents access same data
         let effective_prefix = if is_shared_storage {
-            String::new()  // Empty prefix for shared storage
+            String::new() // Empty prefix for shared storage
         } else {
-            path_prefix.clone()  // Use agent-specific prefix for local storage
+            path_prefix.clone() // Use agent-specific prefix for local storage
         };
-        
-        debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}", 
+
+        debug!("Agent {}: ID='{}', prefix='{}', effective_prefix='{}', address='{}', shared_storage={}",
                idx + 1, agent_id, path_prefix, effective_prefix, agent_addr, is_shared_storage);
-        
+
         // v0.8.22: Apply per-agent multi_endpoint and target overrides if specified
         // This allows static endpoint mapping: each agent uses specific subset of endpoints
         // v0.8.61: Apply concurrency_override to set per-agent thread count
@@ -2727,38 +3208,41 @@ async fn run_distributed_workload(
                 let has_multi_ep = agent_cfg.multi_endpoint.is_some();
                 let has_target = agent_cfg.target_override.is_some();
                 let has_concurrency_override = agent_cfg.concurrency_override.is_some();
-                
+
                 if has_multi_ep || has_target || has_concurrency_override {
                     // Agent has overrides - apply them to config
                     let mut modified_config = config.clone();
-                    
+
                     // Apply target_override to config.target (v0.8.27+)
                     if let Some(ref target) = agent_cfg.target_override {
                         modified_config.target = Some(target.clone());
                         debug!("Agent {}: Using target_override: {}", agent_id, target);
                     }
-                    
+
                     // Apply multi_endpoint override
                     if let Some(ref agent_multi_ep) = agent_cfg.multi_endpoint {
                         modified_config.multi_endpoint = Some(agent_multi_ep.clone());
                     }
-                    
+
                     // v0.8.61: Apply concurrency_override (per-agent thread count)
                     if let Some(override_concurrency) = agent_cfg.concurrency_override {
                         modified_config.concurrency = override_concurrency;
-                        info!("Agent {}: Using concurrency_override: {} threads", agent_id, override_concurrency);
+                        info!(
+                            "Agent {}: Using concurrency_override: {} threads",
+                            agent_id, override_concurrency
+                        );
                     }
-                    
+
                     // Serialize modified config to YAML
                     match serde_yaml::to_string(&modified_config) {
                         Ok(yaml) => {
-                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={}, concurrency={})", 
+                            debug!("Agent {}: Applied per-agent overrides (multi_endpoint={}, target={}, concurrency={})",
                                    agent_id, has_multi_ep, has_target, has_concurrency_override);
                             yaml
                         }
                         Err(e) => {
                             error!("Failed to serialize agent-specific config: {}", e);
-                            config_yaml.clone()  // Fallback to original config
+                            config_yaml.clone() // Fallback to original config
                         }
                     }
                 } else {
@@ -2771,29 +3255,36 @@ async fn run_distributed_workload(
         } else {
             config_yaml.clone()
         };
-        
+
         let addr = agent_addr.clone();
         let ca = agent_ca.cloned();
         let domain = agent_domain.to_string();
         let shared = is_shared_storage;
-        let tx = tx_stats.clone();  // v0.7.6: Clone sender for this task
-        let mut rx_control_broadcast = tx_control_broadcast.subscribe();  // v0.8.26: For barrier release
-        let agent_id_for_task = agent_id.clone();  // v0.8.26: For filtering broadcast messages
+        let tx = tx_stats.clone(); // v0.7.6: Clone sender for this task
+        let mut rx_control_broadcast = tx_control_broadcast.subscribe(); // v0.8.26: For barrier release
+        let agent_id_for_task = agent_id.clone(); // v0.8.26: For filtering broadcast messages
 
         let handle = tokio::spawn(async move {
             debug!("Connecting to agent at {}", addr);
-            
+
             // Connect to agent
-            let mut client = mk_client(&addr, insecure, ca.as_ref(), &domain, keepalive_interval, keepalive_timeout)
-                .await
-                .with_context(|| format!("connect to agent {}", addr))?;
+            let mut client = mk_client(
+                &addr,
+                insecure,
+                ca.as_ref(),
+                &domain,
+                keepalive_interval,
+                keepalive_timeout,
+            )
+            .await
+            .with_context(|| format!("connect to agent {}", addr))?;
 
             debug!("Connected to agent {}, opening bidirectional stream", addr);
 
             // PHASE 4: Open bidirectional stream (control + stats channels)
             let (tx_control, rx_control) = tokio::sync::mpsc::channel::<ControlMessage>(32);
             let control_stream = ReceiverStream::new(rx_control);
-            
+
             let mut stream = client
                 .execute_workload(control_stream)
                 .await
@@ -2801,7 +3292,7 @@ async fn run_distributed_workload(
                 .into_inner();
 
             debug!("Agent {} bidirectional stream opened", addr);
-            
+
             // Phase 1: Send START command with config
             let config_msg = ControlMessage {
                 command: control_message::Command::Start as i32,
@@ -2809,46 +3300,58 @@ async fn run_distributed_workload(
                 agent_id: agent_id.clone(),
                 path_prefix: effective_prefix.clone(),
                 shared_storage: shared,
-                start_timestamp_ns: 0,  // Phase 1: no timestamp yet
+                start_timestamp_ns: 0, // Phase 1: no timestamp yet
                 ack_sequence: 0,
-                agent_index: idx as u32,  // v0.8.7: For distributed cleanup
-                num_agents,               // v0.8.7: For distributed cleanup
-                barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                agent_index: idx as u32, // v0.8.7: For distributed cleanup
+                num_agents,              // v0.8.7: For distributed cleanup
+                barrier_name: String::new(), // v0.8.26: For RELEASE_BARRIER
                 barrier_sequence: 0,
-                target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                target_stage_index: 0, // v0.8.60: For SYNC_STATE
                 target_stage_name: String::new(),
                 ready_for_next: false,
             };
-            
+
             if let Err(e) = tx_control.send(config_msg).await {
-                return Err(anyhow!("Failed to send config to agent {}: {}", agent_id, e));
+                return Err(anyhow!(
+                    "Failed to send config to agent {}: {}",
+                    agent_id,
+                    e
+                ));
             }
-            
+
             debug!("Agent {} sent config via control channel", addr);
-            
+
             // v0.8.51: Use configurable ready_timeout (default 120s, was hardcoded 30s)
             // Large-scale deployments (>100K files) need longer timeout for glob validation
             let mut ready_received = false;
             let ready_timeout = tokio::time::Duration::from_secs(agent_ready_timeout_secs);
             let ready_deadline = tokio::time::Instant::now() + ready_timeout;
-            
+
             while !ready_received && tokio::time::Instant::now() < ready_deadline {
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(1),
-                    stream.message()
-                ).await {
+                match tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.message())
+                    .await
+                {
                     Ok(Ok(Some(stats))) => {
-                        if stats.status == 1 {  // READY
+                        if stats.status == 1 {
+                            // READY
                             ready_received = true;
-                            debug!("Agent {} sent READY with timestamp {}ns", agent_id, stats.agent_timestamp_ns);
-                            
+                            debug!(
+                                "Agent {} sent READY with timestamp {}ns",
+                                agent_id, stats.agent_timestamp_ns
+                            );
+
                             // Forward READY to main loop for state tracking
                             if let Err(e) = tx.send(stats) {
                                 error!("Failed to forward READY from agent {}: {}", addr, e);
                                 break;
                             }
-                        } else if stats.status == 3 {  // ERROR
-                            return Err(anyhow!("Agent {} rejected config: {}", agent_id, stats.error_message));
+                        } else if stats.status == 3 {
+                            // ERROR
+                            return Err(anyhow!(
+                                "Agent {} rejected config: {}",
+                                agent_id,
+                                stats.error_message
+                            ));
                         } else {
                             // Unexpected status during startup - forward and continue
                             let _ = tx.send(stats);
@@ -2868,48 +3371,59 @@ async fn run_distributed_workload(
                     }
                 }
             }
-            
+
             if !ready_received {
-                return Err(anyhow!("Agent {} did not send READY within {}s", agent_id, ready_timeout.as_secs()));
+                return Err(anyhow!(
+                    "Agent {} did not send READY within {}s",
+                    agent_id,
+                    ready_timeout.as_secs()
+                ));
             }
-            
+
             // v0.8.61: Phase 2 START is ONLY for legacy (non-YAML-driven-stages) workflows
             // When using YAML-driven stages, agents transition to preflight stage after Phase 1 START
             // and wait at barrier. Controller releases barrier via RELEASE_BARRIER broadcast, not START.
-            
+
             if !using_yaml_stages {
                 // LEGACY: Phase 2 START with coordinated timestamp for old-style workloads
                 // This happens after ALL agents are READY (controlled by main loop)
                 // For now, send it immediately after READY for backward compatibility with test
                 let start_msg = ControlMessage {
                     command: control_message::Command::Start as i32,
-                    config_yaml: String::new(),  // Already sent in Phase 1
+                    config_yaml: String::new(), // Already sent in Phase 1
                     agent_id: agent_id.clone(),
                     path_prefix: String::new(),
                     shared_storage: false,
-                    start_timestamp_ns: start_ns,  // Phase 2: coordinated start time
+                    start_timestamp_ns: start_ns, // Phase 2: coordinated start time
                     ack_sequence: 0,
-                    agent_index: idx as u32,  // v0.8.7: Redundant but consistent
-                    num_agents,               // v0.8.7: Redundant but consistent
-                    barrier_name: String::new(),  // v0.8.26: For RELEASE_BARRIER
+                    agent_index: idx as u32, // v0.8.7: Redundant but consistent
+                    num_agents,              // v0.8.7: Redundant but consistent
+                    barrier_name: String::new(), // v0.8.26: For RELEASE_BARRIER
                     barrier_sequence: 0,
-                    target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+                    target_stage_index: 0, // v0.8.60: For SYNC_STATE
                     target_stage_name: String::new(),
                     ready_for_next: false,
                 };
-                
+
                 if let Err(e) = tx_control.send(start_msg).await {
-                    return Err(anyhow!("Failed to send start timestamp to agent {}: {}", agent_id, e));
+                    return Err(anyhow!(
+                        "Failed to send start timestamp to agent {}: {}",
+                        agent_id,
+                        e
+                    ));
                 }
-                
-                debug!("Agent {} sent Phase 2 START timestamp {}ns (legacy mode)", addr, start_ns);
+
+                debug!(
+                    "Agent {} sent Phase 2 START timestamp {}ns (legacy mode)",
+                    addr, start_ns
+                );
             } else {
                 info!("Agent {} using YAML-driven stages - skipping Phase 2 START (barrier coordination mode)", agent_id);
             }
-            
+
             // v0.7.6: Forward messages immediately as they arrive (don't wait for stream completion)
             let mut stats_count = 0;
-            let tx_control_for_loop = tx_control.clone();  // v0.8.26: Clone for use in loop
+            let tx_control_for_loop = tx_control.clone(); // v0.8.26: Clone for use in loop
             let stream_result: Result<(), anyhow::Error> = async {
                 loop {
                     tokio::select! {
@@ -2918,7 +3432,7 @@ async fn run_distributed_workload(
                             match msg_result {
                                 Ok(Some(stats_result)) => {
                                     stats_count += 1;
-                                    debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count, 
+                                    debug!("Agent {} sent stats update #{}: {} ops, {} bytes", addr, stats_count,
                                            stats_result.get_ops + stats_result.put_ops + stats_result.meta_ops,
                                            stats_result.get_bytes + stats_result.put_bytes);
                                     // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
@@ -2937,20 +3451,20 @@ async fn run_distributed_workload(
                                 }
                             }
                         }
-                        
+
                         // v0.8.26: Receive control messages from broadcast (e.g., RELEASE_BARRIER)
                         control_result = rx_control_broadcast.recv() => {
                             match control_result {
                                 Ok(control_msg) => {
                                     // Check if this message is for us or broadcast to all
                                     if control_msg.agent_id.is_empty() || control_msg.agent_id == agent_id_for_task {
-                                        debug!("Agent {} forwarding control message: command={}", 
+                                        debug!("Agent {} forwarding control message: command={}",
                                                agent_id_for_task, control_msg.command);
                                         if let Err(e) = tx_control_for_loop.send(control_msg.clone()).await {
-                                            warn!("Failed to forward control message to agent {}: {}", 
+                                            warn!("Failed to forward control message to agent {}: {}",
                                                   agent_id_for_task, e);
                                         }
-                                        
+
                                         // v0.8.29: If this is GOODBYE, break out of loop after forwarding
                                         // The agent will close the stream, and we should exit gracefully
                                         if control_msg.command == pb::iobench::control_message::Command::Goodbye as i32 {
@@ -2960,7 +3474,7 @@ async fn run_distributed_workload(
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!("Agent {} broadcast receiver lagged by {} messages", 
+                                    warn!("Agent {} broadcast receiver lagged by {} messages",
                                           agent_id_for_task, n);
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -2973,7 +3487,7 @@ async fn run_distributed_workload(
                 }
                 Ok(())
             }.await;
-            
+
             // v0.7.12: Handle stream errors by sending error status message
             if let Err(e) = stream_result {
                 error!("Agent {} stream error: {}", agent_id, e);
@@ -2981,13 +3495,29 @@ async fn run_distributed_workload(
                 let error_stats = pb::iobench::LiveStats {
                     agent_id: agent_id.clone(),
                     timestamp_s: 0.0,
-                    get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
-                    put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
-                    meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                    get_ops: 0,
+                    get_bytes: 0,
+                    get_mean_us: 0.0,
+                    get_p50_us: 0.0,
+                    get_p90_us: 0.0,
+                    get_p95_us: 0.0,
+                    get_p99_us: 0.0,
+                    put_ops: 0,
+                    put_bytes: 0,
+                    put_mean_us: 0.0,
+                    put_p50_us: 0.0,
+                    put_p90_us: 0.0,
+                    put_p95_us: 0.0,
+                    put_p99_us: 0.0,
+                    meta_ops: 0,
+                    meta_mean_us: 0.0,
+                    meta_p50_us: 0.0,
+                    meta_p90_us: 0.0,
+                    meta_p99_us: 0.0,
                     elapsed_s: 0.0,
                     completed: true,
                     final_summary: None,
-                    status: 3,  // ERROR
+                    status: 3, // ERROR
                     error_message: format!("Agent workload failed: {}", e),
                     in_prepare_phase: false,
                     prepare_objects_created: 0,
@@ -3000,7 +3530,11 @@ async fn run_distributed_workload(
                     agent_timestamp_ns: 0,
                     sequence: 0,
                     // v0.8.9: Stage tracking (error state)
-                    current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                    current_stage: 0,
+                    stage_name: String::new(),
+                    stage_progress_current: 0,
+                    stage_progress_total: 0,
+                    stage_elapsed_s: 0.0,
                     // v0.8.14: Concurrency (0 for error messages)
                     concurrency: 0,
                     // v0.8.26: Barrier coordination
@@ -3009,12 +3543,18 @@ async fn run_distributed_workload(
                     barrier_sequence: 0,
                     stage_summary: None,
                 };
-                let _ = tx.send(error_stats);  // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
+                let _ = tx.send(error_stats); // BUG FIX v0.8.3: unbounded_channel uses send() not send().await
             }
-            
-            info!("Agent {} stream completed with {} updates", addr, stats_count);
+
+            info!(
+                "Agent {} stream completed with {} updates",
+                addr, stats_count
+            );
             if stats_count == 0 {
-                warn!("⚠️  Agent {} stream ended with ZERO updates - possible connection issue!", addr);
+                warn!(
+                    "⚠️  Agent {} stream ended with ZERO updates - possible connection issue!",
+                    addr
+                );
             }
             Ok::<(), anyhow::Error>(())
         });
@@ -3023,17 +3563,18 @@ async fn run_distributed_workload(
     }
 
     info!("Streaming from {} agents", stream_handles.len());
-    drop(tx_stats);  // v0.7.6: Drop original sender so channel closes when all tasks complete
-    
+    drop(tx_stats); // v0.7.6: Drop original sender so channel closes when all tasks complete
+
     // v0.7.13: STARTUP HANDSHAKE - Track agent state with formal state machine
     let expected_agent_count = stream_handles.len();
-    let mut agent_trackers: std::collections::HashMap<String, AgentTracker> = std::collections::HashMap::new();
-    
+    let mut agent_trackers: std::collections::HashMap<String, AgentTracker> =
+        std::collections::HashMap::new();
+
     // Initialize trackers for all expected agents (agent_addrs are "host:port" strings)
     for agent_id in agent_addrs {
         agent_trackers.insert(agent_id.clone(), AgentTracker::new(agent_id.clone()));
     }
-    
+
     // v0.7.6: Stream forwarding tasks are already running (messages forwarded immediately)
     // Just wait for them to complete in background
     for handle in stream_handles {
@@ -3043,22 +3584,22 @@ async fn run_distributed_workload(
             }
         });
     }
-    
+
     // v0.7.13: Setup signal handlers (SIGINT, SIGTERM)
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
-    
+
     eprintln!("⏳ Waiting for agents to validate configuration...");
     // v0.7.11: Robust startup with retries - scale timeout with agent count
     // Give agents multiple chances to respond (30s base + 5s per agent)
     let startup_timeout_secs = 30 + (agent_addrs.len() as u64 * 5);
     let startup_timeout = tokio::time::Duration::from_secs(startup_timeout_secs);
     let startup_deadline = tokio::time::Instant::now() + startup_timeout;
-    
+
     // Progress check interval - report status every 3 seconds
     let mut progress_interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
     progress_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    
+
     // v0.7.13: Wait for READY/ERROR status from all agents with state tracking
     'startup: loop {
         tokio::select! {
@@ -3067,19 +3608,19 @@ async fn run_distributed_workload(
                 let tracker = agent_trackers
                     .entry(stats.agent_id.clone())
                     .or_insert_with(|| AgentTracker::new(stats.agent_id.clone()));
-                
+
                 // First message - transition from Connecting to Validating
                 if tracker.state == ControllerAgentState::Connecting {
                     let _ = tracker.transition_to(ControllerAgentState::Validating, "first message received");
                 }
-                
+
                 // Check status field and update state
                 match stats.status {
                     1 => {  // READY
                         if let Err(e) = tracker.transition_to(ControllerAgentState::Ready, "READY status received") {
                             warn!("Failed to transition agent {} to Ready: {}", stats.agent_id, e);
                         }
-                        
+
                         // v0.8.4: Calculate clock offset for coordinated start synchronization
                         // NTP-style: offset = agent_time - controller_time
                         // Agent will later adjust start_time using this offset
@@ -3090,7 +3631,7 @@ async fn run_distributed_workload(
                                 .as_nanos() as i64;
                             let offset_ns = stats.agent_timestamp_ns - controller_time_ns;
                             tracker.clock_offset_ns = Some(offset_ns);
-                            
+
                             let offset_ms = offset_ns as f64 / 1_000_000.0;
                             if offset_ms.abs() > 1000.0 {
                                 warn!("Agent {} clock offset: {:.1}ms (large skew detected)", stats.agent_id, offset_ms);
@@ -3100,7 +3641,7 @@ async fn run_distributed_workload(
                         } else {
                             warn!("Agent {} did not send timestamp in READY message", stats.agent_id);
                         }
-                        
+
                         eprintln!("  ✅ {} ready", stats.agent_id);
                     }
                     3 => {  // ERROR
@@ -3128,9 +3669,9 @@ async fn run_distributed_workload(
                         }
                     }
                 }
-                
+
                 tracker.touch();  // Update last seen
-                
+
                 // Check if all agents have responded (Ready or Failed)
                 let responded = agent_trackers.values()
                     .filter(|t| t.state == ControllerAgentState::Ready || t.state == ControllerAgentState::Failed)
@@ -3146,22 +3687,22 @@ async fn run_distributed_workload(
                     .filter(|t| t.state == ControllerAgentState::Ready || t.state == ControllerAgentState::Failed)
                     .count();
                 if responded < expected_agent_count {
-                    eprintln!("  ⏳ {}/{} agents ready, {} remaining ({:.0}s timeout remaining)", 
-                             responded, expected_agent_count, 
+                    eprintln!("  ⏳ {}/{} agents ready, {} remaining ({:.0}s timeout remaining)",
+                             responded, expected_agent_count,
                              expected_agent_count - responded,
                              elapsed.as_secs_f64());
                 }
             }
             _ = tokio::time::sleep_until(startup_deadline) => {
                 eprintln!("\n❌ Startup timeout: Not all agents responded within {}s", startup_timeout.as_secs());
-                
+
                 // Count agents by state
                 let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
                 let failed_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Failed).count();
                 let connecting_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Connecting).count();
-                
+
                 eprintln!("Agent status: {} ready, {} failed, {} no response", ready_count, failed_count, connecting_count);
-                
+
                 // Show per-agent status
                 for tracker in agent_trackers.values() {
                     let (icon, status) = match tracker.state {
@@ -3171,13 +3712,13 @@ async fn run_distributed_workload(
                         _ => ("⚠️", "unexpected"),
                     };
                     if tracker.state == ControllerAgentState::Failed {
-                        eprintln!("  {} {}: {} - {}", icon, tracker.agent_id, status, 
+                        eprintln!("  {} {}: {} - {}", icon, tracker.agent_id, status,
                                  tracker.error_message.as_ref().unwrap_or(&"unknown error".to_string()));
                     } else {
                         eprintln!("  {} {}: {}", icon, tracker.agent_id, status);
                     }
                 }
-                
+
                 if connecting_count > 0 {
                     eprintln!("\n💡 Troubleshooting:");
                     eprintln!("  - Verify agents are running: check agent logs");
@@ -3185,75 +3726,111 @@ async fn run_distributed_workload(
                     eprintln!("  - Ensure agents can reach storage backend");
                     eprintln!("  - Consider increasing timeout for large agent counts");
                 }
-                
+
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
                 abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                
+
                 anyhow::bail!("Agent startup validation timeout");
             }
             sig = &mut shutdown_signal => {
                 eprintln!("\n⚠️  Received {} during startup", sig);
-                
+
                 // v0.7.13: Abort all agents to prevent orphaned workload execution
                 abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                
+
                 anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }
-    
+
     // v0.7.13: Check if any agents reported errors
-    let failed_agents: Vec<_> = agent_trackers.values()
+    let failed_agents: Vec<_> = agent_trackers
+        .values()
         .filter(|t| t.state == ControllerAgentState::Failed)
         .map(|t| (t.agent_id.clone(), t.error_message.clone()))
         .collect();
-    
+
     if !failed_agents.is_empty() {
-        eprintln!("\n❌ {} agent(s) failed configuration validation:", failed_agents.len());
+        eprintln!(
+            "\n❌ {} agent(s) failed configuration validation:",
+            failed_agents.len()
+        );
         for (agent_id, error_msg_opt) in &failed_agents {
             let error_msg = error_msg_opt.as_deref().unwrap_or("unknown error");
             eprintln!("  ❌ {}: {}", agent_id, error_msg);
         }
-        
-        let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
+
+        let ready_count = agent_trackers
+            .values()
+            .filter(|t| t.state == ControllerAgentState::Ready)
+            .count();
         eprintln!("\nReady agents: {}/{}", ready_count, expected_agent_count);
-        for tracker in agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready) {
+        for tracker in agent_trackers
+            .values()
+            .filter(|t| t.state == ControllerAgentState::Ready)
+        {
             eprintln!("  ✅ {}", tracker.agent_id);
         }
-        
+
         // v0.7.13: Abort all agents to prevent orphaned workload execution
-        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-        
+        abort_all_agents(
+            agent_addrs,
+            &mut agent_trackers,
+            insecure,
+            agent_ca,
+            agent_domain,
+        )
+        .await;
+
         anyhow::bail!("{} agent(s) failed startup validation", failed_agents.len());
     }
-    
-    let ready_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Ready).count();
-    eprintln!("✅ All {} agents ready - starting workload execution\n", ready_count);
-    
+
+    let ready_count = agent_trackers
+        .values()
+        .filter(|t| t.state == ControllerAgentState::Ready)
+        .count();
+    eprintln!(
+        "✅ All {} agents ready - starting workload execution\n",
+        ready_count
+    );
+
     // v0.8.25: Initialize BarrierManager if barrier_sync is enabled
     // v0.8.71: Also auto-enable when any YAML-driven stage has a barrier: config block
-    let mut barrier_manager: Option<BarrierManager> = if let Some(ref distributed_config) = config.distributed {
-        let has_stage_barriers = distributed_config.stages.iter().any(|s| s.barrier.is_some());
-        if distributed_config.barrier_sync.enabled || has_stage_barriers {
-            let agent_ids: Vec<String> = agent_addrs.to_vec();
-            // Use default phase config (prepare) for initialization
-            // Specific phase configs will be used in wait_for_barrier() calls
-            let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
-            if distributed_config.barrier_sync.enabled {
-                eprintln!("🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})", 
-                         default_config.heartbeat_interval, default_config.missed_threshold);
+    let mut barrier_manager: Option<BarrierManager> =
+        if let Some(ref distributed_config) = config.distributed {
+            let has_stage_barriers = distributed_config
+                .stages
+                .iter()
+                .any(|s| s.barrier.is_some());
+            if distributed_config.barrier_sync.enabled || has_stage_barriers {
+                let agent_ids: Vec<String> = agent_addrs.to_vec();
+                // Use default phase config (prepare) for initialization
+                // Specific phase configs will be used in wait_for_barrier() calls
+                let default_config = distributed_config.barrier_sync.get_phase_config("prepare");
+                if distributed_config.barrier_sync.enabled {
+                    eprintln!(
+                        "🔄 Barrier synchronization enabled (heartbeat: {}s, threshold: {})",
+                        default_config.heartbeat_interval, default_config.missed_threshold
+                    );
+                } else {
+                    let stage_count = distributed_config
+                        .stages
+                        .iter()
+                        .filter(|s| s.barrier.is_some())
+                        .count();
+                    eprintln!(
+                        "🔄 Barrier synchronization auto-enabled ({} stage barrier(s) detected)",
+                        stage_count
+                    );
+                }
+                Some(BarrierManager::new(agent_ids, default_config))
             } else {
-                let stage_count = distributed_config.stages.iter().filter(|s| s.barrier.is_some()).count();
-                eprintln!("🔄 Barrier synchronization auto-enabled ({} stage barrier(s) detected)", stage_count);
+                None
             }
-            Some(BarrierManager::new(agent_ids, default_config))
         } else {
             None
-        }
-    } else {
-        None
-    };
-    
+        };
+
     // v0.8.60: Validation/preflight barrier handling
     // When using YAML-driven stages with validation, barrier release happens asynchronously
     // in the stats processing loop when all agents report at_barrier=true.
@@ -3262,12 +3839,18 @@ async fn run_distributed_workload(
         let stages = &distributed_config.stages;
         if !stages.is_empty() {
             let first_stage = &stages[0];
-            if matches!(first_stage.config, sai3_bench::config::StageSpecificConfig::Validation) {
-                info!("Validation stage '{}' barrier will be released by stats processing loop", first_stage.name);
+            if matches!(
+                first_stage.config,
+                sai3_bench::config::StageSpecificConfig::Validation
+            ) {
+                info!(
+                    "Validation stage '{}' barrier will be released by stats processing loop",
+                    first_stage.name
+                );
             }
         }
     }
-    
+
     // v0.7.13: Show countdown to coordinated start (suspend progress bar during countdown)
     if total_delay_secs > 0 {
         progress_bar.suspend(|| {
@@ -3282,50 +3865,52 @@ async fn run_distributed_workload(
             eprintln!("\n✅ Starting workload now!\n");
         });
     }
-    
+
     // v0.7.6: Track workload start time for progress bar position
     // Note: This will be reset when prepare phase completes to measure actual workload time
     let mut workload_start = std::time::Instant::now();
-    
+
     // Aggregator for live stats display
-    let mut aggregator = LiveStatsAggregator::new(agent_addrs.len());  // v0.8.2: Pass expected agent count
+    let mut aggregator = LiveStatsAggregator::new(agent_addrs.len()); // v0.8.2: Pass expected agent count
     let mut last_update = std::time::Instant::now();
-    
+
     // v0.7.13: agent_trackers already initialized above for startup phase
     // Continue using it for workload execution (replaces completed_agents, dead_agents, agent_last_seen)
     // v0.8.2: Increased timeouts for long prepare phases (400K+ objects)
     // BUG FIX: Previous values (5s/10s) too aggressive for production workloads
-    // 
+    //
     // Root cause: During large prepare phases, agent's `yield Ok(stats)` can block
     // if controller's gRPC receive buffer fills (backpressure). While blocked,
     // agent cannot send updates, triggering false timeout detection.
-    // 
+    //
     // Production testing: Saw 379s blockage with 400K objects, all agents working fine
     // User testing: Saw 56% prepare completion (113K/200K) before timeout - agents still working
-    // 
+    //
     // BUG FIX v0.8.3: Previous 60s timeout was WAY too short for large prepare phases
     // - 200K objects can take 5-10 minutes to create
     // - gRPC backpressure can pause updates for minutes
     // - Agents keep working but controller gives up and exits
-    // 
+    //
     // New values:
     //   - Warn after 60s (agents should send updates every 0.5s normally)
     //   - Mark disconnected after 10 minutes (truly dead, not just slow)
-    let timeout_warn_secs = 60.0;   // Warn after 1 minute (yellow flag)
-    let timeout_dead_secs = 600.0;  // Mark dead after 10 minutes (red flag)
-    
+    let timeout_warn_secs = 60.0; // Warn after 1 minute (yellow flag)
+    let timeout_dead_secs = 600.0; // Mark dead after 10 minutes (red flag)
+
     // v0.7.5: Collect final summaries for persistence (extracted from completed LiveStats messages)
     let mut agent_summaries: Vec<WorkloadSummary> = Vec::new();
-    
-    // v0.7.9: Collect prepare summaries for persistence  
+
+    // v0.7.9: Collect prepare summaries for persistence
     let mut prepare_summaries: Vec<PrepareSummary> = Vec::new();
-    
+
     // v0.8.27: Collect per-stage summaries for immediate TSV writing
     // Key: (stage_index, stage_name), Value: Vec of (agent_id, summary)
-    let mut stage_summaries: std::collections::HashMap<(u32, String), Vec<(String, StageSummary)>> = std::collections::HashMap::new();
-    let mut stages_written: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
+    let mut stage_summaries: std::collections::HashMap<(u32, String), Vec<(String, StageSummary)>> =
+        std::collections::HashMap::new();
+    let mut stages_written: std::collections::HashSet<(u32, String)> =
+        std::collections::HashSet::new();
     let expected_agents = agent_addrs.len();
-    
+
     // v0.8.19: Performance logging is always enabled with 1-second interval
     // - Aggregate perf_log.tsv in results directory root
     // - Per-agent perf_log.tsv in agents/{agent-id}/ subdirectories
@@ -3336,17 +3921,23 @@ async fn run_distributed_workload(
             writer
         }
         Err(e) => {
-            anyhow::bail!("Failed to create aggregate perf-log at {}: {}", perf_log_path.display(), e);
+            anyhow::bail!(
+                "Failed to create aggregate perf-log at {}: {}",
+                perf_log_path.display(),
+                e
+            );
         }
     };
     let mut perf_log_tracker = PerfLogDeltaTracker::new();
-    
+
     // v0.8.16: Per-agent perf log writers and trackers
     // Lazily initialized when first stats arrive from each agent
     let agents_dir = results_dir.path().join("agents");
-    let mut agent_perf_writers: std::collections::HashMap<String, PerfLogWriter> = std::collections::HashMap::new();
-    let mut agent_perf_trackers: std::collections::HashMap<String, PerfLogDeltaTracker> = std::collections::HashMap::new();
-    
+    let mut agent_perf_writers: std::collections::HashMap<String, PerfLogWriter> =
+        std::collections::HashMap::new();
+    let mut agent_perf_trackers: std::collections::HashMap<String, PerfLogDeltaTracker> =
+        std::collections::HashMap::new();
+
     // Initialize tracker with warmup duration
     let warmup_duration = config.warmup_period.unwrap_or(Duration::ZERO);
     let warmup_opt = if warmup_duration > Duration::ZERO {
@@ -3356,36 +3947,36 @@ async fn run_distributed_workload(
     };
     perf_log_tracker.start(warmup_opt);
     let mut last_perf_log_flush = std::time::Instant::now();
-    
+
     // v0.8.19: CRITICAL - Precise 1-second interval timer for perf_log
     // Uses MissedTickBehavior::Burst to ensure exact 1-second intervals even if processing takes time
     // Display updates can drift, but perf_log MUST be precise for accurate time-series analysis
-    let mut perf_log_timer = tokio::time::interval(Duration::from_millis(CONTROLLER_PERF_LOG_INTERVAL_MS));
+    let mut perf_log_timer =
+        tokio::time::interval(Duration::from_millis(CONTROLLER_PERF_LOG_INTERVAL_MS));
     perf_log_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
     perf_log_timer.tick().await; // First tick is immediate, consume it
-    
+
     // Flush every 10 seconds to minimize data loss on crash
-    let perf_log_flush_interval = Duration::from_secs(
-        sai3_bench::constants::PERF_LOG_FLUSH_INTERVAL_SECS
-    );
-    
+    let perf_log_flush_interval =
+        Duration::from_secs(sai3_bench::constants::PERF_LOG_FLUSH_INTERVAL_SECS);
+
     // v0.8.9: Track stage for transition detection (replaces was_in_prepare_phase)
     let mut last_stage = WorkloadStage::StageUnknown;
     let mut last_stage_name = String::new();
     let mut stage_elapsed_s: f64 = 0.0;
-    
+
     // v0.8.4: Track prepare phase high-water marks (never decrease during prepare)
     let mut max_prepare_created: u64 = 0;
     let mut max_prepare_total: u64 = 0;
-    
+
     // v0.8.9: Track cleanup phase high-water marks (never decrease during cleanup)
     let mut max_cleanup_current: u64 = 0;
     let mut max_cleanup_total: u64 = 0;
-    
+
     // v0.8.19: Cache last aggregate computed by perf_log timer for display use
     // This prevents race condition where display and perf_log both call aggregate()
     let mut last_aggregate: Option<AggregateStats> = None;
-    
+
     // Reset controller perf-log elapsed timing at workload start (after countdown)
     perf_log_tracker.reset_for_stage();
 
@@ -3395,17 +3986,20 @@ async fn run_distributed_workload(
         let mut any_disconnected = false;
         for tracker in agent_trackers.values_mut() {
             if tracker.is_terminal() {
-                continue;  // Skip terminal states (Completed, Failed, Disconnected)
+                continue; // Skip terminal states (Completed, Failed, Disconnected)
             }
-            
+
             if !tracker.is_active() {
-                continue;  // Skip non-active states (not Preparing/Running)
+                continue; // Skip non-active states (not Preparing/Running)
             }
-            
+
             let elapsed = tracker.time_since_last_seen().as_secs_f64();
             if elapsed >= timeout_dead_secs {
                 if tracker.state != ControllerAgentState::Disconnected {
-                    error!("❌ Agent {} STALLED (no updates for {:.1}s) - marking as DISCONNECTED", tracker.agent_id, elapsed);
+                    error!(
+                        "❌ Agent {} STALLED (no updates for {:.1}s) - marking as DISCONNECTED",
+                        tracker.agent_id, elapsed
+                    );
                     let _ = tracker.transition_to(ControllerAgentState::Disconnected, "timeout");
                     // BUG FIX v0.8.3: Do NOT mark as completed - disconnected != completed!
                     // Previous code called mark_completed() here, causing early exit when all agents timed out
@@ -3413,16 +4007,26 @@ async fn run_distributed_workload(
                     any_disconnected = true;
                 }
             } else if elapsed >= timeout_warn_secs {
-                warn!("⚠️  Agent {} delayed: no updates for {:.1}s", tracker.agent_id, elapsed);
+                warn!(
+                    "⚠️  Agent {} delayed: no updates for {:.1}s",
+                    tracker.agent_id, elapsed
+                );
             }
         }
-        
+
         // Update progress bar if we detected any disconnections
         if any_disconnected {
-            let dead_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Disconnected).count();
-            progress_bar.set_message(format!("{} (⚠️ {} dead)", aggregator.aggregate().format_progress(), dead_count));
+            let dead_count = agent_trackers
+                .values()
+                .filter(|t| t.state == ControllerAgentState::Disconnected)
+                .count();
+            progress_bar.set_message(format!(
+                "{} (⚠️ {} dead)",
+                aggregator.aggregate().format_progress(),
+                dead_count
+            ));
         }
-        
+
         tokio::select! {
             stats_opt = rx_stats.recv() => {
                 match stats_opt {
@@ -3431,14 +4035,14 @@ async fn run_distributed_workload(
                         let tracker = agent_trackers
                             .entry(stats.agent_id.clone())
                             .or_insert_with(|| AgentTracker::new(stats.agent_id.clone()));
-                        
+
                         tracker.touch();  // Update last seen timestamp
                         tracker.latest_stats = Some(stats.clone());
-                        
+
                         // v0.8.9: Compute current_stage early for state transitions
                         let current_stage = WorkloadStage::try_from(stats.current_stage)
                             .unwrap_or(WorkloadStage::StageUnknown);
-                        
+
                         // v0.8.25: Process stats as heartbeat for barrier manager
                         if let Some(ref mut bm) = barrier_manager {
                             let phase_progress = pb::iobench::PhaseProgress {
@@ -3479,30 +4083,30 @@ async fn run_distributed_workload(
                                 at_barrier: stats.at_barrier,  // v0.8.26: Use barrier status from agent
                             };
                             bm.process_heartbeat(&stats.agent_id, phase_progress);
-                            
+
                             // v0.8.61: DEBUG - Show barrier status from all messages
                             debug!("Agent {} stats: status={}, at_barrier={}, barrier_seq={}, barrier_name='{}'",
                                    stats.agent_id, stats.status, stats.at_barrier, stats.barrier_sequence, stats.barrier_name);
-                            
+
                             // v0.8.61: Check if agent is at barrier and track for barrier release
                             // Uses NUMERIC stage index ONLY - barrier_sequence is the stage index
                             if stats.at_barrier {
                                 let barrier_index = stats.barrier_sequence;  // Numeric stage index
                                 debug!("Agent {} at barrier {} (sequence {})",
                                        stats.agent_id, barrier_index, stats.barrier_sequence);
-                                
+
                                 // Mark agent as ready for this specific barrier
                                 bm.agent_at_barrier(
                                     &stats.agent_id,
                                     barrier_index,
                                     stats.barrier_sequence
                                 );
-                                
+
                                 // Check if barrier can be released
                                 if let Some(barrier_info) = bm.check_barrier_ready(barrier_index) {
                                     info!("⏱  Barrier {} satisfied with {} agents ready - sending RELEASE_BARRIER (stage transition)",
                                           barrier_index, barrier_info.ready_agents.len());
-                                    
+
                                     // Send RELEASE_BARRIER to all agents via broadcast
                                     // Each agent task filters for messages matching its agent_id
                                     for agent_id in &barrier_info.ready_agents {
@@ -3527,34 +4131,34 @@ async fn run_distributed_workload(
                                             warn!("Failed to broadcast RELEASE_BARRIER for agent {}: {}", agent_id, e);
                                         }
                                     }
-                                    
+
                                     // Clear the barrier after releasing
                                     bm.clear_barrier(barrier_index);
                                 }
                             }
-                            
+
                             // v0.8.27: Collect stage summary if present
                             if let Some(stage_sum) = stats.stage_summary.take() {
                                 let stage_key = (stage_sum.stage_index, stage_sum.stage_name.clone());
                                 info!("Received stage summary from agent '{}' for stage {}: '{}' ({} GET, {} PUT, {} META ops)",
                                       stats.agent_id, stage_sum.stage_index, stage_sum.stage_name,
                                       stage_sum.get_ops, stage_sum.put_ops, stage_sum.meta_ops);
-                                
+
                                 // Collect summaries for this stage (with agent_id for proper attribution)
                                 stage_summaries.entry(stage_key.clone())
                                     .or_default()
                                     .push((stats.agent_id.clone(), stage_sum));
-                                
+
                                 // Check if all agents have reported for this stage
                                 if let Some(summaries) = stage_summaries.get(&stage_key) {
                                     if summaries.len() >= expected_agents && !stages_written.contains(&stage_key) {
                                         info!("All {} agents reported for stage {} '{}' - writing TSV immediately",
                                               expected_agents, stage_key.0, stage_key.1);
-                                        
+
                                         // Write per-stage TSV
                                         let stage_tsv_name = format!("{:02}_{}_results.tsv", stage_key.0 + 1, stage_key.1);
                                         let stage_tsv_path = results_dir.path().join(&stage_tsv_name);
-                                        
+
                                         match write_stage_summary_tsv(&stage_tsv_path, summaries) {
                                             Ok(_) => {
                                                 info!("✓ Stage results written: {}", stage_tsv_name);
@@ -3568,15 +4172,15 @@ async fn run_distributed_workload(
                                 }
                             }
                         }
-                        
+
                         // v0.8.2: Agent recovery from Disconnected state
                         // BUG FIX: Previously agents stayed Disconnected even after sending messages
-                        // 
+                        //
                         // Scenario: Agent times out during prepare (gRPC backpressure)
                         //           → marked Disconnected
                         //           → backpressure resolves, agent sends message
                         //           → THIS CODE recovers agent to correct state
-                        // 
+                        //
                         // Recovery is AUTOMATIC and COMPLETE:
                         //   - State: transition_to() performs full state change + timestamp reset
                         //   - Display: dead_count recalculated dynamically
@@ -3591,7 +4195,7 @@ async fn run_distributed_workload(
                                     info!("Agent {} reconnected - unmarking as completed", stats.agent_id);
                                 }
                             }
-                            
+
                             // v0.8.9: Use current_stage for recovery state
                             let recovery_stage = WorkloadStage::try_from(stats.current_stage)
                                 .unwrap_or(WorkloadStage::StageUnknown);
@@ -3604,19 +4208,19 @@ async fn run_distributed_workload(
                                     _ => ControllerAgentState::Running,
                                 }
                             };
-                            
+
                             // v0.8.2: Increment reconnect counter for diagnostics
                             tracker.reconnect_count += 1;
-                            
+
                             warn!("🔄 Agent {} RECOVERED from DISCONNECTED → {:?} (reconnect #{})", stats.agent_id, new_state, tracker.reconnect_count);
-                            
+
                             // Use transition_to with proper validation (now allowed in state machine)
                             // Note: Checks error for visibility, shouldn't fail with state machine fix
                             if let Err(e) = tracker.transition_to(new_state, "recovered from timeout") {
                                 error!("Failed to recover agent {}: {}", stats.agent_id, e);
                             }
                         }
-                        
+
                         // v0.8.9: current_stage already computed above for barrier tracking
                         // v0.8.4: Use high-water marks during prepare phase to prevent backwards movement
                         // (delayed packets should never decrease the displayed counter)
@@ -3626,7 +4230,7 @@ async fn run_distributed_workload(
                         }
                         let prepare_created = max_prepare_created;
                         let prepare_total = max_prepare_total;
-                        
+
                         // v0.8.9: Track cleanup progress with high-water marks
                         if current_stage == WorkloadStage::StageCleanup {
                             max_cleanup_current = max_cleanup_current.max(stats.stage_progress_current);
@@ -3635,7 +4239,7 @@ async fn run_distributed_workload(
                         let cleanup_current = max_cleanup_current;
                         let cleanup_total = max_cleanup_total;
                         let stage_elapsed_snapshot = stats.stage_elapsed_s;  // Capture before move
-                        
+
                         // v0.8.9: Update agent state based on current_stage enum
                         match current_stage {
                             WorkloadStage::StagePrepare => {
@@ -3657,19 +4261,19 @@ async fn run_distributed_workload(
                             }
                             _ => {}  // Unknown or Custom stages don't trigger state changes
                         }
-                        
+
                         // v0.8.9: Track last known stage for phase transition detection
                         let prev_stage = last_stage;
                         let prev_stage_name = last_stage_name.clone();
                         let current_stage_name = stats.stage_name.clone();
                         last_stage = current_stage;
                         last_stage_name = current_stage_name.clone();
-                        
+
                         // v0.8.19: Lazily initialize per-agent perf-log writer and tracker (always enabled)
                         // Per-agent perf-log creation for each active agent
                         if !stats.completed && stats.status != 3 && stats.status != 5 {
                             let agent_id = stats.agent_id.clone();
-                            
+
                             // Create agent directory and writer if not exists
                             if !agent_perf_writers.contains_key(&agent_id) {
                                 let agent_dir = agents_dir.join(&agent_id);
@@ -3681,7 +4285,7 @@ async fn run_distributed_workload(
                                         Ok(writer) => {
                                             debug!("Created per-agent perf-log at: {}", agent_perf_path.display());
                                             agent_perf_writers.insert(agent_id.clone(), writer);
-                                            
+
                                             // Initialize tracker with warmup duration
                                             let mut tracker = PerfLogDeltaTracker::new();
                                             tracker.start(warmup_opt);
@@ -3694,7 +4298,7 @@ async fn run_distributed_workload(
                                 }
                             }
                         }
-                        
+
                         // v0.7.9: Detect transition from prepare to workload and reset aggregator
                         if prev_stage == WorkloadStage::StagePrepare && current_stage == WorkloadStage::StageWorkload {
                             debug!("Prepare phase completed, resetting aggregator for workload-only stats");
@@ -3704,7 +4308,7 @@ async fn run_distributed_workload(
                             info!("⏱  Controller: agent '{}' transitioned Prepare→Workload (execute stage started). \
                                    Workload timer reset to zero.",
                                 stats.agent_id);
-                            
+
                             // v0.8.16: Reset perf_log warmup timers for workload phase
                             // Warmup should be measured from workload start, not prepare start
                             perf_log_tracker.reset_warmup_for_workload(warmup_opt);
@@ -3712,11 +4316,11 @@ async fn run_distributed_workload(
                                 tracker.reset_warmup_for_workload(warmup_opt);
                             }
                             debug!("Reset perf_log warmup timers for workload phase");
-                            
+
                             // v0.8.4: Reset prepare counters when transitioning to workload phase
                             max_prepare_created = 0;
                             max_prepare_total = 0;
-                            
+
                             // v0.8.25: Wait for prepare barrier if enabled
                             if let Some(ref mut bm) = barrier_manager {
                                 if let Some(ref distributed_config) = config.distributed {
@@ -3724,7 +4328,7 @@ async fn run_distributed_workload(
                                     progress_bar.suspend(|| {
                                         eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("prepare").barrier_type);
                                     });
-                                    
+
                                     match bm.wait_for_barrier("prepare", &agent_clients_map).await {
                                         Ok(BarrierStatus::Ready) => {
                                             eprintln!("✅ All agents synchronized at prepare barrier\n");
@@ -3766,7 +4370,7 @@ async fn run_distributed_workload(
                         } else {
                             stage_elapsed_s = stage_elapsed_s.max(stats.stage_elapsed_s);
                         }
-                        
+
                         // v0.8.13: Check for ERROR status FIRST, regardless of completed flag
                         // Agent sends completed=false with status=3 on error, so we must check status first
                         // Check status code first, error_message may be empty in some edge cases
@@ -3781,16 +4385,16 @@ async fn run_distributed_workload(
                             let _ = tracker.transition_to(ControllerAgentState::Failed, "error status received");
                             aggregator.mark_completed(&stats.agent_id);
                             progress_bar.finish_with_message(format!("❌ Agent {} failed: {}", stats.agent_id, error_msg));
-                            
+
                             // v0.8.1: Save partial results before aborting
                             // Aggregate whatever stats we have so far for diagnostic purposes
                             let partial_stats = aggregator.aggregate();
-                            
+
                             // Finalize results directory with partial data
                             if let Err(e) = results_dir.finalize(partial_stats.elapsed_s) {
                                 error!("Failed to finalize results directory: {}", e);
                             }
-                            
+
                             // Write test status showing the failure
                             let status_summary = check_test_status(&agent_trackers, &agent_summaries);
                             if let Err(e) = write_test_status(&results_dir, &status_summary) {
@@ -3799,16 +4403,16 @@ async fn run_distributed_workload(
                             if let Err(e) = print_test_status(&status_summary, &mut results_dir) {
                                 error!("Failed to print test status: {}", e);
                             }
-                            
+
                             // Inform user that partial results were saved
                             let partial_msg = format!("Partial results saved to: {}", results_dir.path().display());
                             eprintln!("{}", partial_msg);
-                            
+
                             // Abort all agents and exit
                             abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
                             anyhow::bail!("Agent {} workload execution failed: {}", stats.agent_id, error_msg);
                         }
-                        
+
                         // v0.8.13: Handle ABORTED status (status=5)
                         // Agent sends this when it receives and processes an abort command
                         if stats.status == 5 {
@@ -3818,7 +4422,7 @@ async fn run_distributed_workload(
                             // Abort acknowledgment handled - skip regular completion check
                             continue;
                         }
-                        
+
                         // v0.8.13: Defensive check for COMPLETED status (backup for completed flag)
                         // Agent should always send completed=true with status=4, but be defensive
                         if stats.status == 4 && !stats.completed {
@@ -3827,12 +4431,12 @@ async fn run_distributed_workload(
                             aggregator.mark_completed(&stats.agent_id);
                             continue;
                         }
-                        
+
                         // v0.7.5: Extract final summary if completed successfully
                         if stats.completed {
                             let _ = tracker.transition_to(ControllerAgentState::Completed, "workload completed");
                             aggregator.mark_completed(&stats.agent_id);
-                            
+
                             // Extract and store final summary for persistence
                             if let Some(summary) = stats.final_summary {
                                 debug!("Collected final summary from agent {}", summary.agent_id);
@@ -3840,7 +4444,7 @@ async fn run_distributed_workload(
                             } else {
                                 warn!("Agent {} completed but did not provide final summary", stats.agent_id);
                             }
-                            
+
                             // v0.7.9: Extract and store prepare summary for persistence
                             if let Some(prep_summary) = stats.prepare_summary {
                                 debug!("Collected prepare summary from agent {}", prep_summary.agent_id);
@@ -3850,7 +4454,7 @@ async fn run_distributed_workload(
                             // Regular update (not completed yet)
                             aggregator.update(stats);
                         }
-                        
+
                         // v0.8.19: Display update uses cached aggregate from perf_log timer
                         // Only perf_log timer calls aggregate() to ensure precise 1-second windowing
                         if last_update.elapsed() > std::time::Duration::from_millis(CONTROLLER_DISPLAY_UPDATE_INTERVAL_MS) {
@@ -3862,17 +4466,17 @@ async fn run_distributed_workload(
                                 aggregator.aggregate()
                             };
                             let dead_count = agent_trackers.values().filter(|t| t.state == ControllerAgentState::Disconnected).count();
-                            
+
                             // v0.8.9: Use current_stage for stage-aware display
                             let (msg, progress_pos, progress_len, progress_unit) = match current_stage {
                                 WorkloadStage::StagePrepare if prepare_total > 0 => {
                                     // Show prepare progress as "created/total (percentage)"
                                     let pct = (prepare_created as f64 / prepare_total as f64 * 100.0) as u32;
                                     let msg = if dead_count == 0 {
-                                        format!("📦 Preparing: {}/{} objects ({}%) {}", 
+                                        format!("📦 Preparing: {}/{} objects ({}%) {}",
                                                 prepare_created, prepare_total, pct, agg.format_progress())
                                     } else {
-                                        format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}", 
+                                        format!("📦 Preparing: {}/{} objects ({}%) (⚠️ {} dead) {}",
                                                 prepare_created, prepare_total, pct, dead_count, agg.format_progress())
                                     };
                                     (msg, prepare_created, prepare_total, "objects")
@@ -3887,10 +4491,10 @@ async fn run_distributed_workload(
                                         0.0
                                     };
                                     let msg = if dead_count == 0 {
-                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s", 
+                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s",
                                                 cleanup_current, cleanup_total, pct, cleanup_rate)
                                     } else {
-                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s (⚠️ {} dead)", 
+                                        format!("🧹 Cleanup: {}/{} deleted ({}%) | {:.0} DEL/s (⚠️ {} dead)",
                                                 cleanup_current, cleanup_total, pct, cleanup_rate, dead_count)
                                     };
                                     (msg, cleanup_current, cleanup_total, "deleted")
@@ -3907,7 +4511,7 @@ async fn run_distributed_workload(
                                 }
                             };
                             progress_bar.set_message(msg.clone());
-                            
+
                             // v0.8.9: Update progress bar based on current stage
                             progress_bar.set_length(progress_len);
                             progress_bar.set_position(progress_pos);
@@ -3918,9 +4522,9 @@ async fn run_distributed_workload(
                                     .expect("Invalid progress template")
                                     .progress_chars("█▓▒░ ")
                             );
-                            
+
                             last_update = std::time::Instant::now();
-                            
+
                             // v0.8.19: Always write console_log.txt on every 1-second display update
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -3931,7 +4535,7 @@ async fn run_distributed_workload(
                                 warn!("Failed to write live stats to console_log.txt: {}", e);
                             }
                         }
-                        
+
                         // v0.7.5: Check if all agents completed or dead (graceful degradation)
                         if aggregator.all_completed() {
                             break;
@@ -3944,14 +4548,14 @@ async fn run_distributed_workload(
                     }
                 }
             }
-            
+
             // v0.8.19: CRITICAL - Precise 1-second timer for perf_log (separate from display updates)
             // This ensures perf_log.tsv has EXACTLY 1-second intervals for accurate time-series analysis
             // Uses MissedTickBehavior::Burst so if aggregate() takes >1s, we catch up immediately
             _ = perf_log_timer.tick() => {
                 let agg = aggregator.aggregate();
                 last_aggregate = Some(agg.clone());  // Cache for display use
-                
+
                 // Determine stage for perf-log
                 let perf_stage = match last_stage {
                     WorkloadStage::StagePrepare => LiveWorkloadStage::Prepare,
@@ -3960,25 +4564,25 @@ async fn run_distributed_workload(
                     WorkloadStage::StageListing => LiveWorkloadStage::Listing,
                     _ => LiveWorkloadStage::Workload,
                 };
-                
+
                 // v0.8.19: Create perf_log entry directly from windowed values
                 // This ensures console_log.txt and perf_log.tsv show IDENTICAL values
                 let timestamp_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                
+
                 // Compute delta ops/bytes from windowed values
                 let delta_get_ops = (agg.windowed_get_ops_s * agg.windowed_delta_time) as u64;
                 let delta_put_ops = (agg.windowed_put_ops_s * agg.windowed_delta_time) as u64;
-                
+
                 let entry = sai3_bench::perf_log::PerfLogEntry {
                     agent_id: "controller".to_string(),
                     timestamp_epoch_ms: timestamp_ms,
                     elapsed_s: stage_elapsed_s,
                     stage: perf_stage,
                     stage_name: last_stage_name.clone(),
-                    
+
                     // Use windowed values directly (same as display)
                     get_ops: delta_get_ops,
                     get_bytes: agg.windowed_get_bytes,
@@ -3992,7 +4596,7 @@ async fn run_distributed_workload(
                     get_p50_us: agg.get_p50_us as u64,
                     get_p90_us: agg.get_p90_us as u64,
                     get_p99_us: agg.get_p99_us as u64,
-                    
+
                     put_ops: delta_put_ops,
                     put_bytes: agg.windowed_put_bytes,
                     put_iops: agg.windowed_put_ops_s,
@@ -4005,24 +4609,24 @@ async fn run_distributed_workload(
                     put_p50_us: agg.put_p50_us as u64,
                     put_p90_us: agg.put_p90_us as u64,
                     put_p99_us: agg.put_p99_us as u64,
-                    
+
                     meta_ops: 0,  // META not windowed in aggregate
                     meta_iops: if agg.elapsed_s > 0.0 { agg.total_meta_ops as f64 / agg.elapsed_s } else { 0.0 },
                     meta_mean_us: agg.meta_mean_us as u64,
                     meta_p50_us: agg.meta_p50_us as u64,
                     meta_p90_us: agg.meta_p90_us as u64,
                     meta_p99_us: agg.meta_p99_us as u64,
-                    
+
                     cpu_user_percent: agg.cpu_user_percent,
                     cpu_system_percent: agg.cpu_system_percent,
                     cpu_iowait_percent: agg.cpu_iowait_percent,
                     errors: 0,
                 };
-                        
+
                 if let Err(e) = perf_log_writer.write_entry(&entry) {
                     warn!("Failed to write aggregate perf-log entry: {}", e);
                 }
-                
+
                 // Write per-agent perf-log entries at the same precise interval
                 for (agent_id, agent_stats) in aggregator.agent_stats.iter() {
                     if let (Some(agent_writer), Some(agent_tracker)) = (
@@ -4059,48 +4663,48 @@ async fn run_distributed_workload(
                             last_stage_name.clone(),
                         );
                         agent_entry.elapsed_s = agent_stats.stage_elapsed_s;
-                        
+
                         if let Err(e) = agent_writer.write_entry(&agent_entry) {
                             warn!("Failed to write per-agent perf-log entry for {}: {}", agent_id, e);
                         }
                     }
                 }
-                
+
                 // Periodic flush every 10 seconds to minimize data loss on crash
                 if last_perf_log_flush.elapsed() >= perf_log_flush_interval {
                     if let Err(e) = perf_log_writer.flush() {
                         warn!("Failed to flush aggregate perf-log: {}", e);
                     }
-                    
+
                     // Also flush per-agent perf logs
                     for (agent_id, agent_writer) in agent_perf_writers.iter_mut() {
                         if let Err(e) = agent_writer.flush() {
                             warn!("Failed to flush per-agent perf-log for {}: {}", agent_id, e);
                         }
                     }
-                    
+
                     last_perf_log_flush = std::time::Instant::now();
                 }
             }
-            
+
             sig = &mut shutdown_signal => {
                 warn!("Received {} - aborting all agents", sig);
                 progress_bar.finish_with_message(format!("Interrupted by {} - aborting agents...", sig));
-                
+
                 // v0.7.13: Abort all agents to stop running workload and reset state
                 abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
-                
+
                 // Cleanup deployments if any
                 if !deployments.is_empty() {
                     warn!("Cleaning up agents...");
                     let _ = sai3_bench::ssh_deploy::cleanup_agents(deployments);
                 }
-                
+
                 anyhow::bail!("Interrupted by {}", sig);
             }
         }
     }
-    
+
     // v0.8.29: Send GOODBYE to all agents before disconnecting
     // This allows agents to close the gRPC stream gracefully without h2 protocol errors
     info!("Sending GOODBYE to all agents for graceful disconnect");
@@ -4108,7 +4712,7 @@ async fn run_distributed_workload(
         command: pb::iobench::control_message::Command::Goodbye as i32,
         config_yaml: String::new(),
         ack_sequence: 0,
-        agent_id: String::new(),  // Empty = broadcast to all agents
+        agent_id: String::new(), // Empty = broadcast to all agents
         path_prefix: String::new(),
         shared_storage: false,
         start_timestamp_ns: 0,
@@ -4116,24 +4720,29 @@ async fn run_distributed_workload(
         num_agents: 0,
         barrier_name: String::new(),
         barrier_sequence: 0,
-        target_stage_index: 0,    // v0.8.60: For SYNC_STATE
+        target_stage_index: 0, // v0.8.60: For SYNC_STATE
         target_stage_name: String::new(),
         ready_for_next: false,
     };
     // Broadcast to all agents - each agent task receives and forwards
     if let Err(e) = tx_control_broadcast.send(goodbye_msg) {
-        debug!("Failed to broadcast GOODBYE (agents may have already disconnected): {}", e);
+        debug!(
+            "Failed to broadcast GOODBYE (agents may have already disconnected): {}",
+            e
+        );
     }
     // Give agents a moment to process GOODBYE and close streams gracefully
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    
+
     // v0.8.25: Wait for execute barrier if enabled
     // v0.8.28: Skip legacy barrier wait when using YAML-driven stages
     // (stage barriers are already handled during the main loop)
     // v0.8.86: Fix: use !stages.is_empty() (same as line ~2695), not barrier_sync.enabled.
     // barrier_sync.enabled is false when using auto-detected stage barriers, causing the legacy
     // execute barrier to run AFTER GOODBYE is sent, finding 0 agents → "insufficient agents".
-    let using_yaml_stages = config.distributed.as_ref()
+    let using_yaml_stages = config
+        .distributed
+        .as_ref()
         .map(|d| !d.stages.is_empty())
         .unwrap_or(false);
     info!("Post-GOODBYE barrier check: using_yaml_stages={} (stages-based={}, barrier_sync.enabled={})",
@@ -4149,19 +4758,34 @@ async fn run_distributed_workload(
             if let Some(ref distributed_config) = config.distributed {
                 eprintln!("\n🔄 Workload execution complete - synchronizing agents at barrier...");
                 progress_bar.suspend(|| {
-                    eprintln!("   Barrier type: {:?}", distributed_config.barrier_sync.get_phase_config("execute").barrier_type);
+                    eprintln!(
+                        "   Barrier type: {:?}",
+                        distributed_config
+                            .barrier_sync
+                            .get_phase_config("execute")
+                            .barrier_type
+                    );
                 });
-                
+
                 match bm.wait_for_barrier("execute", &agent_clients_map).await {
                     Ok(BarrierStatus::Ready) => {
                         eprintln!("✅ All agents synchronized at execute barrier\n");
                     }
                     Ok(BarrierStatus::Degraded) => {
-                        eprintln!("⚠️  Execute barrier degraded (some agents failed, continuing)\n");
+                        eprintln!(
+                            "⚠️  Execute barrier degraded (some agents failed, continuing)\n"
+                        );
                     }
                     Ok(BarrierStatus::Failed) => {
                         error!("❌ Execute barrier failed (insufficient agents ready)");
-                        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                        abort_all_agents(
+                            agent_addrs,
+                            &mut agent_trackers,
+                            insecure,
+                            agent_ca,
+                            agent_domain,
+                        )
+                        .await;
                         anyhow::bail!("Execute barrier failed - aborting workload");
                     }
                     Ok(BarrierStatus::Waiting) => {
@@ -4169,25 +4793,35 @@ async fn run_distributed_workload(
                     }
                     Err(e) => {
                         error!("❌ Execute barrier error: {}", e);
-                        abort_all_agents(agent_addrs, &mut agent_trackers, insecure, agent_ca, agent_domain).await;
+                        abort_all_agents(
+                            agent_addrs,
+                            &mut agent_trackers,
+                            insecure,
+                            agent_ca,
+                            agent_domain,
+                        )
+                        .await;
                         anyhow::bail!("Execute barrier error: {}", e);
                     }
                 }
             }
         }
     }
-    
+
     // Final aggregation
     let final_stats = aggregator.aggregate();
-    progress_bar.finish_with_message(format!("✓ All {} agents completed\n\n", final_stats.num_agents));
-    
+    progress_bar.finish_with_message(format!(
+        "✓ All {} agents completed\n\n",
+        final_stats.num_agents
+    ));
+
     // v0.8.19: Flush and close perf-log (always enabled)
     if let Err(e) = perf_log_writer.flush() {
         warn!("Failed to flush aggregate perf-log: {}", e);
     } else {
         info!("Aggregate perf-log written to: {}", perf_log_path.display());
     }
-    
+
     // v0.8.16: Flush and close per-agent perf logs
     for (agent_id, writer) in agent_perf_writers.iter_mut() {
         if let Err(e) = writer.flush() {
@@ -4197,66 +4831,83 @@ async fn run_distributed_workload(
         }
     }
     if !agent_perf_writers.is_empty() {
-        info!("Per-agent perf-logs written to: {}/*/perf_log.tsv", agents_dir.display());
+        info!(
+            "Per-agent perf-logs written to: {}/*/perf_log.tsv",
+            agents_dir.display()
+        );
     }
-    
+
     // v0.7.5: Print live aggregate stats for immediate visibility
     println!("=== Live Aggregate Stats (from streaming) ===");
-    println!("Total operations: {} GET, {} PUT, {} META", 
-             final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops);
-    println!("GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
-             final_stats.total_get_ops as f64 / final_stats.elapsed_s,
-             format_bandwidth(final_stats.total_get_bytes, final_stats.elapsed_s),
-             final_stats.get_mean_us,
-             final_stats.get_p50_us,
-             final_stats.get_p95_us);
-    println!("PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
-             final_stats.total_put_ops as f64 / final_stats.elapsed_s,
-             format_bandwidth(final_stats.total_put_bytes, final_stats.elapsed_s),
-             final_stats.put_mean_us,
-             final_stats.put_p50_us,
-             final_stats.put_p95_us);
-    println!("META: {:.0} ops/s (mean: {:.0}µs)",
-             final_stats.total_meta_ops as f64 / final_stats.elapsed_s,
-             final_stats.meta_mean_us);
-    
+    println!(
+        "Total operations: {} GET, {} PUT, {} META",
+        final_stats.total_get_ops, final_stats.total_put_ops, final_stats.total_meta_ops
+    );
+    println!(
+        "GET: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+        final_stats.total_get_ops as f64 / final_stats.elapsed_s,
+        format_bandwidth(final_stats.total_get_bytes, final_stats.elapsed_s),
+        final_stats.get_mean_us,
+        final_stats.get_p50_us,
+        final_stats.get_p95_us
+    );
+    println!(
+        "PUT: {:.0} ops/s, {} (mean: {:.0}µs, p50: {:.0}µs, p95: {:.0}µs)",
+        final_stats.total_put_ops as f64 / final_stats.elapsed_s,
+        format_bandwidth(final_stats.total_put_bytes, final_stats.elapsed_s),
+        final_stats.put_mean_us,
+        final_stats.put_p50_us,
+        final_stats.put_p95_us
+    );
+    println!(
+        "META: {:.0} ops/s (mean: {:.0}µs)",
+        final_stats.total_meta_ops as f64 / final_stats.elapsed_s,
+        final_stats.meta_mean_us
+    );
+
     // v0.7.11: Display CPU utilization summary if available
     if final_stats.cpu_total_percent > 0.0 {
-        println!("CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
-                 final_stats.cpu_total_percent,
-                 final_stats.cpu_user_percent,
-                 final_stats.cpu_system_percent,
-                 final_stats.cpu_iowait_percent);
+        println!(
+            "CPU: {:.1}% total (user: {:.1}%, system: {:.1}%, iowait: {:.1}%)",
+            final_stats.cpu_total_percent,
+            final_stats.cpu_user_percent,
+            final_stats.cpu_system_percent,
+            final_stats.cpu_iowait_percent
+        );
     }
-    
+
     println!("Elapsed: {:.2}s", final_stats.elapsed_s);
     println!();
-    
+
     // v0.7.5: Write per-agent results and create consolidated TSV with histogram aggregation
     // v0.8.29: Skip legacy results.tsv when using YAML stages (per-stage files are written instead)
     if !agent_summaries.is_empty() && !using_yaml_stages {
         info!("Writing results for {} agents", agent_summaries.len());
-        
+
         // Write per-agent results to agents/{agent-id}/ subdirectory
         for summary in &agent_summaries {
             if let Err(e) = write_agent_results(&agents_dir, &summary.agent_id, summary) {
-                error!("Failed to write results for agent {}: {}", summary.agent_id, e);
+                error!(
+                    "Failed to write results for agent {}: {}",
+                    summary.agent_id, e
+                );
             }
         }
-        
+
         // Create consolidated TSV with bucket-level histogram aggregation
         if let Err(e) = create_consolidated_tsv(&agents_dir, &results_dir, &agent_summaries) {
             error!("Failed to create consolidated TSV: {}", e);
         } else {
             info!("✓ Consolidated results.tsv created with accurate histogram aggregation");
         }
-        
+
         // v0.8.22: Aggregate and export endpoint stats if any agent used multi-endpoint
-        let all_endpoint_stats: Vec<_> = agent_summaries.iter()
+        let all_endpoint_stats: Vec<_> = agent_summaries
+            .iter()
             .map(|s| proto_to_endpoint_stats(&s.endpoint_stats))
             .filter(|stats| !stats.is_empty())
             .collect();
-        
+
         if !all_endpoint_stats.is_empty() {
             let aggregated_stats = aggregate_endpoint_stats(&all_endpoint_stats);
             let ep_tsv_path = results_dir.endpoint_stats_tsv_path();
@@ -4265,7 +4916,10 @@ async fn run_distributed_workload(
                     if let Err(e) = exporter.export_endpoint_stats(&aggregated_stats) {
                         error!("Failed to export aggregated endpoint stats: {}", e);
                     } else {
-                        info!("✓ Aggregated endpoint stats written to: {}", ep_tsv_path.display());
+                        info!(
+                            "✓ Aggregated endpoint stats written to: {}",
+                            ep_tsv_path.display()
+                        );
                     }
                 }
                 Err(e) => {
@@ -4273,43 +4927,56 @@ async fn run_distributed_workload(
                 }
             }
         }
-        
+
         // Print detailed per-agent summary
         if let Err(e) = print_distributed_results(&agent_summaries, &mut results_dir) {
             error!("Failed to print distributed results: {}", e);
         }
     } else if using_yaml_stages {
-        info!("Using YAML-driven stages - per-stage TSV files written, skipping legacy results.tsv");
+        info!(
+            "Using YAML-driven stages - per-stage TSV files written, skipping legacy results.tsv"
+        );
     } else {
-        warn!("No agent summaries collected - per-agent results and consolidated TSV not available");
+        warn!(
+            "No agent summaries collected - per-agent results and consolidated TSV not available"
+        );
         warn!("This may indicate agents failed to return final_summary in completed LiveStats messages");
     }
-    
+
     // v0.7.9: Write per-agent prepare results and create consolidated prepare TSV
     // v0.8.29: Skip legacy prepare_results.tsv when using YAML stages
     if !prepare_summaries.is_empty() && !using_yaml_stages {
-        info!("Writing prepare results for {} agents", prepare_summaries.len());
-        
+        info!(
+            "Writing prepare results for {} agents",
+            prepare_summaries.len()
+        );
+
         // Write per-agent prepare results to agents/{agent-id}/ subdirectory
         for prep_summary in &prepare_summaries {
-            if let Err(e) = write_agent_prepare_results(&agents_dir, &prep_summary.agent_id, prep_summary) {
-                error!("Failed to write prepare results for agent {}: {}", prep_summary.agent_id, e);
+            if let Err(e) =
+                write_agent_prepare_results(&agents_dir, &prep_summary.agent_id, prep_summary)
+            {
+                error!(
+                    "Failed to write prepare results for agent {}: {}",
+                    prep_summary.agent_id, e
+                );
             }
         }
-        
+
         // Create consolidated prepare TSV with histogram aggregation
         if let Err(e) = create_consolidated_prepare_tsv(results_dir.path(), &prepare_summaries) {
             error!("Failed to create consolidated prepare TSV: {}", e);
         } else {
             info!("✓ Consolidated prepare_results.tsv created");
         }
-        
+
         // v0.8.22: Aggregate and export prepare endpoint stats if any agent used multi-endpoint
-        let all_prepare_endpoint_stats: Vec<_> = prepare_summaries.iter()
+        let all_prepare_endpoint_stats: Vec<_> = prepare_summaries
+            .iter()
             .map(|s| proto_to_endpoint_stats(&s.endpoint_stats))
             .filter(|stats| !stats.is_empty())
             .collect();
-        
+
         if !all_prepare_endpoint_stats.is_empty() {
             let aggregated_stats = aggregate_endpoint_stats(&all_prepare_endpoint_stats);
             let ep_tsv_path = results_dir.prepare_endpoint_stats_tsv_path();
@@ -4318,16 +4985,22 @@ async fn run_distributed_workload(
                     if let Err(e) = exporter.export_endpoint_stats(&aggregated_stats) {
                         error!("Failed to export aggregated prepare endpoint stats: {}", e);
                     } else {
-                        info!("✓ Aggregated prepare endpoint stats written to: {}", ep_tsv_path.display());
+                        info!(
+                            "✓ Aggregated prepare endpoint stats written to: {}",
+                            ep_tsv_path.display()
+                        );
                     }
                 }
                 Err(e) => {
-                    error!("Failed to create prepare endpoint stats TSV exporter: {}", e);
+                    error!(
+                        "Failed to create prepare endpoint stats TSV exporter: {}",
+                        e
+                    );
                 }
             }
         }
     }
-    
+
     // Finalize results directory with elapsed time from final stats
     results_dir.finalize(final_stats.elapsed_s)?;
 
@@ -4358,7 +5031,10 @@ async fn run_distributed_workload(
             agg_wall_seconds = agg_wall_seconds.max(row.wall_seconds); // wall time = max across agents (parallel)
 
             if let Err(e) = sai3_bench::populate_ledger::append_row(results_dir.path(), &row) {
-                error!("Failed to write per-agent populate ledger row for {}: {}", prep.agent_id, e);
+                error!(
+                    "Failed to write per-agent populate ledger row for {}: {}",
+                    prep.agent_id, e
+                );
             }
         }
 
@@ -4386,7 +5062,10 @@ async fn run_distributed_workload(
             );
             println!("{}", ledger_msg);
             results_dir.write_console(&ledger_msg)?;
-            info!("✓ Populate ledger written ({} agent rows + AGGREGATE)", prepare_summaries.len());
+            info!(
+                "✓ Populate ledger written ({} agent rows + AGGREGATE)",
+                prepare_summaries.len()
+            );
         }
     }
 
@@ -4394,12 +5073,12 @@ async fn run_distributed_workload(
     let status_summary = check_test_status(&agent_trackers, &agent_summaries);
     write_test_status(&results_dir, &status_summary)?;
     print_test_status(&status_summary, &mut results_dir)?;
-    
+
     // Generate Excel summary using sai3-analyze
     let analyze_msg = "\nGenerating Excel summary...";
     println!("{}", analyze_msg);
     results_dir.write_console(analyze_msg)?;
-    
+
     match run_sai3_analyze(results_dir.path()) {
         Ok(()) => {
             let output_file = results_dir.path().join("Summary-Results.xlsx");
@@ -4413,17 +5092,17 @@ async fn run_distributed_workload(
             results_dir.write_console(&warn_msg)?;
         }
     }
-    
+
     let msg = format!("\nResults saved to: {}", results_dir.path().display());
     println!("{}", msg);
 
     // Cleanup SSH-deployed agents (v0.6.11+)
     if !deployments.is_empty() {
         info!("Cleaning up {} deployed agents", deployments.len());
-        
+
         let cleanup_msg = format!("Stopping {} agent containers...", deployments.len());
         println!("{}", cleanup_msg);
-        
+
         use sai3_bench::ssh_deploy;
         match ssh_deploy::cleanup_agents(deployments) {
             Ok(_) => {
@@ -4451,7 +5130,7 @@ struct TestStatus {
     failed: usize,
     disconnected: usize,
     aborting: usize,
-    reconnect_count: usize,  // v0.8.2: Total disconnect/reconnect events across all agents
+    reconnect_count: usize, // v0.8.2: Total disconnect/reconnect events across all agents
     total_ops: u64,
     agent_details: Vec<(String, ControllerAgentState, String)>, // (id, state, reason)
 }
@@ -4465,36 +5144,53 @@ fn check_test_status(
     // Agent IDs are the keys that agents report in their LiveStats messages
     let real_agents: Vec<_> = agent_trackers
         .iter()
-        .filter(|(id, _)| !id.contains(':'))  // Exclude "host:port" entries
+        .filter(|(id, _)| !id.contains(':')) // Exclude "host:port" entries
         .collect();
-    
+
     let total_agents = real_agents.len();
-    let completed = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Completed).count();
-    let failed = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Failed).count();
-    let disconnected = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Disconnected).count();
-    let aborting = real_agents.iter().filter(|(_, t)| t.state == ControllerAgentState::Aborting).count();
-    
+    let completed = real_agents
+        .iter()
+        .filter(|(_, t)| t.state == ControllerAgentState::Completed)
+        .count();
+    let failed = real_agents
+        .iter()
+        .filter(|(_, t)| t.state == ControllerAgentState::Failed)
+        .count();
+    let disconnected = real_agents
+        .iter()
+        .filter(|(_, t)| t.state == ControllerAgentState::Disconnected)
+        .count();
+    let aborting = real_agents
+        .iter()
+        .filter(|(_, t)| t.state == ControllerAgentState::Aborting)
+        .count();
+
     // v0.8.2: Sum reconnect counts across all agents for diagnostic visibility
     let reconnect_count: usize = real_agents.iter().map(|(_, t)| t.reconnect_count).sum();
-    
+
     // Test succeeds only if ALL agents completed successfully
-    let success = total_agents > 0 && completed == total_agents && failed == 0 && disconnected == 0 && aborting == 0;
-    
+    let success = total_agents > 0
+        && completed == total_agents
+        && failed == 0
+        && disconnected == 0
+        && aborting == 0;
+
     // Calculate total operations from summaries
     let total_ops: u64 = agent_summaries.iter().map(|s| s.total_ops).sum();
-    
+
     // Collect agent details for status report (only real agent IDs, not addresses)
     let mut agent_details: Vec<(String, ControllerAgentState, String)> = real_agents
         .iter()
         .map(|(id, tracker)| {
-            let reason = tracker.error_message
+            let reason = tracker
+                .error_message
                 .clone()
                 .unwrap_or_else(|| format!("{:?}", tracker.state));
             ((*id).clone(), tracker.state, reason)
         })
         .collect();
     agent_details.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by agent ID
-    
+
     TestStatus {
         success,
         total_agents,
@@ -4502,7 +5198,7 @@ fn check_test_status(
         failed,
         disconnected,
         aborting,
-        reconnect_count,  // v0.8.2: Include disconnect/reconnect diagnostic
+        reconnect_count, // v0.8.2: Include disconnect/reconnect diagnostic
         total_ops,
         agent_details,
     }
@@ -4511,64 +5207,79 @@ fn check_test_status(
 /// v0.8.1: Write STATUS.txt file with test outcome
 fn write_test_status(results_dir: &ResultsDir, status: &TestStatus) -> anyhow::Result<()> {
     use std::fs;
-    
+
     let status_path = results_dir.path().join("STATUS.txt");
     let mut content = String::new();
-    
+
     // Header
     if status.success {
         content.push_str("TEST STATUS: SUCCESS\n");
     } else {
         content.push_str("TEST STATUS: FAILURE\n");
     }
-    content.push_str(&format!("Timestamp: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+    content.push_str(&format!(
+        "Timestamp: {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
     content.push('\n');
-    
+
     // Summary
     content.push_str("=== Summary ===\n");
     content.push_str(&format!("Total agents: {}\n", status.total_agents));
     content.push_str(&format!("Completed: {}\n", status.completed));
     content.push_str(&format!("Failed: {}\n", status.failed));
     content.push_str(&format!("Disconnected: {}\n", status.disconnected));
-    content.push_str(&format!("Disconnect/Reconnect Count: {}\n", status.reconnect_count));
+    content.push_str(&format!(
+        "Disconnect/Reconnect Count: {}\n",
+        status.reconnect_count
+    ));
     content.push_str(&format!("Aborting: {}\n", status.aborting));
     content.push_str(&format!("Total operations: {}\n", status.total_ops));
     content.push('\n');
-    
+
     // Per-agent details
     content.push_str("=== Agent Details ===\n");
     for (agent_id, state, reason) in &status.agent_details {
         content.push_str(&format!("{}: {:?} ({})\n", agent_id, state, reason));
     }
-    
+
     // Failure details (if any)
     if !status.success {
         content.push('\n');
         content.push_str("=== Failure Analysis ===\n");
-        
+
         if status.failed > 0 {
-            content.push_str(&format!("⚠ {} agent(s) reported ERROR status\n", status.failed));
+            content.push_str(&format!(
+                "⚠ {} agent(s) reported ERROR status\n",
+                status.failed
+            ));
         }
         if status.disconnected > 0 {
-            content.push_str(&format!("⚠ {} agent(s) disconnected or timed out\n", status.disconnected));
+            content.push_str(&format!(
+                "⚠ {} agent(s) disconnected or timed out\n",
+                status.disconnected
+            ));
         }
         if status.aborting > 0 {
-            content.push_str(&format!("⚠ {} agent(s) in aborting state\n", status.aborting));
+            content.push_str(&format!(
+                "⚠ {} agent(s) in aborting state\n",
+                status.aborting
+            ));
         }
         if status.total_ops == 0 {
             content.push_str("⚠ Zero operations completed - workload did not execute\n");
         }
-        
+
         content.push_str("\nRecommendations:\n");
         content.push_str("1. Check agent logs in agents/*/console_log.txt\n");
         content.push_str("2. Review controller console_log.txt for error messages\n");
         content.push_str("3. Verify agent connectivity and network stability\n");
         content.push_str("4. Check storage backend availability\n");
     }
-    
+
     fs::write(&status_path, content)
         .with_context(|| format!("Failed to write STATUS.txt: {}", status_path.display()))?;
-    
+
     Ok(())
 }
 
@@ -4578,57 +5289,67 @@ fn print_test_status(status: &TestStatus, results_dir: &mut ResultsDir) -> anyho
         let msg = "\n✅ Test PASSED: All agents completed successfully".to_string();
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("   {} agents, {} total operations", status.total_agents, status.total_ops);
+
+        let msg = format!(
+            "   {} agents, {} total operations",
+            status.total_agents, status.total_ops
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
     } else {
         let msg = "\n❌ Test FAILED: One or more agents did not complete successfully".to_string();
         eprintln!("{}", msg);
         results_dir.write_console(&msg)?;
-        
+
         let msg = format!("   Completed: {}/{}", status.completed, status.total_agents);
         eprintln!("{}", msg);
         results_dir.write_console(&msg)?;
-        
+
         if status.failed > 0 {
             let msg = format!("   Failed: {} agent(s) reported errors", status.failed);
             eprintln!("{}", msg);
             results_dir.write_console(&msg)?;
         }
-        
+
         if status.disconnected > 0 {
-            let msg = format!("   Disconnected: {} agent(s) lost connection", status.disconnected);
+            let msg = format!(
+                "   Disconnected: {} agent(s) lost connection",
+                status.disconnected
+            );
             eprintln!("{}", msg);
             results_dir.write_console(&msg)?;
         }
-        
+
         if status.aborting > 0 {
             let msg = format!("   Aborting: {} agent(s) in abort state", status.aborting);
             eprintln!("{}", msg);
             results_dir.write_console(&msg)?;
         }
-        
+
         if status.total_ops == 0 {
-            let msg = "   ⚠ CRITICAL: Zero operations completed - workload did not execute!".to_string();
+            let msg =
+                "   ⚠ CRITICAL: Zero operations completed - workload did not execute!".to_string();
             eprintln!("{}", msg);
             results_dir.write_console(&msg)?;
         }
-        
+
         let msg = "\n   See STATUS.txt in results directory for full details".to_string();
         eprintln!("{}", msg);
         results_dir.write_console(&msg)?;
     }
-    
+
     Ok(())
 }
 
 /// Print aggregated results from all agents
-fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut ResultsDir) -> anyhow::Result<()> {
+fn print_distributed_results(
+    summaries: &[WorkloadSummary],
+    results_dir: &mut ResultsDir,
+) -> anyhow::Result<()> {
     let msg = "\n=== Distributed Results ===".to_string();
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    
+
     let msg = format!("Total agents: {}", summaries.len());
     println!("{}", msg);
     results_dir.write_console(&msg)?;
@@ -4638,54 +5359,64 @@ fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut Re
         let msg = format!("\n--- Agent: {} ---", summary.agent_id);
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
+
         let msg = format!("  Wall time: {:.2}s", summary.wall_seconds);
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total ops: {} ({:.2} ops/s)", 
-                 summary.total_ops, 
-                 summary.total_ops as f64 / summary.wall_seconds);
+
+        let msg = format!(
+            "  Total ops: {} ({:.2} ops/s)",
+            summary.total_ops,
+            summary.total_ops as f64 / summary.wall_seconds
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
-                 summary.total_bytes as f64 / 1_048_576.0,
-                 (summary.total_bytes as f64 / 1_048_576.0) / summary.wall_seconds);
+
+        let msg = format!(
+            "  Total bytes: {:.2} MB ({:.2} MiB/s)",
+            summary.total_bytes as f64 / 1_048_576.0,
+            (summary.total_bytes as f64 / 1_048_576.0) / summary.wall_seconds
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
+
         if let Some(ref get) = summary.get {
             if get.ops > 0 {
-                let msg = format!("  GET: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
-                         get.ops,
-                         get.bytes as f64 / 1_048_576.0,
-                         get.mean_us,
-                         get.p95_us);
+                let msg = format!(
+                    "  GET: {} ops, {:.2} MB, mean: {}µs, p95: {}µs",
+                    get.ops,
+                    get.bytes as f64 / 1_048_576.0,
+                    get.mean_us,
+                    get.p95_us
+                );
                 println!("{}", msg);
                 results_dir.write_console(&msg)?;
             }
         }
-        
+
         if let Some(ref put) = summary.put {
             if put.ops > 0 {
-                let msg = format!("  PUT: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
-                         put.ops,
-                         put.bytes as f64 / 1_048_576.0,
-                         put.mean_us,
-                         put.p95_us);
+                let msg = format!(
+                    "  PUT: {} ops, {:.2} MB, mean: {}µs, p95: {}µs",
+                    put.ops,
+                    put.bytes as f64 / 1_048_576.0,
+                    put.mean_us,
+                    put.p95_us
+                );
                 println!("{}", msg);
                 results_dir.write_console(&msg)?;
             }
         }
-        
+
         if let Some(ref meta) = summary.meta {
             if meta.ops > 0 {
-                let msg = format!("  META: {} ops, {:.2} MB, mean: {}µs, p95: {}µs", 
-                         meta.ops,
-                         meta.bytes as f64 / 1_048_576.0,
-                         meta.mean_us,
-                         meta.p95_us);
+                let msg = format!(
+                    "  META: {} ops, {:.2} MB, mean: {}µs, p95: {}µs",
+                    meta.ops,
+                    meta.bytes as f64 / 1_048_576.0,
+                    meta.mean_us,
+                    meta.p95_us
+                );
                 println!("{}", msg);
                 results_dir.write_console(&msg)?;
             }
@@ -4700,68 +5431,103 @@ fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut Re
         .map(|s| s.wall_seconds)
         .fold(0.0f64, f64::max);
 
-    let get_ops: u64 = summaries.iter().filter_map(|s| s.get.as_ref().map(|g| g.ops)).sum();
-    let get_bytes: u64 = summaries.iter().filter_map(|s| s.get.as_ref().map(|g| g.bytes)).sum();
-    
-    let put_ops: u64 = summaries.iter().filter_map(|s| s.put.as_ref().map(|p| p.ops)).sum();
-    let put_bytes: u64 = summaries.iter().filter_map(|s| s.put.as_ref().map(|p| p.bytes)).sum();
+    let get_ops: u64 = summaries
+        .iter()
+        .filter_map(|s| s.get.as_ref().map(|g| g.ops))
+        .sum();
+    let get_bytes: u64 = summaries
+        .iter()
+        .filter_map(|s| s.get.as_ref().map(|g| g.bytes))
+        .sum();
 
-    let meta_ops: u64 = summaries.iter().filter_map(|s| s.meta.as_ref().map(|m| m.ops)).sum();
+    let put_ops: u64 = summaries
+        .iter()
+        .filter_map(|s| s.put.as_ref().map(|p| p.ops))
+        .sum();
+    let put_bytes: u64 = summaries
+        .iter()
+        .filter_map(|s| s.put.as_ref().map(|p| p.bytes))
+        .sum();
+
+    let meta_ops: u64 = summaries
+        .iter()
+        .filter_map(|s| s.meta.as_ref().map(|m| m.ops))
+        .sum();
 
     let msg = "\n=== Aggregate Totals ===".to_string();
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    
-    let msg = format!("Total ops: {} ({:.2} ops/s)", 
-             total_ops, 
-             total_ops as f64 / max_wall);
+
+    let msg = format!(
+        "Total ops: {} ({:.2} ops/s)",
+        total_ops,
+        total_ops as f64 / max_wall
+    );
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    
-    let msg = format!("Total bytes: {:.2} MB ({:.2} MiB/s)", 
-             total_bytes as f64 / 1_048_576.0,
-             (total_bytes as f64 / 1_048_576.0) / max_wall);
+
+    let msg = format!(
+        "Total bytes: {:.2} MB ({:.2} MiB/s)",
+        total_bytes as f64 / 1_048_576.0,
+        (total_bytes as f64 / 1_048_576.0) / max_wall
+    );
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    
+
     if get_ops > 0 {
         let msg = "\nGET aggregate:".to_string();
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total ops: {} ({:.2} ops/s)", get_ops, get_ops as f64 / max_wall);
+
+        let msg = format!(
+            "  Total ops: {} ({:.2} ops/s)",
+            get_ops,
+            get_ops as f64 / max_wall
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
-                 get_bytes as f64 / 1_048_576.0,
-                 (get_bytes as f64 / 1_048_576.0) / max_wall);
+
+        let msg = format!(
+            "  Total bytes: {:.2} MB ({:.2} MiB/s)",
+            get_bytes as f64 / 1_048_576.0,
+            (get_bytes as f64 / 1_048_576.0) / max_wall
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
     }
-    
+
     if put_ops > 0 {
         let msg = "\nPUT aggregate:".to_string();
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total ops: {} ({:.2} ops/s)", put_ops, put_ops as f64 / max_wall);
+
+        let msg = format!(
+            "  Total ops: {} ({:.2} ops/s)",
+            put_ops,
+            put_ops as f64 / max_wall
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total bytes: {:.2} MB ({:.2} MiB/s)", 
-                 put_bytes as f64 / 1_048_576.0,
-                 (put_bytes as f64 / 1_048_576.0) / max_wall);
+
+        let msg = format!(
+            "  Total bytes: {:.2} MB ({:.2} MiB/s)",
+            put_bytes as f64 / 1_048_576.0,
+            (put_bytes as f64 / 1_048_576.0) / max_wall
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
     }
-    
+
     if meta_ops > 0 {
         let msg = "\nMETA aggregate:".to_string();
         println!("{}", msg);
         results_dir.write_console(&msg)?;
-        
-        let msg = format!("  Total ops: {} ({:.2} ops/s)", meta_ops, meta_ops as f64 / max_wall);
+
+        let msg = format!(
+            "  Total ops: {} ({:.2} ops/s)",
+            meta_ops,
+            meta_ops as f64 / max_wall
+        );
         println!("{}", msg);
         results_dir.write_console(&msg)?;
     }
@@ -4769,7 +5535,7 @@ fn print_distributed_results(summaries: &[WorkloadSummary], results_dir: &mut Re
     let msg = "\n✅ Distributed workload complete!".to_string();
     println!("{}", msg);
     results_dir.write_console(&msg)?;
-    
+
     Ok(())
 }
 
@@ -4780,50 +5546,66 @@ fn write_agent_results(
     summary: &WorkloadSummary,
 ) -> anyhow::Result<()> {
     use std::fs;
-    
+
     // Create subdirectory for this agent
     let agent_dir = agents_dir.join(agent_id);
     fs::create_dir_all(&agent_dir)
         .with_context(|| format!("Failed to create agent directory: {}", agent_dir.display()))?;
-    
+
     // Write metadata.json
     if !summary.metadata_json.is_empty() {
         let metadata_path = agent_dir.join("metadata.json");
-        fs::write(&metadata_path, &summary.metadata_json)
-            .with_context(|| format!("Failed to write agent metadata: {}", metadata_path.display()))?;
+        fs::write(&metadata_path, &summary.metadata_json).with_context(|| {
+            format!(
+                "Failed to write agent metadata: {}",
+                metadata_path.display()
+            )
+        })?;
     }
-    
+
     // Write results.tsv
     if !summary.tsv_content.is_empty() {
         let tsv_path = agent_dir.join("results.tsv");
         fs::write(&tsv_path, &summary.tsv_content)
             .with_context(|| format!("Failed to write agent TSV: {}", tsv_path.display()))?;
     }
-    
+
     // v0.8.22: Write endpoint stats TSV if multi-endpoint was used
     if !summary.endpoint_stats.is_empty() {
         let ep_stats = proto_to_endpoint_stats(&summary.endpoint_stats);
         let ep_tsv_path = agent_dir.join("workload_endpoint_stats.tsv");
         let ep_exporter = sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path)
-            .with_context(|| format!("Failed to create endpoint stats TSV exporter: {}", ep_tsv_path.display()))?;
-        ep_exporter.export_endpoint_stats(&ep_stats)
-            .with_context(|| format!("Failed to export endpoint stats: {}", ep_tsv_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to create endpoint stats TSV exporter: {}",
+                    ep_tsv_path.display()
+                )
+            })?;
+        ep_exporter
+            .export_endpoint_stats(&ep_stats)
+            .with_context(|| {
+                format!("Failed to export endpoint stats: {}", ep_tsv_path.display())
+            })?;
     }
-    
+
     // Write console_log.txt (if provided - currently agents don't generate this)
     if !summary.console_log.is_empty() {
         let console_path = agent_dir.join("console_log.txt");
-        fs::write(&console_path, &summary.console_log)
-            .with_context(|| format!("Failed to write agent console log: {}", console_path.display()))?;
+        fs::write(&console_path, &summary.console_log).with_context(|| {
+            format!(
+                "Failed to write agent console log: {}",
+                console_path.display()
+            )
+        })?;
     }
-    
+
     // Write a note about the agent's local results path
     if !summary.results_path.is_empty() {
         let note_path = agent_dir.join("agent_local_path.txt");
         fs::write(&note_path, &summary.results_path)
             .with_context(|| format!("Failed to write agent path note: {}", note_path.display()))?;
     }
-    
+
     // Write a note about operation log (if it exists on agent)
     if !summary.op_log_path.is_empty() {
         let oplog_note_path = agent_dir.join("agent_op_log_path.txt");
@@ -4833,11 +5615,19 @@ fn write_agent_results(
              They are not transferred via gRPC due to their size.",
             summary.op_log_path
         );
-        fs::write(&oplog_note_path, note)
-            .with_context(|| format!("Failed to write op-log path note: {}", oplog_note_path.display()))?;
+        fs::write(&oplog_note_path, note).with_context(|| {
+            format!(
+                "Failed to write op-log path note: {}",
+                oplog_note_path.display()
+            )
+        })?;
     }
-    
-    info!("Wrote agent {} results to: {}", agent_id, agent_dir.display());
+
+    info!(
+        "Wrote agent {} results to: {}",
+        agent_id,
+        agent_dir.display()
+    );
     Ok(())
 }
 
@@ -4848,65 +5638,83 @@ fn write_agent_prepare_results(
     summary: &PrepareSummary,
 ) -> anyhow::Result<()> {
     use std::fs;
-    
+
     // Create subdirectory for this agent
     let agent_dir = agents_dir.join(agent_id);
     fs::create_dir_all(&agent_dir)
         .with_context(|| format!("Failed to create agent directory: {}", agent_dir.display()))?;
-    
+
     // Write prepare_results.tsv
     if !summary.tsv_content.is_empty() {
         let tsv_path = agent_dir.join("prepare_results.tsv");
-        fs::write(&tsv_path, &summary.tsv_content)
-            .with_context(|| format!("Failed to write agent prepare TSV: {}", tsv_path.display()))?;
+        fs::write(&tsv_path, &summary.tsv_content).with_context(|| {
+            format!("Failed to write agent prepare TSV: {}", tsv_path.display())
+        })?;
     }
-    
+
     // v0.8.22: Write endpoint stats TSV if multi-endpoint was used during prepare
     if !summary.endpoint_stats.is_empty() {
         let ep_stats = proto_to_endpoint_stats(&summary.endpoint_stats);
         let ep_tsv_path = agent_dir.join("prepare_endpoint_stats.tsv");
         let ep_exporter = sai3_bench::tsv_export::TsvExporter::with_path(&ep_tsv_path)
-            .with_context(|| format!("Failed to create endpoint stats TSV exporter: {}", ep_tsv_path.display()))?;
-        ep_exporter.export_endpoint_stats(&ep_stats)
-            .with_context(|| format!("Failed to export prepare endpoint stats: {}", ep_tsv_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to create endpoint stats TSV exporter: {}",
+                    ep_tsv_path.display()
+                )
+            })?;
+        ep_exporter
+            .export_endpoint_stats(&ep_stats)
+            .with_context(|| {
+                format!(
+                    "Failed to export prepare endpoint stats: {}",
+                    ep_tsv_path.display()
+                )
+            })?;
     }
-    
+
     // Write a note about the agent's local results path
     if !summary.results_path.is_empty() {
         let note_path = agent_dir.join("prepare_local_path.txt");
-        fs::write(&note_path, &summary.results_path)
-            .with_context(|| format!("Failed to write prepare path note: {}", note_path.display()))?;
+        fs::write(&note_path, &summary.results_path).with_context(|| {
+            format!("Failed to write prepare path note: {}", note_path.display())
+        })?;
     }
-    
+
     Ok(())
 }
 
 /// Convert protobuf EndpointStatsSnapshot to local EndpointStatsSnapshot (v0.8.22)
 fn proto_to_endpoint_stats(
-    proto_stats: &[pb::iobench::EndpointStatsSnapshot]
+    proto_stats: &[pb::iobench::EndpointStatsSnapshot],
 ) -> Vec<sai3_bench::workload::EndpointStatsSnapshot> {
-    proto_stats.iter().map(|s| sai3_bench::workload::EndpointStatsSnapshot {
-        uri: s.uri.clone(),
-        total_requests: s.total_requests,
-        bytes_read: s.bytes_read,
-        bytes_written: s.bytes_written,
-        error_count: s.error_count,
-        active_requests: s.active_requests as usize,
-    }).collect()
+    proto_stats
+        .iter()
+        .map(|s| sai3_bench::workload::EndpointStatsSnapshot {
+            uri: s.uri.clone(),
+            total_requests: s.total_requests,
+            bytes_read: s.bytes_read,
+            bytes_written: s.bytes_written,
+            error_count: s.error_count,
+            active_requests: s.active_requests as usize,
+        })
+        .collect()
 }
 
 /// Aggregate endpoint stats from multiple agents (v0.8.22)
 /// Combines stats for endpoints with same URI
 fn aggregate_endpoint_stats(
-    all_agent_stats: &[Vec<sai3_bench::workload::EndpointStatsSnapshot>]
+    all_agent_stats: &[Vec<sai3_bench::workload::EndpointStatsSnapshot>],
 ) -> Vec<sai3_bench::workload::EndpointStatsSnapshot> {
     use std::collections::HashMap;
-    
-    let mut aggregated: HashMap<String, sai3_bench::workload::EndpointStatsSnapshot> = HashMap::new();
-    
+
+    let mut aggregated: HashMap<String, sai3_bench::workload::EndpointStatsSnapshot> =
+        HashMap::new();
+
     for agent_stats in all_agent_stats {
         for stat in agent_stats {
-            aggregated.entry(stat.uri.clone())
+            aggregated
+                .entry(stat.uri.clone())
                 .and_modify(|agg| {
                     agg.total_requests += stat.total_requests;
                     agg.bytes_read += stat.bytes_read;
@@ -4917,32 +5725,35 @@ fn aggregate_endpoint_stats(
                 .or_insert(stat.clone());
         }
     }
-    
+
     let mut result: Vec<_> = aggregated.into_values().collect();
-    result.sort_by(|a, b| a.uri.cmp(&b.uri));  // Sort by URI for consistent output
+    result.sort_by(|a, b| a.uri.cmp(&b.uri)); // Sort by URI for consistent output
     result
 }
 
 /// Convert protobuf SizeBins to local SizeBins (v0.8.18)
 fn proto_to_size_bins(proto_bins: &pb::iobench::SizeBins) -> sai3_bench::workload::SizeBins {
     use std::collections::HashMap;
-    
+
     let mut by_bucket = HashMap::new();
     for bucket_data in &proto_bins.buckets {
-        by_bucket.insert(bucket_data.bucket_idx as usize, (bucket_data.ops, bucket_data.bytes));
+        by_bucket.insert(
+            bucket_data.bucket_idx as usize,
+            (bucket_data.ops, bucket_data.bytes),
+        );
     }
-    
+
     sai3_bench::workload::SizeBins { by_bucket }
 }
 
 /// Merge SizeBins from multiple agents (v0.8.18)
 fn merge_size_bins(bins_list: &[sai3_bench::workload::SizeBins]) -> sai3_bench::workload::SizeBins {
     let mut merged = sai3_bench::workload::SizeBins::default();
-    
+
     for bins in bins_list {
         merged.merge_from(bins);
     }
-    
+
     merged
 }
 
@@ -4952,62 +5763,75 @@ fn create_consolidated_prepare_tsv(
     results_dir: &std::path::Path,
     summaries: &[PrepareSummary],
 ) -> anyhow::Result<()> {
-    use hdrhistogram::Histogram;
     use hdrhistogram::serialization::Deserializer;
+    use hdrhistogram::Histogram;
     use std::fs::File;
     use std::io::{BufWriter, Write};
-    
-    info!("Creating consolidated prepare_results.tsv from {} agent histograms", summaries.len());
-    
+
+    info!(
+        "Creating consolidated prepare_results.tsv from {} agent histograms",
+        summaries.len()
+    );
+
     // Define histogram parameters (must match agent configuration)
     const MIN: u64 = 1;
-    const MAX: u64 = 3_600_000_000;  // 1 hour in microseconds
+    const MAX: u64 = 3_600_000_000; // 1 hour in microseconds
     const SIGFIG: u8 = 3;
     const NUM_BUCKETS: usize = 9;
-    
+
     // Create accumulators for PUT operations (prepare phase only does PUTs)
     let mut put_accumulators = Vec::new();
     for _ in 0..NUM_BUCKETS {
         put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
     }
-    
+
     // Deserialize and merge all PUT histograms from agents
     let mut deserializer = Deserializer::new();
-    
+
     for (agent_idx, summary) in summaries.iter().enumerate() {
-        info!("Merging prepare histograms from agent {} ({})", agent_idx + 1, summary.agent_id);
-        
+        info!(
+            "Merging prepare histograms from agent {} ({})",
+            agent_idx + 1,
+            summary.agent_id
+        );
+
         if summary.histogram_put.is_empty() {
             continue;
         }
-        
+
         // Deserialize PUT histograms (one per bucket)
         let mut cursor = &summary.histogram_put[..];
         for (bucket_idx, accumulator) in put_accumulators.iter_mut().enumerate() {
             match deserializer.deserialize::<u64, _>(&mut cursor) {
                 Ok(hist) => {
-                    accumulator.add(&hist)
+                    accumulator
+                        .add(&hist)
                         .context("Failed to merge PUT histograms")?;
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize PUT histogram bucket {} from agent {}: {}", 
-                          bucket_idx, summary.agent_id, e);
-                    break;  // Stop if deserialization fails
+                    warn!(
+                        "Failed to deserialize PUT histogram bucket {} from agent {}: {}",
+                        bucket_idx, summary.agent_id, e
+                    );
+                    break; // Stop if deserialization fails
                 }
             }
         }
     }
-    
+
     // Calculate aggregate metrics from summaries
     let mut total_ops: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut total_objects_created: u64 = 0;
     let mut total_objects_existed: u64 = 0;
-    let total_wall_seconds = summaries.iter().map(|s| s.wall_seconds).fold(0.0f64, f64::max);
-    
+    let total_wall_seconds = summaries
+        .iter()
+        .map(|s| s.wall_seconds)
+        .fold(0.0f64, f64::max);
+
     // v0.8.18: Merge SizeBins from all agents for accurate per-bucket avg_bytes
     let mut put_bins_list = Vec::new();
-    
+
     for summary in summaries {
         if let Some(ref put) = summary.put {
             total_ops += put.ops;
@@ -5015,29 +5839,29 @@ fn create_consolidated_prepare_tsv(
         }
         total_objects_created += summary.objects_created;
         total_objects_existed += summary.objects_existed;
-        
+
         // Collect SizeBins for merging
         if let Some(ref bins) = summary.put_bins {
             put_bins_list.push(proto_to_size_bins(bins));
         }
     }
-    
+
     // Merge all SizeBins for accurate per-bucket calculations
     let merged_put_bins = merge_size_bins(&put_bins_list);
-    
+
     // Write consolidated TSV
     let tsv_path = results_dir.join("prepare_results.tsv");
     let mut writer = BufWriter::new(File::create(&tsv_path)?);
-    
+
     // Write header
     writeln!(writer, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
-    
+
     // Write PUT bucket rows (from merged histograms)
     for (idx, hist) in put_accumulators.iter().enumerate() {
         if hist.is_empty() {
             continue;
         }
-        
+
         let mean_us = hist.mean();
         let p50_us = hist.value_at_quantile(0.50);
         let p90_us = hist.value_at_quantile(0.90);
@@ -5045,9 +5869,13 @@ fn create_consolidated_prepare_tsv(
         let p99_us = hist.value_at_quantile(0.99);
         let max_us = hist.max();
         let count = hist.len();
-        
+
         // v0.8.18: Use actual per-bucket bytes from merged SizeBins (NOT total!)
-        let (bucket_ops, bucket_bytes) = merged_put_bins.by_bucket.get(&idx).copied().unwrap_or((0, 0));
+        let (bucket_ops, bucket_bytes) = merged_put_bins
+            .by_bucket
+            .get(&idx)
+            .copied()
+            .unwrap_or((0, 0));
         let avg_bytes = if bucket_ops > 0 {
             bucket_bytes as f64 / bucket_ops as f64
         } else {
@@ -5055,17 +5883,27 @@ fn create_consolidated_prepare_tsv(
         };
         let ops_per_sec = count as f64 / total_wall_seconds;
         let throughput_mibps = (bucket_bytes as f64 / 1_048_576.0) / total_wall_seconds;
-        
+
         let bucket_label = BUCKET_LABELS[idx];
-        
+
         writeln!(
             writer,
             "PUT\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
-            bucket_label, idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
-            avg_bytes, ops_per_sec, throughput_mibps, count
+            bucket_label,
+            idx,
+            mean_us,
+            p50_us,
+            p90_us,
+            p95_us,
+            p99_us,
+            max_us,
+            avg_bytes,
+            ops_per_sec,
+            throughput_mibps,
+            count
         )?;
     }
-    
+
     // Write ALL summary row (combines all buckets)
     if total_ops > 0 {
         // Merge all bucket histograms into one for overall stats
@@ -5075,7 +5913,7 @@ fn create_consolidated_prepare_tsv(
                 all_hist.add(bucket_hist)?;
             }
         }
-        
+
         if !all_hist.is_empty() {
             let mean_us = all_hist.mean();
             let p50_us = all_hist.value_at_quantile(0.50);
@@ -5084,25 +5922,40 @@ fn create_consolidated_prepare_tsv(
             let p99_us = all_hist.value_at_quantile(0.99);
             let max_us = all_hist.max();
             let count = all_hist.len();
-            
+
             let avg_bytes = total_bytes / total_ops;
             let ops_per_sec = count as f64 / total_wall_seconds;
-            let throughput_mibps = (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
-            
+            let throughput_mibps =
+                (count as f64 * avg_bytes as f64) / total_wall_seconds / 1024.0 / 1024.0;
+
             writeln!(
                 writer,
                 "PUT\tALL\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{}",
-                99, mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
-                avg_bytes, ops_per_sec, throughput_mibps, count
+                99,
+                mean_us,
+                p50_us,
+                p90_us,
+                p95_us,
+                p99_us,
+                max_us,
+                avg_bytes,
+                ops_per_sec,
+                throughput_mibps,
+                count
             )?;
         }
     }
-    
+
     writer.flush()?;
-    info!("Wrote consolidated prepare_results.tsv to {}", tsv_path.display());
-    info!("Prepare phase summary: {} objects created, {} existed, {:.2}s elapsed",
-          total_objects_created, total_objects_existed, total_wall_seconds);
-    
+    info!(
+        "Wrote consolidated prepare_results.tsv to {}",
+        tsv_path.display()
+    );
+    info!(
+        "Prepare phase summary: {} objects created, {} existed, {:.2}s elapsed",
+        total_objects_created, total_objects_existed, total_wall_seconds
+    );
+
     Ok(())
 }
 
@@ -5118,50 +5971,56 @@ fn write_stage_summary_tsv(
     path: &std::path::Path,
     summaries_with_agent: &[(String, StageSummary)],
 ) -> anyhow::Result<()> {
-    use hdrhistogram::Histogram;
     use hdrhistogram::serialization::Deserializer;
+    use hdrhistogram::Histogram;
+    use sai3_bench::constants::NUM_BUCKETS;
     use std::fs::File;
     use std::io::Write;
-    use sai3_bench::constants::NUM_BUCKETS;
-    
+
     if summaries_with_agent.is_empty() {
         anyhow::bail!("No stage summaries to write");
     }
-    
+
     // Extract just the summaries for aggregate calculations
     let summaries: Vec<&StageSummary> = summaries_with_agent.iter().map(|(_, s)| s).collect();
-    
+
     let stage_name = &summaries[0].stage_name;
     let stage_type = &summaries[0].stage_type;
     let stage_index = summaries[0].stage_index;
-    
-    info!("Writing stage {} '{}' ({}) TSV with {} agent summaries",
-          stage_index, stage_name, stage_type, summaries.len());
-    
+
+    info!(
+        "Writing stage {} '{}' ({}) TSV with {} agent summaries",
+        stage_index,
+        stage_name,
+        stage_type,
+        summaries.len()
+    );
+
     // Aggregate stats from all agents
-    let max_wall_seconds = summaries.iter()
+    let max_wall_seconds = summaries
+        .iter()
         .map(|s| s.wall_seconds)
         .fold(0.0f64, f64::max);
-    
+
     // Define histogram parameters (must match agent configuration)
     const MIN: u64 = 1;
     const MAX: u64 = 3_600_000_000;
     const SIGFIG: u8 = 3;
-    
+
     // v0.8.28: Create per-bucket histogram accumulators (9 per op type)
     let mut get_accumulators = Vec::new();
     let mut put_accumulators = Vec::new();
     let mut meta_accumulators = Vec::new();
-    
+
     for _ in 0..NUM_BUCKETS {
         get_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
         put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
         meta_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
     }
-    
+
     // Deserialize per-bucket histograms from all agents
     let mut deserializer = Deserializer::new();
-    
+
     for summary in &summaries {
         // Deserialize GET histograms (9 buckets per agent)
         if !summary.histogram_get.is_empty() {
@@ -5172,7 +6031,7 @@ fn write_stage_summary_tsv(
                 }
             }
         }
-        
+
         // Deserialize PUT histograms (9 buckets per agent)
         if !summary.histogram_put.is_empty() {
             let mut cursor = std::io::Cursor::new(&summary.histogram_put);
@@ -5182,7 +6041,7 @@ fn write_stage_summary_tsv(
                 }
             }
         }
-        
+
         // Deserialize META histograms (9 buckets per agent)
         if !summary.histogram_meta.is_empty() {
             let mut cursor = std::io::Cursor::new(&summary.histogram_meta);
@@ -5193,12 +6052,12 @@ fn write_stage_summary_tsv(
             }
         }
     }
-    
+
     // Merge size bins from all agents
     let mut get_bins_list = Vec::new();
     let mut put_bins_list = Vec::new();
     let mut meta_bins_list = Vec::new();
-    
+
     for summary in &summaries {
         if let Some(ref bins) = summary.get_bins {
             get_bins_list.push(proto_to_size_bins(bins));
@@ -5210,71 +6069,152 @@ fn write_stage_summary_tsv(
             meta_bins_list.push(proto_to_size_bins(bins));
         }
     }
-    
+
     let merged_get_bins = merge_size_bins(&get_bins_list);
     let merged_put_bins = merge_size_bins(&put_bins_list);
     let merged_meta_bins = merge_size_bins(&meta_bins_list);
-    
+
     // Calculate totals from merged bins
     let total_get_ops: u64 = merged_get_bins.by_bucket.values().map(|(ops, _)| ops).sum();
-    let total_get_bytes: u64 = merged_get_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
+    let total_get_bytes: u64 = merged_get_bins
+        .by_bucket
+        .values()
+        .map(|(_, bytes)| bytes)
+        .sum();
     let total_put_ops: u64 = merged_put_bins.by_bucket.values().map(|(ops, _)| ops).sum();
-    let total_put_bytes: u64 = merged_put_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
-    let total_meta_ops: u64 = merged_meta_bins.by_bucket.values().map(|(ops, _)| ops).sum();
-    let total_meta_bytes: u64 = merged_meta_bins.by_bucket.values().map(|(_, bytes)| bytes).sum();
+    let total_put_bytes: u64 = merged_put_bins
+        .by_bucket
+        .values()
+        .map(|(_, bytes)| bytes)
+        .sum();
+    let total_meta_ops: u64 = merged_meta_bins
+        .by_bucket
+        .values()
+        .map(|(ops, _)| ops)
+        .sum();
+    let total_meta_bytes: u64 = merged_meta_bins
+        .by_bucket
+        .values()
+        .map(|(_, bytes)| bytes)
+        .sum();
     let _total_errors: u64 = summaries.iter().map(|s| s.errors).sum();
-    
+
     // Write TSV file with legacy per-bucket format
     let file = File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
-    
+
     // Header comment
-    writeln!(writer, "# Stage {} Results: {} ({})", stage_index + 1, stage_name, stage_type)?;
+    writeln!(
+        writer,
+        "# Stage {} Results: {} ({})",
+        stage_index + 1,
+        stage_name,
+        stage_type
+    )?;
     writeln!(writer, "# Agents: {}", summaries.len())?;
     writeln!(writer, "# Duration: {:.2}s", max_wall_seconds)?;
     writeln!(writer)?;
-    
+
     // Per-bucket format header (matching legacy results.tsv)
     writeln!(writer, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
-    
+
     // Collect all rows for sorting by bucket_idx
     let mut rows: Vec<(usize, String)> = Vec::new();
-    
+
     // Per-bucket rows for each operation type
-    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, &merged_get_bins, max_wall_seconds)?;
-    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, &merged_put_bins, max_wall_seconds)?;
-    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, &merged_meta_bins, max_wall_seconds)?;
-    
+    collect_op_rows(
+        &mut rows,
+        "GET",
+        &get_accumulators,
+        total_get_ops,
+        total_get_bytes,
+        &merged_get_bins,
+        max_wall_seconds,
+    )?;
+    collect_op_rows(
+        &mut rows,
+        "PUT",
+        &put_accumulators,
+        total_put_ops,
+        total_put_bytes,
+        &merged_put_bins,
+        max_wall_seconds,
+    )?;
+    collect_op_rows(
+        &mut rows,
+        "META",
+        &meta_accumulators,
+        total_meta_ops,
+        total_meta_bytes,
+        &merged_meta_bins,
+        max_wall_seconds,
+    )?;
+
     // Aggregate "ALL" rows (bucket_idx 97/98/99 for sorting after per-bucket rows)
-    collect_aggregate_row(&mut rows, "META", 97, &meta_accumulators, total_meta_ops, total_meta_bytes, max_wall_seconds)?;
-    collect_aggregate_row(&mut rows, "GET", 98, &get_accumulators, total_get_ops, total_get_bytes, max_wall_seconds)?;
-    collect_aggregate_row(&mut rows, "PUT", 99, &put_accumulators, total_put_ops, total_put_bytes, max_wall_seconds)?;
-    
+    collect_aggregate_row(
+        &mut rows,
+        "META",
+        97,
+        &meta_accumulators,
+        total_meta_ops,
+        total_meta_bytes,
+        max_wall_seconds,
+    )?;
+    collect_aggregate_row(
+        &mut rows,
+        "GET",
+        98,
+        &get_accumulators,
+        total_get_ops,
+        total_get_bytes,
+        max_wall_seconds,
+    )?;
+    collect_aggregate_row(
+        &mut rows,
+        "PUT",
+        99,
+        &put_accumulators,
+        total_put_ops,
+        total_put_bytes,
+        max_wall_seconds,
+    )?;
+
     // Sort by bucket_idx and write
     rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
     for (_, row) in rows {
         writeln!(writer, "{}", row)?;
     }
-    
+
     // Per-agent breakdown (after the main data)
     writeln!(writer)?;
     writeln!(writer, "# Per-Agent Details")?;
-    writeln!(writer, "agent_id\tget_ops\tget_bytes\tput_ops\tput_bytes\tmeta_ops\tduration_s\terrors")?;
+    writeln!(
+        writer,
+        "agent_id\tget_ops\tget_bytes\tput_ops\tput_bytes\tmeta_ops\tduration_s\terrors"
+    )?;
     for (agent_id, summary) in summaries_with_agent {
-        writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}",
-                 agent_id,
-                 summary.get_ops, summary.get_bytes,
-                 summary.put_ops, summary.put_bytes,
-                 summary.meta_ops, summary.wall_seconds,
-                 summary.errors)?;
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}",
+            agent_id,
+            summary.get_ops,
+            summary.get_bytes,
+            summary.put_ops,
+            summary.put_bytes,
+            summary.meta_ops,
+            summary.wall_seconds,
+            summary.errors
+        )?;
     }
-    
+
     writer.flush()?;
-    info!("Wrote stage results to: {} ({} ops, {:.2} MB)",
-          path.display(),
-          total_get_ops + total_put_ops + total_meta_ops,
-          (total_get_bytes + total_put_bytes) as f64 / 1_048_576.0);
-    
+    info!(
+        "Wrote stage results to: {} ({} ops, {:.2} MB)",
+        path.display(),
+        total_get_ops + total_put_ops + total_meta_ops,
+        (total_get_bytes + total_put_bytes) as f64 / 1_048_576.0
+    );
+
     Ok(())
 }
 
@@ -5285,109 +6225,144 @@ fn create_consolidated_tsv(
     results_dir: &ResultsDir,
     summaries: &[WorkloadSummary],
 ) -> anyhow::Result<()> {
-    use hdrhistogram::Histogram;
     use hdrhistogram::serialization::Deserializer;
+    use hdrhistogram::Histogram;
     use std::fs::File;
     use std::io::Write;
-    
-    info!("Creating consolidated results.tsv from {} agent histograms", summaries.len());
-    
+
+    info!(
+        "Creating consolidated results.tsv from {} agent histograms",
+        summaries.len()
+    );
+
     // Define histogram parameters (must match agent configuration in metrics.rs)
     // Range: 1µs to 1 hour (3.6e9 µs), 3 significant figures
     const MIN: u64 = 1;
-    const MAX: u64 = 3_600_000_000;  // 1 hour in microseconds
+    const MAX: u64 = 3_600_000_000; // 1 hour in microseconds
     const SIGFIG: u8 = 3;
     const NUM_BUCKETS: usize = 9;
-    
+
     // Create accumulators for each operation type and size bucket
     let mut get_accumulators = Vec::new();
     let mut put_accumulators = Vec::new();
     let mut meta_accumulators = Vec::new();
-    
+
     for _ in 0..NUM_BUCKETS {
         get_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
         put_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
         meta_accumulators.push(Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?);
     }
-    
+
     // Deserialize and merge histograms from all agents
     let mut deserializer = Deserializer::new();
-    
+
     for (agent_idx, summary) in summaries.iter().enumerate() {
-        info!("Merging histograms from agent {} ({})", agent_idx + 1, summary.agent_id);
-        
+        info!(
+            "Merging histograms from agent {} ({})",
+            agent_idx + 1,
+            summary.agent_id
+        );
+
         // Deserialize GET histograms (one per bucket)
         let mut cursor = &summary.histogram_get[..];
         for (bucket_idx, accumulator) in get_accumulators.iter_mut().enumerate() {
-            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
-                .with_context(|| format!("Failed to deserialize GET histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
-            accumulator.add(hist)
-                .with_context(|| format!("Failed to merge GET histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
+            let hist: Histogram<u64> =
+                deserializer.deserialize(&mut cursor).with_context(|| {
+                    format!(
+                        "Failed to deserialize GET histogram bucket {} from agent {}",
+                        bucket_idx, summary.agent_id
+                    )
+                })?;
+            accumulator.add(hist).with_context(|| {
+                format!(
+                    "Failed to merge GET histogram bucket {} from agent {}",
+                    bucket_idx, summary.agent_id
+                )
+            })?;
         }
-        
+
         // Deserialize PUT histograms
         let mut cursor = &summary.histogram_put[..];
         for (bucket_idx, accumulator) in put_accumulators.iter_mut().enumerate() {
-            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
-                .with_context(|| format!("Failed to deserialize PUT histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
-            accumulator.add(hist)
-                .with_context(|| format!("Failed to merge PUT histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
+            let hist: Histogram<u64> =
+                deserializer.deserialize(&mut cursor).with_context(|| {
+                    format!(
+                        "Failed to deserialize PUT histogram bucket {} from agent {}",
+                        bucket_idx, summary.agent_id
+                    )
+                })?;
+            accumulator.add(hist).with_context(|| {
+                format!(
+                    "Failed to merge PUT histogram bucket {} from agent {}",
+                    bucket_idx, summary.agent_id
+                )
+            })?;
         }
-        
+
         // Deserialize META histograms
         let mut cursor = &summary.histogram_meta[..];
         for (bucket_idx, accumulator) in meta_accumulators.iter_mut().enumerate() {
-            let hist: Histogram<u64> = deserializer.deserialize(&mut cursor)
-                .with_context(|| format!("Failed to deserialize META histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
-            accumulator.add(hist)
-                .with_context(|| format!("Failed to merge META histogram bucket {} from agent {}", 
-                                        bucket_idx, summary.agent_id))?;
+            let hist: Histogram<u64> =
+                deserializer.deserialize(&mut cursor).with_context(|| {
+                    format!(
+                        "Failed to deserialize META histogram bucket {} from agent {}",
+                        bucket_idx, summary.agent_id
+                    )
+                })?;
+            accumulator.add(hist).with_context(|| {
+                format!(
+                    "Failed to merge META histogram bucket {} from agent {}",
+                    bucket_idx, summary.agent_id
+                )
+            })?;
         }
     }
-    
+
     // Calculate total wall time (max of all agents)
-    let wall_seconds = summaries.iter()
+    let wall_seconds = summaries
+        .iter()
         .map(|s| s.wall_seconds)
         .fold(0.0f64, f64::max);
-    
+
     // Calculate aggregate operation counts and bytes
-    let total_get_ops: u64 = summaries.iter()
+    let total_get_ops: u64 = summaries
+        .iter()
         .filter_map(|s| s.get.as_ref())
         .map(|g| g.ops)
         .sum();
-    let total_get_bytes: u64 = summaries.iter()
+    let total_get_bytes: u64 = summaries
+        .iter()
         .filter_map(|s| s.get.as_ref())
         .map(|g| g.bytes)
         .sum();
-    
-    let total_put_ops: u64 = summaries.iter()
+
+    let total_put_ops: u64 = summaries
+        .iter()
         .filter_map(|s| s.put.as_ref())
         .map(|p| p.ops)
         .sum();
-    let total_put_bytes: u64 = summaries.iter()
+    let total_put_bytes: u64 = summaries
+        .iter()
         .filter_map(|s| s.put.as_ref())
         .map(|p| p.bytes)
         .sum();
-    
-    let total_meta_ops: u64 = summaries.iter()
+
+    let total_meta_ops: u64 = summaries
+        .iter()
         .filter_map(|s| s.meta.as_ref())
         .map(|m| m.ops)
         .sum();
-    let total_meta_bytes: u64 = summaries.iter()
+    let total_meta_bytes: u64 = summaries
+        .iter()
         .filter_map(|s| s.meta.as_ref())
         .map(|m| m.bytes)
         .sum();
-    
+
     // v0.8.18: Merge SizeBins from all agents for accurate per-bucket avg_bytes
     let mut get_bins_list = Vec::new();
     let mut put_bins_list = Vec::new();
     let mut meta_bins_list = Vec::new();
-    
+
     for summary in summaries {
         if let Some(ref bins) = summary.get_bins {
             get_bins_list.push(proto_to_size_bins(bins));
@@ -5399,42 +6374,93 @@ fn create_consolidated_tsv(
             meta_bins_list.push(proto_to_size_bins(bins));
         }
     }
-    
+
     let merged_get_bins = merge_size_bins(&get_bins_list);
     let merged_put_bins = merge_size_bins(&put_bins_list);
     let merged_meta_bins = merge_size_bins(&meta_bins_list);
-    
+
     // Write consolidated TSV
     let tsv_path = results_dir.path().join("results.tsv");
     let mut f = File::create(&tsv_path)
         .with_context(|| format!("Failed to create consolidated TSV: {}", tsv_path.display()))?;
-    
+
     // Write header
     writeln!(f, "operation\tsize_bucket\tbucket_idx\tmean_us\tp50_us\tp90_us\tp95_us\tp99_us\tmax_us\tavg_bytes\tops_per_sec\tthroughput_mibps\tcount")?;
-    
+
     // Collect all rows for sorting
     let mut rows = Vec::new();
-    
+
     // Write per-bucket rows (merged across all agents)
-    collect_op_rows(&mut rows, "GET", &get_accumulators, total_get_ops, total_get_bytes, &merged_get_bins, wall_seconds)?;
-    collect_op_rows(&mut rows, "PUT", &put_accumulators, total_put_ops, total_put_bytes, &merged_put_bins, wall_seconds)?;
-    collect_op_rows(&mut rows, "META", &meta_accumulators, total_meta_ops, total_meta_bytes, &merged_meta_bins, wall_seconds)?;
-    
+    collect_op_rows(
+        &mut rows,
+        "GET",
+        &get_accumulators,
+        total_get_ops,
+        total_get_bytes,
+        &merged_get_bins,
+        wall_seconds,
+    )?;
+    collect_op_rows(
+        &mut rows,
+        "PUT",
+        &put_accumulators,
+        total_put_ops,
+        total_put_bytes,
+        &merged_put_bins,
+        wall_seconds,
+    )?;
+    collect_op_rows(
+        &mut rows,
+        "META",
+        &meta_accumulators,
+        total_meta_ops,
+        total_meta_bytes,
+        &merged_meta_bins,
+        wall_seconds,
+    )?;
+
     // Write aggregate rows (overall totals across all agents and size buckets)
     // META=97, GET=98, PUT=99 for natural sorting
-    collect_aggregate_row(&mut rows, "META", 97, &meta_accumulators, total_meta_ops, total_meta_bytes, wall_seconds)?;
-    collect_aggregate_row(&mut rows, "GET", 98, &get_accumulators, total_get_ops, total_get_bytes, wall_seconds)?;
-    collect_aggregate_row(&mut rows, "PUT", 99, &put_accumulators, total_put_ops, total_put_bytes, wall_seconds)?;
-    
+    collect_aggregate_row(
+        &mut rows,
+        "META",
+        97,
+        &meta_accumulators,
+        total_meta_ops,
+        total_meta_bytes,
+        wall_seconds,
+    )?;
+    collect_aggregate_row(
+        &mut rows,
+        "GET",
+        98,
+        &get_accumulators,
+        total_get_ops,
+        total_get_bytes,
+        wall_seconds,
+    )?;
+    collect_aggregate_row(
+        &mut rows,
+        "PUT",
+        99,
+        &put_accumulators,
+        total_put_ops,
+        total_put_bytes,
+        wall_seconds,
+    )?;
+
     // Sort by bucket_idx
     rows.sort_by_key(|(bucket_idx, _)| *bucket_idx);
-    
+
     // Write sorted rows
     for (_, row) in rows {
         writeln!(f, "{}", row)?;
     }
-    
-    info!("Consolidated results.tsv written to: {}", tsv_path.display());
+
+    info!(
+        "Consolidated results.tsv written to: {}",
+        tsv_path.display()
+    );
     Ok(())
 }
 
@@ -5443,9 +6469,9 @@ fn collect_op_rows(
     rows: &mut Vec<(usize, String)>,
     op_name: &str,
     accumulators: &[hdrhistogram::Histogram<u64>],
-    _total_ops: u64,  // v0.8.18: Unused - kept for API compatibility
-    _total_bytes: u64,  // v0.8.18: Unused - kept for API compatibility
-    merged_bins: &sai3_bench::workload::SizeBins,  // v0.8.18: Use per-bucket bytes!
+    _total_ops: u64,   // v0.8.18: Unused - kept for API compatibility
+    _total_bytes: u64, // v0.8.18: Unused - kept for API compatibility
+    merged_bins: &sai3_bench::workload::SizeBins, // v0.8.18: Use per-bucket bytes!
     wall_seconds: f64,
 ) -> anyhow::Result<()> {
     for (bucket_idx, hist) in accumulators.iter().enumerate() {
@@ -5453,7 +6479,7 @@ fn collect_op_rows(
         if count == 0 {
             continue;
         }
-        
+
         // Calculate percentiles (histograms store microseconds directly)
         let mean_us = hist.mean();
         let p50_us = hist.value_at_quantile(0.50) as f64;
@@ -5461,34 +6487,43 @@ fn collect_op_rows(
         let p95_us = hist.value_at_quantile(0.95) as f64;
         let p99_us = hist.value_at_quantile(0.99) as f64;
         let max_us = hist.max() as f64;
-        
+
         // v0.8.18: Use actual per-bucket bytes from merged SizeBins (NOT estimated!)
-        let (bucket_ops, bucket_bytes) = merged_bins.by_bucket.get(&bucket_idx).copied().unwrap_or((0, 0));
+        let (bucket_ops, bucket_bytes) = merged_bins
+            .by_bucket
+            .get(&bucket_idx)
+            .copied()
+            .unwrap_or((0, 0));
         let avg_bytes = if bucket_ops > 0 {
             bucket_bytes as f64 / bucket_ops as f64
         } else {
             0.0
         };
-        
+
         // Calculate throughput
         let ops_per_sec = count as f64 / wall_seconds;
         let throughput_mibps = (bucket_bytes as f64 / 1_048_576.0) / wall_seconds;
-        
+
         let row = format!(
             "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
             op_name,
             BUCKET_LABELS[bucket_idx],
             bucket_idx,
-            mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+            mean_us,
+            p50_us,
+            p90_us,
+            p95_us,
+            p99_us,
+            max_us,
             avg_bytes,
             ops_per_sec,
             throughput_mibps,
             count
         );
-        
+
         rows.push((bucket_idx, row));
     }
-    
+
     Ok(())
 }
 
@@ -5506,20 +6541,20 @@ fn collect_aggregate_row(
     const MIN: u64 = 1;
     const MAX: u64 = 3_600_000_000;
     const SIGFIG: u8 = 3;
-    
+
     let mut combined = hdrhistogram::Histogram::<u64>::new_with_bounds(MIN, MAX, SIGFIG)?;
-    
+
     for hist in accumulators {
         if !hist.is_empty() {
             combined.add(hist)?;
         }
     }
-    
+
     let count = combined.len();
     if count == 0 {
         return Ok(());
     }
-    
+
     // Calculate percentiles from combined histogram
     let mean_us = combined.mean();
     let p50_us = combined.value_at_quantile(0.50) as f64;
@@ -5527,28 +6562,33 @@ fn collect_aggregate_row(
     let p95_us = combined.value_at_quantile(0.95) as f64;
     let p99_us = combined.value_at_quantile(0.99) as f64;
     let max_us = combined.max() as f64;
-    
+
     // Calculate totals
     let avg_bytes = if total_ops > 0 {
         total_bytes as f64 / total_ops as f64
     } else {
         0.0
     };
-    
+
     let ops_per_sec = count as f64 / wall_seconds;
     let throughput_mibps = (total_bytes as f64 / 1_048_576.0) / wall_seconds;
-    
+
     let row = format!(
         "{}\tALL\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{:.2}\t{}",
         op_name,
         bucket_idx,
-        mean_us, p50_us, p90_us, p95_us, p99_us, max_us,
+        mean_us,
+        p50_us,
+        p90_us,
+        p95_us,
+        p99_us,
+        max_us,
         avg_bytes,
         ops_per_sec,
         throughput_mibps,
         count
     );
-    
+
     rows.push((bucket_idx, row));
     Ok(())
 }
@@ -5563,12 +6603,12 @@ fn collect_aggregate_row(
 /// This is the same validation that agents perform, so dry-run catches errors early
 async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result<()> {
     use sai3_bench::config::OpSpec;
-    
+
     // Check that workload has operations configured
     if config.workload.is_empty() {
         bail!("No operations configured in workload");
     }
-    
+
     // Validate each operation
     for weighted_op in &config.workload {
         match &weighted_op.spec {
@@ -5581,26 +6621,38 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
                         // v0.8.51: Use spawn_blocking to prevent executor starvation on large globs
                         let file_path_clone = file_path.clone();
                         let path_clone = path.clone();
-                        let paths = tokio::task::spawn_blocking(move || -> Result<Vec<std::path::PathBuf>> {
-                            let paths: Vec<_> = glob::glob(&file_path_clone)
-                                .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", path_clone, e))?
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|e| anyhow!("Glob error: {}", e))?;
-                            Ok(paths)
-                        })
+                        let paths = tokio::task::spawn_blocking(
+                            move || -> Result<Vec<std::path::PathBuf>> {
+                                let paths: Vec<_> = glob::glob(&file_path_clone)
+                                    .map_err(|e| {
+                                        anyhow!("Invalid glob pattern '{}': {}", path_clone, e)
+                                    })?
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map_err(|e| anyhow!("Glob error: {}", e))?;
+                                Ok(paths)
+                            },
+                        )
                         .await
                         .map_err(|e| anyhow!("Blocking task failed: {}", e))??;
-                        
+
                         if paths.is_empty() {
                             bail!("No files found matching GET pattern: {}", path);
                         }
                     }
                 }
             }
-            OpSpec::Put { path, object_size, size_spec, .. } => {
+            OpSpec::Put {
+                path,
+                object_size,
+                size_spec,
+                ..
+            } => {
                 // PUT operations need size configuration
                 if object_size.is_none() && size_spec.is_none() {
-                    bail!("PUT operation at '{}' requires either 'object_size' or 'size_spec'", path);
+                    bail!(
+                        "PUT operation at '{}' requires either 'object_size' or 'size_spec'",
+                        path
+                    );
                 }
             }
             OpSpec::Delete { path, .. } => {
@@ -5626,7 +6678,7 @@ async fn validate_workload_config(config: &sai3_bench::config::Config) -> Result
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -5680,8 +6732,8 @@ workload:
     weight: 100
 "#;
 
-        let config: Config = serde_yaml::from_str(config_yaml)
-            .expect("Failed to parse base config");
+        let config: Config =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse base config");
 
         // Test agent 0 (has override)
         let agent0_config = if let Some(ref distributed) = config.distributed {
@@ -5724,13 +6776,18 @@ workload:
         assert_eq!(agent1_ep.strategy, "least_connections");
 
         // Test agent 2 (no override - should keep global)
-        let agent2_has_override = config.distributed.as_ref()
+        let agent2_has_override = config
+            .distributed
+            .as_ref()
             .and_then(|d| d.agents.get(2))
             .and_then(|a| a.multi_endpoint.as_ref())
             .is_some();
-        
-        assert!(!agent2_has_override, "Agent 2 should not have multi_endpoint override");
-        
+
+        assert!(
+            !agent2_has_override,
+            "Agent 2 should not have multi_endpoint override"
+        );
+
         // Agent 2 should use global config unchanged
         let global_ep = config.multi_endpoint.as_ref().unwrap();
         assert_eq!(global_ep.endpoints.len(), 4);
@@ -5769,11 +6826,13 @@ workload:
     weight: 100
 "#;
 
-        let base_config: Config = serde_yaml::from_str(config_yaml)
-            .expect("Failed to parse base config");
+        let base_config: Config =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse base config");
 
         // Simulate controller applying agent-specific override
-        let agent_override = base_config.distributed.as_ref()
+        let agent_override = base_config
+            .distributed
+            .as_ref()
             .and_then(|d| d.agents.first())
             .and_then(|a| a.multi_endpoint.as_ref())
             .expect("Agent should have multi_endpoint override");
@@ -5782,14 +6841,14 @@ workload:
         agent_config.multi_endpoint = Some(agent_override.clone());
 
         // Serialize to YAML (this is what controller sends to agent)
-        let agent_yaml = serde_yaml::to_string(&agent_config)
-            .expect("Failed to serialize agent config");
+        let agent_yaml =
+            serde_yaml::to_string(&agent_config).expect("Failed to serialize agent config");
 
         println!("Agent-specific YAML:\n{}", agent_yaml);
 
         // Parse it back (simulating agent receiving the config)
-        let parsed_config: Config = serde_yaml::from_str(&agent_yaml)
-            .expect("Failed to parse agent-specific YAML");
+        let parsed_config: Config =
+            serde_yaml::from_str(&agent_yaml).expect("Failed to parse agent-specific YAML");
 
         // Verify the agent received the correct multi_endpoint config
         assert!(parsed_config.multi_endpoint.is_some());
@@ -5832,11 +6891,13 @@ workload:
     weight: 100
 "#;
 
-        let config: Config = serde_yaml::from_str(config_yaml)
-            .expect("Failed to parse base config");
+        let config: Config =
+            serde_yaml::from_str(config_yaml).expect("Failed to parse base config");
 
         // Check that agent has no override
-        let agent_has_override = config.distributed.as_ref()
+        let agent_has_override = config
+            .distributed
+            .as_ref()
             .and_then(|d| d.agents.first())
             .and_then(|a| a.multi_endpoint.as_ref())
             .is_some();
@@ -5895,10 +6956,12 @@ workload:
     weight: 100
 "#;
 
-        let config: Config = serde_yaml::from_str(config_yaml)
-            .expect("Failed to parse config");
+        let config: Config = serde_yaml::from_str(config_yaml).expect("Failed to parse config");
 
-        let distributed = config.distributed.as_ref().expect("Should have distributed config");
+        let distributed = config
+            .distributed
+            .as_ref()
+            .expect("Should have distributed config");
 
         // Agent 0: has override
         assert!(distributed.agents[0].multi_endpoint.is_some());
@@ -5959,8 +7022,7 @@ workload:
     weight: 100
 "#;
 
-        let config: Config = serde_yaml::from_str(config_yaml)
-            .expect("Failed to parse config");
+        let config: Config = serde_yaml::from_str(config_yaml).expect("Failed to parse config");
 
         // Simulate controller loop for each agent
         for (idx, _agent_addr) in ["localhost:7167", "localhost:7168"].iter().enumerate() {
@@ -5971,7 +7033,7 @@ workload:
                         // Agent has multi_endpoint override - replace global config
                         let mut modified_config = config.clone();
                         modified_config.multi_endpoint = Some(agent_multi_ep.clone());
-                        
+
                         // Serialize modified config to YAML
                         serde_yaml::to_string(&modified_config)
                             .expect("Failed to serialize agent config")
@@ -5991,9 +7053,11 @@ workload:
                 .expect("Agent should be able to parse the YAML");
 
             // Verify agent got correct endpoints
-            let agent_ep = agent_config.multi_endpoint.as_ref()
+            let agent_ep = agent_config
+                .multi_endpoint
+                .as_ref()
                 .expect("Agent config should have multi_endpoint");
-            
+
             match idx {
                 0 => {
                     // Agent 0 should have endpoints a & b
@@ -6013,8 +7077,12 @@ workload:
             }
 
             // CRITICAL: Verify agent does NOT have all 4 global endpoints
-            assert_ne!(agent_ep.endpoints.len(), 4, 
-                      "Agent {} should NOT have all 4 global endpoints!", idx);
+            assert_ne!(
+                agent_ep.endpoints.len(),
+                4,
+                "Agent {} should NOT have all 4 global endpoints!",
+                idx
+            );
         }
     }
 
@@ -6025,10 +7093,10 @@ workload:
     mod barrier_sync_tests {
         use sai3_bench::config::{BarrierType, PhaseBarrierConfig};
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         // Import types from controller.rs crate root
-        use crate::{BarrierManager, BarrierStatus};
         use crate::pb::iobench::{PhaseProgress, WorkloadPhase};
+        use crate::{BarrierManager, BarrierStatus};
 
         /// Helper: Create a minimal PhaseBarrierConfig for testing
         fn test_barrier_config(
@@ -6042,16 +7110,12 @@ workload:
                 missed_threshold,
                 query_timeout: 5,
                 query_retries: 2,
-                agent_barrier_timeout: 120,  // Default 2 minutes
+                agent_barrier_timeout: 120, // Default 2 minutes
             }
         }
 
         /// Helper: Create PhaseProgress for testing (matches actual proto structure)
-        fn make_progress(
-            agent_id: &str,
-            phase: WorkloadPhase,
-            completed: bool,
-        ) -> PhaseProgress {
+        fn make_progress(agent_id: &str, phase: WorkloadPhase, completed: bool) -> PhaseProgress {
             PhaseProgress {
                 agent_id: agent_id.to_string(),
                 current_phase: phase as i32,
@@ -6082,9 +7146,9 @@ workload:
         fn test_barrier_manager_creation() {
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
-            
+
             let manager = BarrierManager::new(agent_ids.clone(), config);
-            
+
             // Verify initial state
             assert_eq!(manager.agents.len(), 2);
             assert!(manager.agents.contains_key("agent1"));
@@ -6098,12 +7162,12 @@ workload:
             let agent_ids = vec!["agent1".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             let progress = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
-            
+
             // Process heartbeat
             manager.process_heartbeat("agent1", progress.clone());
-            
+
             // Verify heartbeat was recorded
             let heartbeat = manager.agents.get("agent1").unwrap();
             assert_eq!(heartbeat.missed_count, 0);
@@ -6116,11 +7180,11 @@ workload:
             let agent_ids = vec!["agent1".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Send progress with completed=true
             let progress = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent1", progress);
-            
+
             // Verify agent marked as ready
             assert!(manager.ready_agents.contains("agent1"));
         }
@@ -6130,14 +7194,14 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Both agents report ready
             let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             let progress2 = make_progress("agent2", WorkloadPhase::PhasePrepareReady, true);
-            
+
             manager.process_heartbeat("agent1", progress1);
             manager.process_heartbeat("agent2", progress2);
-            
+
             // Check barrier - should be Ready (all agents ready)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Ready);
@@ -6148,11 +7212,11 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Only agent1 ready, agent2 still preparing
             let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent1", progress1);
-            
+
             // Check barrier - should be Waiting
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Waiting);
@@ -6163,7 +7227,7 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 1, 2);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Agent1 ready, agent2 failed
             // Current implementation: ready_count (1) == alive_count (1) → Ready (not Failed!)
             // This is because check_barrier checks `ready_count == alive_count` before `failed_count > 0`
@@ -6171,7 +7235,7 @@ workload:
             let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, false); // Not ready
             manager.process_heartbeat("agent1", progress1);
             manager.failed_agents.insert("agent2".to_string());
-            
+
             // Check barrier - should be Failed (failed_count > 0 and not all alive agents ready)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Failed);
@@ -6186,16 +7250,16 @@ workload:
             ];
             let config = test_barrier_config(BarrierType::Majority, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // All 3 agents ready (> 50%)
             let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
             let progress2 = make_progress("agent2", WorkloadPhase::PhaseExecuteReady, true);
             let progress3 = make_progress("agent3", WorkloadPhase::PhaseExecuteReady, true);
-            
+
             manager.process_heartbeat("agent1", progress1);
             manager.process_heartbeat("agent2", progress2);
             manager.process_heartbeat("agent3", progress3);
-            
+
             // Check barrier - should be Ready (all agents)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Ready);
@@ -6210,15 +7274,15 @@ workload:
             ];
             let config = test_barrier_config(BarrierType::Majority, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // 2 out of 3 agents ready (majority), 1 failed
             let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
             let progress2 = make_progress("agent2", WorkloadPhase::PhaseExecuteReady, true);
-            
+
             manager.process_heartbeat("agent1", progress1);
             manager.process_heartbeat("agent2", progress2);
             manager.failed_agents.insert("agent3".to_string());
-            
+
             // Check barrier - should be Degraded (majority achieved but not all)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Degraded);
@@ -6233,13 +7297,13 @@ workload:
             ];
             let config = test_barrier_config(BarrierType::Majority, 1, 2);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Only 1 out of 3 ready (not majority), 2 failed
             let progress1 = make_progress("agent1", WorkloadPhase::PhaseExecuteReady, true);
             manager.process_heartbeat("agent1", progress1);
             manager.failed_agents.insert("agent2".to_string());
             manager.failed_agents.insert("agent3".to_string());
-            
+
             // Check barrier - should be Failed (majority not achieved)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Failed);
@@ -6250,14 +7314,14 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::BestEffort, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Both agents ready
             let progress1 = make_progress("agent1", WorkloadPhase::PhaseCleanupReady, true);
             let progress2 = make_progress("agent2", WorkloadPhase::PhaseCleanupReady, true);
-            
+
             manager.process_heartbeat("agent1", progress1);
             manager.process_heartbeat("agent2", progress2);
-            
+
             // Check barrier - should be Ready
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Ready);
@@ -6268,12 +7332,12 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::BestEffort, 1, 2);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // One agent ready, one failed
             let progress1 = make_progress("agent1", WorkloadPhase::PhaseCleanupReady, true);
             manager.process_heartbeat("agent1", progress1);
             manager.failed_agents.insert("agent2".to_string());
-            
+
             // Check barrier - should be Degraded (BestEffort continues with any alive agent)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Degraded);
@@ -6284,11 +7348,11 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::BestEffort, 1, 2);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // All agents failed
             manager.failed_agents.insert("agent1".to_string());
             manager.failed_agents.insert("agent2".to_string());
-            
+
             // Check barrier - should be Failed (no agents alive)
             let status = manager.check_barrier();
             assert_eq!(status, BarrierStatus::Failed);
@@ -6300,7 +7364,7 @@ workload:
             assert_eq!(BarrierStatus::Waiting, BarrierStatus::Waiting);
             assert_eq!(BarrierStatus::Degraded, BarrierStatus::Degraded);
             assert_eq!(BarrierStatus::Failed, BarrierStatus::Failed);
-            
+
             assert_ne!(BarrierStatus::Ready, BarrierStatus::Waiting);
             assert_ne!(BarrierStatus::Degraded, BarrierStatus::Failed);
         }
@@ -6308,7 +7372,7 @@ workload:
         #[test]
         fn test_phase_progress_creation() {
             let progress = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
-            
+
             assert_eq!(progress.agent_id, "agent1");
             assert_eq!(progress.current_phase, WorkloadPhase::PhasePreparing as i32);
             assert!(!progress.phase_completed);
@@ -6322,20 +7386,20 @@ workload:
             let agent_ids = vec!["agent1".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Send multiple heartbeats with progress
             let progress1 = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
             manager.process_heartbeat("agent1", progress1);
             assert_eq!(manager.ready_agents.len(), 0); // Not ready yet
-            
+
             let progress2 = make_progress("agent1", WorkloadPhase::PhasePreparing, false);
             manager.process_heartbeat("agent1", progress2);
             assert_eq!(manager.ready_agents.len(), 0); // Still not ready
-            
+
             let progress3 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent1", progress3);
             assert_eq!(manager.ready_agents.len(), 1); // Now ready!
-            
+
             // Verify agent is in ready set
             assert!(manager.ready_agents.contains("agent1"));
         }
@@ -6344,7 +7408,7 @@ workload:
         fn test_barrier_config_defaults() {
             // Verify config values are set correctly
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
-            
+
             assert_eq!(config.heartbeat_interval, 5);
             assert_eq!(config.missed_threshold, 3);
             assert_eq!(config.query_timeout, 5);
@@ -6372,21 +7436,21 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Agent1 reaches barrier
             let progress1 = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent1", progress1);
             assert!(manager.ready_agents.contains("agent1"));
-            
+
             // Agent1 sends another heartbeat (still at barrier)
             let progress1_again = make_progress("agent1", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent1", progress1_again);
             assert!(manager.ready_agents.contains("agent1")); // Still ready
-            
+
             // Agent2 now ready
             let progress2 = make_progress("agent2", WorkloadPhase::PhasePrepareReady, true);
             manager.process_heartbeat("agent2", progress2);
-            
+
             // Both should be ready
             assert_eq!(manager.ready_agents.len(), 2);
             assert_eq!(manager.check_barrier(), BarrierStatus::Ready);
@@ -6397,10 +7461,10 @@ workload:
             // Test that each barrier type is configured correctly
             let config_all = test_barrier_config(BarrierType::AllOrNothing, 10, 5);
             assert!(matches!(config_all.barrier_type, BarrierType::AllOrNothing));
-            
+
             let config_maj = test_barrier_config(BarrierType::Majority, 15, 4);
             assert!(matches!(config_maj.barrier_type, BarrierType::Majority));
-            
+
             let config_best = test_barrier_config(BarrierType::BestEffort, 20, 3);
             assert!(matches!(config_best.barrier_type, BarrierType::BestEffort));
         }
@@ -6414,10 +7478,10 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Agent1 arrives at barrier index 1
             manager.agent_at_barrier("agent1", 1, 1);
-            
+
             // Verify barrier state exists
             assert!(manager.barrier_agents.contains_key(&1));
             let state = manager.barrier_agents.get(&1).unwrap();
@@ -6428,15 +7492,19 @@ workload:
 
         #[test]
         fn test_agent_at_barrier_multiple_agents() {
-            let agent_ids = vec!["agent1".to_string(), "agent2".to_string(), "agent3".to_string()];
+            let agent_ids = vec![
+                "agent1".to_string(),
+                "agent2".to_string(),
+                "agent3".to_string(),
+            ];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // All agents arrive at barrier
             manager.agent_at_barrier("agent1", 2, 1);
             manager.agent_at_barrier("agent2", 2, 1);
             manager.agent_at_barrier("agent3", 2, 1);
-            
+
             let state = manager.barrier_agents.get(&2).unwrap();
             assert_eq!(state.ready_agents.len(), 3);
             assert!(!state.released);
@@ -6447,18 +7515,45 @@ workload:
             let agent_ids = vec!["agent1".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Agent arrives at barrier with sequence 1
             manager.agent_at_barrier("agent1", 3, 1);
-            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 1);
-            
+            assert_eq!(
+                *manager
+                    .barrier_agents
+                    .get(&3)
+                    .unwrap()
+                    .ready_agents
+                    .get("agent1")
+                    .unwrap(),
+                1
+            );
+
             // Agent sends updated heartbeat with sequence 5
             manager.agent_at_barrier("agent1", 3, 5);
-            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
-            
+            assert_eq!(
+                *manager
+                    .barrier_agents
+                    .get(&3)
+                    .unwrap()
+                    .ready_agents
+                    .get("agent1")
+                    .unwrap(),
+                5
+            );
+
             // Older sequence should NOT update
             manager.agent_at_barrier("agent1", 3, 3);
-            assert_eq!(*manager.barrier_agents.get(&3).unwrap().ready_agents.get("agent1").unwrap(), 5);
+            assert_eq!(
+                *manager
+                    .barrier_agents
+                    .get(&3)
+                    .unwrap()
+                    .ready_agents
+                    .get("agent1")
+                    .unwrap(),
+                5
+            );
         }
 
         #[test]
@@ -6466,15 +7561,15 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Both agents at barrier
             manager.agent_at_barrier("agent1", 4, 1);
             manager.agent_at_barrier("agent2", 4, 1);
-            
+
             // Should be ready to release
             let release_info = manager.check_barrier_ready(4);
             assert!(release_info.is_some());
-            
+
             let info = release_info.unwrap();
             assert_eq!(info.barrier_index, 4);
             assert_eq!(info.ready_agents.len(), 2);
@@ -6485,10 +7580,10 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Only one agent at barrier
             manager.agent_at_barrier("agent1", 1, 1);
-            
+
             // Should NOT be ready (waiting for agent2)
             let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
@@ -6499,11 +7594,11 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // One agent ready, one failed
             manager.agent_at_barrier("agent1", 1, 1);
             manager.failed_agents.insert("agent2".to_string());
-            
+
             // Should NOT be ready (AllOrNothing requires no failures)
             let release_info = manager.check_barrier_ready(1);
             assert!(release_info.is_none());
@@ -6511,32 +7606,36 @@ workload:
 
         #[test]
         fn test_check_barrier_ready_majority_success() {
-            let agent_ids = vec!["agent1".to_string(), "agent2".to_string(), "agent3".to_string()];
+            let agent_ids = vec![
+                "agent1".to_string(),
+                "agent2".to_string(),
+                "agent3".to_string(),
+            ];
             let config = test_barrier_config(BarrierType::Majority, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // 2 of 3 agents ready (majority)
             manager.agent_at_barrier("agent1", 5, 1);
             manager.agent_at_barrier("agent2", 5, 2);
-            
+
             // Should be ready (2 > 3/2)
             let release_info = manager.check_barrier_ready(5);
             assert!(release_info.is_some());
-            
+
             let info = release_info.unwrap();
             assert_eq!(info.barrier_index, 5);
         }
 
-        #[test]  
+        #[test]
         fn test_check_barrier_ready_best_effort_success() {
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::BestEffort, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // One agent failed, one ready at barrier
             manager.failed_agents.insert("agent2".to_string());
             manager.agent_at_barrier("agent1", 6, 1);
-            
+
             // Should be ready (all alive agents ready)
             let release_info = manager.check_barrier_ready(6);
             assert!(release_info.is_some());
@@ -6547,20 +7646,20 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Both agents at barrier
             manager.agent_at_barrier("agent1", 1, 1);
             manager.agent_at_barrier("agent2", 1, 1);
-            
+
             // First check should succeed
             assert!(manager.check_barrier_ready(1).is_some());
-            
+
             // Clear the barrier
             manager.clear_barrier(1);
-            
+
             // Second check should return None (already released)
             assert!(manager.check_barrier_ready(1).is_none());
-            
+
             // Verify released flag is set
             assert!(manager.barrier_agents.get(&1).unwrap().released);
         }
@@ -6570,28 +7669,28 @@ workload:
             let agent_ids = vec!["agent1".to_string(), "agent2".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let mut manager = BarrierManager::new(agent_ids, config);
-            
+
             // Agents at different barriers
             manager.agent_at_barrier("agent1", 1, 1);
             manager.agent_at_barrier("agent2", 1, 1);
             manager.agent_at_barrier("agent1", 2, 2);
             // agent2 NOT at execute_ready yet
-            
+
             // prepare_ready should be ready
             assert!(manager.check_barrier_ready(1).is_some());
-            
+
             // execute_ready should NOT be ready
             assert!(manager.check_barrier_ready(2).is_none());
-            
+
             // Clear prepare_ready
             manager.clear_barrier(1);
-            
+
             // execute_ready should still NOT be ready (independent)
             assert!(manager.check_barrier_ready(2).is_none());
-            
+
             // agent2 arrives at execute_ready
             manager.agent_at_barrier("agent2", 2, 2);
-            
+
             // Now execute_ready should be ready
             assert!(manager.check_barrier_ready(2).is_some());
         }
@@ -6601,7 +7700,7 @@ workload:
             let agent_ids = vec!["agent1".to_string()];
             let config = test_barrier_config(BarrierType::AllOrNothing, 5, 3);
             let manager = BarrierManager::new(agent_ids, config);
-            
+
             // Query for a barrier no agent has reached
             let release_info = manager.check_barrier_ready(999);
             assert!(release_info.is_none());
@@ -6654,13 +7753,21 @@ workload:
         #[test]
         fn test_ctl_parse_csv_bool_false_variants() {
             for v in &["false", "0", "no", "off"] {
-                assert_eq!(parse_csv_bool(v).unwrap(), vec![false], "failed for '{}'", v);
+                assert_eq!(
+                    parse_csv_bool(v).unwrap(),
+                    vec![false],
+                    "failed for '{}'",
+                    v
+                );
             }
         }
 
         #[test]
         fn test_ctl_parse_csv_bool_multi() {
-            assert_eq!(parse_csv_bool("false,true,false").unwrap(), vec![false, true, false]);
+            assert_eq!(
+                parse_csv_bool("false,true,false").unwrap(),
+                vec![false, true, false]
+            );
         }
 
         #[test]
@@ -6869,6 +7976,130 @@ workload:
             // A clean list with no zeros passes
             let ok = parse_csv_u32("1,2,4").unwrap();
             assert!(!ok.iter().any(|&v| v == 0));
+        }
+    }
+
+    // ── Credential forwarding helpers (v0.8.92) ───────────────────────────────
+
+    mod credential_forwarding {
+        use super::super::{is_credential_key, load_credentials_for_agents};
+        use std::io::Write;
+
+        // ── is_credential_key ─────────────────────────────────────────────────
+
+        #[test]
+        fn test_is_credential_key_aws_prefix() {
+            assert!(is_credential_key("AWS_ACCESS_KEY_ID"));
+            assert!(is_credential_key("AWS_SECRET_ACCESS_KEY"));
+            assert!(is_credential_key("AWS_SESSION_TOKEN"));
+            assert!(is_credential_key("AWS_DEFAULT_REGION"));
+            assert!(is_credential_key("AWS_ENDPOINT_URL"));
+        }
+
+        #[test]
+        fn test_is_credential_key_gcp_exact() {
+            // Exact match — no trailing chars should still match (starts_with covers it)
+            assert!(is_credential_key("GOOGLE_APPLICATION_CREDENTIALS"));
+            // A longer key that starts with the same prefix but has extra chars is
+            // allowed (starts_with matches), which is intentional.
+            assert!(is_credential_key("GOOGLE_APPLICATION_CREDENTIALS_JSON"));
+        }
+
+        #[test]
+        fn test_is_credential_key_azure_prefix() {
+            assert!(is_credential_key("AZURE_STORAGE_ACCOUNT"));
+            assert!(is_credential_key("AZURE_STORAGE_KEY"));
+            assert!(is_credential_key("AZURE_STORAGE_CONNECTION_STRING"));
+            assert!(is_credential_key("AZURE_STORAGE_SAS_TOKEN"));
+        }
+
+        #[test]
+        fn test_is_credential_key_rejects_arbitrary_vars() {
+            // Should not match — these are not cloud credentials
+            assert!(!is_credential_key("HOME"));
+            assert!(!is_credential_key("PATH"));
+            assert!(!is_credential_key("USER"));
+            assert!(!is_credential_key("HOSTNAME"));
+            assert!(!is_credential_key("GOOGLE_CLOUD_PROJECT")); // not in allow-list
+            assert!(!is_credential_key("AZURE_CLIENT_ID")); // not AZURE_STORAGE_*
+        }
+
+        #[test]
+        fn test_is_credential_key_empty_string() {
+            assert!(!is_credential_key(""));
+        }
+
+        // ── load_credentials_for_agents (env-file path) ───────────────────────
+
+        #[test]
+        fn test_load_from_env_file_returns_credential_keys_only() {
+            // Write a temporary .env file with a mix of cred and non-cred vars
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE").unwrap();
+            writeln!(f, "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG").unwrap();
+            writeln!(f, "HOME=/root").unwrap(); // should be filtered out
+            writeln!(f, "AZURE_STORAGE_ACCOUNT=myaccount").unwrap();
+            writeln!(f, "SOME_OTHER_VAR=ignored").unwrap();
+
+            let (vars, source) = load_credentials_for_agents(Some(f.path())).unwrap();
+
+            assert_eq!(
+                vars.get("AWS_ACCESS_KEY_ID").map(String::as_str),
+                Some("AKIAIOSFODNN7EXAMPLE")
+            );
+            assert_eq!(
+                vars.get("AWS_SECRET_ACCESS_KEY").map(String::as_str),
+                Some("wJalrXUtnFEMI/K7MDENG")
+            );
+            assert_eq!(
+                vars.get("AZURE_STORAGE_ACCOUNT").map(String::as_str),
+                Some("myaccount")
+            );
+            // Non-credential keys must be absent
+            assert!(!vars.contains_key("HOME"));
+            assert!(!vars.contains_key("SOME_OTHER_VAR"));
+            assert_eq!(vars.len(), 3);
+            assert!(source.contains("env file"));
+        }
+
+        #[test]
+        fn test_load_from_env_file_all_non_creds_returns_empty() {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "FOO=bar").unwrap();
+            writeln!(f, "BAZ=qux").unwrap();
+
+            let (vars, _) = load_credentials_for_agents(Some(f.path())).unwrap();
+            assert!(vars.is_empty(), "No credential keys should be returned");
+        }
+
+        #[test]
+        fn test_load_from_env_file_not_found_returns_error() {
+            let result = load_credentials_for_agents(Some(std::path::Path::new(
+                "/tmp/__nonexistent_sai3bench_test_creds.env",
+            )));
+            assert!(
+                result.is_err(),
+                "Missing env file should return an error, not panic"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("Cannot read env file") || msg.contains("nonexistent"),
+                "Error message should mention the file: {}",
+                msg
+            );
+        }
+
+        #[test]
+        fn test_load_from_env_file_gcp_key() {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            writeln!(f, "GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json").unwrap();
+
+            let (vars, _) = load_credentials_for_agents(Some(f.path())).unwrap();
+            assert_eq!(
+                vars.get("GOOGLE_APPLICATION_CREDENTIALS")
+                    .map(String::as_str),
+                Some("/path/to/sa-key.json")
+            );
         }
     }
 }

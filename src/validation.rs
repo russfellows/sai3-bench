@@ -62,12 +62,12 @@ fn estimate_directory_tree_totals(dir_config: &DirectoryStructureConfig) -> Resu
     let mut total_dirs: u64 = 0;
     let mut dirs_at_level: u64 = 1;
     for _ in 0..depth {
-        dirs_at_level = dirs_at_level
-            .checked_mul(width)
-            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (width/depth too large)"))?;
-        total_dirs = total_dirs
-            .checked_add(dirs_at_level)
-            .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (too many directories)"))?;
+        dirs_at_level = dirs_at_level.checked_mul(width).ok_or_else(|| {
+            anyhow::anyhow!("Directory tree size overflow (width/depth too large)")
+        })?;
+        total_dirs = total_dirs.checked_add(dirs_at_level).ok_or_else(|| {
+            anyhow::anyhow!("Directory tree size overflow (too many directories)")
+        })?;
     }
 
     let total_files = match dir_config.distribution.as_str() {
@@ -77,7 +77,10 @@ fn estimate_directory_tree_totals(dir_config: &DirectoryStructureConfig) -> Resu
         "all" => total_dirs
             .checked_mul(files_per_dir)
             .ok_or_else(|| anyhow::anyhow!("Directory tree size overflow (too many files)"))?,
-        other => anyhow::bail!("Invalid distribution strategy: '{}'. Must be 'bottom' or 'all'", other),
+        other => anyhow::bail!(
+            "Invalid distribution strategy: '{}'. Must be 'bottom' or 'all'",
+            other
+        ),
     };
 
     Ok((total_dirs, total_files))
@@ -168,29 +171,35 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     println!();
     println!("✅ Config file parsed successfully: {}", config_path);
     println!();
-    
+
     // Basic configuration
     println!("┌─ Test Configuration ─────────────────────────────────────────────────┐");
     println!("│ Duration:     {:?}", config.duration);
     println!("│ Concurrency:  {} threads", config.concurrency);
-    
+
     // Multi-process scaling (v0.7.3+)
     if let Some(ref processes) = config.processes {
         let resolved = processes.resolve();
         match processes {
             ProcessScaling::Single => {
                 println!("│ Processes:    1 (single process mode)");
-            },
+            }
             ProcessScaling::Auto => {
-                println!("│ Processes:    {} (auto-detected physical cores)", resolved);
-            },
+                println!(
+                    "│ Processes:    {} (auto-detected physical cores)",
+                    resolved
+                );
+            }
             ProcessScaling::Manual(n) => {
                 println!("│ Processes:    {} (manual configuration)", n);
-            },
+            }
         }
-        println!("│ Total Workers: {} (processes × threads)", resolved * config.concurrency);
+        println!(
+            "│ Total Workers: {} (processes × threads)",
+            resolved * config.concurrency
+        );
     }
-    
+
     if let Some(ref target) = config.target {
         let backend = BackendType::from_uri(target);
         println!("│ Target URI:   {}", target);
@@ -198,10 +207,13 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     } else {
         println!("│ Target URI:   (not set - using absolute URIs in operations)");
     }
-    
+
     // Performance logging status
     if let Some(ref perf_log) = config.perf_log {
-        println!("│ Perf Log:     ✅ ENABLED (interval: {:?})", perf_log.interval);
+        println!(
+            "│ Perf Log:     ✅ ENABLED (interval: {:?})",
+            perf_log.interval
+        );
         if let Some(ref path) = perf_log.path {
             println!("│               Output: {}", path.display());
         } else {
@@ -210,17 +222,23 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     } else {
         println!("│ Perf Log:     ❌ DISABLED");
     }
-    
-        println!("└──────────────────────────────────────────────────────────────────────┘");
+
+    println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
 
     // GCS storage optimization settings (shown when s3dlio_optimization block is present)
     if let Some(ref opt) = config.s3dlio_optimization {
-        let is_gcs = config.target.as_deref()
+        let is_gcs = config
+            .target
+            .as_deref()
             .map(|t| t.starts_with("gs://") || t.starts_with("gcs://"))
             .unwrap_or(false);
-        if is_gcs || opt.gcs_project.is_some() || opt.gcs_rapid_mode.is_some() ||
-           opt.gcs_channel_count.is_some() || opt.gcs_write_chunk_size_bytes.is_some() {
+        if is_gcs
+            || opt.gcs_project.is_some()
+            || opt.gcs_rapid_mode.is_some()
+            || opt.gcs_channel_count.is_some()
+            || opt.gcs_write_chunk_size_bytes.is_some()
+        {
             println!("┌─ GCS Storage Optimization ─────────────────────────────────────────────┤");
             if let Some(ref project) = opt.gcs_project {
                 println!("│ GCS Project:    {} (→ GOOGLE_CLOUD_PROJECT)", project);
@@ -228,7 +246,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│ GCS Project:    (not set — using GOOGLE_CLOUD_PROJECT env var)");
             }
             if let Some(rapid) = opt.gcs_rapid_mode {
-                println!("│ RAPID mode:     {}", if rapid { "✅ FORCED ON" } else { "❌ FORCED OFF" });
+                println!(
+                    "│ RAPID mode:     {}",
+                    if rapid {
+                        "✅ FORCED ON"
+                    } else {
+                        "❌ FORCED OFF"
+                    }
+                );
             } else {
                 println!("│ RAPID mode:     auto-detect per bucket (default)");
             }
@@ -238,7 +263,43 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│ gRPC channels:  auto (= concurrency)");
             }
             if let Some(bytes) = opt.gcs_write_chunk_size_bytes {
-                println!("│ Write chunk:    {} bytes ({:.1} MiB)", bytes, bytes as f64 / 1_048_576.0);
+                println!(
+                    "│ Write chunk:    {} bytes ({:.1} MiB)",
+                    bytes,
+                    bytes as f64 / 1_048_576.0
+                );
+            }
+            println!("└───────────────────────────────────────────────────────────────────────┤");
+            println!();
+        }
+
+        // HTTP/2 settings (shown whenever any h2* field is set)
+        if opt.h2c.is_some()
+            || opt.h2_adaptive_window.is_some()
+            || opt.h2_stream_window_mb.is_some()
+            || opt.h2_conn_window_mb.is_some()
+        {
+            println!("┌─ HTTP/2 (h2c) Configuration ───────────────────────────────────────────┤");
+            match opt.h2c {
+                Some(true) => println!("│ h2c mode:       ✅ FORCED ON  (S3DLIO_H2C=1)"),
+                Some(false) => println!("│ h2c mode:       ❌ FORCED OFF (S3DLIO_H2C=0)"),
+                None => println!("│ h2c mode:       auto-probe (default)"),
+            }
+            match opt.h2_adaptive_window {
+                Some(true) | None => println!("│ Window mode:    adaptive BDP estimator (default)"),
+                Some(false) => {
+                    println!("│ Window mode:    static");
+                    let stream = opt.h2_stream_window_mb.unwrap_or(4);
+                    let conn = opt.h2_conn_window_mb.unwrap_or(stream * 4);
+                    println!(
+                        "│ Stream window:  {} MiB  (S3DLIO_H2_STREAM_WINDOW_MB={})",
+                        stream, stream
+                    );
+                    println!(
+                        "│ Conn window:    {} MiB  (S3DLIO_H2_CONN_WINDOW_MB={})",
+                        conn, conn
+                    );
+                }
             }
             println!("└───────────────────────────────────────────────────────────────────────┤");
             println!();
@@ -253,7 +314,9 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
 
                 // Sizes: explicit list OR log-spaced range
                 let size_values: Vec<u64> = if let Some(ref sizes_str) = at.sizes {
-                    sizes_str.split(',').map(|s| s.trim())
+                    sizes_str
+                        .split(',')
+                        .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
                         .filter_map(|s| crate::size_parser::parse_size(s).ok())
                         .collect()
@@ -261,8 +324,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     let range = at.size_range.as_deref().unwrap_or("32MiB-64MiB");
                     let steps = at.size_steps.unwrap_or(4).max(1);
                     let mut parts = range.splitn(2, '-').map(|s| s.trim());
-                    let s0 = parts.next().and_then(|s| crate::size_parser::parse_size(s).ok()).unwrap_or(32 * 1024 * 1024);
-                    let s1 = parts.next().and_then(|s| crate::size_parser::parse_size(s).ok()).unwrap_or(s0);
+                    let s0 = parts
+                        .next()
+                        .and_then(|s| crate::size_parser::parse_size(s).ok())
+                        .unwrap_or(32 * 1024 * 1024);
+                    let s1 = parts
+                        .next()
+                        .and_then(|s| crate::size_parser::parse_size(s).ok())
+                        .unwrap_or(s0);
                     let (lo, hi) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
                     if steps == 1 || lo == hi {
                         vec![lo]
@@ -279,9 +348,15 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     }
                 };
 
-                let thread_values: Vec<usize> = at.threads.as_deref().unwrap_or("16,32,64")
-                    .split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse().ok()).collect();
+                let thread_values: Vec<usize> = at
+                    .threads
+                    .as_deref()
+                    .unwrap_or("16,32,64")
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
 
                 let uri_str = at.uri.as_deref().unwrap_or("");
                 let is_gcs = uri_str.starts_with("gs://") || uri_str.starts_with("gcs://");
@@ -299,19 +374,37 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     1
                 };
 
-                let range_enabled_count = at.range_enabled.as_deref().unwrap_or("false,true")
-                    .split(',').filter(|s| !s.trim().is_empty()).count();
-                let range_thresh_count = at.range_thresholds_mb.as_deref().unwrap_or("32,64")
-                    .split(',').filter(|s| !s.trim().is_empty()).count();
+                let range_enabled_count = at
+                    .range_enabled
+                    .as_deref()
+                    .unwrap_or("false,true")
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .count();
+                let range_thresh_count = at
+                    .range_thresholds_mb
+                    .as_deref()
+                    .unwrap_or("32,64")
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .count();
                 let gcs_chunk_count: usize = if is_gcs {
-                    at.gcs_write_chunk_sizes.as_deref().unwrap_or("2097152,4128768")
-                        .split(',').filter(|s| !s.trim().is_empty()).count()
+                    at.gcs_write_chunk_sizes
+                        .as_deref()
+                        .unwrap_or("2097152,4128768")
+                        .split(',')
+                        .filter(|s| !s.trim().is_empty())
+                        .count()
                 } else {
                     1
                 };
 
-                let total_cases = size_values.len() * thread_values.len() * chan_count
-                    * range_enabled_count * range_thresh_count * gcs_chunk_count;
+                let total_cases = size_values.len()
+                    * thread_values.len()
+                    * chan_count
+                    * range_enabled_count
+                    * range_thresh_count
+                    * gcs_chunk_count;
                 let trials = at.trials.unwrap_or(1);
                 let objects = at.objects.unwrap_or(64);
                 let total_runs = total_cases * trials;
@@ -323,60 +416,107 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 // ── Print the block ──────────────────────────────────────────────────
                 println!("┌─ Autotune Configuration ────────────────────────────────────────────┐");
                 println!("│ Source:       ✅ explicit 'autotune:' block");
-                println!("│ URI:          {}",
-                    at.uri.as_deref().unwrap_or("(not set)"));
+                println!(
+                    "│ URI:          {}",
+                    at.uri.as_deref().unwrap_or("(not set)")
+                );
 
                 // Sizes with computed values
-                let size_labels: Vec<String> = size_values.iter().map(|&b| {
-                    let (v, u) = format_bytes(b); format!("{:.1} {}", v, u)
-                }).collect();
+                let size_labels: Vec<String> = size_values
+                    .iter()
+                    .map(|&b| {
+                        let (v, u) = format_bytes(b);
+                        format!("{:.1} {}", v, u)
+                    })
+                    .collect();
 
                 if let Some(ref sizes_str) = at.sizes {
-                    println!("│ Sizes:        {} → {} value(s): {:?}",
-                        sizes_str, size_values.len(), size_labels);
+                    println!(
+                        "│ Sizes:        {} → {} value(s): {:?}",
+                        sizes_str,
+                        size_values.len(),
+                        size_labels
+                    );
                 } else {
                     let range_display = at.size_range.as_deref().unwrap_or("32MiB-64MiB (default)");
                     let steps = at.size_steps.unwrap_or(4);
-                    println!("│ Size Range:   {} (log-spaced, {} step{}) → {} size(s): {:?}",
-                        range_display, steps, if steps == 1 { "" } else { "s" },
-                        size_values.len(), size_labels);
+                    println!(
+                        "│ Size Range:   {} (log-spaced, {} step{}) → {} size(s): {:?}",
+                        range_display,
+                        steps,
+                        if steps == 1 { "" } else { "s" },
+                        size_values.len(),
+                        size_labels
+                    );
                 }
 
                 // Thread sweep
-                println!("│ Threads:      {} → {} value(s): {:?}",
+                println!(
+                    "│ Threads:      {} → {} value(s): {:?}",
                     at.threads.as_deref().unwrap_or("16,32,64 (default)"),
-                    thread_values.len(), thread_values);
+                    thread_values.len(),
+                    thread_values
+                );
 
                 // Channel sweep
                 if let Some(ref cpt) = at.channels_per_thread {
-                    let cpts: Vec<usize> = cpt.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                    println!("│ Channels/Thr: {} → {} value(s)  [effective = threads × cpt]",
-                        cpt, cpts.len());
-                    println!("│               e.g. {} threads × {:?} = {:?} channels",
+                    let cpts: Vec<usize> = cpt
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    println!(
+                        "│ Channels/Thr: {} → {} value(s)  [effective = threads × cpt]",
+                        cpt,
+                        cpts.len()
+                    );
+                    println!(
+                        "│               e.g. {} threads × {:?} = {:?} channels",
                         thread_values.first().copied().unwrap_or(0),
                         cpts,
-                        cpts.iter().map(|&c| thread_values.first().copied().unwrap_or(0) * c).collect::<Vec<_>>());
+                        cpts.iter()
+                            .map(|&c| thread_values.first().copied().unwrap_or(0) * c)
+                            .collect::<Vec<_>>()
+                    );
                 } else if let Some(ref ch) = at.channels {
-                    let ch_vals: Vec<usize> = ch.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                    println!("│ Channels:     {} → {} value(s) (absolute)", ch, ch_vals.len());
+                    let ch_vals: Vec<usize> = ch
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    println!(
+                        "│ Channels:     {} → {} value(s) (absolute)",
+                        ch,
+                        ch_vals.len()
+                    );
                 } else if is_gcs {
                     println!("│ Channels/Thr: 1 (default — effective = threads × 1)");
                 }
 
                 if let Some(ref range_enabled) = at.range_enabled {
-                    println!("│ Range Enabled: {} → {} value(s)",
+                    println!(
+                        "│ Range Enabled: {} → {} value(s)",
                         range_enabled,
-                        range_enabled.split(',').filter(|s| !s.trim().is_empty()).count());
+                        range_enabled
+                            .split(',')
+                            .filter(|s| !s.trim().is_empty())
+                            .count()
+                    );
                 }
                 if let Some(ref range_thresholds) = at.range_thresholds_mb {
-                    println!("│ Range Thresh: {} MB → {} value(s)",
+                    println!(
+                        "│ Range Thresh: {} MB → {} value(s)",
                         range_thresholds,
-                        range_thresholds.split(',').filter(|s| !s.trim().is_empty()).count());
+                        range_thresholds
+                            .split(',')
+                            .filter(|s| !s.trim().is_empty())
+                            .count()
+                    );
                 }
                 if let Some(ref chunks) = at.gcs_write_chunk_sizes {
-                    println!("│ GCS Chunks:   {} bytes → {} value(s)",
+                    println!(
+                        "│ GCS Chunks:   {} bytes → {} value(s)",
                         chunks,
-                        chunks.split(',').filter(|s| !s.trim().is_empty()).count());
+                        chunks.split(',').filter(|s| !s.trim().is_empty()).count()
+                    );
                 }
                 if let Some(ref rapid) = at.gcs_rapid_mode {
                     println!("│ GCS RAPID:    {}", rapid);
@@ -386,10 +526,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 }
                 println!("│ Objects:      {}", objects);
                 println!("│ Trials:       {}", trials);
-                println!("│ Optimize For: {}",
-                    at.optimize_for.as_deref().unwrap_or("throughput (default)"));
-                println!("│ Ops:          {}",
-                    at.ops.as_deref().unwrap_or("both (default)"));
+                println!(
+                    "│ Optimize For: {}",
+                    at.optimize_for.as_deref().unwrap_or("throughput (default)")
+                );
+                println!(
+                    "│ Ops:          {}",
+                    at.ops.as_deref().unwrap_or("both (default)")
+                );
                 println!("│");
                 println!("│ ── Sweep summary ─────────────────────────────────────────────────");
                 println!("│   Loop order  : sizes({}) × threads({}) × channels({}) × range_en({}) × thresh({}) × gcs_chunk({})",
@@ -397,33 +541,59 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     range_enabled_count, range_thresh_count, gcs_chunk_count);
                 println!("│   Total cases : {}", total_cases);
                 println!("│   Trials/case : {}", trials);
-                println!("│   Total runs  : {} case(s) × {} trial(s) = {} runs", total_cases, trials, total_runs);
-                println!("│   Object I/Os : {} runs × {} op(s) × {} objects = {} I/Os",
-                    total_runs, op_multiplier, objects, total_runs * op_multiplier * objects as usize);
+                println!(
+                    "│   Total runs  : {} case(s) × {} trial(s) = {} runs",
+                    total_cases, trials, total_runs
+                );
+                println!(
+                    "│   Object I/Os : {} runs × {} op(s) × {} objects = {} I/Os",
+                    total_runs,
+                    op_multiplier,
+                    objects,
+                    total_runs * op_multiplier * objects as usize
+                );
                 if total_runs > 200 {
-                    println!("│   ⚠️  WARNING: {} runs is a large sweep — consider narrowing parameters", total_runs);
+                    println!(
+                        "│   ⚠️  WARNING: {} runs is a large sweep — consider narrowing parameters",
+                        total_runs
+                    );
                 }
-                println!("└──────────────────────────────────────────────────────────────────────┘");
+                println!(
+                    "└──────────────────────────────────────────────────────────────────────┘"
+                );
                 println!();
             }
         }
     }
-    
+
     // RangeEngine configuration
     if let Some(ref range_config) = config.range_engine {
         println!("┌─ RangeEngine Configuration ──────────────────────────────────────────┐");
-        println!("│ Enabled:      {}", if range_config.enabled { "✅ YES" } else { "❌ NO" });
+        println!(
+            "│ Enabled:      {}",
+            if range_config.enabled {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            }
+        );
         if range_config.enabled {
             let min_mb = range_config.min_split_size / (1024 * 1024);
             let chunk_mb = range_config.chunk_size / (1024 * 1024);
-            println!("│ Min Size:     {} MiB (files >= this use concurrent range downloads)", min_mb);
+            println!(
+                "│ Min Size:     {} MiB (files >= this use concurrent range downloads)",
+                min_mb
+            );
             println!("│ Chunk Size:   {} MiB per range request", chunk_mb);
-            println!("│ Max Ranges:   {} concurrent ranges per file", range_config.max_concurrent_ranges);
+            println!(
+                "│ Max Ranges:   {} concurrent ranges per file",
+                range_config.max_concurrent_ranges
+            );
         }
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
     }
-    
+
     // PageCache configuration
     if let Some(page_cache_mode) = config.page_cache_mode {
         println!("┌─ Page Cache Configuration (file:// and direct:// only) ─────────────┐");
@@ -439,7 +609,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
     }
-    
+
     // Multi-endpoint configuration for standalone mode (v0.8.22+)
     if config.multi_endpoint.is_some() && config.distributed.is_none() {
         if let Some(ref multi) = config.multi_endpoint {
@@ -453,7 +623,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             println!();
         }
     }
-    
+
     // Distributed configuration (v0.7.5+)
     if let Some(ref dist) = config.distributed {
         println!("┌─ Distributed Configuration ──────────────────────────────────────────┐");
@@ -461,18 +631,31 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!("│ Shared Filesystem: {}", dist.shared_filesystem);
         println!("│ Tree Creation:    {:?}", dist.tree_creation_mode);
         println!("│ Path Selection:   {:?}", dist.path_selection);
-        if matches!(dist.path_selection, crate::config::PathSelectionStrategy::Partitioned | crate::config::PathSelectionStrategy::Weighted) {
-            println!("│ Partition Overlap: {:.1}%", dist.partition_overlap * 100.0);
+        if matches!(
+            dist.path_selection,
+            crate::config::PathSelectionStrategy::Partitioned
+                | crate::config::PathSelectionStrategy::Weighted
+        ) {
+            println!(
+                "│ Partition Overlap: {:.1}%",
+                dist.partition_overlap * 100.0
+            );
         }
-        
+
         // v0.8.51: Show timeout configuration if modified from defaults
         println!("│");
         println!("│ gRPC Timeouts:");
         if dist.grpc_keepalive_interval != 30 {
-            println!("│   Keepalive:      {}s ⚠️  CUSTOM (default: 30s)", dist.grpc_keepalive_interval);
+            println!(
+                "│   Keepalive:      {}s ⚠️  CUSTOM (default: 30s)",
+                dist.grpc_keepalive_interval
+            );
         }
         if dist.grpc_keepalive_timeout != 10 {
-            println!("│   Keepalive TO:   {}s ⚠️  CUSTOM (default: 10s)", dist.grpc_keepalive_timeout);
+            println!(
+                "│   Keepalive TO:   {}s ⚠️  CUSTOM (default: 10s)",
+                dist.grpc_keepalive_timeout
+            );
         }
         if dist.agent_ready_timeout != 120 {
             let timeout_display = if dist.agent_ready_timeout >= 60 {
@@ -480,9 +663,12 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             } else {
                 format!("{}s", dist.agent_ready_timeout)
             };
-            println!("│   Agent Ready:    {} ⚠️  CUSTOM (default: 120s)", timeout_display);
+            println!(
+                "│   Agent Ready:    {} ⚠️  CUSTOM (default: 120s)",
+                timeout_display
+            );
         }
-        
+
         // v0.8.22: Display global multi-endpoint configuration if present
         if let Some(ref global_multi) = config.multi_endpoint {
             println!("│");
@@ -494,79 +680,113 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
             }
             println!("│   (applies to agents without per-agent override)");
         }
-        
+
         println!("│");
         println!("│ Agent List:");
         for (idx, agent) in dist.agents.iter().enumerate() {
             let id = agent.id.as_deref().unwrap_or("auto");
             println!("│   {}: {} (id: {})", idx + 1, agent.address, id);
-            
+
             // v0.8.61: Display concurrency configuration per agent
             let effective_concurrency = agent.concurrency_override.unwrap_or(config.concurrency);
-            let num_endpoints = agent.multi_endpoint.as_ref()
+            let num_endpoints = agent
+                .multi_endpoint
+                .as_ref()
                 .map(|m| m.endpoints.len())
                 .unwrap_or(1);
-            
+
             if let Some(override_conc) = agent.concurrency_override {
-                println!("│      Concurrency:     {} threads (OVERRIDE)", override_conc);
+                println!(
+                    "│      Concurrency:     {} threads (OVERRIDE)",
+                    override_conc
+                );
             } else {
-                println!("│      Concurrency:     {} threads (global config)", effective_concurrency);
+                println!(
+                    "│      Concurrency:     {} threads (global config)",
+                    effective_concurrency
+                );
             }
-            
+
             // v0.8.61: Critical validation - warn if concurrency < endpoints
             if effective_concurrency < num_endpoints {
                 println!("│      ⚠️  WARNING: Only {:.1} threads per endpoint ({} threads / {} endpoints)",
                          effective_concurrency as f64 / num_endpoints as f64,
                          effective_concurrency, num_endpoints);
-                println!("│      ⚠️  Some endpoints will be idle! Recommend concurrency >= {}", num_endpoints);
+                println!(
+                    "│      ⚠️  Some endpoints will be idle! Recommend concurrency >= {}",
+                    num_endpoints
+                );
             } else {
-                println!("│      Threads/Endpoint: {:.1} ({} threads / {} endpoints)",
-                         effective_concurrency as f64 / num_endpoints as f64,
-                         effective_concurrency, num_endpoints);
+                println!(
+                    "│      Threads/Endpoint: {:.1} ({} threads / {} endpoints)",
+                    effective_concurrency as f64 / num_endpoints as f64,
+                    effective_concurrency,
+                    num_endpoints
+                );
             }
-            
+
             // v0.8.22: Display per-agent multi-endpoint configuration if present
             if let Some(ref agent_multi) = agent.multi_endpoint {
                 println!("│      Multi-Endpoint:  {} strategy", agent_multi.strategy);
-                println!("│      Endpoints:       {} total", agent_multi.endpoints.len());
+                println!(
+                    "│      Endpoints:       {} total",
+                    agent_multi.endpoints.len()
+                );
                 for (ep_idx, endpoint) in agent_multi.endpoints.iter().enumerate() {
                     println!("│        {}: {}", ep_idx + 1, endpoint);
                 }
             } else if config.multi_endpoint.is_some() {
                 println!("│      Multi-Endpoint:  (using global configuration)");
             }
-            
+
             if idx < dist.agents.len() - 1 {
                 println!("│");
             }
         }
-        
+
         // v0.8.61: Show total concurrency summary
-        let total_concurrency: usize = dist.agents.iter()
+        let total_concurrency: usize = dist
+            .agents
+            .iter()
             .map(|a| a.concurrency_override.unwrap_or(config.concurrency))
             .sum();
-        let total_endpoints: usize = dist.agents.iter()
-            .map(|a| a.multi_endpoint.as_ref().map(|m| m.endpoints.len()).unwrap_or(1))
+        let total_endpoints: usize = dist
+            .agents
+            .iter()
+            .map(|a| {
+                a.multi_endpoint
+                    .as_ref()
+                    .map(|m| m.endpoints.len())
+                    .unwrap_or(1)
+            })
             .sum();
-        
+
         println!("│");
-        println!("│ TOTAL: {} threads across {} agents, {} endpoints total",
-                 total_concurrency, dist.agents.len(), total_endpoints);
-        println!("│        (Average: {:.1} threads per endpoint)",
-                 total_concurrency as f64 / total_endpoints as f64);
-        
+        println!(
+            "│ TOTAL: {} threads across {} agents, {} endpoints total",
+            total_concurrency,
+            dist.agents.len(),
+            total_endpoints
+        );
+        println!(
+            "│        (Average: {:.1} threads per endpoint)",
+            total_concurrency as f64 / total_endpoints as f64
+        );
+
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
-        
+
         // Stage execution plan (v0.8.24+)
         if let Some(ref dist_config) = config.distributed {
             // Try to parse stages - if successful, show stage execution plan
             match dist_config.get_sorted_stages() {
                 Ok(stages) if !stages.is_empty() => {
-                    println!("┌─ YAML-Driven Stage Execution Plan ──────────────────────────────────┐");
+                    println!(
+                        "┌─ YAML-Driven Stage Execution Plan ──────────────────────────────────┐"
+                    );
                     println!("│ {} stages will execute in order:", stages.len());
                     println!("│");
-                    
+
                     for (idx, stage) in stages.iter().enumerate() {
                         let stage_num = idx + 1;
                         let stage_type = match &stage.config {
@@ -577,19 +797,24 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             crate::config::StageSpecificConfig::Hybrid { .. } => "HYBRID",
                             crate::config::StageSpecificConfig::Validation => "VALIDATION",
                         };
-                        
+
                         let completion = match stage.completion {
                             crate::config::CompletionCriteria::Duration => "Duration",
                             crate::config::CompletionCriteria::TasksDone => "TasksDone",
                             crate::config::CompletionCriteria::ScriptExit => "ScriptExit",
-                            crate::config::CompletionCriteria::ValidationPassed => "ValidationPassed",
+                            crate::config::CompletionCriteria::ValidationPassed => {
+                                "ValidationPassed"
+                            }
                             crate::config::CompletionCriteria::DurationOrTasks => "DurationOrTasks",
                         };
-                        
-                        println!("│ Stage {}: {} (order: {})", stage_num, stage.name, stage.order);
+
+                        println!(
+                            "│ Stage {}: {} (order: {})",
+                            stage_num, stage.name, stage.order
+                        );
                         println!("│   Type:       {}", stage_type);
                         println!("│   Completion: {}", completion);
-                        
+
                         // Show type-specific details
                         match &stage.config {
                             crate::config::StageSpecificConfig::Execute { duration } => {
@@ -608,7 +833,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             crate::config::StageSpecificConfig::Custom { command, args } => {
                                 println!("│   Command:    {} {:?}", command, args);
                             }
-                            crate::config::StageSpecificConfig::Hybrid { max_duration, expected_tasks } => {
+                            crate::config::StageSpecificConfig::Hybrid {
+                                max_duration,
+                                expected_tasks,
+                            } => {
                                 if let Some(duration) = max_duration {
                                     println!("│   Max Dur:    {:?}", duration);
                                 }
@@ -622,47 +850,59 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                 }
                             }
                         }
-                        
+
                         // Show barrier configuration with timeout details (v0.8.51)
                         if let Some(ref stage_barrier) = stage.barrier {
-                            println!("│   Barrier:    ✅ {:?} (stage override)", stage_barrier.barrier_type);
-                            
+                            println!(
+                                "│   Barrier:    ✅ {:?} (stage override)",
+                                stage_barrier.barrier_type
+                            );
+
                             // Show timeout if different from default (120s)
                             if stage_barrier.agent_barrier_timeout != 120 {
-                                let timeout_display = if stage_barrier.agent_barrier_timeout >= 86400 {
-                                    format!("{}h", stage_barrier.agent_barrier_timeout / 3600)
-                                } else if stage_barrier.agent_barrier_timeout >= 3600 {
-                                    format!("{:.1}h", stage_barrier.agent_barrier_timeout as f64 / 3600.0)
-                                } else if stage_barrier.agent_barrier_timeout >= 60 {
-                                    format!("{}m", stage_barrier.agent_barrier_timeout / 60)
-                                } else {
-                                    format!("{}s", stage_barrier.agent_barrier_timeout)
-                                };
-                                println!("│   Timeout:    {} ⚠️  CUSTOM (default: 120s)", timeout_display);
+                                let timeout_display =
+                                    if stage_barrier.agent_barrier_timeout >= 86400 {
+                                        format!("{}h", stage_barrier.agent_barrier_timeout / 3600)
+                                    } else if stage_barrier.agent_barrier_timeout >= 3600 {
+                                        format!(
+                                            "{:.1}h",
+                                            stage_barrier.agent_barrier_timeout as f64 / 3600.0
+                                        )
+                                    } else if stage_barrier.agent_barrier_timeout >= 60 {
+                                        format!("{}m", stage_barrier.agent_barrier_timeout / 60)
+                                    } else {
+                                        format!("{}s", stage_barrier.agent_barrier_timeout)
+                                    };
+                                println!(
+                                    "│   Timeout:    {} ⚠️  CUSTOM (default: 120s)",
+                                    timeout_display
+                                );
                             }
-                            
+
                             // Show heartbeat if different from default (30s)
                             if stage_barrier.heartbeat_interval != 30 {
-                                println!("│   Heartbeat:  {}s ⚠️  CUSTOM (default: 30s)", 
-                                    stage_barrier.heartbeat_interval);
+                                println!(
+                                    "│   Heartbeat:  {}s ⚠️  CUSTOM (default: 30s)",
+                                    stage_barrier.heartbeat_interval
+                                );
                             }
                         } else if dist_config.barrier_sync.enabled {
                             println!("│   Barrier:    ✅ ENABLED (global config)");
                         } else {
                             println!("│   Barrier:    ❌ DISABLED");
                         }
-                        
+
                         if idx < stages.len() - 1 {
                             println!("│");
                         }
                     }
-                    
+
                     println!("│");
-                    
+
                     // Check if any barriers are actually enabled
-                    let has_any_barriers = dist_config.barrier_sync.enabled || 
-                        stages.iter().any(|s| s.barrier.is_some());
-                    
+                    let has_any_barriers = dist_config.barrier_sync.enabled
+                        || stages.iter().any(|s| s.barrier.is_some());
+
                     if has_any_barriers {
                         println!("│ ✅ Agents will synchronize at barriers between stages");
                     } else {
@@ -671,15 +911,19 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         println!("│    This may cause race conditions in distributed workloads");
                         println!("│    Consider adding barrier configuration (see docs)");
                     }
-                    
-                    println!("└──────────────────────────────────────────────────────────────────────┘");
+
+                    println!(
+                        "└──────────────────────────────────────────────────────────────────────┘"
+                    );
                     println!();
-                    
+
                     // v0.8.52: Check for conflicting cleanup configuration
                     // If explicit stages exist + has cleanup stage + prepare.cleanup=false → WARN
                     if let Some(ref prepare) = config.prepare {
-                        let has_cleanup_stage = stages.iter().any(|s| matches!(s.config, crate::config::StageSpecificConfig::Cleanup { .. }));
-                        
+                        let has_cleanup_stage = stages.iter().any(|s| {
+                            matches!(s.config, crate::config::StageSpecificConfig::Cleanup { .. })
+                        });
+
                         if has_cleanup_stage && !prepare.cleanup {
                             println!("┌─ ⚠️  CONFIGURATION CONFLICT DETECTED ⚠️  ────────────────────────────┐");
                             println!("│                                                                      │");
@@ -696,7 +940,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!("│ 📢 WHAT WILL HAPPEN:                                                 │");
                             println!("│                                                                      │");
                             println!("│   → Cleanup stage WILL execute                                       │");
-                            println!("│   → All {} objects WILL be deleted                                   │", 
+                            println!("│   → All {} objects WILL be deleted                                   │",
                                 if let Some(ref dir_struct) = prepare.directory_structure {
                                     match estimate_directory_tree_totals(dir_struct) {
                                         Ok((_dirs, total_files)) => format_with_thousands(total_files),
@@ -733,7 +977,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!("│ 📢 WHAT WILL HAPPEN:                                                 │");
                             println!("│                                                                      │");
                             println!("│   → NO cleanup stage will execute                                    │");
-                            println!("│   → All {} objects WILL be kept                                      │", 
+                            println!("│   → All {} objects WILL be kept                                      │",
                                 if let Some(ref dir_struct) = prepare.directory_structure {
                                     match estimate_directory_tree_totals(dir_struct) {
                                         Ok((_dirs, total_files)) => format_with_thousands(total_files),
@@ -756,19 +1000,25 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                             println!();
                         }
                     }
-                    
+
                     // v0.8.87: Show which method will be used to build the object manifest
                     // at runtime, so the user can see if a listing will be triggered.
                     {
                         let has_prepare_stage = stages.iter().any(|s| {
-                            matches!(&s.config, crate::config::StageSpecificConfig::Prepare { .. })
+                            matches!(
+                                &s.config,
+                                crate::config::StageSpecificConfig::Prepare { .. }
+                            )
                         });
-                        let has_directory_structure = config.prepare.as_ref()
+                        let has_directory_structure = config
+                            .prepare
+                            .as_ref()
                             .and_then(|p| p.directory_structure.as_ref())
                             .is_some();
-                        let has_get_ops = config.workload.iter().any(|w| {
-                            matches!(w.spec, crate::config::OpSpec::Get { .. })
-                        });
+                        let has_get_ops = config
+                            .workload
+                            .iter()
+                            .any(|w| matches!(w.spec, crate::config::OpSpec::Get { .. }));
 
                         if has_get_ops || has_prepare_stage {
                             println!("┌─ Object Manifest Source ─────────────────────────────────────────────┐");
@@ -781,8 +1031,10 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
 
                                 if let Some(ref prepare) = config.prepare {
                                     if let Some(ref dir_config) = prepare.directory_structure {
-                                        let leaf_dirs = (dir_config.width as u64).pow(dir_config.depth as u32);
-                                        let total_files = leaf_dirs * dir_config.files_per_dir as u64;
+                                        let leaf_dirs =
+                                            (dir_config.width as u64).pow(dir_config.depth as u32);
+                                        let total_files =
+                                            leaf_dirs * dir_config.files_per_dir as u64;
                                         println!("│    Width={} × Depth={} → {} leaf dirs × {} files = {} objects",
                                             dir_config.width, dir_config.depth,
                                             format_with_thousands(leaf_dirs),
@@ -817,18 +1069,45 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     if let Some(ref prepare) = config.prepare {
                         println!("┌─ Prepare Phase Configuration (for prepare stage) ───────────────────┐");
                         println!("│ Strategy:           {:?}", prepare.prepare_strategy);
-                        println!("│ Skip Verification:  {} {}", 
-                            if prepare.skip_verification { "✅ YES" } else { "❌ NO" },
-                            if prepare.skip_verification { "(no LIST before create)" } else { "(LIST to check existing)" });
-                        println!("│ Force Overwrite:    {}", 
-                            if prepare.force_overwrite { "✅ YES (overwrite existing)" } else { "❌ NO (skip existing)" });
-                        println!("│ Cleanup:            {}", 
-                            if prepare.cleanup { "✅ YES (delete after test)" } else { "❌ NO (keep objects)" });
-                        
+                        println!(
+                            "│ Skip Verification:  {} {}",
+                            if prepare.skip_verification {
+                                "✅ YES"
+                            } else {
+                                "❌ NO"
+                            },
+                            if prepare.skip_verification {
+                                "(no LIST before create)"
+                            } else {
+                                "(LIST to check existing)"
+                            }
+                        );
+                        println!(
+                            "│ Force Overwrite:    {}",
+                            if prepare.force_overwrite {
+                                "✅ YES (overwrite existing)"
+                            } else {
+                                "❌ NO (skip existing)"
+                            }
+                        );
+                        println!(
+                            "│ Cleanup:            {}",
+                            if prepare.cleanup {
+                                "✅ YES (delete after test)"
+                            } else {
+                                "❌ NO (keep objects)"
+                            }
+                        );
+
                         // Show barrier timeout from prepare stage if available
                         if let Some(ref dist_config) = config.distributed {
                             if let Ok(stages) = dist_config.get_sorted_stages() {
-                                if let Some(prepare_stage) = stages.iter().find(|s| matches!(s.config, crate::config::StageSpecificConfig::Prepare { .. })) {
+                                if let Some(prepare_stage) = stages.iter().find(|s| {
+                                    matches!(
+                                        s.config,
+                                        crate::config::StageSpecificConfig::Prepare { .. }
+                                    )
+                                }) {
                                     if let Some(ref barrier) = prepare_stage.barrier {
                                         let timeout_secs = barrier.agent_barrier_timeout;
                                         let timeout_display = if timeout_secs >= 86400 {
@@ -840,265 +1119,385 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                         } else {
                                             format!("{} seconds", timeout_secs)
                                         };
-                                        println!("│ Max Duration:       {} (barrier timeout)", timeout_display);
+                                        println!(
+                                            "│ Max Duration:       {} (barrier timeout)",
+                                            timeout_display
+                                        );
                                     }
                                 }
                             }
                         }
-                        
+
                         // Show directory tree summary if configured
                         if let Some(ref dir_config) = prepare.directory_structure {
                             println!("│");
                             println!("│ 📁 Directory Tree:");
                             let leaf_dirs = (dir_config.width as u64).pow(dir_config.depth as u32);
-                            println!("│   Width × Depth:    {} × {} = {} leaf dirs", 
-                                dir_config.width, dir_config.depth, format_with_thousands(leaf_dirs));
-                            println!("│   Files/Dir:        {} files per leaf", format_usize(dir_config.files_per_dir));
-                            let (total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
-                            println!("│   Total Dirs:       {} directories", format_with_thousands(total_dirs));
-                            println!("│   Total Files:      {} files", format_with_thousands(total_files));
+                            println!(
+                                "│   Width × Depth:    {} × {} = {} leaf dirs",
+                                dir_config.width,
+                                dir_config.depth,
+                                format_with_thousands(leaf_dirs)
+                            );
+                            println!(
+                                "│   Files/Dir:        {} files per leaf",
+                                format_usize(dir_config.files_per_dir)
+                            );
+                            let (total_dirs, total_files) =
+                                estimate_directory_tree_totals(dir_config)?;
+                            println!(
+                                "│   Total Dirs:       {} directories",
+                                format_with_thousands(total_dirs)
+                            );
+                            println!(
+                                "│   Total Files:      {} files",
+                                format_with_thousands(total_files)
+                            );
 
                             let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
                             let (size_val, size_unit) = format_bytes(total_bytes);
-                            println!("│   Total Data Size:  {} bytes ({:.2} {})",
-                                format_with_thousands(total_bytes), size_val, size_unit);
+                            println!(
+                                "│   Total Data Size:  {} bytes ({:.2} {})",
+                                format_with_thousands(total_bytes),
+                                size_val,
+                                size_unit
+                            );
                         }
-                        
+
                         println!("└──────────────────────────────────────────────────────────────────────┘");
                         println!();
                     }
                 }
                 Ok(_) => {
                     // No stages configured - using deprecated prepare/execute/cleanup flow
-                    println!("┌─ Execution Plan (DEPRECATED) ────────────────────────────────────────┐");
+                    println!(
+                        "┌─ Execution Plan (DEPRECATED) ────────────────────────────────────────┐"
+                    );
                     println!("│ Using hardcoded prepare → execute → cleanup flow");
                     println!("│");
                     println!("│ ⚠️  RECOMMENDATION: Migrate to YAML-driven stages");
                     println!("│    Add 'stages:' section to distributed config for better control");
-                    println!("└──────────────────────────────────────────────────────────────────────┘");
+                    println!(
+                        "└──────────────────────────────────────────────────────────────────────┘"
+                    );
                     println!();
                 }
                 Err(e) => {
                     // Stage parsing error - show error
-                    println!("┌─ Stage Configuration ERROR ──────────────────────────────────────────┐");
+                    println!(
+                        "┌─ Stage Configuration ERROR ──────────────────────────────────────────┐"
+                    );
                     println!("│ ❌ Failed to parse stages: {}", e);
                     println!("│");
                     println!("│ The distributed test will NOT run with this configuration.");
                     println!("│ Fix the stage configuration and run --dry-run again.");
-                    println!("└──────────────────────────────────────────────────────────────────────┘");
+                    println!(
+                        "└──────────────────────────────────────────────────────────────────────┘"
+                    );
                     println!();
                     return Err(anyhow::anyhow!("Stage configuration error: {}", e));
                 }
             }
         }
     }
-    
+
     // Prepare configuration
     // Skip this section if using YAML-driven stages (prepare behavior defined in stages)
-    let using_stages = config.distributed.as_ref()
+    let using_stages = config
+        .distributed
+        .as_ref()
         .and_then(|d| d.get_sorted_stages().ok())
         .map(|stages| !stages.is_empty())
         .unwrap_or(false);
-    
+
     if let Some(ref prepare) = config.prepare {
         if !using_stages {
             println!("┌─ Prepare Phase ──────────────────────────────────────────────────────┐");
             println!("│ Objects will be created BEFORE test execution");
             println!("│");
             println!("│ Strategy:           {:?}", prepare.prepare_strategy);
-            println!("│ Skip Verification:  {} {}", 
-                if prepare.skip_verification { "✅ YES" } else { "❌ NO" },
-                if prepare.skip_verification { "(no LIST before create)" } else { "(LIST to check existing)" });
-            println!("│ Force Overwrite:    {}", 
-                if prepare.force_overwrite { "✅ YES (overwrite existing)" } else { "❌ NO (skip existing)" });
-            println!("│");
-        
-        // Directory tree structure (if configured)
-        if let Some(ref dir_config) = prepare.directory_structure {
-            println!("│ 📁 Directory Tree Structure:");
-            println!("│   Width:            {} subdirectories per level", dir_config.width);
-            println!("│   Depth:            {} levels", dir_config.depth);
-            println!("│   Files/Dir:        {} files per directory", dir_config.files_per_dir);
-            println!("│   Distribution:     {} ({}", dir_config.distribution,
-                if dir_config.distribution == "bottom" { "files only in leaf directories" } 
-                else { "files at every level" });
-            println!("│   Directory Mask:   {}", dir_config.dir_mask);
-            println!("│");
-
-            let (total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
-            println!("│ 📊 Calculated Tree Metrics:");
-            println!("│   Total Directories:  {}", format_with_thousands(total_dirs));
-            println!("│   Total Files:        {}", format_with_thousands(total_files));
-
-            let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
-            let (size_val, size_unit) = format_bytes(total_bytes);
-            println!("│   Total Data Size:    {} bytes ({:.2} {})", 
-                format_with_thousands(total_bytes), size_val, size_unit);
-            println!("│");
-        }
-        
-        for (idx, spec) in prepare.ensure_objects.iter().enumerate() {
-            if prepare.directory_structure.is_some() && spec.count == 0 {
-                // Skip showing flat object sections when using directory tree and count is 0
-                continue;
-            }
-            
-            // Determine URI display based on configuration mode
-            let uri_display = if spec.base_uri.is_none() && spec.use_multi_endpoint {
-                // In distributed mode with multi_endpoint, each agent uses its own endpoints
-                if config.distributed.is_some() {
-                    String::from("Per-agent multi-endpoint (see agent configs)")
+            println!(
+                "│ Skip Verification:  {} {}",
+                if prepare.skip_verification {
+                    "✅ YES"
                 } else {
-                    // Standalone mode with multi_endpoint
-                    String::from("Multi-endpoint load balancing (see above)")
-                }
-            } else {
-                spec.get_base_uri(None)
-                    .unwrap_or_else(|_| String::from("<not configured>"))
-            };
-            
-            println!("│ Flat Objects Section {}:", idx + 1);
-            println!("│   URI:              {}", uri_display);
-            println!("│   Count:            {} objects", format_with_thousands(spec.count));
-            
-            // Display size information
-            if let Some(ref size_spec) = spec.size_spec {
-                let mut generator = SizeGenerator::new(size_spec)?;
-                println!("│   Size:             {}", generator.description());
-            } else if let (Some(min), Some(max)) = (spec.min_size, spec.max_size) {
-                if min == max {
-                    println!("│   Size:             {} bytes (fixed)", min);
+                    "❌ NO"
+                },
+                if prepare.skip_verification {
+                    "(no LIST before create)"
                 } else {
-                    println!("│   Size:             {} - {} bytes (uniform)", min, max);
+                    "(LIST to check existing)"
+                }
+            );
+            println!(
+                "│ Force Overwrite:    {}",
+                if prepare.force_overwrite {
+                    "✅ YES (overwrite existing)"
+                } else {
+                    "❌ NO (skip existing)"
+                }
+            );
+            println!("│");
+
+            // Directory tree structure (if configured)
+            if let Some(ref dir_config) = prepare.directory_structure {
+                println!("│ 📁 Directory Tree Structure:");
+                println!(
+                    "│   Width:            {} subdirectories per level",
+                    dir_config.width
+                );
+                println!("│   Depth:            {} levels", dir_config.depth);
+                println!(
+                    "│   Files/Dir:        {} files per directory",
+                    dir_config.files_per_dir
+                );
+                println!(
+                    "│   Distribution:     {} ({}",
+                    dir_config.distribution,
+                    if dir_config.distribution == "bottom" {
+                        "files only in leaf directories"
+                    } else {
+                        "files at every level"
+                    }
+                );
+                println!("│   Directory Mask:   {}", dir_config.dir_mask);
+                println!("│");
+
+                let (total_dirs, total_files) = estimate_directory_tree_totals(dir_config)?;
+                println!("│ 📊 Calculated Tree Metrics:");
+                println!(
+                    "│   Total Directories:  {}",
+                    format_with_thousands(total_dirs)
+                );
+                println!(
+                    "│   Total Files:        {}",
+                    format_with_thousands(total_files)
+                );
+
+                let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
+                let (size_val, size_unit) = format_bytes(total_bytes);
+                println!(
+                    "│   Total Data Size:    {} bytes ({:.2} {})",
+                    format_with_thousands(total_bytes),
+                    size_val,
+                    size_unit
+                );
+                println!("│");
+            }
+
+            for (idx, spec) in prepare.ensure_objects.iter().enumerate() {
+                if prepare.directory_structure.is_some() && spec.count == 0 {
+                    // Skip showing flat object sections when using directory tree and count is 0
+                    continue;
+                }
+
+                // Determine URI display based on configuration mode
+                let uri_display = if spec.base_uri.is_none() && spec.use_multi_endpoint {
+                    // In distributed mode with multi_endpoint, each agent uses its own endpoints
+                    if config.distributed.is_some() {
+                        String::from("Per-agent multi-endpoint (see agent configs)")
+                    } else {
+                        // Standalone mode with multi_endpoint
+                        String::from("Multi-endpoint load balancing (see above)")
+                    }
+                } else {
+                    spec.get_base_uri(None)
+                        .unwrap_or_else(|_| String::from("<not configured>"))
+                };
+
+                println!("│ Flat Objects Section {}:", idx + 1);
+                println!("│   URI:              {}", uri_display);
+                println!(
+                    "│   Count:            {} objects",
+                    format_with_thousands(spec.count)
+                );
+
+                // Display size information
+                if let Some(ref size_spec) = spec.size_spec {
+                    let mut generator = SizeGenerator::new(size_spec)?;
+                    println!("│   Size:             {}", generator.description());
+                } else if let (Some(min), Some(max)) = (spec.min_size, spec.max_size) {
+                    if min == max {
+                        println!("│   Size:             {} bytes (fixed)", min);
+                    } else {
+                        println!("│   Size:             {} - {} bytes (uniform)", min, max);
+                    }
+                }
+
+                // Display fill pattern
+                println!("│   Fill Pattern:     {:?}", spec.fill);
+                if matches!(
+                    spec.fill,
+                    crate::config::FillPattern::Random | crate::config::FillPattern::Prand
+                ) {
+                    let dedup_desc = if spec.dedup_factor == 1 {
+                        "all unique".to_string()
+                    } else {
+                        format!(
+                            "{:.1}% dedup",
+                            (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0
+                        )
+                    };
+                    println!(
+                        "│   Dedup Factor:     {} ({})",
+                        spec.dedup_factor, dedup_desc
+                    );
+
+                    let compress_desc = if spec.compress_factor == 1 {
+                        "uncompressible".to_string()
+                    } else {
+                        format!(
+                            "{:.1}% compressible",
+                            (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0
+                        )
+                    };
+                    println!(
+                        "│   Compress Factor:  {} ({})",
+                        spec.compress_factor, compress_desc
+                    );
+                }
+
+                if idx < prepare.ensure_objects.len() - 1 {
+                    println!("│");
                 }
             }
-            
-            // Display fill pattern
-            println!("│   Fill Pattern:     {:?}", spec.fill);
-            if matches!(spec.fill, crate::config::FillPattern::Random | crate::config::FillPattern::Prand) {
-                let dedup_desc = if spec.dedup_factor == 1 { 
-                    "all unique".to_string() 
-                } else { 
-                    format!("{:.1}% dedup", (spec.dedup_factor - 1) as f64 / spec.dedup_factor as f64 * 100.0) 
-                };
-                println!("│   Dedup Factor:     {} ({})", spec.dedup_factor, dedup_desc);
-                
-                let compress_desc = if spec.compress_factor == 1 { 
-                    "uncompressible".to_string() 
-                } else { 
-                    format!("{:.1}% compressible", (spec.compress_factor - 1) as f64 / spec.compress_factor as f64 * 100.0) 
-                };
-                println!("│   Compress Factor:  {} ({})", spec.compress_factor, compress_desc);
-            }
-            
-            if idx < prepare.ensure_objects.len() - 1 {
-                println!("│");
-            }
-        }
 
-        if prepare.directory_structure.is_none() {
-            let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
-            let (size_val, size_unit) = format_bytes(total_bytes);
-            println!("│");
-            println!("│ Estimated Total Data Size: {} bytes ({:.2} {})",
-                format_with_thousands(total_bytes), size_val, size_unit);
-        }
-        
-        println!("│");
-        println!("│ Cleanup:            {}", if prepare.cleanup { "✅ YES (delete after test)" } else { "❌ NO (keep objects)" });
-        if prepare.post_prepare_delay > 0 {
-            println!("│ Post-Prepare Delay: {}s (eventual consistency wait)", prepare.post_prepare_delay);
-        }
-        
-        // v0.8.19: Warn if skip_verification=true and workload has GET operations
-        if prepare.skip_verification {
-            // Check if any workload operation is a GET
-            let has_get_ops = config.workload.iter().any(|w| matches!(w.spec, crate::config::OpSpec::Get { .. }));
-            if has_get_ops {
+            if prepare.directory_structure.is_none() {
+                let total_bytes = estimate_objects_bytes(&prepare.ensure_objects)?;
+                let (size_val, size_unit) = format_bytes(total_bytes);
                 println!("│");
-                println!("│ ⚠️  WARNING: skip_verification=true but workload has GET operations");
-                println!("│     Objects will NOT be created during prepare phase!");
-                println!("│     GET operations will fail unless objects exist from a previous run.");
-                println!("│");
-                println!("│     To fix: Set skip_verification=false (default) to create objects");
+                println!(
+                    "│ Estimated Total Data Size: {} bytes ({:.2} {})",
+                    format_with_thousands(total_bytes),
+                    size_val,
+                    size_unit
+                );
             }
-        }
-        
-        println!("└──────────────────────────────────────────────────────────────────────┘");
-        println!();
+
+            println!("│");
+            println!(
+                "│ Cleanup:            {}",
+                if prepare.cleanup {
+                    "✅ YES (delete after test)"
+                } else {
+                    "❌ NO (keep objects)"
+                }
+            );
+            if prepare.post_prepare_delay > 0 {
+                println!(
+                    "│ Post-Prepare Delay: {}s (eventual consistency wait)",
+                    prepare.post_prepare_delay
+                );
+            }
+
+            // v0.8.19: Warn when skip_verification=true WITHOUT force_overwrite and workload has GETs.
+            // In that combination the prepare phase assumes all objects already exist and skips all PUTs,
+            // so GET operations in the workload will fail against an empty bucket.
+            // force_overwrite=true overrides this — PUTs happen unconditionally — so no warning needed.
+            if prepare.skip_verification && !prepare.force_overwrite {
+                // Check if any workload operation is a GET
+                let has_get_ops = config
+                    .workload
+                    .iter()
+                    .any(|w| matches!(w.spec, crate::config::OpSpec::Get { .. }));
+                if has_get_ops {
+                    println!("│");
+                    println!("│ ⚠️  WARNING: skip_verification=true without force_overwrite=true");
+                    println!(
+                        "│     Prepare will assume all objects already exist and skip all PUTs."
+                    );
+                    println!(
+                        "│     GET operations will fail unless objects exist from a previous run."
+                    );
+                    println!("│");
+                    println!("│     To create objects unconditionally: add force_overwrite: true");
+                    println!(
+                        "│     To create only missing objects:    set skip_verification: false"
+                    );
+                }
+            }
+
+            println!("└──────────────────────────────────────────────────────────────────────┘");
+            println!();
         } // End of !using_stages check
     }
-    
+
     // v0.8.60: KV Cache Configuration (always show when prepare is enabled)
     if config.prepare.is_some() {
         println!("┌─ KV Cache & Checkpointing ───────────────────────────────────────────┐");
-        
-        // Checkpoint interval (always show, including default)
-        let checkpoint_interval = config.cache_checkpoint_interval_secs;
-        if checkpoint_interval > 0 {
-            let (interval_val, interval_unit) = if checkpoint_interval >= 3600 {
-                (checkpoint_interval / 3600, "hours")
-            } else if checkpoint_interval >= 60 {
-                (checkpoint_interval / 60, "minutes")
-            } else {
-                (checkpoint_interval, "seconds")
-            };
-            
-            let interval_display = if checkpoint_interval == 300 {
-                format!("{} {} (DEFAULT)", interval_val, interval_unit)
-            } else {
-                format!("{} {} ⚠️  CUSTOM", interval_val, interval_unit)
-            };
-            
-            println!("│ Checkpoint Interval: {}", interval_display);
-            println!("│   ✅ Periodic checkpointing ENABLED");
-            println!("│   📦 Creates tar.zst archives during prepare");
-            println!("│   🔄 Maximum data loss: {} {}", interval_val, interval_unit);
-            println!("│   💾 Archive format: .sai3-cache-agent-{{id}}.tar.zst");
-        } else {
-            println!("│ Checkpoint Interval: DISABLED (0 seconds)");
-            println!("│   ⚠️  Only final checkpoint at end of prepare");
-            println!("│   🔴 Risk: ALL metadata lost if prepare crashes");
-        }
-        println!("│");
-        
-        // KV cache directory (show where LSM operations will be isolated)
-        if let Some(ref dist) = config.distributed {
-            // Distributed mode - check for global or per-agent overrides
-            if let Some(ref kv_cache_dir) = dist.kv_cache_dir {
-                println!("│ KV Cache Directory:  {} (GLOBAL)", kv_cache_dir.display());
-            } else {
-                println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
-            }
-            
-            // Check for per-agent overrides
-            let has_agent_overrides = dist.agents.iter()
-                .any(|a| a.kv_cache_dir.is_some());
-            
-            if has_agent_overrides {
-                println!("│");
-                println!("│ Per-Agent Overrides:");
-                for (idx, agent) in dist.agents.iter().enumerate() {
-                    if let Some(ref agent_kv_dir) = agent.kv_cache_dir {
-                        let agent_id = agent.id.as_deref().unwrap_or("auto");
-                        println!("│   Agent {}: {} (id: {})", idx + 1, agent_kv_dir.display(), agent_id);
-                    }
-                }
-            }
-        } else {
-            // Standalone mode - no distributed config
-            println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
-        }
-        
-        println!("│");
-        println!("│");
-        // v0.8.89: enable_metadata_cache
+
+        // v0.8.89: enable_metadata_cache — gate ALL checkpointing detail on this flag.
+        // Checkpointing archives the Fjall KV store; when that store is disabled there
+        // is nothing to checkpoint, so showing "ENABLED" would be misleading.
         if config.enable_metadata_cache {
             println!("│ Metadata Cache (Fjall KV): ✅ ENABLED (default)");
             println!("│   📊 Tracks per-object creation state — enables crash/resume");
+            println!("│");
+
+            // Checkpoint interval (only meaningful when KV cache is active)
+            let checkpoint_interval = config.cache_checkpoint_interval_secs;
+            if checkpoint_interval > 0 {
+                let (interval_val, interval_unit) = if checkpoint_interval >= 3600 {
+                    (checkpoint_interval / 3600, "hours")
+                } else if checkpoint_interval >= 60 {
+                    (checkpoint_interval / 60, "minutes")
+                } else {
+                    (checkpoint_interval, "seconds")
+                };
+
+                let interval_display = if checkpoint_interval == 300 {
+                    format!("{} {} (DEFAULT)", interval_val, interval_unit)
+                } else {
+                    format!("{} {} ⚠️  CUSTOM", interval_val, interval_unit)
+                };
+
+                println!("│ Checkpoint Interval: {}", interval_display);
+                println!("│   ✅ Periodic checkpointing ENABLED");
+                println!("│   📦 Creates tar.zst archives during prepare");
+                println!(
+                    "│   🔄 Maximum data loss: {} {}",
+                    interval_val, interval_unit
+                );
+                println!("│   💾 Archive format: .sai3-cache-agent-{{id}}.tar.zst");
+            } else {
+                println!("│ Checkpoint Interval: DISABLED (0 seconds)");
+                println!("│   ⚠️  Only final checkpoint at end of prepare");
+                println!("│   🔴 Risk: ALL metadata lost if prepare crashes");
+            }
+            println!("│");
+
+            // KV cache directory (show where LSM operations will be isolated)
+            if let Some(ref dist) = config.distributed {
+                if let Some(ref kv_cache_dir) = dist.kv_cache_dir {
+                    println!("│ KV Cache Directory:  {} (GLOBAL)", kv_cache_dir.display());
+                } else {
+                    println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
+                }
+
+                let has_agent_overrides = dist.agents.iter().any(|a| a.kv_cache_dir.is_some());
+
+                if has_agent_overrides {
+                    println!("│");
+                    println!("│ Per-Agent Overrides:");
+                    for (idx, agent) in dist.agents.iter().enumerate() {
+                        if let Some(ref agent_kv_dir) = agent.kv_cache_dir {
+                            let agent_id = agent.id.as_deref().unwrap_or("auto");
+                            println!(
+                                "│   Agent {}: {} (id: {})",
+                                idx + 1,
+                                agent_kv_dir.display(),
+                                agent_id
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("│ KV Cache Directory:  /tmp/ (DEFAULT - system temp)");
+            }
         } else {
             println!("│ Metadata Cache (Fjall KV): 🚫 DISABLED (enable_metadata_cache: false)");
             println!("│   ⚠️  Crash-resume NOT available for this prepare");
+            println!("│   🚫 Checkpointing: N/A — no Fjall KV store to archive");
             println!("│   💡 Sweet spot for cache: 1M–1B objects/run");
             println!("│      < 1M: listing is fast enough to verify (~200s at 5K LIST/s)");
             println!("│      > 1B: KV store too large — disable here");
@@ -1114,22 +1513,31 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
         println!("└──────────────────────────────────────────────────────────────────────┘");
         println!();
     }
-    
+
     // Workload operations
     println!("┌─ Workload Operations ────────────────────────────────────────────────┐");
     let total_weight: u32 = config.workload.iter().map(|w| w.weight).sum();
-    println!("│ {} operation types, total weight: {}", config.workload.len(), total_weight);
+    println!(
+        "│ {} operation types, total weight: {}",
+        config.workload.len(),
+        total_weight
+    );
     println!("│ Execution Duration: {:?}", config.duration);
     println!("│");
-    
+
     for (idx, weighted_op) in config.workload.iter().enumerate() {
         let percentage = (weighted_op.weight as f64 / total_weight as f64) * 100.0;
-        
+
         let (op_name, details) = match &weighted_op.spec {
-            crate::config::OpSpec::Get { path, .. } => {
-                ("GET", format!("path: {}", path))
-            },
-            crate::config::OpSpec::Put { path, object_size, size_spec, dedup_factor, compress_factor, .. } => {
+            crate::config::OpSpec::Get { path, .. } => ("GET", format!("path: {}", path)),
+            crate::config::OpSpec::Put {
+                path,
+                object_size,
+                size_spec,
+                dedup_factor,
+                compress_factor,
+                ..
+            } => {
                 let mut details = format!("path: {}", path);
                 if let Some(ref spec) = size_spec {
                     let mut generator = SizeGenerator::new(spec)?;
@@ -1137,39 +1545,40 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 } else if let Some(size) = object_size {
                     details.push_str(&format!(", size: {} bytes", size));
                 }
-                details.push_str(&format!(", dedup: {}, compress: {}", dedup_factor, compress_factor));
+                details.push_str(&format!(
+                    ", dedup: {}, compress: {}",
+                    dedup_factor, compress_factor
+                ));
                 ("PUT", details)
-            },
-            crate::config::OpSpec::List { path, .. } => {
-                ("LIST", format!("path: {}", path))
-            },
-            crate::config::OpSpec::Stat { path, .. } => {
-                ("STAT", format!("path: {}", path))
-            },
-            crate::config::OpSpec::Delete { path, .. } => {
-                ("DELETE", format!("path: {}", path))
-            },
-            crate::config::OpSpec::Mkdir { path } => {
-                ("MKDIR", format!("path: {}", path))
-            },
+            }
+            crate::config::OpSpec::List { path, .. } => ("LIST", format!("path: {}", path)),
+            crate::config::OpSpec::Stat { path, .. } => ("STAT", format!("path: {}", path)),
+            crate::config::OpSpec::Delete { path, .. } => ("DELETE", format!("path: {}", path)),
+            crate::config::OpSpec::Mkdir { path } => ("MKDIR", format!("path: {}", path)),
             crate::config::OpSpec::Rmdir { path, recursive } => {
                 let rec = if *recursive { " (recursive)" } else { "" };
                 ("RMDIR", format!("path: {}{}", path, rec))
-            },
+            }
         };
-        
-        println!("│ Op {}: {} - {:.1}% (weight: {})", idx + 1, op_name, percentage, weighted_op.weight);
+
+        println!(
+            "│ Op {}: {} - {:.1}% (weight: {})",
+            idx + 1,
+            op_name,
+            percentage,
+            weighted_op.weight
+        );
         println!("│       {}", details);
-        
+
         if let Some(concurrency) = weighted_op.concurrency {
             println!("│       concurrency override: {} threads", concurrency);
         }
-        
+
         if idx < config.workload.len() - 1 {
             println!("│");
         }
     }
-    
+
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
 
@@ -1193,7 +1602,8 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     if let Some(ref multi) = config.multi_endpoint {
                         (multi.endpoints.clone(), "global multi-endpoint")
                     } else if let Some(ref dist) = config.distributed {
-                        let first_agent = dist.agents.first().and_then(|a| a.multi_endpoint.as_ref());
+                        let first_agent =
+                            dist.agents.first().and_then(|a| a.multi_endpoint.as_ref());
                         if let Some(agent_multi) = first_agent {
                             (agent_multi.endpoints.clone(), "agent-1 multi-endpoint")
                         } else {
@@ -1209,8 +1619,14 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     (vec![base_uri], "base_uri")
                 };
 
-                let base_uri = endpoints.first().cloned().unwrap_or_else(|| "unknown://".to_string());
-                let seed = base_uri.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let base_uri = endpoints
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown://".to_string());
+                let seed = base_uri
+                    .as_bytes()
+                    .iter()
+                    .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 let size_spec = spec.get_size_spec();
                 let mut size_generator = SizeGenerator::new_with_seed(&size_spec, seed)?;
 
@@ -1268,14 +1684,24 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 let elapsed = start.elapsed();
                 let rss_after = read_rss_kb();
 
-                println!("│ Sample:       {} objects (first {} of {})", format_with_thousands(sample_count as u64), sample_count, format_with_thousands(total_objects));
+                println!(
+                    "│ Sample:       {} objects (first {} of {})",
+                    format_with_thousands(sample_count as u64),
+                    sample_count,
+                    format_with_thousands(total_objects)
+                );
                 println!("│ Source:       {}", base_uri_label);
                 println!("│ Time:         {:.2}s", elapsed.as_secs_f64());
                 match (rss_before, rss_after) {
                     (Some(before), Some(after)) => {
                         let delta_kb = after.saturating_sub(before);
                         let (size_val, size_unit) = format_bytes(delta_kb * 1024);
-                        println!("│ RSS Delta:    {} KiB ({:.2} {})", format_with_thousands(delta_kb), size_val, size_unit);
+                        println!(
+                            "│ RSS Delta:    {} KiB ({:.2} {})",
+                            format_with_thousands(delta_kb),
+                            size_val,
+                            size_unit
+                        );
                     }
                     _ => {
                         println!("│ RSS Delta:    unavailable (/proc/self/status)");
@@ -1289,38 +1715,53 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     }
     println!("└──────────────────────────────────────────────────────────────────────┘");
     println!();
-    
+
     // v0.8.53: Multi-endpoint + directory tree validation with sample file paths
     if let Some(ref prepare) = config.prepare {
         if let Some(ref dir_config) = prepare.directory_structure {
             // Check if any operation uses multi_endpoint
-            let has_multi_endpoint_ops = prepare.ensure_objects.iter().any(|spec| spec.use_multi_endpoint);
+            let has_multi_endpoint_ops = prepare
+                .ensure_objects
+                .iter()
+                .any(|spec| spec.use_multi_endpoint);
             let workload_uses_multi_ep = config.workload.iter().any(|wo| {
-                matches!(&wo.spec, 
-                    crate::config::OpSpec::Get { use_multi_endpoint: true, .. } | 
-                    crate::config::OpSpec::Put { use_multi_endpoint: true, .. } |
-                    crate::config::OpSpec::Stat { use_multi_endpoint: true, .. } |
-                    crate::config::OpSpec::Delete { use_multi_endpoint: true, .. })
+                matches!(
+                    &wo.spec,
+                    crate::config::OpSpec::Get {
+                        use_multi_endpoint: true,
+                        ..
+                    } | crate::config::OpSpec::Put {
+                        use_multi_endpoint: true,
+                        ..
+                    } | crate::config::OpSpec::Stat {
+                        use_multi_endpoint: true,
+                        ..
+                    } | crate::config::OpSpec::Delete {
+                        use_multi_endpoint: true,
+                        ..
+                    }
+                )
             });
-            
+
             if has_multi_endpoint_ops || workload_uses_multi_ep {
                 println!("┌─ Multi-Endpoint File Distribution ──────────────────────────────────┐");
-                
+
                 // Collect ALL endpoints from ALL agents (distributed mode) or global config
                 // Structure: Vec<(agent_id, endpoint_url)>
                 let mut all_endpoints: Vec<(String, String)> = Vec::new();
-                
+
                 if let Some(ref dist) = config.distributed {
                     // Distributed mode: collect from each agent
                     for (idx, agent) in dist.agents.iter().enumerate() {
                         if let Some(ref me_cfg) = agent.multi_endpoint {
-                            let agent_id = agent.id.clone().unwrap_or_else(|| format!("agent-{}", idx));
+                            let agent_id =
+                                agent.id.clone().unwrap_or_else(|| format!("agent-{}", idx));
                             for endpoint in &me_cfg.endpoints {
                                 all_endpoints.push((agent_id.clone(), endpoint.clone()));
                             }
                         }
                     }
-                    
+
                     // Fallback to global config if no per-agent endpoints
                     if all_endpoints.is_empty() {
                         if let Some(ref me_cfg) = config.multi_endpoint {
@@ -1335,16 +1776,24 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         all_endpoints.push(("single".to_string(), endpoint.clone()));
                     }
                 }
-                
+
                 if !all_endpoints.is_empty() {
                     println!("│ ⚠️  IMPORTANT: Files are distributed ROUND-ROBIN by index");
                     println!("│");
-                    println!("│ Total endpoints: {} across {} agent(s)", 
+                    println!(
+                        "│ Total endpoints: {} across {} agent(s)",
                         all_endpoints.len(),
-                        if let Some(ref dist) = config.distributed { dist.agents.len() } else { 1 }
+                        if let Some(ref dist) = config.distributed {
+                            dist.agents.len()
+                        } else {
+                            1
+                        }
                     );
-                    println!("│ Distribution pattern: file_NNNNNNNN.dat → endpoint[N % {}]", all_endpoints.len());
-                    
+                    println!(
+                        "│ Distribution pattern: file_NNNNNNNN.dat → endpoint[N % {}]",
+                        all_endpoints.len()
+                    );
+
                     // Show pattern description
                     if all_endpoints.len() == 2 {
                         println!("│   • Even indices (0, 2, 4, 6...) → endpoint 1");
@@ -1356,26 +1805,31 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         println!("│   • Indices 3, 7, 11, 15... → endpoint 4");
                     } else {
                         for i in 0..std::cmp::min(all_endpoints.len(), 6) {
-                            println!("│   • Indices {}, {}, {}... → endpoint {}", 
-                                i, i + all_endpoints.len(), i + 2*all_endpoints.len(), i + 1);
+                            println!(
+                                "│   • Indices {}, {}, {}... → endpoint {}",
+                                i,
+                                i + all_endpoints.len(),
+                                i + 2 * all_endpoints.len(),
+                                i + 1
+                            );
                         }
                         if all_endpoints.len() > 6 {
                             println!("│   ... ({} more endpoints)", all_endpoints.len() - 6);
                         }
                     }
                     println!("│");
-                    
+
                     // Generate sample file paths using DirectoryTree
                     use crate::directory_tree::DirectoryTree;
                     match DirectoryTree::new(dir_config.clone()) {
                         Ok(tree) => {
                             use crate::directory_tree::TreeManifest;
                             let manifest = TreeManifest::from_tree(&tree);
-                            
+
                             // Show 2 sample files per endpoint, grouped by agent
                             println!("│ Sample files (first 2 per endpoint):");
                             println!("│");
-                            
+
                             let mut current_agent = String::new();
                             for (ep_idx, (agent_id, endpoint)) in all_endpoints.iter().enumerate() {
                                 // Print agent header when we switch agents
@@ -1390,9 +1844,9 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                         }
                                     }
                                 }
-                                
+
                                 println!("│ Endpoint {} ({}):", ep_idx + 1, endpoint);
-                                
+
                                 // Find first 2 files that go to this endpoint
                                 let mut files_shown = 0;
                                 for i in 0..manifest.total_files {
@@ -1412,11 +1866,16 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                                         }
                                     }
                                 }
-                                
+
                                 // Count total files for this endpoint
-                                let total_on_endpoint = (manifest.total_files + all_endpoints.len() - 1 - ep_idx) / all_endpoints.len();
+                                let total_on_endpoint =
+                                    (manifest.total_files + all_endpoints.len() - 1 - ep_idx)
+                                        / all_endpoints.len();
                                 if total_on_endpoint > files_shown {
-                                    println!("│   ... ({} more on this endpoint)", total_on_endpoint - files_shown);
+                                    println!(
+                                        "│   ... ({} more on this endpoint)",
+                                        total_on_endpoint - files_shown
+                                    );
                                 }
                             }
                         }
@@ -1425,27 +1884,32 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                         }
                     }
                 }
-                
-                println!("└──────────────────────────────────────────────────────────────────────┘");
+
+                println!(
+                    "└──────────────────────────────────────────────────────────────────────┘"
+                );
                 println!();
             }
         }
     }
-    
+
     // Summary
     println!("✅ Configuration is valid and ready to run");
     println!();
-    
+
     // Show appropriate command to execute
     if config.distributed.is_some() {
         println!("To execute this distributed test, run:");
-        println!("  sai3bench-ctl --agents <agent1>,<agent2>,... run --config {}", config_path);
+        println!(
+            "  sai3bench-ctl --agents <agent1>,<agent2>,... run --config {}",
+            config_path
+        );
     } else {
         println!("To execute this test, run:");
         println!("  sai3-bench run --config {}", config_path);
     }
     println!();
-    
+
     Ok(())
 }
 

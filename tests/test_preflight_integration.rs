@@ -18,10 +18,9 @@ pub mod pb {
 
 use pb::iobench::{
     agent_server::{Agent, AgentServer},
-    Empty, LiveStats, OpSummary, PingReply, PreFlightRequest, PreFlightResponse,
-    RunGetRequest, RunPutRequest, RunWorkloadRequest, WorkloadSummary,
-    ControlMessage, ValidationResult, ResultLevel, ErrorType,
-    BarrierRequest, BarrierResponse, AgentQueryRequest, AgentQueryResponse,
+    AgentQueryRequest, AgentQueryResponse, BarrierRequest, BarrierResponse, ControlMessage, Empty,
+    ErrorType, LiveStats, OpSummary, PingReply, PreFlightRequest, PreFlightResponse, ResultLevel,
+    RunGetRequest, RunPutRequest, RunWorkloadRequest, ValidationResult, WorkloadSummary,
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -61,7 +60,7 @@ impl Agent for MockAgent {
         request: tonic::Request<PreFlightRequest>,
     ) -> Result<tonic::Response<PreFlightResponse>, tonic::Status> {
         let _req = request.into_inner();
-        
+
         // Check for injected error
         if let Some(err_msg) = self.preflight_error.lock().await.as_ref() {
             let response = PreFlightResponse {
@@ -86,33 +85,57 @@ impl Agent for MockAgent {
             // Run actual filesystem validation
             match sai3_bench::preflight::filesystem::validate_filesystem(
                 test_path,
-                true,  // check_write
-                Some(1024 * 1024),  // 1 MB required
-            ).await {
+                true,              // check_write
+                Some(1024 * 1024), // 1 MB required
+            )
+            .await
+            {
                 Ok(summary) => {
-                    let results: Vec<ValidationResult> = summary.results.iter().map(|r| {
-                        ValidationResult {
+                    let results: Vec<ValidationResult> = summary
+                        .results
+                        .iter()
+                        .map(|r| ValidationResult {
                             level: match r.level {
-                                sai3_bench::preflight::ResultLevel::Success => ResultLevel::Success as i32,
-                                sai3_bench::preflight::ResultLevel::Info => ResultLevel::Info as i32,
-                                sai3_bench::preflight::ResultLevel::Warning => ResultLevel::Warning as i32,
-                                sai3_bench::preflight::ResultLevel::Error => ResultLevel::Error as i32,
+                                sai3_bench::preflight::ResultLevel::Success => {
+                                    ResultLevel::Success as i32
+                                }
+                                sai3_bench::preflight::ResultLevel::Info => {
+                                    ResultLevel::Info as i32
+                                }
+                                sai3_bench::preflight::ResultLevel::Warning => {
+                                    ResultLevel::Warning as i32
+                                }
+                                sai3_bench::preflight::ResultLevel::Error => {
+                                    ResultLevel::Error as i32
+                                }
                             },
                             error_type: match r.error_type {
-                                Some(sai3_bench::preflight::ErrorType::Authentication) => ErrorType::Authentication as i32,
-                                Some(sai3_bench::preflight::ErrorType::Permission) => ErrorType::Permission as i32,
-                                Some(sai3_bench::preflight::ErrorType::Network) => ErrorType::Network as i32,
-                                Some(sai3_bench::preflight::ErrorType::Configuration) => ErrorType::Configuration as i32,
-                                Some(sai3_bench::preflight::ErrorType::Resource) => ErrorType::Resource as i32,
-                                Some(sai3_bench::preflight::ErrorType::System) => ErrorType::System as i32,
+                                Some(sai3_bench::preflight::ErrorType::Authentication) => {
+                                    ErrorType::Authentication as i32
+                                }
+                                Some(sai3_bench::preflight::ErrorType::Permission) => {
+                                    ErrorType::Permission as i32
+                                }
+                                Some(sai3_bench::preflight::ErrorType::Network) => {
+                                    ErrorType::Network as i32
+                                }
+                                Some(sai3_bench::preflight::ErrorType::Configuration) => {
+                                    ErrorType::Configuration as i32
+                                }
+                                Some(sai3_bench::preflight::ErrorType::Resource) => {
+                                    ErrorType::Resource as i32
+                                }
+                                Some(sai3_bench::preflight::ErrorType::System) => {
+                                    ErrorType::System as i32
+                                }
                                 None => ErrorType::Unknown as i32,
                             },
                             message: r.message.clone(),
                             suggestion: r.suggestion.clone(),
                             details: r.details.clone().unwrap_or_default(),
                             test_phase: r.test_phase.clone(),
-                        }
-                    }).collect();
+                        })
+                        .collect();
 
                     let passed = !summary.has_errors();
                     Ok(tonic::Response::new(PreFlightResponse {
@@ -123,9 +146,7 @@ impl Agent for MockAgent {
                         info_count: summary.info_count() as i32,
                     }))
                 }
-                Err(e) => {
-                    Err(tonic::Status::internal(format!("Validation error: {}", e)))
-                }
+                Err(e) => Err(tonic::Status::internal(format!("Validation error: {}", e))),
             }
         } else {
             // No test path - return success
@@ -213,7 +234,7 @@ async fn test_preflight_grpc_success() -> Result<()> {
     // Start mock agent server
     let agent = MockAgent::with_test_path(test_path.clone());
     let addr = "127.0.0.1:50051".parse().unwrap();
-    
+
     let server_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(AgentServer::new(agent))
@@ -240,7 +261,10 @@ async fn test_preflight_grpc_success() -> Result<()> {
     let result = response.into_inner();
 
     // Verify response
-    assert!(result.passed, "Pre-flight should pass for writable directory");
+    assert!(
+        result.passed,
+        "Pre-flight should pass for writable directory"
+    );
     assert_eq!(result.error_count, 0);
     assert!(!result.results.is_empty(), "Should have validation results");
 
@@ -253,7 +277,7 @@ async fn test_preflight_grpc_success() -> Result<()> {
 async fn test_preflight_grpc_detects_nonexistent_directory() -> Result<()> {
     // Create path to non-existent directory
     let nonexistent = PathBuf::from("/tmp/sai3bench-test-nonexistent-dir-12345");
-    
+
     // Ensure it doesn't exist
     if nonexistent.exists() {
         std::fs::remove_dir_all(&nonexistent)?;
@@ -262,7 +286,7 @@ async fn test_preflight_grpc_detects_nonexistent_directory() -> Result<()> {
     // Start mock agent server
     let agent = MockAgent::with_test_path(nonexistent.clone());
     let addr = "127.0.0.1:50052".parse().unwrap();
-    
+
     let server_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(AgentServer::new(agent))
@@ -289,24 +313,32 @@ async fn test_preflight_grpc_detects_nonexistent_directory() -> Result<()> {
     let result = response.into_inner();
 
     // Verify response
-    assert!(!result.passed, "Pre-flight should fail for non-existent directory");
+    assert!(
+        !result.passed,
+        "Pre-flight should fail for non-existent directory"
+    );
     assert!(result.error_count > 0, "Should have at least one error");
-    
+
     // Debug: print the actual errors we got
     eprintln!("Results from validation:");
     for (i, r) in result.results.iter().enumerate() {
-        eprintln!("  Result {}: level={}, error_type={}, message={}", 
-            i, r.level, r.error_type, r.message);
+        eprintln!(
+            "  Result {}: level={}, error_type={}, message={}",
+            i, r.level, r.error_type, r.message
+        );
     }
-    
+
     // Check that we got configuration, permission, or system error
     let has_relevant_error = result.results.iter().any(|r| {
-        r.level == ResultLevel::Error as i32 &&
-        (r.error_type == ErrorType::Permission as i32 || 
-         r.error_type == ErrorType::System as i32 ||
-         r.error_type == ErrorType::Configuration as i32)
+        r.level == ResultLevel::Error as i32
+            && (r.error_type == ErrorType::Permission as i32
+                || r.error_type == ErrorType::System as i32
+                || r.error_type == ErrorType::Configuration as i32)
     });
-    assert!(has_relevant_error, "Should have permission, system, or configuration error");
+    assert!(
+        has_relevant_error,
+        "Should have permission, system, or configuration error"
+    );
 
     // Cleanup
     server_handle.abort();
@@ -316,11 +348,11 @@ async fn test_preflight_grpc_detects_nonexistent_directory() -> Result<()> {
 #[tokio::test]
 async fn test_preflight_grpc_detects_readonly_directory() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    
+
     // Create temp directory and make it read-only
     let temp_dir = TempDir::new()?;
     let test_path = temp_dir.path().to_path_buf();
-    
+
     // Set read-only permissions (0555)
     let mut perms = std::fs::metadata(&test_path)?.permissions();
     perms.set_mode(0o555);
@@ -329,7 +361,7 @@ async fn test_preflight_grpc_detects_readonly_directory() -> Result<()> {
     // Start mock agent server
     let agent = MockAgent::with_test_path(test_path.clone());
     let addr = "127.0.0.1:50053".parse().unwrap();
-    
+
     let server_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(AgentServer::new(agent))
@@ -356,21 +388,26 @@ async fn test_preflight_grpc_detects_readonly_directory() -> Result<()> {
     let result = response.into_inner();
 
     // Verify response - should fail due to write check
-    assert!(!result.passed, "Pre-flight should fail for read-only directory");
+    assert!(
+        !result.passed,
+        "Pre-flight should fail for read-only directory"
+    );
     assert!(result.error_count > 0, "Should have at least one error");
-    
+
     // Check for permission error
     let has_permission_error = result.results.iter().any(|r| {
-        r.level == ResultLevel::Error as i32 &&
-        r.error_type == ErrorType::Permission as i32
+        r.level == ResultLevel::Error as i32 && r.error_type == ErrorType::Permission as i32
     });
-    assert!(has_permission_error, "Should have permission error for read-only directory");
+    assert!(
+        has_permission_error,
+        "Should have permission error for read-only directory"
+    );
 
     // Cleanup - restore permissions before cleanup
     let mut perms = std::fs::metadata(&test_path)?.permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&test_path, perms)?;
-    
+
     server_handle.abort();
     Ok(())
 }
@@ -379,7 +416,7 @@ async fn test_preflight_grpc_detects_readonly_directory() -> Result<()> {
 fn test_validation_result_aggregation() {
     // Test that we correctly aggregate errors/warnings across multiple agents
     use pb::iobench::PreFlightResponse;
-    
+
     let responses = [
         PreFlightResponse {
             passed: true,

@@ -1,6 +1,6 @@
 // src/config.rs
-use serde::{Deserialize, Serialize};
 use crate::size_generator::SizeSpec;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -22,53 +22,53 @@ pub struct Config {
     /// Optional prepare step to ensure objects exist before testing (Warp parity)
     #[serde(default)]
     pub prepare: Option<PrepareConfig>,
-    
+
     /// Optional RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
     /// Only applies to network backends (S3, Azure, GCS) with files >= min_split_size
     #[serde(default)]
     pub range_engine: Option<RangeEngineConfig>,
-    
+
     /// Optional page cache behavior hint for file system operations (v0.6.8+)
     /// Only applies to file:// and direct:// backends on Linux/Unix systems
     /// Maps to posix_fadvise() system call for optimizing kernel page cache behavior
     /// Default: None (uses Auto mode - Sequential for large files, Random for small)
     #[serde(default)]
     pub page_cache_mode: Option<PageCacheMode>,
-    
+
     /// Optional distributed testing configuration (v0.6.11+)
     /// Enables automated SSH deployment, per-agent customization, and coordinated execution
     #[serde(default)]
     pub distributed: Option<DistributedConfig>,
-    
+
     /// Optional I/O rate control (v0.7.1+)
     /// Controls the rate at which operations are issued (not their completion rate)
     /// Default: None (unlimited throughput - current behavior)
     #[serde(default)]
     pub io_rate: Option<IoRateConfig>,
-    
+
     /// Optional multi-process scaling configuration (v0.7.3+)
     /// Controls how many processes to spawn per endpoint for parallel execution
     /// Default: None (single process - current behavior)
     #[serde(default)]
     pub processes: Option<ProcessScaling>,
-    
+
     /// Processing mode for multi-core execution (v0.7.3+)
     /// Default: MultiRuntime (stays in single process, multiple tokio runtimes)
     #[serde(default)]
     pub processing_mode: ProcessingMode,
-    
+
     /// Optional live stats tracker for distributed execution (v0.7.5+)
     /// Used by agent to report real-time operation statistics to controller
     /// This is runtime state and should not be serialized to YAML config files
     #[serde(skip)]
     pub live_stats_tracker: Option<std::sync::Arc<crate::live_stats::LiveStatsTracker>>,
-    
+
     /// Optional error handling configuration (v0.8.0+)
     /// Controls how workload handles I/O errors (retry, skip, or abort)
     /// Default: ErrorHandlingConfig::default() (100 max errors, 5 errors/sec threshold)
     #[serde(default)]
     pub error_handling: ErrorHandlingConfig,
-    
+
     /// Optional operation log path for s3dlio oplog tracing (v0.8.2+)
     /// Captures all storage operations (GET/PUT/DELETE/LIST/etc.) with timestamps and latencies
     /// Output format: TSV (optionally zstd-compressed if path ends with .zst)
@@ -78,7 +78,7 @@ pub struct Config {
     /// Default: None (no operation logging)
     #[serde(default)]
     pub op_log_path: Option<std::path::PathBuf>,
-    
+
     /// Optional warmup period to exclude from statistics analysis (v0.8.15+)
     /// Time at the beginning of workload execution to ignore for metrics.
     /// Data is still captured but flagged as warmup (is_warmup=1 in perf-log).
@@ -87,14 +87,14 @@ pub struct Config {
     /// Default: None (no warmup period)
     #[serde(default, with = "humantime_serde_opt")]
     pub warmup_period: Option<std::time::Duration>,
-    
+
     /// Optional performance log configuration for time-series metrics (v0.8.15+)
     /// Captures aggregate metrics at regular intervals for performance analysis over time.
     /// Unlike op-log (per-operation), perf-log captures rates/latencies per interval.
     /// Default: None (no performance logging)
     #[serde(default)]
     pub perf_log: Option<PerfLogConfig>,
-    
+
     /// Optional multi-endpoint configuration (v0.8.22+)
     /// Enables load balancing across multiple storage endpoints (S3, Azure, GCS, file://)
     /// All agents use these endpoints unless per-agent override is specified in distributed.agents
@@ -107,12 +107,12 @@ pub struct Config {
     /// Works for BOTH standalone (sai3-bench run) and distributed (sai3bench-ctl) modes
     /// 0 = Disabled (only checkpoint at end of prepare)
     /// Default: 300 seconds (5 minutes) for long-running prepares
-    /// 
+    ///
     /// **Why periodic checkpointing?**
     /// - Protects against data loss if prepare crashes after hours of work
     /// - For cloud storage (s3://, az://, gs://), creates .tar.zst archive and uploads via ObjectStore
     /// - For filesystem (file://, direct://), creates .tar.zst archive on disk
-    /// 
+    ///
     /// Example: checkpoint every 10 minutes during 12-hour prepare:
     /// ```yaml
     /// cache_checkpoint_interval_secs: 600
@@ -149,13 +149,13 @@ pub struct Config {
     /// Optional s3dlio optimization configuration (v0.8.63+, requires s3dlio v0.9.50+)
     /// Controls advanced s3dlio features via environment variables.
     /// These settings are applied automatically when the config is loaded.
-    /// 
+    ///
     /// **Key Features:**
     /// - Range download optimization: 76% faster for large objects (≥64 MB)
     /// - Multipart upload improvements: Automatic zero-copy optimizations
-    /// 
+    ///
     /// Default: None (s3dlio defaults apply - range optimization DISABLED)
-    /// 
+    ///
     /// Example:
     /// ```yaml
     /// s3dlio_optimization:
@@ -164,6 +164,31 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub s3dlio_optimization: Option<S3dlioOptimizationConfig>,
+
+    /// Credentials to forward to agent nodes (v0.8.92+).
+    ///
+    /// When `sai3bench-ctl` is invoked with `--env-file <path>` (or `--forward-env`),
+    /// it reads the allow-listed credential environment variables from that file and
+    /// embeds them here before serialising the config to send to each agent.  The agent
+    /// applies these key-value pairs to its own process environment before running the
+    /// workload or pre-flight validation.
+    ///
+    /// **Allowed key prefixes (hard-coded allow-list):**
+    /// - `AWS_*` — AWS SDK credentials and endpoint overrides
+    /// - `GOOGLE_APPLICATION_CREDENTIALS` — GCP service-account key path
+    /// - `AZURE_STORAGE_*` — Azure Blob Storage credentials
+    ///
+    /// **Security notes:**
+    /// - This field is **skipped when empty** (`skip_serializing_if`), so it never
+    ///   appears in user-written YAML config files.
+    /// - Credentials travel inside the gRPC `config_yaml` field.  Enable TLS
+    ///   (`--tls`) when operating over untrusted networks.
+    /// - Key names (never values) are logged at `info` level for audit purposes.
+    ///
+    /// Users should NOT set this field manually in their YAML files; use
+    /// `--env-file` on the controller command line instead.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub distributed_env: std::collections::HashMap<String, String>,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -175,15 +200,15 @@ fn default_concurrency() -> usize {
 }
 
 pub fn default_cache_checkpoint_interval() -> u64 {
-    300  // 5 minutes - protects long-running prepares from data loss
+    300 // 5 minutes - protects long-running prepares from data loss
 }
 
 fn default_enable_metadata_cache() -> bool {
-    true  // Enabled by default — preserves backward compatibility
+    true // Enabled by default — preserves backward compatibility
 }
 
 /// Error handling configuration (v0.8.0+)
-/// 
+///
 /// I/O errors are expected during benchmarking (network failures, timeouts, etc.)
 /// This configuration controls when the workload should abort vs. continue.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -192,52 +217,51 @@ pub struct ErrorHandlingConfig {
     /// Default: 100
     #[serde(default = "default_max_errors")]
     pub max_total_errors: u64,
-    
+
     /// Error rate threshold (errors per second) to trigger backoff
     /// When this rate is exceeded, workload backs off for backoff_duration
     /// Default: 5.0 (5 errors/second)
     #[serde(default = "default_error_rate_threshold")]
     pub error_rate_threshold: f64,
-    
+
     /// Duration to back off when error rate threshold is hit
     /// Default: 5 seconds
     #[serde(default = "default_backoff_duration", with = "humantime_serde")]
     pub backoff_duration: std::time::Duration,
-    
+
     /// Window for calculating error rate (seconds)
     /// Default: 1 second
     #[serde(default = "default_error_rate_window")]
     pub error_rate_window: f64,
-    
+
     /// Whether to retry failed operations or skip them
     /// Default: false (skip and continue)
     #[serde(default)]
     pub retry_on_error: bool,
-    
+
     /// Maximum retries per operation (only used if retry_on_error=true)
     /// Default: 3
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    
+
     // v0.8.13: Exponential backoff configuration for retries
-    
     /// Initial delay before first retry (milliseconds)
     /// Default: 100ms
     #[serde(default = "default_initial_retry_delay_ms")]
     pub initial_retry_delay_ms: u64,
-    
+
     /// Maximum delay between retries (milliseconds)
     /// Caps exponential growth to prevent excessive waits
     /// Default: 5000ms (5 seconds)
     #[serde(default = "default_max_retry_delay_ms")]
     pub max_retry_delay_ms: u64,
-    
+
     /// Multiplier for exponential backoff (delay * multiplier each retry)
     /// 2.0 means delay doubles: 100ms -> 200ms -> 400ms -> 800ms
     /// Default: 2.0
     #[serde(default = "default_retry_backoff_multiplier")]
     pub retry_backoff_multiplier: f64,
-    
+
     /// Jitter factor for retry delays (0.0 = no jitter, 1.0 = full jitter)
     /// Adds randomness to prevent thundering herd on retries
     /// Default: 0.25 (25% jitter)
@@ -299,10 +323,10 @@ fn default_retry_jitter_factor() -> f64 {
 }
 
 /// Performance log configuration for time-series metrics capture (v0.8.15+)
-/// 
+///
 /// Captures aggregate performance metrics at regular intervals for analysis
 /// of how performance changes over the duration of a workload.
-/// 
+///
 /// In distributed mode, perf_log.tsv is always written to the results directory,
 /// so the path field is optional and ignored.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -313,7 +337,7 @@ pub struct PerfLogConfig {
     /// If path ends with .zst, output will be zstd-compressed
     #[serde(default)]
     pub path: Option<std::path::PathBuf>,
-    
+
     /// Sampling interval for metrics capture (e.g., "1s", "5s", "10s")
     /// Default: 1 second
     #[serde(default = "default_perf_log_interval", with = "humantime_serde")]
@@ -325,13 +349,13 @@ fn default_perf_log_interval() -> std::time::Duration {
 }
 
 /// Multi-endpoint configuration for load balancing across multiple storage endpoints (v0.8.22+)
-/// 
+///
 /// Enables distributing I/O operations across multiple storage endpoints for improved
 /// performance and bandwidth utilization. Particularly useful for:
 /// - Multi-NIC storage systems (VAST, Weka, etc.)
 /// - Distributed object storage (multiple S3 endpoints, MinIO clusters)
 /// - Multi-mount NFS with identical namespaces
-/// 
+///
 /// Example use case: 4 test hosts, each targeting 2 of 8 storage IPs
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MultiEndpointConfig {
@@ -340,7 +364,7 @@ pub struct MultiEndpointConfig {
     /// - least_connections: Route to endpoint with fewest active requests (adaptive)
     #[serde(default = "default_load_balance_strategy")]
     pub strategy: String,
-    
+
     /// List of endpoint URIs to load balance across
     /// All endpoints must present identical namespace (same files accessible from each)
     /// Examples:
@@ -355,7 +379,7 @@ fn default_load_balance_strategy() -> String {
 }
 
 /// Custom serde module for Option<Duration> with humantime parsing
-/// 
+///
 /// This allows YAML like:
 ///   warmup_period: 30s
 ///   warmup_period: 2m
@@ -363,7 +387,7 @@ fn default_load_balance_strategy() -> String {
 mod humantime_serde_opt {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
-    
+
     pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -373,18 +397,16 @@ mod humantime_serde_opt {
             None => serializer.serialize_none(),
         }
     }
-    
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let opt: Option<String> = Option::deserialize(deserializer)?;
         match opt {
-            Some(s) => {
-                humantime::parse_duration(&s)
-                    .map(Some)
-                    .map_err(serde::de::Error::custom)
-            }
+            Some(s) => humantime::parse_duration(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
             None => Ok(None),
         }
     }
@@ -397,7 +419,7 @@ pub enum ProcessingMode {
     /// Multiple OS processes (true isolation, pipes for IPC)
     /// Better for: kernel contention measurement, production simulation
     MultiProcess,
-    
+
     /// Multiple tokio runtimes in single process (cleaner, native channels)
     /// Better for: simplicity, debugging, when OS-level isolation not needed
     #[default]
@@ -407,11 +429,11 @@ pub enum ProcessingMode {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeightedOp {
     pub weight: u32,
-    
+
     /// Optional per-operation concurrency override (v0.5.3+)
     #[serde(default)]
     pub concurrency: Option<usize>,
-    
+
     #[serde(flatten)]
     pub spec: OpSpec,
 }
@@ -421,9 +443,9 @@ pub struct WeightedOp {
 pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
     /// Can be absolute URI (s3://bucket/key) or relative path (data/file.txt) when target is set.
-    Get { 
+    Get {
         path: String,
-        
+
         /// Use multi-endpoint configuration for load balancing (v0.8.22+)
         /// When true, operations are distributed across all configured endpoints
         /// Default: false (use path directly as single endpoint)
@@ -433,34 +455,34 @@ pub enum OpSpec {
 
     /// PUT objects with configurable sizes.
     /// Uses 'path' relative to target, or absolute URI.
-    /// 
+    ///
     /// Supports two syntaxes:
     /// 1. Fixed size (backward compatible):
     ///    Put { path: "data/", object_size: 1048576 }
-    /// 
+    ///
     /// 2. Size distribution (v0.5.3+):
     ///    Put { path: "data/", size_distribution: { type: "lognormal", mean: 1048576, ... } }
     Put {
         path: String,
-        
+
         /// Fixed object size in bytes (backward compatible)
         #[serde(default)]
         object_size: Option<u64>,
-        
+
         /// Size distribution specification (v0.5.3+)
         #[serde(default, alias = "size_distribution")]
         size_spec: Option<SizeSpec>,
-        
+
         /// Deduplication factor: 1 = all unique blocks, 2 = 1/2 unique, 3 = 1/3 unique, etc.
         /// Controls block-level deduplication ratio for generated data (v0.5.3+)
         #[serde(default = "default_dedup_factor")]
         dedup_factor: usize,
-        
+
         /// Compression factor: 1 = random (uncompressible), 2 = 2:1 ratio, 3 = 3:1 ratio, etc.
         /// Controls compressibility of generated data (v0.5.3+)
         #[serde(default = "default_compress_factor")]
         compress_factor: usize,
-        
+
         /// Use multi-endpoint configuration for load balancing (v0.8.22+)
         /// When true, operations are distributed across all configured endpoints
         /// Default: false (use path directly as single endpoint)
@@ -472,7 +494,7 @@ pub enum OpSpec {
     /// Uses 'path' relative to target, or absolute URI.
     List {
         path: String,
-        
+
         /// Use multi-endpoint configuration for load balancing (v0.8.22+)
         /// When true, operations are distributed across all configured endpoints
         /// Default: false (use path directly as single endpoint)
@@ -484,7 +506,7 @@ pub enum OpSpec {
     /// Uses 'path' relative to target, or absolute URI.
     Stat {
         path: String,
-        
+
         /// Use multi-endpoint configuration for load balancing (v0.8.22+)
         /// When true, operations are distributed across all configured endpoints
         /// Default: false (use path directly as single endpoint)
@@ -496,7 +518,7 @@ pub enum OpSpec {
     /// Uses 'path' relative to target, or absolute URI.
     Delete {
         path: String,
-        
+
         /// Use multi-endpoint configuration for load balancing (v0.8.22+)
         /// When true, operations are distributed across all configured endpoints
         /// Default: false (use path directly as single endpoint)
@@ -507,9 +529,7 @@ pub enum OpSpec {
     /// MKDIR - Create a directory (filesystem backends only).
     /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
     /// Creates parent directories as needed (like mkdir -p).
-    Mkdir {
-        path: String,
-    },
+    Mkdir { path: String },
 
     /// RMDIR - Remove a directory (filesystem backends only).
     /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
@@ -530,15 +550,14 @@ pub enum PrepareStrategy {
     /// Default behavior: predictable, separate progress bars per size
     #[default]
     Sequential,
-    
+
     /// Process all ensure_objects entries in parallel (all sizes interleaved)
     /// Better throughput: unified progress bar, better storage pipeline utilization
     Parallel,
 }
 
-
 /// Cleanup error handling mode (v0.8.7+)
-/// 
+///
 /// Controls how cleanup handles objects that are already deleted or missing.
 /// This is important for resuming interrupted cleanup operations.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -548,19 +567,18 @@ pub enum CleanupMode {
     /// Strict mode: Report errors for any failed deletion
     /// Best for: First-time cleanup where all objects should exist
     Strict,
-    
+
     /// Tolerant mode: Ignore "not found" errors, report other errors
     /// Best for: Resuming interrupted cleanup operations
     /// Objects that were already deleted will be silently skipped
     #[default]
     Tolerant,
-    
+
     /// Best-effort mode: Ignore all deletion errors
     /// Best for: Cleanup after test failures where object state is uncertain
     /// All errors are logged as warnings but don't affect cleanup success
     BestEffort,
 }
-
 
 /// Prepare configuration for pre-populating objects before testing
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -568,42 +586,45 @@ pub struct PrepareConfig {
     /// Objects to ensure exist before test
     #[serde(default)]
     pub ensure_objects: Vec<EnsureSpec>,
-    
+
     /// Whether to cleanup prepared objects after test
     #[serde(default)]
     pub cleanup: bool,
-    
+
     /// Skip workload and only run cleanup (v0.8.7+)
     /// When true, skips prepare and workload phases, only performs cleanup
     /// Used for resuming interrupted cleanup operations or cleaning up after manual testing
     /// Default: false (run normal prepare -> workload -> cleanup sequence)
     #[serde(default)]
     pub cleanup_only: Option<bool>,
-    
+
     /// Delay in seconds after prepare phase completes (for cloud storage eventual consistency)
     /// Default: 0 (no delay). Recommended: 2-5 seconds for cloud storage (GCS, S3, Azure)
     /// Supports time units: "5s", "2m", "1h" (or plain seconds: 300)
-    #[serde(default, deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub post_prepare_delay: u64,
-    
+
     /// Optional directory tree structure (rdf-bench style width/depth model)
     /// When specified, creates deterministic hierarchical directory structure before workload
     #[serde(default)]
     pub directory_structure: Option<crate::directory_tree::DirectoryStructureConfig>,
-    
+
     /// Strategy for executing prepare phase (v0.7.2+)
     /// - sequential: Process each ensure_objects entry one at a time (default, backward compatible)
     /// - parallel: Interleave all ensure_objects entries for maximum throughput
     #[serde(default)]
     pub prepare_strategy: PrepareStrategy,
-    
+
     /// Skip verification of directory tree structure (v0.7.8+)
     /// When true, assumes all files exist and skips the listing verification step
     /// Use this for faster startup when you know the directory structure is complete
     /// Default: false (always verify and create missing files)
     #[serde(default)]
     pub skip_verification: bool,
-    
+
     /// Force overwrite all files regardless of existence (v0.8.24+)
     /// When true, creates all files even if skip_verification=true
     /// Use this to regenerate all data, overwriting partial/corrupted datasets
@@ -611,7 +632,7 @@ pub struct PrepareConfig {
     /// Default: false
     #[serde(default)]
     pub force_overwrite: bool,
-    
+
     /// Cleanup error handling mode (v0.8.7+)
     /// Controls how cleanup handles objects that are already deleted or missing
     /// Default: tolerant (allows resuming interrupted cleanup operations)
@@ -624,45 +645,45 @@ pub struct PrepareConfig {
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
     /// When use_multi_endpoint=true, this provides the path component only (after the endpoint)
-    /// 
+    ///
     /// **Optional in Isolated Mode**: When tree_creation_mode=isolated and use_multi_endpoint=true,
     /// base_uri can be omitted. In this case, each agent will use the first URI from its
     /// multi_endpoint configuration for prepare/listing operations.
     #[serde(default)]
     pub base_uri: Option<String>,
-    
+
     /// Use multi-endpoint configuration for object creation (v0.8.22+)
     /// When true, objects are distributed across all configured endpoints
     /// This is CRITICAL for performance when endpoints represent different network paths
     /// Default: false (use base_uri directly)
     #[serde(default)]
     pub use_multi_endpoint: bool,
-    
+
     /// Target number of objects to ensure exist
     #[serde(deserialize_with = "crate::serde_helpers::deserialize_u64_with_separators")]
     pub count: u64,
-    
+
     /// Minimum object size in bytes (deprecated - use size_distribution)
     #[serde(default)]
     pub min_size: Option<u64>,
-    
+
     /// Maximum object size in bytes (deprecated - use size_distribution)
     #[serde(default)]
     pub max_size: Option<u64>,
-    
+
     /// Size distribution specification (v0.5.3+, preferred)
     #[serde(default, alias = "size_distribution")]
     pub size_spec: Option<SizeSpec>,
-    
+
     /// Fill pattern: "zero", "random", or "prand" (pseudo-random, faster)
     #[serde(default = "default_fill")]
     pub fill: FillPattern,
-    
+
     /// Deduplication factor (v0.5.3+): 1 = all unique, 2 = 1/2 unique, 3 = 1/3 unique, etc.
     /// Only applies when using s3dlio-controlled data generation
     #[serde(default = "default_dedup_factor")]
     pub dedup_factor: usize,
-    
+
     /// Compression factor (v0.5.3+): 1 = uncompressible (random), 2 = 2:1, 3 = 3:1, etc.
     /// Controls the ratio of constant (zero) bytes to random bytes
     #[serde(default = "default_compress_factor")]
@@ -671,13 +692,13 @@ pub struct EnsureSpec {
 
 impl EnsureSpec {
     /// Get the effective base_uri for this agent
-    /// 
+    ///
     /// In isolated mode with multi_endpoint, if base_uri is None, this will use the first
     /// URI from the provided multi_endpoint_uris (the agent's own endpoints).
-    /// 
+    ///
     /// # Arguments
     /// * `multi_endpoint_uris` - Optional list of URIs from agent's multi_endpoint config
-    /// 
+    ///
     /// # Returns
     /// Ok(uri) if a valid base_uri can be determined, Err otherwise
     pub fn get_base_uri(&self, multi_endpoint_uris: Option<&[String]>) -> anyhow::Result<String> {
@@ -699,11 +720,11 @@ impl EnsureSpec {
             anyhow::bail!("base_uri is required when use_multi_endpoint=false")
         }
     }
-    
+
     /// Get the size specification, converting legacy min/max_size if needed
     pub fn get_size_spec(&self) -> SizeSpec {
-        use crate::size_generator::{SizeDistribution, DistributionType, DistributionParams};
-        
+        use crate::size_generator::{DistributionParams, DistributionType, SizeDistribution};
+
         if let Some(ref spec) = self.size_spec {
             // New syntax
             spec.clone()
@@ -711,7 +732,7 @@ impl EnsureSpec {
             // Backward compatibility: convert min_size/max_size to uniform distribution
             let min = self.min_size.unwrap_or(default_min_size());
             let max = self.max_size.unwrap_or(default_max_size());
-            
+
             if min == max {
                 // Fixed size
                 SizeSpec::Fixed(min)
@@ -736,19 +757,19 @@ impl EnsureSpec {
 pub enum FillPattern {
     Zero,
     Random,
-    Prand,  // Pseudo-random (alias for Random; formerly used s3dlio::fill_controlled_data)
+    Prand, // Pseudo-random (alias for Random; formerly used s3dlio::fill_controlled_data)
 }
 
-fn default_min_size() -> u64 { 
+fn default_min_size() -> u64 {
     crate::constants::DEFAULT_MIN_SIZE
 }
 
-fn default_max_size() -> u64 { 
+fn default_max_size() -> u64 {
     crate::constants::DEFAULT_MAX_SIZE
 }
 
-fn default_fill() -> FillPattern { 
-    FillPattern::Random 
+fn default_fill() -> FillPattern {
+    FillPattern::Random
 }
 
 fn default_dedup_factor() -> usize {
@@ -795,9 +816,14 @@ impl Config {
     /// For backward compatibility with code expecting a fixed size
     pub fn get_put_info(&self, put_op: &OpSpec) -> (String, u64) {
         match put_op {
-            OpSpec::Put { path, object_size, size_spec, .. } => {
+            OpSpec::Put {
+                path,
+                object_size,
+                size_spec,
+                ..
+            } => {
                 let base_uri = self.resolve_uri(path);
-                
+
                 // Backward compatibility: prefer object_size if specified
                 let size = if let Some(sz) = object_size {
                     *sz
@@ -812,20 +838,25 @@ impl Config {
                 } else {
                     panic!("PUT operation must specify either object_size or size_spec");
                 };
-                
+
                 (base_uri, size)
             }
             _ => panic!("Expected PUT operation"),
         }
     }
-    
+
     /// Get the resolved PUT target and size specification (v0.5.3+)
     /// Returns (base_uri, SizeSpec) for use with SizeGenerator
     pub fn get_put_size_spec(&self, put_op: &OpSpec) -> (String, SizeSpec) {
         match put_op {
-            OpSpec::Put { path, object_size, size_spec, .. } => {
+            OpSpec::Put {
+                path,
+                object_size,
+                size_spec,
+                ..
+            } => {
                 let base_uri = self.resolve_uri(path);
-                
+
                 // Backward compatibility: convert object_size to SizeSpec::Fixed
                 let spec = if let Some(spec) = size_spec {
                     spec.clone()
@@ -834,7 +865,7 @@ impl Config {
                 } else {
                     panic!("PUT operation must specify either object_size or size_spec");
                 };
-                
+
                 (base_uri, spec)
             }
             _ => panic!("Expected PUT operation"),
@@ -844,36 +875,34 @@ impl Config {
     /// Get the resolved URI for a metadata operation (List, Stat, Delete, Mkdir, Rmdir)
     pub fn get_meta_uri(&self, meta_op: &OpSpec) -> String {
         match meta_op {
-            OpSpec::List { path, .. } 
-            | OpSpec::Stat { path, .. } 
+            OpSpec::List { path, .. }
+            | OpSpec::Stat { path, .. }
             | OpSpec::Delete { path, .. }
             | OpSpec::Mkdir { path }
-            | OpSpec::Rmdir { path, .. } => {
-                self.resolve_uri(path)
-            }
+            | OpSpec::Rmdir { path, .. } => self.resolve_uri(path),
             _ => panic!("Expected metadata operation"),
         }
     }
 
     /// Apply agent-specific path prefix to all operations for distributed execution.
     /// This enables per-agent path isolation to prevent conflicts between agents.
-    /// 
+    ///
     /// For SHARED storage (S3, GCS, Azure): Only applies prefix to target, NOT to prepare config.
     /// This allows all agents to use the same prepared dataset.
-    /// 
+    ///
     /// For LOCAL storage (file://, direct://): Applies prefix to both target AND prepare config.
     /// Each agent prepares and uses its own isolated dataset.
-    /// 
+    ///
     /// # Arguments
     /// * `agent_id` - Unique identifier for this agent (e.g., "agent-1")
     /// * `prefix` - Path prefix to apply (e.g., "agent-1/")
     /// * `shared_storage` - True if storage is shared (S3/GCS/Azure), false if local per-agent
-    /// 
+    ///
     /// # Example
     /// ```
     /// # use sai3_bench::config::Config;
     /// # use serde_yaml;
-    /// 
+    ///
     /// // Shared storage example:
     /// let yaml = r#"
     /// target: "s3://bucket/bench/"
@@ -887,10 +916,15 @@ impl Config {
     /// config.apply_agent_prefix("agent-1", "agent-1/", true).unwrap();
     /// assert_eq!(config.target.unwrap(), "s3://bucket/bench/agent-1/");
     /// ```
-    pub fn apply_agent_prefix(&mut self, _agent_id: &str, prefix: &str, shared_storage: bool) -> anyhow::Result<()> {
+    pub fn apply_agent_prefix(
+        &mut self,
+        _agent_id: &str,
+        prefix: &str,
+        shared_storage: bool,
+    ) -> anyhow::Result<()> {
         // Store original target for prepare base_uri rewriting
         let original_target = self.target.clone();
-        
+
         // Apply prefix to base target if set
         if let Some(ref target) = self.target {
             self.target = Some(join_uri_path(target, prefix)?);
@@ -907,14 +941,17 @@ impl Config {
                 // For local storage, we need to update prepare base_uris to match the modified target
                 // The prepare base_uri might be an absolute URI that extends the target path
                 // We need to insert the prefix at the same location where we modified the target
-                if let (Some(ref new_target), Some(ref orig_target)) = (&self.target, &original_target) {
+                if let (Some(ref new_target), Some(ref orig_target)) =
+                    (&self.target, &original_target)
+                {
                     for ensure_spec in &mut prepare.ensure_objects {
                         // If base_uri is None, skip modification (it will use first multi_endpoint)
                         if let Some(ref base_uri_str) = ensure_spec.base_uri {
                             // If base_uri starts with the original target, replace it with the new target
                             if base_uri_str.starts_with(orig_target) {
                                 let relative_path = &base_uri_str[orig_target.len()..];
-                                ensure_spec.base_uri = Some(format!("{}{}", new_target, relative_path));
+                                ensure_spec.base_uri =
+                                    Some(format!("{}{}", new_target, relative_path));
                             } else {
                                 // Otherwise, just append the prefix (shouldn't happen in normal configs)
                                 ensure_spec.base_uri = Some(join_uri_path(base_uri_str, prefix)?);
@@ -947,18 +984,27 @@ impl Config {
     ///
     /// Non-GCS targets (`s3://`, `az://`, `file://`, …): no-op.
     pub fn apply_gcs_defaults(&mut self) {
-        let target_is_gcs = self.target.as_deref()
+        let target_is_gcs = self
+            .target
+            .as_deref()
             .map(|t| t.starts_with("gs://") || t.starts_with("gcs://"))
             .unwrap_or(false)
-            || self.multi_endpoint.as_ref()
-                .map(|me| me.endpoints.iter().any(|e| e.starts_with("gs://") || e.starts_with("gcs://")))
+            || self
+                .multi_endpoint
+                .as_ref()
+                .map(|me| {
+                    me.endpoints
+                        .iter()
+                        .any(|e| e.starts_with("gs://") || e.starts_with("gcs://"))
+                })
                 .unwrap_or(false);
 
         if !target_is_gcs {
             return;
         }
 
-        let explicit_channels = self.s3dlio_optimization
+        let explicit_channels = self
+            .s3dlio_optimization
             .as_ref()
             .and_then(|o| o.gcs_channel_count);
 
@@ -976,7 +1022,7 @@ impl Config {
 }
 
 /// Join a base URI with a path suffix, handling different URI schemes properly.
-/// 
+///
 /// # Examples
 /// - `join_uri_path("s3://bucket/base/", "agent-1/")` → `"s3://bucket/base/agent-1/"`
 /// - `join_uri_path("file:///tmp/test/", "agent-1/")` → `"file:///tmp/test/agent-1/"`
@@ -990,18 +1036,21 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
     if let Some(scheme_end) = base.find("://") {
         let scheme = &base[..scheme_end + 3]; // Include "://"
         let path = &base[scheme_end + 3..];
-        
+
         // Ensure path ends with / before appending suffix
         let normalized_path = if path.is_empty() || path.ends_with('/') {
             path.to_string()
         } else {
             format!("{}/", path)
         };
-        
+
         // Ensure suffix doesn't start with / (would create double slash)
         let normalized_suffix = suffix.trim_start_matches('/');
-        
-        Ok(format!("{}{}{}", scheme, normalized_path, normalized_suffix))
+
+        Ok(format!(
+            "{}{}{}",
+            scheme, normalized_path, normalized_suffix
+        ))
     } else {
         // Relative path (no scheme)
         let normalized_base = if base.is_empty() || base.ends_with('/') {
@@ -1009,29 +1058,29 @@ fn join_uri_path(base: &str, suffix: &str) -> anyhow::Result<String> {
         } else {
             format!("{}/", base)
         };
-        
+
         let normalized_suffix = suffix.trim_start_matches('/');
         Ok(format!("{}{}", normalized_base, normalized_suffix))
     }
 }
 
 /// RangeEngine configuration for controlling concurrent range downloads (v0.9.4+)
-/// 
+///
 /// RangeEngine splits large file downloads into concurrent HTTP range requests,
 /// hiding network latency through parallelism. However, it adds HEAD request
 /// overhead to check file sizes on every GET operation.
-/// 
+///
 /// **Performance Impact:**
 /// - Small files (<16 MiB): HEAD overhead outweighs benefits - net SLOWER
 /// - Medium files (16-64 MiB): Marginal benefit, often still slower
 /// - Large files (>64 MiB): 30-50% faster on high-latency networks
-/// 
+///
 /// **Default: DISABLED** (false) based on production benchmarks showing 20-25%
 /// regression on typical workloads (1 MiB objects on GCS). Only enable if:
 /// - Your workload has primarily large files (>64 MiB)
 /// - Network latency is high (>100ms)
 /// - High bandwidth available (>1 Gbps)
-/// 
+///
 /// When enabled, set min_split_size to at least 16 MiB to avoid overhead.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RangeEngineConfig {
@@ -1039,7 +1088,7 @@ pub struct RangeEngineConfig {
     /// Default: false (disabled) - avoids HEAD overhead on typical workloads
     #[serde(default = "default_range_engine_enabled")]
     pub enabled: bool,
-    
+
     /// Size of each concurrent range request in bytes
     /// Default: 67108864 (64 MiB)
     /// - Larger chunks: Fewer requests, less overhead, but less parallelism
@@ -1048,7 +1097,7 @@ pub struct RangeEngineConfig {
     /// Recommended: 32-128 MiB depending on network speed
     #[serde(default = "default_chunk_size")]
     pub chunk_size: u64,
-    
+
     /// Maximum number of concurrent range requests
     /// Default: 16
     /// - Higher values: More parallelism for high-bandwidth networks (>1 Gbps)
@@ -1057,20 +1106,20 @@ pub struct RangeEngineConfig {
     /// Recommended: 8-32 depending on network capacity
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_ranges: usize,
-    
+
     /// Minimum file size to trigger RangeEngine (in bytes)
     /// Default: 16777216 (16 MiB) - matches s3dlio library default
     /// Files smaller than this use simple sequential downloads
-    /// 
+    ///
     /// **Performance Note**: Production benchmarks show HEAD overhead makes
     /// RangeEngine slower for files <16 MiB. Only lower this if you have:
     /// - Verified performance benefit on your specific workload
     /// - Very high network latency (>200ms) where parallelism helps
-    /// 
+    ///
     /// Recommended: 16-64 MiB for typical cloud storage workloads
     #[serde(default = "default_min_split_size")]
     pub min_split_size: u64,
-    
+
     /// Timeout for each range request in seconds
     /// Default: 30 seconds
     /// Increase for slow or unstable networks
@@ -1079,7 +1128,7 @@ pub struct RangeEngineConfig {
 }
 
 fn default_range_engine_enabled() -> bool {
-    false  // Disabled by default - avoids 20-25% regression on typical workloads
+    false // Disabled by default - avoids 20-25% regression on typical workloads
 }
 
 fn default_chunk_size() -> u64 {
@@ -1099,50 +1148,50 @@ fn default_range_timeout_secs() -> u64 {
 }
 
 /// s3dlio optimization configuration (v0.8.63+, requires s3dlio v0.9.50+)
-/// 
+///
 /// Controls advanced s3dlio performance features via environment variables.
 /// These settings are converted to environment variables (S3DLIO_*) when the config is loaded,
 /// allowing you to configure s3dlio optimizations directly in your YAML files.
-/// 
+///
 /// **Key Features**:
 /// - **Range downloads**: Parallel range requests for large objects (76% faster for ≥64 MB)
 /// - **Multipart uploads**: Zero-copy chunking (automatic, no configuration needed)
-/// 
+///
 /// **Performance Benchmark** (16× 148 MB objects, MinIO):
 /// - Without optimization: 429 MB/s (5.52s)
 /// - With optimization (64 MB threshold): 755 MB/s (3.14s) - **76% faster**
-/// 
+///
 /// **When to Enable Range Downloads**:
 /// - ✅ Large objects (≥64 MB typical, ≥128 MB for very large)
 /// - ✅ Cross-region downloads (high latency)
 /// - ✅ Throttled connections
 /// - ✅ Workloads dominated by large file GET operations
-/// 
+///
 /// **When to Disable**:
 /// - ❌ Small files (< 64 MB) - adds HEAD request overhead
 /// - ❌ Same-region high-bandwidth (coordination overhead may dominate)
 /// - ❌ PUT-heavy workloads
 /// - ❌ HEAD requests are rate-limited
-/// 
+///
 /// **Example YAML**:
 /// ```yaml
 /// target: "s3://my-bucket/large-files/"
 /// duration: 300s
 /// concurrency: 16
-/// 
+///
 /// # Enable s3dlio optimizations
 /// s3dlio_optimization:
 ///   enable_range_downloads: true   # Enable parallel range requests
 ///   range_threshold_mb: 64          # Only for objects ≥64 MB (recommended)
 ///   # range_concurrency: 16         # Optional: Override auto-calculated concurrency
 ///   # chunk_size_mb: 4              # Optional: Override auto-calculated chunk size
-/// 
+///
 /// workload:
 ///   - op: get
 ///     path: "data/*"
 ///     weight: 80
 /// ```
-/// 
+///
 /// **Environment Variables Set**:
 /// - `S3DLIO_ENABLE_RANGE_OPTIMIZATION`: "1" if enable_range_downloads is true
 /// - `S3DLIO_RANGE_THRESHOLD_MB`: Threshold in MB (default: 64)
@@ -1151,60 +1200,59 @@ fn default_range_timeout_secs() -> u64 {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct S3dlioOptimizationConfig {
     /// Enable parallel range downloads for large objects (v0.9.50+)
-    /// 
+    ///
     /// When enabled, objects ≥ range_threshold_mb are downloaded using concurrent range requests
     /// instead of a single sequential GET. This provides significant speedups (50-76%) for
     /// large objects, especially in high-latency or cross-region scenarios.
-    /// 
+    ///
     /// **Performance Impact**:
     /// - 64 MB threshold: +76% throughput (429 → 755 MB/s)
     /// - 32 MB threshold: +71% throughput
     /// - 16 MB threshold: +69% throughput
-    /// 
+    ///
     /// **Overhead**: Adds one HEAD request per object to determine size.
     /// Only enable if your workload includes many objects ≥ threshold size.
-    /// 
+    ///
     /// Default: false (disabled to avoid HEAD overhead on typical workloads)
     #[serde(default)]
     pub enable_range_downloads: bool,
-    
+
     /// Threshold in MB for when to use parallel range downloads
     /// Objects smaller than this use simple sequential downloads.
-    /// 
+    ///
     /// **Recommended values**:
     /// - 64 MB: Best balance (76% improvement, low overhead risk)
     /// - 128 MB: Very conservative (only huge files)
     /// - 32 MB: Moderate (71% improvement, some overhead for 32-64 MB files)
     /// - 16 MB: Aggressive (69% improvement, higher overhead for 16-32 MB files)
-    /// 
+    ///
     /// Default: 64 MB (optimal for most workloads)
     #[serde(default = "default_s3dlio_range_threshold_mb")]
     pub range_threshold_mb: u64,
-    
+
     /// Optional: Number of concurrent range requests
     /// If not specified, s3dlio auto-calculates based on object size (8-32 typical).
-    /// 
+    ///
     /// **Tuning**:
     /// - Higher values (32+): Better for high-bandwidth, low-latency networks
     /// - Lower values (8-16): Better for bandwidth-limited or high-latency scenarios
-    /// 
+    ///
     /// Default: None (auto-calculated by s3dlio)
     #[serde(default)]
     pub range_concurrency: Option<usize>,
-    
+
     /// Optional: Chunk size in MB for each range request
     /// If not specified, s3dlio auto-calculates based on object size (1-8 MB typical).
-    /// 
+    ///
     /// **Tuning**:
     /// - Larger chunks (8+ MB): Fewer requests, less coordination overhead
     /// - Smaller chunks (1-2 MB): More parallelism, better for very high latency
-    /// 
+    ///
     /// Default: None (auto-calculated by s3dlio)
     #[serde(default)]
     pub chunk_size_mb: Option<u64>,
 
     // ── GCS-specific settings ─────────────────────────────────────────────────
-
     /// GCS: gRPC subchannel count override (v0.9.65+, requires s3dlio ≥ 0.9.65)
     ///
     /// Sets the number of gRPC subchannels (independent HTTP/2 connections) used
@@ -1270,10 +1318,106 @@ pub struct S3dlioOptimizationConfig {
     /// `GCS_PROJECT` environment variables (existing behaviour).
     #[serde(default)]
     pub gcs_project: Option<String>,
+
+    // ── HTTP/2 (h2c) settings ─────────────────────────────────────────────────
+    /// Enable HTTP/2 cleartext (h2c) for `http://` endpoints (v0.9.90+)
+    ///
+    /// Sets `S3DLIO_H2C`.  Only meaningful for storage endpoints accessed via
+    /// plain `http://`; `https://` endpoints negotiate HTTP/2 automatically via
+    /// TLS ALPN and are unaffected.
+    ///
+    /// - `true`  — force h2c prior-knowledge (no HTTP/1.1 fallback)
+    /// - `false` — always HTTP/1.1, skip the auto-probe
+    /// - absent  — auto-probe: try h2c on first connection, fall back if refused
+    ///
+    /// Required before the h2_* window settings below have any effect.
+    #[serde(default)]
+    pub h2c: Option<bool>,
+
+    /// HTTP/2 adaptive flow-control window (BDP estimator) (v0.9.90+)
+    ///
+    /// Sets `S3DLIO_H2_ADAPTIVE_WINDOW`.  Only active when `h2c: true`.
+    ///
+    /// When `true` (default), hyper sends H2 PING frames, measures RTT, computes
+    /// `BDP = throughput × RTT`, and issues WINDOW_UPDATE to keep the window ≥ BDP.
+    /// This self-tunes from 64 KB up to hundreds of MiB with no manual input.
+    ///
+    /// **When `true`, the two static window fields below are ignored entirely.**
+    ///
+    /// Set to `false` for reproducible benchmarks where you want fixed window sizes.
+    #[serde(default)]
+    pub h2_adaptive_window: Option<bool>,
+
+    /// HTTP/2 per-stream flow-control window in MiB (v0.9.90+)
+    ///
+    /// Sets `S3DLIO_H2_STREAM_WINDOW_MB`.  Static mode only (`h2_adaptive_window: false`).
+    ///
+    /// Controls how much response data the server may send on a single H2 stream before
+    /// we must issue WINDOW_UPDATE.  The H2 spec default is 64 KB — far too small for
+    /// high-throughput storage I/O.  Clamped to 256 MiB maximum.
+    ///
+    /// When absent, defaults to the s3dlio default (4 MiB).
+    #[serde(default)]
+    pub h2_stream_window_mb: Option<u32>,
+
+    /// HTTP/2 connection-level flow-control window in MiB (v0.9.90+)
+    ///
+    /// Sets `S3DLIO_H2_CONN_WINDOW_MB`.  Static mode only (`h2_adaptive_window: false`).
+    ///
+    /// Aggregate receive budget across all concurrent H2 streams on one TCP connection.
+    /// Must be ≥ `h2_stream_window_mb` or the connection becomes the bottleneck.
+    /// Defaults to 4× `h2_stream_window_mb` when absent.  Clamped to 256 MiB maximum.
+    #[serde(default)]
+    pub h2_conn_window_mb: Option<u32>,
+
+    // ── Runtime thread counts ─────────────────────────────────────────────────
+    /// Thread count for the s3dlio global async runtime (v0.8.92)
+    ///
+    /// Sets `S3DLIO_RT_THREADS`.  The s3dlio library maintains an internal Tokio
+    /// runtime separate from the sai3-bench agent runtime.  By default it caps at
+    /// `min(num_cpus × 2, 32)`, which is far too low for high-concurrency S3 workloads.
+    ///
+    /// **Rule of thumb**: set this to at least your `concurrency` value.
+    /// For a 384-concurrency workload across 16 endpoints, 384 is a safe minimum.
+    ///
+    /// If absent and `auto_threads` (below) is `true`, this is derived automatically
+    /// from the `concurrency` field in the parent `Config` at apply time.
+    #[serde(default)]
+    pub s3dlio_rt_threads: Option<usize>,
+
+    /// Thread count for the sai3-bench agent's own Tokio runtime (v0.8.92)
+    ///
+    /// Corresponds to the `--worker-threads` CLI flag on `sai3bench-agent`.
+    /// **This field is informational only when sent via gRPC** — the agent Tokio
+    /// runtime is already running by the time the YAML config arrives.  Set the
+    /// `--worker-threads N` flag when starting the agent, or set the
+    /// `TOKIO_WORKER_THREADS` environment variable on each agent host.
+    ///
+    /// When this field is set in the YAML and the agent has not already set a thread
+    /// count, it is recorded in the perf-log header for observability.
+    ///
+    /// **Rule of thumb**: set to the same value as `s3dlio_rt_threads` (or
+    /// `concurrency`).  Default Tokio behaviour is `num_cpus` which on most servers
+    /// is 32–128 — usually sufficient for pure-async I/O but explicit is better.
+    #[serde(default)]
+    pub tokio_worker_threads: Option<usize>,
+
+    /// Auto-derive `s3dlio_rt_threads` from the parent `concurrency` if not set (v0.8.92)
+    ///
+    /// Default: `true`.  When `true` and `s3dlio_rt_threads` is absent, the apply()
+    /// method sets `S3DLIO_RT_THREADS = max(concurrency, current_s3dlio_default)`.
+    /// Set to `false` to disable auto-derivation and rely solely on the explicit
+    /// `s3dlio_rt_threads` field or the `S3DLIO_RT_THREADS` environment variable.
+    #[serde(default = "default_auto_threads")]
+    pub auto_threads: bool,
 }
 
 fn default_s3dlio_range_threshold_mb() -> u64 {
-    64  // 64 MB - optimal balance per benchmarks (76% improvement)
+    64 // 64 MB - optimal balance per benchmarks (76% improvement)
+}
+
+fn default_auto_threads() -> bool {
+    true
 }
 
 impl S3dlioOptimizationConfig {
@@ -1283,32 +1427,47 @@ impl S3dlioOptimizationConfig {
         // Set range optimization enable flag
         if self.enable_range_downloads {
             std::env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "1");
-            tracing::info!("Enabled s3dlio range download optimization (S3DLIO_ENABLE_RANGE_OPTIMIZATION=1)");
+            tracing::info!(
+                "Enabled s3dlio range download optimization (S3DLIO_ENABLE_RANGE_OPTIMIZATION=1)"
+            );
         } else {
             std::env::set_var("S3DLIO_ENABLE_RANGE_OPTIMIZATION", "0");
             tracing::debug!("s3dlio range download optimization disabled (default)");
         }
-        
+
         // Set threshold
-        std::env::set_var("S3DLIO_RANGE_THRESHOLD_MB", self.range_threshold_mb.to_string());
-        tracing::info!("Set s3dlio range threshold: {} MB (S3DLIO_RANGE_THRESHOLD_MB={})", 
-                      self.range_threshold_mb, self.range_threshold_mb);
-        
+        std::env::set_var(
+            "S3DLIO_RANGE_THRESHOLD_MB",
+            self.range_threshold_mb.to_string(),
+        );
+        tracing::info!(
+            "Set s3dlio range threshold: {} MB (S3DLIO_RANGE_THRESHOLD_MB={})",
+            self.range_threshold_mb,
+            self.range_threshold_mb
+        );
+
         // Set optional concurrency
         if let Some(concurrency) = self.range_concurrency {
             std::env::set_var("S3DLIO_RANGE_CONCURRENCY", concurrency.to_string());
-            tracing::info!("Set s3dlio range concurrency: {} (S3DLIO_RANGE_CONCURRENCY={})", 
-                          concurrency, concurrency);
+            tracing::info!(
+                "Set s3dlio range concurrency: {} (S3DLIO_RANGE_CONCURRENCY={})",
+                concurrency,
+                concurrency
+            );
         } else {
             tracing::debug!("Using s3dlio auto-calculated range concurrency");
         }
-        
+
         // Set optional chunk size (convert MB to bytes)
         if let Some(chunk_mb) = self.chunk_size_mb {
             let chunk_bytes = chunk_mb * 1024 * 1024;
             std::env::set_var("S3DLIO_CHUNK_SIZE", chunk_bytes.to_string());
-            tracing::info!("Set s3dlio chunk size: {} MB ({} bytes) (S3DLIO_CHUNK_SIZE={})", 
-                          chunk_mb, chunk_bytes, chunk_bytes);
+            tracing::info!(
+                "Set s3dlio chunk size: {} MB ({} bytes) (S3DLIO_CHUNK_SIZE={})",
+                chunk_mb,
+                chunk_bytes,
+                chunk_bytes
+            );
         } else {
             tracing::debug!("Using s3dlio auto-calculated chunk size");
         }
@@ -1318,7 +1477,10 @@ impl S3dlioOptimizationConfig {
         // Config::apply_gcs_defaults(), which also has access to concurrency.
         if let Some(n) = self.gcs_channel_count {
             s3dlio::set_gcs_channel_count(n);
-            tracing::info!("Set GCS gRPC channel count: {} (via set_gcs_channel_count)", n);
+            tracing::info!(
+                "Set GCS gRPC channel count: {} (via set_gcs_channel_count)",
+                n
+            );
         }
 
         // GCS: RAPID mode override
@@ -1338,37 +1500,153 @@ impl S3dlioOptimizationConfig {
         // GCS: write chunk size in bytes
         if let Some(bytes) = self.gcs_write_chunk_size_bytes {
             std::env::set_var("S3DLIO_GRPC_WRITE_CHUNK_SIZE", bytes.to_string());
-            tracing::info!("Set GCS write chunk size: {} bytes (S3DLIO_GRPC_WRITE_CHUNK_SIZE={})", bytes, bytes);
+            tracing::info!(
+                "Set GCS write chunk size: {} bytes (S3DLIO_GRPC_WRITE_CHUNK_SIZE={})",
+                bytes,
+                bytes
+            );
         }
 
         // GCS: project ID — YAML takes precedence over environment variable
         if let Some(ref project) = self.gcs_project {
             std::env::set_var("GOOGLE_CLOUD_PROJECT", project);
-            tracing::info!("Set GCS project: {} (via YAML -> GOOGLE_CLOUD_PROJECT)", project);
+            tracing::info!(
+                "Set GCS project: {} (via YAML -> GOOGLE_CLOUD_PROJECT)",
+                project
+            );
         } else {
             tracing::debug!("GCS project: using GOOGLE_CLOUD_PROJECT env var fallback");
         }
+
+        // ── HTTP/2 (h2c) settings ─────────────────────────────────────────────
+
+        if let Some(h2c) = self.h2c {
+            std::env::set_var("S3DLIO_H2C", if h2c { "1" } else { "0" });
+            tracing::info!(
+                "Set h2c mode: {} (S3DLIO_H2C={})",
+                h2c,
+                if h2c { "1" } else { "0" }
+            );
+        }
+
+        if let Some(adaptive) = self.h2_adaptive_window {
+            std::env::set_var(
+                "S3DLIO_H2_ADAPTIVE_WINDOW",
+                if adaptive { "1" } else { "0" },
+            );
+            tracing::info!(
+                "Set H2 adaptive window: {} (S3DLIO_H2_ADAPTIVE_WINDOW={})",
+                adaptive,
+                if adaptive { "1" } else { "0" }
+            );
+        }
+
+        if let Some(stream_mb) = self.h2_stream_window_mb {
+            std::env::set_var("S3DLIO_H2_STREAM_WINDOW_MB", stream_mb.to_string());
+            tracing::info!(
+                "Set H2 stream window: {} MiB (S3DLIO_H2_STREAM_WINDOW_MB={})",
+                stream_mb,
+                stream_mb
+            );
+        }
+
+        if let Some(conn_mb) = self.h2_conn_window_mb {
+            std::env::set_var("S3DLIO_H2_CONN_WINDOW_MB", conn_mb.to_string());
+            tracing::info!(
+                "Set H2 connection window: {} MiB (S3DLIO_H2_CONN_WINDOW_MB={})",
+                conn_mb,
+                conn_mb
+            );
+        }
+    }
+
+    /// Apply s3dlio runtime thread count, optionally auto-deriving from concurrency.
+    ///
+    /// Call this **before** any s3dlio operation so the global runtime is
+    /// initialised with the correct thread count.  The s3dlio global runtime is lazy
+    /// (initialised on first use), so setting `S3DLIO_RT_THREADS` here is effective
+    /// as long as no s3dlio call has been made yet.
+    ///
+    /// `concurrency` is the `Config.concurrency` value.
+    pub fn apply_thread_counts(&self, concurrency: usize) {
+        // Explicit YAML value takes precedence over auto-derivation and over the
+        // existing environment variable (YAML config is intentional, env var may
+        // be a stale leftover from a previous test session).
+        if let Some(explicit) = self.s3dlio_rt_threads {
+            std::env::set_var("S3DLIO_RT_THREADS", explicit.to_string());
+            tracing::info!(
+                "Set s3dlio runtime threads: {} (S3DLIO_RT_THREADS={}) [explicit YAML]",
+                explicit,
+                explicit
+            );
+            return;
+        }
+
+        // Auto-derive: if the env var is already set (e.g., by the operator on the
+        // agent host), respect it.
+        if std::env::var("S3DLIO_RT_THREADS").is_ok() {
+            tracing::debug!(
+                "S3DLIO_RT_THREADS already set in environment — skipping auto-derivation"
+            );
+            return;
+        }
+
+        if self.auto_threads && concurrency > 0 {
+            // The s3dlio global RT default caps at min(num_cpus*2, 32).
+            // For high-concurrency S3 workloads this is far too low.  Set it to
+            // `concurrency` so there is at least one RT thread per in-flight task.
+            // Add a small overhead factor (1.5×) to absorb connection management and
+            // housekeeping tasks that run alongside the PUT/GET tasks.
+            let derived = std::cmp::max(concurrency + concurrency / 2, 32);
+            std::env::set_var("S3DLIO_RT_THREADS", derived.to_string());
+            tracing::info!(
+                "Auto-set s3dlio runtime threads: {} (concurrency={}) \
+                 — set s3dlio_optimization.s3dlio_rt_threads or S3DLIO_RT_THREADS to override",
+                derived,
+                concurrency
+            );
+        }
+    }
+}
+
+/// Auto-derive and apply S3DLIO_RT_THREADS from concurrency when no explicit config is available.
+///
+/// Convenience helper for code paths where the YAML has no `s3dlio_optimization` block.
+/// Equivalent to calling `S3dlioOptimizationConfig { auto_threads: true, ..zero }.apply_thread_counts(concurrency)`.
+pub fn auto_apply_rt_threads(concurrency: usize) {
+    if std::env::var("S3DLIO_RT_THREADS").is_ok() {
+        return; // respect operator override
+    }
+    if concurrency > 0 {
+        let derived = std::cmp::max(concurrency + concurrency / 2, 32);
+        std::env::set_var("S3DLIO_RT_THREADS", derived.to_string());
+        tracing::info!(
+            "Auto-set s3dlio runtime threads: {} (concurrency={}) \
+             — set s3dlio_optimization.s3dlio_rt_threads or S3DLIO_RT_THREADS to override",
+            derived,
+            concurrency
+        );
     }
 }
 
 /// Page cache behavior modes for file system operations (Linux/Unix posix_fadvise hints)
 /// Only applies to file:// and direct:// backends
-/// 
+///
 /// This controls kernel page cache behavior via posix_fadvise() system calls,
 /// optimizing memory usage and I/O patterns for different access scenarios.
-/// 
+///
 /// **Performance Impact**:
 /// - Proper mode selection can provide 2-3x performance improvement
 /// - Wrong mode can cause cache thrashing and memory pressure
 /// - No effect on non-Linux/Unix systems (silently ignored)
-/// 
+///
 /// **Mode Selection Guide**:
 /// - **Sequential**: Large files read once from start to finish (e.g., video streaming)
 /// - **Random**: Many small seeks within files (e.g., database workloads)
 /// - **DontNeed**: Read-once data that shouldn't evict other cache (e.g., backup/archival)
 /// - **Normal**: Default kernel heuristics (safe but not optimized)
 /// - **Auto**: Smart default - Sequential for full GETs, Random for range GETs
-/// 
+///
 /// **Example YAML**:
 /// ```yaml
 /// target: "file:///data/test/"
@@ -1397,26 +1675,29 @@ pub enum PageCacheMode {
 pub struct DistributedConfig {
     /// List of agent configurations
     pub agents: Vec<AgentConfig>,
-    
+
     /// SSH deployment configuration (optional)
     #[serde(default)]
     pub ssh: Option<SshConfig>,
-    
+
     /// Docker deployment configuration (optional)
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
-    
+
     /// Delay in seconds before coordinated start (default: 2)
     /// Allows time for all agents to receive config and prepare
     /// Supports time units: "30s", "5m", "1h" (or plain seconds: 300)
-    #[serde(default = "default_start_delay", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_start_delay",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub start_delay: u64,
-    
+
     /// Path prefix template for agent isolation (default: "agent-{id}/")
     /// Use {id} as placeholder for agent identifier
     #[serde(default = "default_path_template")]
     pub path_template: String,
-    
+
     /// Whether target storage is shared across agents (REQUIRED - no default)
     /// Must be explicitly set to true or false based on your actual deployment
     /// - true: Shared storage - agents access same data (e.g., NFS, Lustre, shared S3 bucket)
@@ -1424,52 +1705,61 @@ pub struct DistributedConfig {
     ///
     /// Note: This is independent of storage TYPE - file://, s3://, az://, gs:// can all be shared OR per-agent
     pub shared_filesystem: bool,
-    
+
     /// How agents create directory tree structure (REQUIRED - no default)
     /// - isolated: Each agent creates separate tree under agent-{id}/ prefix
     /// - coordinator: Controller creates tree once, agents skip prepare phase
     /// - concurrent: All agents create same tree (idempotent mkdir handles races)
     pub tree_creation_mode: TreeCreationMode,
-    
+
     /// How agents select paths during workload (REQUIRED - affects contention level)
     /// - random: All agents pick any directory - maximum contention
     /// - partitioned: Agents prefer hash(path) % agent_id directories - reduced contention
     /// - exclusive: Each agent only uses assigned directories - minimal contention
     /// - weighted: Probabilistic mix controlled by partition_overlap
     pub path_selection: PathSelectionStrategy,
-    
+
     /// For partitioned/weighted modes: probability of accessing other agents' partitions (0.0-1.0)
     /// Default: 0.3 (30% chance to access another agent's partition)
     /// Only used when path_selection is "partitioned" or "weighted"
     #[serde(default = "default_partition_overlap")]
     pub partition_overlap: f64,
-    
+
     /// gRPC keep-alive interval in seconds (default: 30)
     /// How often PING frames are sent to detect dead connections
     /// For very slow operations (>30s), increase to 60+ to avoid premature disconnects
     /// Supports time units: "30s", "5m", "1h" (or plain seconds: 300)
-    #[serde(default = "default_grpc_keepalive_interval", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_grpc_keepalive_interval",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub grpc_keepalive_interval: u64,
-    
+
     /// gRPC keep-alive timeout in seconds (default: 10)
     /// How long to wait for PONG response before declaring connection dead
     /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
-    #[serde(default = "default_grpc_keepalive_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_grpc_keepalive_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub grpc_keepalive_timeout: u64,
-    
+
     /// v0.8.51: Timeout for agents to send initial READY signal after receiving config (default: 120)
     /// Agents perform config validation (including glob pattern expansion) before sending READY.
     /// Large directory structures (>100K files) require longer timeouts.
     /// Recommendations: Small (<10K files): 60s, Medium (10K-100K): 120s, Large (>100K): 300-600s
     /// Supports time units: "2m", "5m", "10m" (or plain seconds: 300)
-    #[serde(default = "default_agent_ready_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_agent_ready_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub agent_ready_timeout: u64,
-    
+
     /// v0.8.25: Barrier synchronization for phase coordination
     /// Disabled by default for backward compatibility
     #[serde(default)]
     pub barrier_sync: BarrierSyncConfig,
-    
+
     /// v0.8.61: YAML-driven stage orchestration (REQUIRED for distributed mode)
     /// Explicit stage ordering with flexible completion criteria
     /// Stages MUST be defined when using distributed testing
@@ -1478,7 +1768,7 @@ pub struct DistributedConfig {
     /// Note: default allows parsing old configs for conversion
     #[serde(default)]
     pub stages: Vec<StageConfig>,
-    
+
     /// v0.8.60: Default KV cache directory for metadata caching (optional)
     /// Used to isolate LSM operations (journals, compaction, version files) from test storage
     /// Default: System temp dir (/tmp on Linux, %TEMP% on Windows)
@@ -1495,47 +1785,47 @@ pub struct AgentConfig {
     /// Agent address (host:port) or hostname (for SSH deployment)
     /// Examples: "node1.example.com:7167", "10.0.1.50:7167", "node1" (SSH mode)
     pub address: String,
-    
+
     /// Optional friendly identifier (default: derived from address)
     /// Used in results directory naming and logging
     #[serde(default)]
     pub id: Option<String>,
-    
+
     /// Override base target URI for this agent
     /// Example: "s3://bucket-2/" to use different bucket
     #[serde(default)]
     pub target_override: Option<String>,
-    
+
     /// Override concurrency for this agent
     /// Useful for heterogeneous hardware (different CPU counts)
     #[serde(default)]
     pub concurrency_override: Option<usize>,
-    
+
     /// Environment variables to inject into agent container/process
     /// Example: {"AWS_PROFILE": "benchmark-reader", "RUST_LOG": "debug"}
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
-    
+
     /// Docker volume mounts for this agent (format: "host:container" or "host:container:mode")
     /// Example: ["/mnt/nvme:/data", "/tmp/results:/results:ro"]
     #[serde(default)]
     pub volumes: Vec<String>,
-    
+
     /// Custom path template override for this agent (default: uses distributed.path_template)
     #[serde(default)]
     pub path_template: Option<String>,
-    
+
     /// Listen port for agent (SSH mode only, default: 7167)
     #[serde(default = "default_agent_port")]
     pub listen_port: u16,
-    
+
     /// Per-agent multi-endpoint override (v0.8.22+)
     /// If specified, this agent uses these endpoints instead of global multi_endpoint config
     /// Enables static endpoint mapping: assign specific endpoints to specific agents
     /// Example: Agent 1 -> [IP1, IP2], Agent 2 -> [IP3, IP4], etc.
     #[serde(default)]
     pub multi_endpoint: Option<MultiEndpointConfig>,
-    
+
     /// Per-agent KV cache directory override (v0.8.60+)
     /// Overrides distributed.kv_cache_dir for this specific agent
     /// Useful for heterogeneous storage: fast local SSDs on some nodes, slower on others
@@ -1550,20 +1840,23 @@ pub struct SshConfig {
     /// Enable SSH automation (default: false)
     #[serde(default)]
     pub enabled: bool,
-    
+
     /// SSH username (default: current user)
     #[serde(default)]
     pub user: Option<String>,
-    
+
     /// Path to SSH private key (default: ~/.ssh/id_rsa)
     #[serde(default)]
     pub key_path: Option<String>,
-    
+
     /// SSH connection timeout in seconds (default: 10)
     /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
-    #[serde(default = "default_ssh_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_ssh_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub timeout: u64,
-    
+
     /// Known hosts file path (default: ~/.ssh/known_hosts)
     /// Set to empty string to disable host key checking (insecure!)
     #[serde(default)]
@@ -1578,29 +1871,29 @@ pub struct DeploymentConfig {
     /// - binary: Execute sai3bench-agent directly on host
     #[serde(default = "default_deployment_type")]
     pub deploy_type: String,
-    
+
     /// Container runtime command: "docker" or "podman" (default: "docker")
     /// Used for: container_runtime run, container_runtime pull, container_runtime ps, etc.
     #[serde(default = "default_container_runtime")]
     pub container_runtime: String,
-    
+
     /// Container image to use (e.g., "sai3bench:v0.6.11")
     #[serde(default = "default_docker_image")]
     pub image: String,
-    
+
     /// Container network mode (default: "host")
     /// For gRPC agent communication, "host" is recommended
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
-    
+
     /// Image pull policy: "always", "if_not_present", "never"
     #[serde(default = "default_pull_policy")]
     pub pull_policy: String,
-    
+
     /// Path to sai3bench-agent binary on remote hosts (binary mode)
     #[serde(default = "default_binary_path")]
     pub binary_path: String,
-    
+
     /// Additional docker run arguments
     #[serde(default)]
     pub docker_args: Vec<String>,
@@ -1651,15 +1944,15 @@ fn default_partition_overlap() -> f64 {
 }
 
 fn default_grpc_keepalive_interval() -> u64 {
-    30  // 30 seconds - send PING every 30s
+    30 // 30 seconds - send PING every 30s
 }
 
 fn default_grpc_keepalive_timeout() -> u64 {
-    10  // 10 seconds - wait for PONG
+    10 // 10 seconds - wait for PONG
 }
 
 fn default_agent_ready_timeout() -> u64 {
-    120  // 120 seconds (2 minutes) - increased from 30s in v0.8.51 for large-scale deployments
+    120 // 120 seconds (2 minutes) - increased from 30s in v0.8.51 for large-scale deployments
 }
 
 /// Directory tree creation mode for distributed testing
@@ -1693,11 +1986,11 @@ pub enum PathSelectionStrategy {
 // ============================================================================
 
 /// I/O rate control configuration (v0.7.1)
-/// 
+///
 /// Controls the rate at which operations are issued to storage backends.
 /// Inspired by rdf-bench's iorate= parameter but adapted for sai3-bench's
 /// async architecture.
-/// 
+///
 /// # Example
 /// ```yaml
 /// io_rate:
@@ -1707,17 +2000,17 @@ pub enum PathSelectionStrategy {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IoRateConfig {
     /// Target operations per second (IOPS)
-    /// 
+    ///
     /// Special values:
     /// - 0 or "max": No rate limiting (maximum throughput)
     /// - Numeric value: Target IOPS (e.g., 1000, 5000, 10000)
-    /// 
+    ///
     /// The target rate is distributed evenly across all concurrent workers.
     #[serde(deserialize_with = "deserialize_iops")]
     pub iops: IopsTarget,
-    
+
     /// Inter-arrival time distribution (default: exponential)
-    /// 
+    ///
     /// - exponential: Poisson arrivals (realistic, default)
     /// - uniform: Fixed intervals between operations
     /// - deterministic: Precise timing (testing/debugging only)
@@ -1802,7 +2095,13 @@ where
             } else {
                 value
                     .parse::<u64>()
-                    .map(|n| if n == 0 { IopsTarget::Max } else { IopsTarget::Fixed(n) })
+                    .map(|n| {
+                        if n == 0 {
+                            IopsTarget::Max
+                        } else {
+                            IopsTarget::Fixed(n)
+                        }
+                    })
                     .map_err(|_| E::custom(format!("invalid IOPS value: {}", value)))
             }
         }
@@ -1816,13 +2115,13 @@ where
 // =============================================================================
 
 /// Replay backpressure configuration (v0.8.9+)
-/// 
+///
 /// Controls how replay mode handles situations where the target system
 /// cannot sustain the recorded I/O rate. When lag exceeds the threshold,
 /// replay switches to best-effort mode (issuing ops as fast as possible
 /// without timing). If mode flapping is detected (oscillating between
 /// normal and best-effort), replay exits gracefully.
-/// 
+///
 /// # Example
 /// ```yaml
 /// replay:
@@ -1840,27 +2139,30 @@ pub struct ReplayConfig {
     /// Default: 5 seconds
     #[serde(default = "default_replay_lag_threshold", with = "humantime_serde")]
     pub lag_threshold: std::time::Duration,
-    
+
     /// Recovery threshold for switching back to normal mode
     /// When lag drops below this threshold, normal timing resumes.
     /// Must be less than lag_threshold to prevent oscillation (hysteresis).
     /// Default: 1 second
-    #[serde(default = "default_replay_recovery_threshold", with = "humantime_serde")]
+    #[serde(
+        default = "default_replay_recovery_threshold",
+        with = "humantime_serde"
+    )]
     pub recovery_threshold: std::time::Duration,
-    
+
     /// Maximum mode transitions (flaps) per minute before graceful exit
     /// Prevents endless oscillation between normal and best-effort modes.
     /// When exceeded, replay drains in-flight ops and exits with warning.
     /// Default: 3
     #[serde(default = "default_replay_max_flaps")]
     pub max_flaps_per_minute: u32,
-    
+
     /// Timeout for draining in-flight operations on flap-exit
     /// After flap limit is hit, wait this long for pending ops to complete.
     /// Default: 10 seconds
     #[serde(default = "default_replay_drain_timeout", with = "humantime_serde")]
     pub drain_timeout: std::time::Duration,
-    
+
     /// Maximum concurrent operations during replay
     /// Limits how many operations can be in-flight simultaneously.
     /// Default: 1000
@@ -1911,11 +2213,11 @@ pub enum BarrierType {
     /// All agents must reach barrier (hard requirement)
     /// Missing agents cause entire workload to abort
     AllOrNothing,
-    
+
     /// Majority (>50%) must reach barrier
     /// Stragglers are marked failed and excluded from next phase
     Majority,
-    
+
     /// Best effort - proceed when liveness check fails on stragglers
     /// Stragglers continue independently (out of sync OK)
     BestEffort,
@@ -1927,30 +2229,36 @@ pub struct PhaseBarrierConfig {
     /// Barrier type for this phase
     #[serde(rename = "type")]
     pub barrier_type: BarrierType,
-    
+
     /// How often agents report progress (default: 30s)
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
-    
+
     /// How many missed heartbeats before query (default: 3 = 90s with 30s interval)
     #[serde(default = "default_missed_threshold")]
     pub missed_threshold: u32,
-    
+
     /// Timeout for explicit agent query (default: 10s)
     /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
-    #[serde(default = "default_query_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_query_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub query_timeout: u64,
-    
+
     /// Retries for agent query (default: 2)
     #[serde(default = "default_query_retries")]
     pub query_retries: u32,
-    
+
     /// Agent-side barrier wait timeout (default: 120s)
     /// How long each agent waits for controller to release barrier
     /// Must be > (heartbeat_interval * missed_threshold + query_timeout * query_retries)
     /// For very large scales (300k+ dirs), use 600s+
     /// Supports time units: "2m", "5m", "10m" (or plain seconds: 600)
-    #[serde(default = "default_agent_barrier_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_agent_barrier_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub agent_barrier_timeout: u64,
 }
 
@@ -1963,25 +2271,24 @@ pub enum CompletionCriteria {
     /// Used by: execute stages, custom stages with fixed runtime
     #[default]
     Duration,
-    
+
     /// Complete when all tasks finished (task-based)
     /// Used by: prepare (objects created), cleanup (objects deleted)
     TasksDone,
-    
+
     /// Complete when script exits (script-based)
     /// Used by: custom stages running external tools
     ScriptExit,
-    
+
     /// Complete when validation checks pass (validation-based)
     /// Used by: preflight/validation stages
     ValidationPassed,
-    
+
     /// Complete when either duration OR tasks finish (hybrid)
     /// Whichever criterion met first
     /// Used by: stages with both time limit and task count
     DurationOrTasks,
 }
-
 
 /// Stage-specific configuration based on stage type
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1993,42 +2300,42 @@ pub enum StageSpecificConfig {
         #[serde(with = "humantime_serde")]
         duration: std::time::Duration,
     },
-    
+
     /// Prepare stage configuration (object creation)
     Prepare {
         /// Expected number of objects to create (optional, for progress tracking)
         #[serde(default)]
         expected_objects: Option<usize>,
     },
-    
+
     /// Cleanup stage configuration (object deletion)
     Cleanup {
         /// Expected number of objects to delete (optional, for progress tracking)
         #[serde(default)]
         expected_objects: Option<usize>,
     },
-    
+
     /// Custom stage configuration (user-defined script/command)
     Custom {
         /// Command to execute
         command: String,
-        
+
         /// Optional arguments to command
         #[serde(default)]
         args: Vec<String>,
     },
-    
+
     /// Hybrid stage with both duration and task limits
     Hybrid {
         /// Maximum duration (optional)
         #[serde(default, with = "humantime_serde_opt")]
         max_duration: Option<std::time::Duration>,
-        
+
         /// Expected number of tasks (optional)
         #[serde(default)]
         expected_tasks: Option<usize>,
     },
-    
+
     /// Validation stage (pre-flight checks, no workload execution)
     /// Completes immediately - validation happens at RPC level before stages run
     /// Use stage.timeout_secs for timeout configuration (not nested here to avoid duplication)
@@ -2040,30 +2347,30 @@ pub enum StageSpecificConfig {
 pub struct StageConfig {
     /// Stage name (e.g., "preflight", "prepare", "epoch-1", "cleanup")
     pub name: String,
-    
+
     /// Explicit execution order (1, 2, 3, etc.)
     /// Stages sorted by this field, not YAML position
     pub order: usize,
-    
+
     /// Completion criteria (how to determine stage is done)
     #[serde(default)]
     pub completion: CompletionCriteria,
-    
+
     /// Barrier synchronization for this stage (optional)
     /// If not specified, uses barrier_sync.enabled from DistributedConfig
     #[serde(default)]
     pub barrier: Option<PhaseBarrierConfig>,
-    
+
     /// Maximum time to wait for stage completion before timeout (seconds)
     /// Default: no timeout (wait indefinitely)
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    
+
     /// Whether this stage is optional (can be skipped on failure)
     /// Default: false (all stages required)
     #[serde(default)]
     pub optional: bool,
-    
+
     /// Stage-specific configuration (flattened into struct)
     #[serde(flatten)]
     pub config: StageSpecificConfig,
@@ -2075,42 +2382,58 @@ pub struct BarrierSyncConfig {
     /// Enable barrier synchronization (default: false for backward compat)
     #[serde(default)]
     pub enabled: bool,
-    
+
     /// Default heartbeat settings (apply to all phases unless overridden)
     /// Supports time units: "30s", "1m", "5m" (or plain seconds: 300)
-    #[serde(default = "default_heartbeat_interval", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_heartbeat_interval",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub default_heartbeat_interval: u64,
-    
+
     #[serde(default = "default_missed_threshold")]
     pub default_missed_threshold: u32,
-    
+
     /// Supports time units: "10s", "30s", "1m" (or plain seconds: 60)
-    #[serde(default = "default_query_timeout", deserialize_with = "crate::serde_helpers::deserialize_duration_seconds")]
+    #[serde(
+        default = "default_query_timeout",
+        deserialize_with = "crate::serde_helpers::deserialize_duration_seconds"
+    )]
     pub default_query_timeout: u64,
-    
+
     #[serde(default = "default_query_retries")]
     pub default_query_retries: u32,
-    
+
     /// Per-phase configuration
     #[serde(default)]
     pub validation: Option<PhaseBarrierConfig>,
-    
+
     #[serde(default)]
     pub prepare: Option<PhaseBarrierConfig>,
-    
+
     #[serde(default)]
     pub execute: Option<PhaseBarrierConfig>,
-    
+
     #[serde(default)]
     pub cleanup: Option<PhaseBarrierConfig>,
 }
 
 // Default values for barrier configuration
-fn default_heartbeat_interval() -> u64 { 30 }
-fn default_missed_threshold() -> u32 { 3 }
-fn default_query_timeout() -> u64 { 10 }
-fn default_query_retries() -> u32 { 2 }
-fn default_agent_barrier_timeout() -> u64 { 120 }  // 2 minutes default (was hardcoded 30s)
+fn default_heartbeat_interval() -> u64 {
+    30
+}
+fn default_missed_threshold() -> u32 {
+    3
+}
+fn default_query_timeout() -> u64 {
+    10
+}
+fn default_query_retries() -> u32 {
+    2
+}
+fn default_agent_barrier_timeout() -> u64 {
+    120
+} // 2 minutes default (was hardcoded 30s)
 
 impl Default for BarrierSyncConfig {
     fn default() -> Self {
@@ -2138,7 +2461,7 @@ impl BarrierSyncConfig {
             "cleanup" => self.cleanup.as_ref(),
             _ => None,
         };
-        
+
         config.cloned().unwrap_or_else(|| PhaseBarrierConfig {
             barrier_type: BarrierType::AllOrNothing,
             heartbeat_interval: self.default_heartbeat_interval,
@@ -2156,14 +2479,14 @@ impl BarrierSyncConfig {
 
 impl DistributedConfig {
     /// Get sorted stages (by order field), generating defaults if not specified
-    /// 
+    ///
     /// Get sorted stages from configuration (stages are now MANDATORY)
     pub fn get_sorted_stages(&self) -> Result<Vec<StageConfig>, String> {
         let stages = &self.stages;
-        
+
         // Validate user-provided stages
         self.validate_stages(stages)?;
-        
+
         // Sort by order field
         let mut sorted = stages.clone();
         sorted.sort_by_key(|s| s.order);
@@ -2177,22 +2500,24 @@ impl DistributedConfig {
                         StageSpecificConfig::Prepare { .. } => "prepare",
                         StageSpecificConfig::Cleanup { .. } => "cleanup",
                         StageSpecificConfig::Execute { .. } => "execute",
-                        StageSpecificConfig::Custom { .. } | StageSpecificConfig::Hybrid { .. } => "execute",
+                        StageSpecificConfig::Custom { .. } | StageSpecificConfig::Hybrid { .. } => {
+                            "execute"
+                        }
                     };
                     stage.barrier = Some(self.barrier_sync.get_phase_config(phase_name));
                 }
             }
         }
-        
+
         Ok(sorted)
     }
-    
+
     /// Validate stage configuration
     fn validate_stages(&self, stages: &[StageConfig]) -> Result<(), String> {
         if stages.is_empty() {
             return Err("stages list cannot be empty".to_string());
         }
-        
+
         // Check for unique stage names
         let mut names = std::collections::HashSet::new();
         for stage in stages {
@@ -2200,7 +2525,7 @@ impl DistributedConfig {
                 return Err(format!("duplicate stage name: {}", stage.name));
             }
         }
-        
+
         // Check for unique order values (no duplicates)
         let mut orders = std::collections::HashSet::new();
         for stage in stages {
@@ -2208,71 +2533,93 @@ impl DistributedConfig {
                 return Err(format!("duplicate stage order: {}", stage.order));
             }
         }
-        
+
         // Warn about gaps in ordering (not an error, but suspicious)
         let mut sorted_orders: Vec<_> = orders.iter().copied().collect();
         sorted_orders.sort();
         for window in sorted_orders.windows(2) {
             if window[1] - window[0] > 1 {
-                eprintln!("Warning: gap in stage ordering: {} -> {} (missing {})", 
-                    window[0], window[1], window[0] + 1);
+                eprintln!(
+                    "Warning: gap in stage ordering: {} -> {} (missing {})",
+                    window[0],
+                    window[1],
+                    window[0] + 1
+                );
             }
         }
-        
+
         // Validate completion criteria matches stage type
         for stage in stages {
             match &stage.config {
                 StageSpecificConfig::Execute { duration: _ } => {
-                    if !matches!(stage.completion, CompletionCriteria::Duration | CompletionCriteria::DurationOrTasks) {
-                        return Err(format!("Execute stage '{}' should use Duration or DurationOrTasks completion", stage.name));
+                    if !matches!(
+                        stage.completion,
+                        CompletionCriteria::Duration | CompletionCriteria::DurationOrTasks
+                    ) {
+                        return Err(format!(
+                            "Execute stage '{}' should use Duration or DurationOrTasks completion",
+                            stage.name
+                        ));
                     }
                 }
                 StageSpecificConfig::Prepare { .. } | StageSpecificConfig::Cleanup { .. } => {
-                    if !matches!(stage.completion, CompletionCriteria::TasksDone | CompletionCriteria::DurationOrTasks) {
+                    if !matches!(
+                        stage.completion,
+                        CompletionCriteria::TasksDone | CompletionCriteria::DurationOrTasks
+                    ) {
                         return Err(format!("Prepare/Cleanup stage '{}' should use TasksDone or DurationOrTasks completion", stage.name));
                     }
                 }
                 StageSpecificConfig::Custom { .. } => {
-                    if !matches!(stage.completion, CompletionCriteria::ScriptExit | CompletionCriteria::DurationOrTasks) {
-                        return Err(format!("Custom stage '{}' should use ScriptExit or DurationOrTasks completion", stage.name));
+                    if !matches!(
+                        stage.completion,
+                        CompletionCriteria::ScriptExit | CompletionCriteria::DurationOrTasks
+                    ) {
+                        return Err(format!(
+                            "Custom stage '{}' should use ScriptExit or DurationOrTasks completion",
+                            stage.name
+                        ));
                     }
                 }
                 StageSpecificConfig::Hybrid { .. } => {
                     if !matches!(stage.completion, CompletionCriteria::DurationOrTasks) {
-                        return Err(format!("Hybrid stage '{}' must use DurationOrTasks completion", stage.name));
+                        return Err(format!(
+                            "Hybrid stage '{}' must use DurationOrTasks completion",
+                            stage.name
+                        ));
                     }
                 }
                 StageSpecificConfig::Validation => {
                     if !matches!(stage.completion, CompletionCriteria::ValidationPassed) {
-                        return Err(format!("Validation stage '{}' should use ValidationPassed completion", stage.name));
+                        return Err(format!(
+                            "Validation stage '{}' should use ValidationPassed completion",
+                            stage.name
+                        ));
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
-    
 }
 
 /// Multi-process scaling configuration (v0.7.3+)
 /// Controls how many processes to spawn per endpoint for parallel execution
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub enum ProcessScaling {
     /// Single process mode (default, current behavior)
     #[default]
     Single,
-    
+
     /// Auto-scale to physical CPU cores (not hyperthreads)
     /// Best for cloud storage (S3/Azure/GCS) with single endpoint
     Auto,
-    
+
     /// Explicit process count
     /// Useful for manual tuning or on-premises multi-endpoint setups
     Manual(usize),
 }
-
 
 /// Serde deserialization for ProcessScaling
 /// Accepts: "auto", "single", 1, or explicit integer
@@ -2323,14 +2670,15 @@ impl<'de> Deserialize<'de> for ProcessScaling {
                 match value {
                     "auto" | "Auto" | "AUTO" => Ok(ProcessScaling::Auto),
                     "single" | "Single" | "SINGLE" | "1" => Ok(ProcessScaling::Single),
-                    _ => {
-                        match value.parse::<usize>() {
-                            Ok(1) => Ok(ProcessScaling::Single),
-                            Ok(n) if n > 1 => Ok(ProcessScaling::Manual(n)),
-                            Ok(_) => Err(E::custom("processes must be >= 1")),
-                            Err(_) => Err(E::custom(format!("invalid process scaling value: {}", value))),
-                        }
-                    }
+                    _ => match value.parse::<usize>() {
+                        Ok(1) => Ok(ProcessScaling::Single),
+                        Ok(n) if n > 1 => Ok(ProcessScaling::Manual(n)),
+                        Ok(_) => Err(E::custom("processes must be >= 1")),
+                        Err(_) => Err(E::custom(format!(
+                            "invalid process scaling value: {}",
+                            value
+                        ))),
+                    },
                 }
             }
         }

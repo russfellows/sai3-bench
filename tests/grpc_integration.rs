@@ -81,11 +81,11 @@ fn agent_and_controller_ping() {
         err
     );
     assert!(
-        out.contains(&format!("connected to {}", addr)) || err.contains(&format!("connected to {}", addr)),
+        out.contains(&format!("connected to {}", addr))
+            || err.contains(&format!("connected to {}", addr)),
         "expected controller to print 'connected to {}'\nstdout=\n{}\nstderr=\n{}",
         addr,
         out,
         err
     );
 }
-

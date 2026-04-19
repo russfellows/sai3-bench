@@ -58,19 +58,16 @@ impl MetadataPrefetcher {
     }
 
     /// Spawn metadata pre-fetch pipeline
-    /// 
+    ///
     /// Returns a receiver channel that yields ObjectMetadata as it's fetched.
     /// The pipeline spawns worker tasks that fetch metadata concurrently.
-    /// 
+    ///
     /// # Arguments
     /// * `uris` - Iterator of URIs to fetch metadata for
-    /// 
+    ///
     /// # Returns
     /// Receiver channel that yields ObjectMetadata results
-    pub async fn prefetch_metadata<I>(
-        &self,
-        uris: I,
-    ) -> mpsc::Receiver<ObjectMetadata>
+    pub async fn prefetch_metadata<I>(&self, uris: I) -> mpsc::Receiver<ObjectMetadata>
     where
         I: IntoIterator<Item = String> + Send + 'static,
         I::IntoIter: Send,
@@ -142,7 +139,7 @@ impl MetadataPrefetcher {
     /// achieves 100% cache hit rate with ZERO stat() overhead.
     ///
     /// # Arguments
-    /// * `uris` - Iterator of URIs to fetch metadata for  
+    /// * `uris` - Iterator of URIs to fetch metadata for
     /// * `cache` - Optional endpoint cache from prepare phase
     /// * `config_hash` - Config hash for cache lookups
     ///
@@ -200,10 +197,11 @@ impl MetadataPrefetcher {
                             Some(uri) => {
                                 let metadata = fetch_metadata_with_cache(
                                     &uri,
-                                    None,  // TODO: Worker-level cache not yet implemented
+                                    None, // TODO: Worker-level cache not yet implemented
                                     &config_hash,
-                                ).await;
-                                
+                                )
+                                .await;
+
                                 if tx.send(metadata).await.is_err() {
                                     debug!("Worker {}: Receiver dropped, stopping", worker_id);
                                     break;
@@ -241,7 +239,7 @@ impl MetadataPrefetcher {
 }
 
 // ============================================================================
-// Helper Functions  
+// Helper Functions
 // ============================================================================
 
 /// Fetch metadata with cache-awareness (v0.8.60+)
@@ -249,7 +247,7 @@ impl MetadataPrefetcher {
 /// **Cache Integration**: Tries persistent cache first, falls back to stat() on miss.
 ///
 /// # Algorithm
-/// 1. Extract file_idx from path using naming convention  
+/// 1. Extract file_idx from path using naming convention
 /// 2. Query cache for ObjectEntry
 /// 3. If hit + state==Created: return cached size (FAST PATH, ~100ns)
 /// 4. If miss: fall back to async stat() (SLOW PATH, ~1ms)
@@ -292,7 +290,7 @@ fn is_local_uri(uri: &str) -> bool {
 }
 
 /// Fetch metadata with cache-awareness (v0.8.60+)
-/// 
+///
 /// For local files (file:// or direct://), fetches size via std::fs::metadata.
 /// For remote URIs (s3://, gs://, az://), size is set to None (would require HEAD).
 async fn fetch_metadata_for_uri(uri: &str) -> ObjectMetadata {
@@ -364,10 +362,10 @@ mod tests {
 
         // Verify we got metadata for all files
         assert_eq!(results.len(), 10);
-        
+
         // Verify all are marked as local
         assert!(results.iter().all(|m| m.is_local));
-        
+
         // Verify all have size information
         assert!(results.iter().all(|m| m.size.is_some()));
     }
@@ -390,10 +388,10 @@ mod tests {
         }
 
         assert_eq!(results.len(), 3);
-        
+
         // All should be marked as not local
         assert!(results.iter().all(|m| !m.is_local));
-        
+
         // All should have no size information (no HEAD request made)
         assert!(results.iter().all(|m| m.size.is_none()));
     }

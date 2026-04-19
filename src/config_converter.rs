@@ -30,7 +30,7 @@ pub fn has_stages(config: &Config) -> bool {
 /// Returns true if:
 /// - Has workload section (the main indicator of an executable config)
 /// - Does NOT have stages section (or it's empty)
-/// 
+///
 /// Note: Does NOT require distributed section - standalone configs also need stages in v0.8.61+
 pub fn needs_conversion(config: &Config) -> bool {
     // Must have workload to convert (all executable configs have this)
@@ -69,7 +69,13 @@ pub fn generate_stages(config: &Config) -> Result<Vec<StageConfig>> {
     if let Some(ref prepare) = config.prepare {
         // Calculate expected objects from ensure_objects
         let expected_objects = if !prepare.ensure_objects.is_empty() {
-            Some(prepare.ensure_objects.iter().map(|e| e.count as usize).sum())
+            Some(
+                prepare
+                    .ensure_objects
+                    .iter()
+                    .map(|e| e.count as usize)
+                    .sum(),
+            )
         } else {
             None
         };
@@ -108,7 +114,13 @@ pub fn generate_stages(config: &Config) -> Result<Vec<StageConfig>> {
         if cleanup_enabled {
             // Calculate expected objects from ensure_objects
             let expected_objects = if !prepare.ensure_objects.is_empty() {
-                Some(prepare.ensure_objects.iter().map(|e| e.count as usize).sum())
+                Some(
+                    prepare
+                        .ensure_objects
+                        .iter()
+                        .map(|e| e.count as usize)
+                        .sum(),
+                )
             } else {
                 None
             };
@@ -136,29 +148,26 @@ pub fn generate_stages(config: &Config) -> Result<Vec<StageConfig>> {
 /// - Preserves all other fields
 pub fn convert_config(config: &mut Config) -> Result<()> {
     // Generate stages
-    let stages = generate_stages(config)
-        .context("Failed to generate stages from legacy config")?;
+    let stages = generate_stages(config).context("Failed to generate stages from legacy config")?;
 
     // Add stages to distributed section (create if needed)
-    let distributed = config
-        .distributed
-        .get_or_insert_with(|| DistributedConfig {
-            agents: Vec::new(),
-            ssh: None,
-            deployment: None,
-            start_delay: 2,  // default_start_delay
-            path_template: "agent-{id}/".to_string(),  // default_path_template
-            shared_filesystem: false,
-            tree_creation_mode: crate::config::TreeCreationMode::Isolated,
-            path_selection: crate::config::PathSelectionStrategy::Random,
-            partition_overlap: 0.3,  // default_partition_overlap
-            grpc_keepalive_interval: 30,  // default
-            grpc_keepalive_timeout: 10,  // default
-            agent_ready_timeout: 120,  // default
-            barrier_sync: Default::default(),
-            stages: Vec::new(),
-            kv_cache_dir: None,
-        });
+    let distributed = config.distributed.get_or_insert_with(|| DistributedConfig {
+        agents: Vec::new(),
+        ssh: None,
+        deployment: None,
+        start_delay: 2,                           // default_start_delay
+        path_template: "agent-{id}/".to_string(), // default_path_template
+        shared_filesystem: false,
+        tree_creation_mode: crate::config::TreeCreationMode::Isolated,
+        path_selection: crate::config::PathSelectionStrategy::Random,
+        partition_overlap: 0.3,      // default_partition_overlap
+        grpc_keepalive_interval: 30, // default
+        grpc_keepalive_timeout: 10,  // default
+        agent_ready_timeout: 120,    // default
+        barrier_sync: Default::default(),
+        stages: Vec::new(),
+        kv_cache_dir: None,
+    });
 
     distributed.stages = stages;
 
@@ -204,9 +213,9 @@ pub fn convert_yaml_file(
     }
 
     // Generate stages configuration
-    let stages = generate_stages(&config)
-        .context("Failed to generate stages from legacy config")?;
-    
+    let stages =
+        generate_stages(&config).context("Failed to generate stages from legacy config")?;
+
     let stage_count = stages.len();
 
     if dry_run {
@@ -227,10 +236,12 @@ pub fn convert_yaml_file(
     // Validate if requested
     if validate {
         // Re-parse to validate the modified YAML
-        let validated_config: Config = serde_yaml::from_str(&new_yaml)
-            .context("Failed to parse converted YAML")?;
-        
-        if let Err(e) = crate::validation::display_config_summary(&validated_config, tmp_path.to_str().unwrap()) {
+        let validated_config: Config =
+            serde_yaml::from_str(&new_yaml).context("Failed to parse converted YAML")?;
+
+        if let Err(e) =
+            crate::validation::display_config_summary(&validated_config, tmp_path.to_str().unwrap())
+        {
             std::fs::remove_file(&tmp_path).ok();
             anyhow::bail!("Validation failed: {}", e);
         }
@@ -254,13 +265,13 @@ pub fn convert_yaml_file(
 /// Generate minimal YAML for stages (only non-default values)
 fn generate_minimal_stages_yaml(stages: &[StageConfig]) -> Result<String> {
     use std::fmt::Write;
-    
+
     let mut yaml = String::new();
-    
+
     for stage in stages {
         writeln!(yaml, "  - name: {}", stage.name)?;
         writeln!(yaml, "    order: {}", stage.order)?;
-        
+
         // Write completion criteria
         let completion_str = match &stage.completion {
             CompletionCriteria::ValidationPassed => "validation_passed",
@@ -270,12 +281,12 @@ fn generate_minimal_stages_yaml(stages: &[StageConfig]) -> Result<String> {
             CompletionCriteria::DurationOrTasks => "duration_or_tasks",
         };
         writeln!(yaml, "    completion: {}", completion_str)?;
-        
+
         // Only write timeout if specified (300 is default for some stages)
         if let Some(timeout) = stage.timeout_secs {
             writeln!(yaml, "    timeout_secs: {}", timeout)?;
         }
-        
+
         // Write stage type and type-specific fields
         match &stage.config {
             StageSpecificConfig::Validation => {
@@ -309,7 +320,10 @@ fn generate_minimal_stages_yaml(stages: &[StageConfig]) -> Result<String> {
                     }
                 }
             }
-            StageSpecificConfig::Hybrid { max_duration, expected_tasks } => {
+            StageSpecificConfig::Hybrid {
+                max_duration,
+                expected_tasks,
+            } => {
                 writeln!(yaml, "    type: hybrid")?;
                 if let Some(dur) = max_duration {
                     let dur_str = format_duration(dur);
@@ -321,7 +335,7 @@ fn generate_minimal_stages_yaml(stages: &[StageConfig]) -> Result<String> {
             }
         }
     }
-    
+
     Ok(yaml)
 }
 
@@ -343,16 +357,18 @@ fn insert_stages_into_yaml(original: &str, stages_yaml: &str, config: &Config) -
     let mut in_distributed = false;
     let mut distributed_indent = 0;
     let mut found_distributed = false;
-    
+
     // Check if this is a multi-agent distributed config (needs barriers)
-    let is_multi_agent = config.distributed.as_ref()
+    let is_multi_agent = config
+        .distributed
+        .as_ref()
         .map(|d| d.agents.len() > 1)
         .unwrap_or(false);
-    
+
     for line in original.lines() {
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
-        
+
         // Check if we're entering distributed section
         if trimmed.starts_with("distributed:") {
             in_distributed = true;
@@ -362,23 +378,27 @@ fn insert_stages_into_yaml(original: &str, stages_yaml: &str, config: &Config) -
             result.push('\n');
             continue;
         }
-        
+
         // Check if we're leaving distributed section
-        if in_distributed && !trimmed.is_empty() && !trimmed.starts_with('#') && indent <= distributed_indent {
+        if in_distributed
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && indent <= distributed_indent
+        {
             // We've left the distributed section - insert stages before this line
             insert_stages_section(&mut result, stages_yaml, is_multi_agent);
             in_distributed = false;
         }
-        
+
         result.push_str(line);
         result.push('\n');
     }
-    
+
     // If we're still in distributed section at end of file, append stages
     if in_distributed {
         insert_stages_section(&mut result, stages_yaml, is_multi_agent);
     }
-    
+
     // If no distributed section exists, create one with empty agents
     if !found_distributed {
         result.push_str("\n# Distributed configuration (required for explicit stages)\n");
@@ -386,18 +406,22 @@ fn insert_stages_into_yaml(original: &str, stages_yaml: &str, config: &Config) -
         result.push_str("  agents: []  # Empty for standalone configs\n");
         insert_stages_section(&mut result, stages_yaml, is_multi_agent);
     }
-    
+
     Ok(result)
 }
 
 /// Insert stages section with optional barrier recommendations
 fn insert_stages_section(result: &mut String, stages_yaml: &str, is_multi_agent: bool) {
     result.push('\n');
-    
+
     // Add barrier recommendations for multi-agent configs
     if is_multi_agent {
-        result.push_str("  # ⚠️  RECOMMENDED: Add barrier synchronization for distributed workloads\n");
-        result.push_str("  # Without barriers, agents may race between stages causing incorrect results.\n");
+        result.push_str(
+            "  # ⚠️  RECOMMENDED: Add barrier synchronization for distributed workloads\n",
+        );
+        result.push_str(
+            "  # Without barriers, agents may race between stages causing incorrect results.\n",
+        );
         result.push_str("  # Uncomment the following to enable barriers:\n");
         result.push_str("  #\n");
         result.push_str("  # barrier_sync:\n");
@@ -406,9 +430,9 @@ fn insert_stages_section(result: &mut String, stages_yaml: &str, is_multi_agent:
         result.push_str("  # Or add per-stage barriers (see example below with \"# ADD THIS\"):\n");
         result.push('\n');
     }
-    
+
     result.push_str("  stages:\n");
-    
+
     // Insert stages with barrier recommendations if multi-agent
     if is_multi_agent {
         insert_stages_with_barrier_hints(result, stages_yaml);
@@ -420,11 +444,11 @@ fn insert_stages_section(result: &mut String, stages_yaml: &str, is_multi_agent:
 /// Insert stages with commented barrier recommendations
 fn insert_stages_with_barrier_hints(result: &mut String, stages_yaml: &str) {
     let mut first_stage = true;
-    
+
     for line in stages_yaml.lines() {
         result.push_str(line);
         result.push('\n');
-        
+
         // After "type: validation/prepare/execute/cleanup", suggest barrier
         if line.trim().starts_with("type: ") && first_stage {
             result.push_str("    # ADD THIS (recommended for multi-agent workloads):\n");
@@ -466,7 +490,7 @@ impl ConversionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PrepareConfig, WeightedOp, OpSpec};
+    use crate::config::{OpSpec, PrepareConfig, WeightedOp};
     use std::time::Duration;
 
     fn create_legacy_config() -> Config {
@@ -483,7 +507,7 @@ mod tests {
                 concurrency: None,
             }],
             prepare: Some(PrepareConfig {
-                cleanup: true,  // Enable cleanup to generate 4 stages in tests
+                cleanup: true, // Enable cleanup to generate 4 stages in tests
                 ..Default::default()
             }),
             distributed: Some(DistributedConfig {
@@ -517,13 +541,17 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         }
     }
 
     #[test]
     fn test_needs_conversion_legacy() {
         let config = create_legacy_config();
-        assert!(needs_conversion(&config), "Legacy config should need conversion");
+        assert!(
+            needs_conversion(&config),
+            "Legacy config should need conversion"
+        );
     }
 
     #[test]
@@ -531,14 +559,20 @@ mod tests {
         // Standalone configs (no distributed section) should also be converted in v0.8.61+
         let mut config = create_legacy_config();
         config.distributed = None;
-        assert!(needs_conversion(&config), "Standalone config with workload should need conversion");
+        assert!(
+            needs_conversion(&config),
+            "Standalone config with workload should need conversion"
+        );
     }
 
     #[test]
     fn test_needs_conversion_no_workload() {
         let mut config = create_legacy_config();
         config.workload = Vec::new();
-        assert!(!needs_conversion(&config), "Config without workload shouldn't need conversion");
+        assert!(
+            !needs_conversion(&config),
+            "Config without workload shouldn't need conversion"
+        );
     }
 
     #[test]
@@ -561,7 +595,10 @@ mod tests {
 
         assert_eq!(stages[1].name, "prepare");
         assert_eq!(stages[1].order, 2);
-        assert!(matches!(stages[1].config, StageSpecificConfig::Prepare { .. }));
+        assert!(matches!(
+            stages[1].config,
+            StageSpecificConfig::Prepare { .. }
+        ));
 
         assert_eq!(stages[2].name, "execute");
         assert_eq!(stages[2].order, 3);
@@ -573,7 +610,10 @@ mod tests {
 
         assert_eq!(stages[3].name, "cleanup");
         assert_eq!(stages[3].order, 4);
-        assert!(matches!(stages[3].config, StageSpecificConfig::Cleanup { .. }));
+        assert!(matches!(
+            stages[3].config,
+            StageSpecificConfig::Cleanup { .. }
+        ));
     }
 
     #[test]
@@ -583,7 +623,11 @@ mod tests {
 
         let stages = generate_stages(&config).expect("Should generate stages");
 
-        assert_eq!(stages.len(), 2, "Should generate 2 stages (preflight + execute only)");
+        assert_eq!(
+            stages.len(),
+            2,
+            "Should generate 2 stages (preflight + execute only)"
+        );
         assert_eq!(stages[0].name, "preflight");
         assert_eq!(stages[1].name, "execute");
     }
@@ -617,7 +661,11 @@ mod tests {
         assert_eq!(distributed.stages.len(), 4);
 
         // Verify execute stage has the original duration
-        let execute_stage = distributed.stages.iter().find(|s| s.name == "execute").unwrap();
+        let execute_stage = distributed
+            .stages
+            .iter()
+            .find(|s| s.name == "execute")
+            .unwrap();
         if let StageSpecificConfig::Execute { duration } = execute_stage.config {
             assert_eq!(duration, original_duration);
         }
@@ -638,7 +686,7 @@ mod tests {
                 },
                 concurrency: None,
             }],
-            prepare: None,  // No prepare = no cleanup stage
+            prepare: None,     // No prepare = no cleanup stage
             distributed: None, // Key: No distributed section!
             range_engine: None,
             page_cache_mode: None,
@@ -654,6 +702,7 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         };
 
         let original_duration = config.duration;
@@ -661,13 +710,20 @@ mod tests {
         convert_config(&mut config).expect("Should convert standalone config");
 
         // Check that distributed section was created with stages
-        assert!(config.distributed.is_some(), "Distributed section should be created");
+        assert!(
+            config.distributed.is_some(),
+            "Distributed section should be created"
+        );
         assert!(has_stages(&config), "Config should now have stages");
 
         let distributed = config.distributed.as_ref().unwrap();
-        
+
         // Should have 2 stages: preflight + execute (no prepare, no cleanup)
-        assert_eq!(distributed.stages.len(), 2, "Should generate 2 stages for minimal config");
+        assert_eq!(
+            distributed.stages.len(),
+            2,
+            "Should generate 2 stages for minimal config"
+        );
         assert_eq!(distributed.stages[0].name, "preflight");
         assert_eq!(distributed.stages[1].name, "execute");
 
@@ -680,7 +736,10 @@ mod tests {
         }
 
         // Verify agents list is empty (standalone mode)
-        assert!(distributed.agents.is_empty(), "Standalone config should have no agents");
+        assert!(
+            distributed.agents.is_empty(),
+            "Standalone config should have no agents"
+        );
     }
 
     #[test]
@@ -713,7 +772,7 @@ mod tests {
                 },
             ],
             prepare: Some(PrepareConfig {
-                cleanup: false,  // No cleanup stage
+                cleanup: false, // No cleanup stage
                 ..Default::default()
             }),
             distributed: None,
@@ -731,12 +790,13 @@ mod tests {
             cache_checkpoint_interval_secs: 300,
             enable_metadata_cache: true,
             s3dlio_optimization: None,
+            distributed_env: Default::default(),
         };
 
         convert_config(&mut config).expect("Should convert config");
 
         let distributed = config.distributed.as_ref().unwrap();
-        
+
         // Should have 3 stages: preflight + prepare + execute (no cleanup)
         assert_eq!(distributed.stages.len(), 3);
         assert_eq!(distributed.stages[0].name, "preflight");

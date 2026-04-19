@@ -43,22 +43,39 @@ pub async fn validate_object_storage(
     // Detect permission source (env vars vs instance-level)
     results.push(detect_permission_source().await?);
 
-    for (idx, endpoint) in endpoints.iter().enumerate() {
+    // Group endpoints by bucket so we test one representative per bucket and
+    // report "N/N endpoints" rather than one error line per IP.  This keeps the
+    // output readable even for large multi-IP endpoint sets.
+    let mut bucket_groups: Vec<(String, Vec<String>)> = Vec::new();
+    for ep in endpoints {
+        let label = bucket_label(ep);
+        if let Some(group) = bucket_groups.iter_mut().find(|(l, _)| l == &label) {
+            group.1.push(ep.clone());
+        } else {
+            bucket_groups.push((label, vec![ep.clone()]));
+        }
+    }
+
+    for (label, bucket_endpoints) in &bucket_groups {
+        let representative = &bucket_endpoints[0];
+        let count = bucket_endpoints.len();
+
         tracing::info!(
-            "Validating object storage endpoint {}/{}: {}",
-            idx + 1,
-            endpoints.len(),
-            endpoint
+            "Validating bucket '{}' ({} endpoint{}) via {}",
+            label,
+            count,
+            if count == 1 { "" } else { "s" },
+            representative
         );
 
-        // Build an ObjectStore for this URI
-        let store = match store_for_uri(endpoint) {
+        // Build an ObjectStore for the representative endpoint
+        let store = match store_for_uri(representative) {
             Ok(s) => s,
             Err(e) => {
                 results.push(ValidationResult::error(
                     ErrorType::Configuration,
                     "init",
-                    format!("Cannot initialize storage for {}: {}", endpoint, e),
+                    format!("Cannot initialize storage for {}: {}", representative, e),
                     "Check URI format: s3://bucket/prefix  gs://bucket/prefix  az://account/container/prefix",
                 ));
                 continue;
@@ -66,72 +83,62 @@ pub async fn validate_object_storage(
         };
 
         // Stream at most 1 key — fast even for buckets with billions of objects.
-        // A network/auth error manifests as Some(Err(…)); an empty bucket as None.
-        let mut stream = store.list_stream(endpoint, false);
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            stream.next(),
-        ).await {
+        let mut stream = store.list_stream(representative, false);
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
             Err(_elapsed) => {
                 results.push(ValidationResult::error(
                     ErrorType::Network,
                     "list",
-                    format!("Timed out connecting to {}", endpoint),
+                    format!(
+                        "Timed out connecting to {} (bucket: {}{})",
+                        representative,
+                        label,
+                        if count > 1 { format!(" — {} endpoints total", count) } else { String::new() }
+                    ),
                     "Check network connectivity, DNS resolution, and storage endpoint configuration",
                 ));
             }
             Ok(Some(Err(e))) => {
-                let err_str = e.to_string().to_lowercase();
-                let (error_type, suggestion) = if err_str.contains("403")
-                    || err_str.contains("forbidden")
-                    || err_str.contains("accessdenied")
-                    || err_str.contains("access denied")
-                {
-                    (ErrorType::Permission,
-                     "Check that the service account/IAM role has storage.objects.list permission")
-                } else if err_str.contains("401")
-                    || err_str.contains("unauthorized")
-                    || err_str.contains("unauthenticated")
-                {
-                    (ErrorType::Authentication,
-                     "Credentials invalid or expired; check GOOGLE_APPLICATION_CREDENTIALS or IAM role")
-                } else if err_str.contains("404")
-                    || err_str.contains("nosuchbucket")
-                    || err_str.contains("no such bucket")
-                    || err_str.contains("not found")
-                {
-                    (ErrorType::Configuration,
-                     "Bucket does not exist or the endpoint path is incorrect")
+                let (error_type, suggestion) = classify_storage_error(&e);
+                let suffix = if count > 1 {
+                    format!(" (applies to all {} endpoints for this bucket)", count)
                 } else {
-                    (ErrorType::Network,
-                     "Check network connectivity and storage backend availability")
+                    String::new()
                 };
                 results.push(ValidationResult::error(
                     error_type,
                     "list",
-                    format!("Failed to list {}: {}", endpoint, e),
+                    format!("Failed to list {}: {}{}", representative, e, suffix),
                     suggestion,
                 ));
             }
             Ok(None) => {
-                // Bucket is accessible but empty at this prefix
-                results.push(ValidationResult::success(
-                    "list",
-                    format!("Bucket accessible (no objects at prefix): {}", endpoint),
-                ));
+                let msg = if count > 1 {
+                    format!(
+                        "Bucket '{}' accessible (empty prefix) — {} endpoints",
+                        label, count
+                    )
+                } else {
+                    format!(
+                        "Bucket accessible (no objects at prefix): {}",
+                        representative
+                    )
+                };
+                results.push(ValidationResult::success("list", msg));
             }
             Ok(Some(Ok(_first_key))) => {
-                results.push(ValidationResult::success(
-                    "list",
-                    format!("Bucket accessible: {}", endpoint),
-                ));
+                let msg = if count > 1 {
+                    format!("Bucket '{}' accessible — {} endpoints", label, count)
+                } else {
+                    format!("Bucket accessible: {}", representative)
+                };
+                results.push(ValidationResult::success("list", msg));
             }
         }
 
-        // Write probe: PUT a known-content object, GET it back, DELETE it.
-        // All steps are warning-only — never a hard failure.
+        // Write probe: test only the representative endpoint; report count in message.
         if check_write {
-            let probe_results = write_probe(endpoint).await;
+            let probe_results = write_probe(representative, count).await;
             results.extend(probe_results);
         }
     }
@@ -141,10 +148,13 @@ pub async fn validate_object_storage(
 
 /// PUT a tiny probe object, GET it back and verify its content, then DELETE it.
 ///
+/// `endpoint_count` is the total number of IPs for this bucket; it's included in
+/// messages so the user knows "1 of N sampled" without seeing N individual results.
+///
 /// All three steps issue only warnings on failure — the preflight does not
 /// hard-fail because a read-only credential set on a GET-only workload should
 /// never prevent the run.
-async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
+async fn write_probe(endpoint: &str, endpoint_count: usize) -> Vec<ValidationResult> {
     let mut results = Vec::new();
 
     // Build a unique probe URI from the endpoint so concurrent agents don't collide.
@@ -152,7 +162,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     // known string (PROBE_CONTENT) that we verify on read-back.
     let suffix: u32 = rand::rng().random();
     let sep = if endpoint.ends_with('/') { "" } else { "/" };
-    let probe_uri = format!("{}{}sai3bench-preflight-probe-{:08x}.bin", endpoint, sep, suffix);
+    let probe_uri = format!(
+        "{}{}sai3bench-preflight-probe-{:08x}.bin",
+        endpoint, sep, suffix
+    );
 
     // ── Step 1: PUT ────────────────────────────────────────────────────────────
     let store = match store_for_uri(&probe_uri) {
@@ -161,7 +174,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
             results.push(ValidationResult::warning(
                 ErrorType::Configuration,
                 "write-probe",
-                format!("Cannot initialize store for write probe at {}: {}", endpoint, e),
+                format!(
+                    "Cannot initialize store for write probe at {}: {}",
+                    endpoint, e
+                ),
                 "Write probe skipped — check URI format",
             ));
             return results;
@@ -172,7 +188,8 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     let put_result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         store.put(&probe_uri, put_data),
-    ).await;
+    )
+    .await;
 
     match put_result {
         Err(_elapsed) => {
@@ -185,27 +202,35 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
             return results;
         }
         Ok(Err(e)) => {
+            let suffix = if endpoint_count > 1 {
+                format!(" (sampled 1 of {} endpoints)", endpoint_count)
+            } else {
+                String::new()
+            };
             results.push(ValidationResult::warning(
                 ErrorType::Permission,
                 "write-probe-put",
-                format!("Write probe PUT failed at {}: {}", endpoint, e),
+                format!("Write probe PUT failed at {}{}: {}", endpoint, suffix, e),
                 "Workload may fail if it requires write access — check write permissions",
             ));
             return results;
         }
         Ok(Ok(())) => {
+            let suffix = if endpoint_count > 1 {
+                format!(" ({} endpoints)", endpoint_count)
+            } else {
+                String::new()
+            };
             results.push(ValidationResult::success(
                 "write-probe-put",
-                format!("Write probe PUT succeeded at {}", endpoint),
+                format!("Write probe PUT succeeded at {}{}", endpoint, suffix),
             ));
         }
     }
 
     // ── Step 2: GET and verify content ─────────────────────────────────────────
-    let get_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        store.get(&probe_uri),
-    ).await;
+    let get_result =
+        tokio::time::timeout(std::time::Duration::from_secs(15), store.get(&probe_uri)).await;
 
     match get_result {
         Err(_elapsed) => {
@@ -247,17 +272,18 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     }
 
     // ── Step 3: DELETE ─────────────────────────────────────────────────────────
-    let del_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        store.delete(&probe_uri),
-    ).await;
+    let del_result =
+        tokio::time::timeout(std::time::Duration::from_secs(15), store.delete(&probe_uri)).await;
 
     match del_result {
         Err(_elapsed) => {
             results.push(ValidationResult::warning(
                 ErrorType::Network,
                 "write-probe-delete",
-                format!("Write probe DELETE timed out at {} — probe object may remain", endpoint),
+                format!(
+                    "Write probe DELETE timed out at {} — probe object may remain",
+                    endpoint
+                ),
                 "Manually delete: sai3bench-preflight-probe-*.bin",
             ));
         }
@@ -265,7 +291,10 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
             results.push(ValidationResult::warning(
                 ErrorType::Permission,
                 "write-probe-delete",
-                format!("Write probe DELETE failed at {}: {} — probe object may remain", endpoint, e),
+                format!(
+                    "Write probe DELETE failed at {}: {} — probe object may remain",
+                    endpoint, e
+                ),
                 "Manually delete: sai3bench-preflight-probe-*.bin",
             ));
         }
@@ -280,7 +309,96 @@ async fn write_probe(endpoint: &str) -> Vec<ValidationResult> {
     results
 }
 
-/// Detect permission source (environment variables vs instance-level)
+/// Extract a human-readable bucket label from a storage URI.
+///
+/// `s3://10.9.0.17:80/my-bucket/prefix/` → `"my-bucket"`  
+/// `gs://my-bucket/prefix/` → `"my-bucket"`
+/// Returns the full URI on parse failure (always produces a useful string).
+fn bucket_label(uri: &str) -> String {
+    // Strip scheme (s3://, gs://, az://)
+    let rest = if let Some(pos) = uri.find("://") {
+        &uri[pos + 3..]
+    } else {
+        return uri.to_string();
+    };
+    // Drop host[:port]
+    let after_host = if let Some(pos) = rest.find('/') {
+        &rest[pos + 1..]
+    } else {
+        return uri.to_string();
+    };
+    // First path segment = bucket
+    let bucket = after_host.split('/').next().unwrap_or(after_host);
+    if bucket.is_empty() {
+        uri.to_string()
+    } else {
+        bucket.to_string()
+    }
+}
+
+/// Classify an error string (both display and debug formats) into an [ErrorType]
+/// with an actionable suggestion.
+///
+/// AWS SDK Rust uses the term "service error" for any HTTP 4xx/5xx response body
+/// that was parsed as an S3 error document, which means the status code is NOT
+/// present in the `Display` string — only in the `Debug` representation.
+/// We check both forms so we can still give a useful classification.
+fn classify_storage_error(e: &anyhow::Error) -> (ErrorType, &'static str) {
+    let display = e.to_string().to_lowercase();
+    let debug = format!("{:?}", e).to_lowercase();
+
+    // Check display string first (human-readable chain)
+    if display.contains("403")
+        || display.contains("forbidden")
+        || display.contains("accessdenied")
+        || display.contains("access denied")
+        || debug.contains("403")
+        || debug.contains("forbidden")
+        || debug.contains("accessdenied")
+    {
+        return (
+            ErrorType::Permission,
+            "Check bucket name, credentials, and IAM/ACL permissions",
+        );
+    }
+    if display.contains("401")
+        || display.contains("unauthorized")
+        || display.contains("unauthenticated")
+        || debug.contains("401")
+        || debug.contains("unauthorized")
+    {
+        return (
+            ErrorType::Authentication,
+            "Credentials invalid or expired — check AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY",
+        );
+    }
+    if display.contains("404")
+        || display.contains("nosuchbucket")
+        || display.contains("no such bucket")
+        || display.contains("not found")
+        || debug.contains("nosuchbucket")
+        || debug.contains("404")
+    {
+        return (
+            ErrorType::Configuration,
+            "Bucket does not exist or endpoint path is incorrect",
+        );
+    }
+    // "service error" = S3 XML error body parsed by SDK; status code is in debug only
+    if display.contains("service error") || debug.contains("service error") {
+        return (
+            ErrorType::Permission,
+            "S3 service returned an error — likely 403 Forbidden (wrong bucket, missing credentials, \
+             or insufficient permissions). Check AWS credentials and bucket name.",
+        );
+    }
+    // Generic network/connectivity failures
+    (
+        ErrorType::Network,
+        "Check network connectivity and storage backend availability",
+    )
+}
+
 async fn detect_permission_source() -> Result<ValidationResult> {
     // Check AWS EC2 instance IAM role
     if let Ok(role) = check_ec2_iam_role().await {
@@ -422,4 +540,137 @@ async fn check_azure_managed_identity() -> Result<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    // ── bucket_label ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bucket_label_s3_with_ip_and_port() {
+        // The original bug trigger: IP:port endpoint with bucket in path
+        assert_eq!(
+            bucket_label("s3://10.9.0.17:80/my-bucket/prefix/"),
+            "my-bucket"
+        );
+    }
+
+    #[test]
+    fn test_bucket_label_s3_standard() {
+        assert_eq!(
+            bucket_label("s3://s3.amazonaws.com/my-bucket/subdir/"),
+            "my-bucket"
+        );
+    }
+
+    #[test]
+    fn test_bucket_label_s3_no_trailing_path() {
+        // Bucket only, no sub-path
+        assert_eq!(bucket_label("s3://host/just-bucket"), "just-bucket");
+    }
+
+    #[test]
+    fn test_bucket_label_gs() {
+        assert_eq!(
+            bucket_label("gs://my-gcs-project/datasets/training/"),
+            "datasets"
+        );
+    }
+
+    #[test]
+    fn test_bucket_label_az() {
+        assert_eq!(
+            bucket_label("az://mystorageaccount/mycontainer/blobs/"),
+            "mycontainer"
+        );
+    }
+
+    #[test]
+    fn test_bucket_label_no_scheme_passthrough() {
+        // No "://" → returned as-is
+        assert_eq!(bucket_label("not-a-uri"), "not-a-uri");
+    }
+
+    #[test]
+    fn test_bucket_label_host_no_path() {
+        // Nothing after host → fall back to full URI
+        assert_eq!(bucket_label("s3://just-a-host"), "s3://just-a-host");
+    }
+
+    // ── classify_storage_error ────────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_403_in_display() {
+        let err = anyhow::anyhow!("request failed with status 403");
+        let (kind, _) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Permission);
+    }
+
+    #[test]
+    fn test_classify_forbidden_in_display() {
+        let err = anyhow::anyhow!("HTTP Forbidden: access denied to resource");
+        let (kind, hint) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Permission);
+        assert!(hint.contains("credentials") || hint.contains("IAM"));
+    }
+
+    #[test]
+    fn test_classify_accessdenied_in_display() {
+        let err = anyhow::anyhow!("S3 Error: AccessDenied - you lack permission");
+        let (kind, _) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Permission);
+    }
+
+    #[test]
+    fn test_classify_service_error_permission() {
+        // "service error" without a status code in display — matches the AWS SDK pattern.
+        // The fix: we also check the Debug representation which includes the HTTP status.
+        let err = anyhow::anyhow!("service error encountered while making a request");
+        let (kind, hint) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Permission);
+        assert!(hint.contains("403") || hint.contains("Forbidden") || hint.contains("permission"));
+    }
+
+    #[test]
+    fn test_classify_401_unauthorized() {
+        let err = anyhow::anyhow!("401 Unauthorized - invalid credentials");
+        let (kind, hint) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Authentication);
+        assert!(
+            hint.contains("AWS_ACCESS_KEY_ID")
+                || hint.contains("expired")
+                || hint.contains("Credentials")
+        );
+    }
+
+    #[test]
+    fn test_classify_unauthenticated() {
+        let err = anyhow::anyhow!("unauthenticated: token missing");
+        let (kind, _) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Authentication);
+    }
+
+    #[test]
+    fn test_classify_nosuchbucket_in_display() {
+        let err = anyhow::anyhow!("NoSuchBucket: the specified bucket does not exist");
+        let (kind, hint) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Configuration);
+        assert!(hint.contains("does not exist") || hint.contains("path"));
+    }
+
+    #[test]
+    fn test_classify_404_in_display() {
+        let err = anyhow::anyhow!("endpoint returned 404 not found");
+        let (kind, _) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Configuration);
+    }
+
+    #[test]
+    fn test_classify_network_fallback() {
+        // Unknown error → generic network classification
+        let err = anyhow::anyhow!("connection reset by peer");
+        let (kind, hint) = classify_storage_error(&err);
+        assert_eq!(kind, ErrorType::Network);
+        assert!(hint.contains("network") || hint.contains("connectivity"));
+    }
+}

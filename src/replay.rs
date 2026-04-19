@@ -118,7 +118,11 @@ pub fn parse_oplog(path: &Path) -> Result<Vec<OpLogEntry>> {
         let op = match record[2].parse::<OpType>() {
             Ok(o) => o,
             Err(_) => {
-                debug!("Skipping line {} (unknown op: {})", line_num + 2, &record[2]);
+                debug!(
+                    "Skipping line {} (unknown op: {})",
+                    line_num + 2,
+                    &record[2]
+                );
                 skipped += 1;
                 continue;
             }
@@ -222,10 +226,7 @@ pub async fn replay_workload(config: ReplayConfig) -> Result<()> {
         }
     }
 
-    info!(
-        "Replay complete: {} successful, {} failed",
-        success, failed
-    );
+    info!("Replay complete: {} successful, {} failed", success, failed);
     Ok(())
 }
 
@@ -271,7 +272,7 @@ async fn execute_operation(op: &OpLogEntry, uri: &str) -> Result<()> {
             // OPTIMIZED v0.8.20+: Use cached generator pool for 50+ GB/s
             // Returns Bytes directly - zero-copy
             let data = crate::data_gen_pool::generate_data_optimized(op.bytes as usize, 1, 1);
-            workload::put_object_multi_backend(uri, data).await?;  // Bytes passed directly
+            workload::put_object_multi_backend(uri, data).await?; // Bytes passed directly
         }
         OpType::DELETE => {
             workload::delete_object_multi_backend(uri).await?;

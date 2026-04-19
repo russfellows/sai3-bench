@@ -1,13 +1,13 @@
 [package]
 name = "sai3-bench"
-version = "0.8.90"
+version = "0.8.92"
 edition = "2021"
 build   = "build.rs"
 
 [dependencies]
-# AWS SDK - aligned with s3dlio v0.9.86
-aws-config = "=1.8.14"
-aws-sdk-s3 = "=1.124.0"
+# AWS SDK - aligned with s3dlio v0.9.90
+aws-config = "=1.8.15"
+aws-sdk-s3 = "=1.129.0"
 anyhow = "^1"
 base64 = "^0.22"
 chrono = "^0.4"
@@ -26,9 +26,9 @@ num_cpus = "^1.16"
 # s3dlio: git-tagged release dependency for portable builds on any machine.
 # Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
 # az:// and gs:// support even though s3dlio's own default profile is S3-focused.
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86", features = ["full-backends"] }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.90", features = ["full-backends"] }
 # ⚠️ MUST keep s3dlio-oplog tag in sync with s3dlio tag above — both live in the same repo/commit.
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.86" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.90" }
 # Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
 # Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
 
@@ -81,7 +81,7 @@ bytes = "^1.10"
 nix = { version = "^0.27", features = ["user", "fs"] }  # Unix permissions, mount detection
 fs2 = "^0.4"              # Cross-platform disk space checks
 sysinfo = "^0.30"         # System resource queries
-reqwest = { version = "^0.11", features = ["json"] }  # Metadata service queries
+reqwest = { version = "^0.13", features = ["json"] }  # Metadata service queries
 users = "^0.11"           # Username/groupname lookup
 
 # Results analysis (v0.8.17+)

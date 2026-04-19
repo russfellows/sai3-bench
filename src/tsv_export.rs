@@ -5,10 +5,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::metrics::OpHists;
 use crate::constants::BUCKET_LABELS;
+use crate::metrics::OpHists;
 use crate::prepare::PrepareMetrics;
-use crate::workload::{SizeBins, EndpointStatsSnapshot};
+use crate::workload::{EndpointStatsSnapshot, SizeBins};
 
 /// TSV exporter for benchmark results
 pub struct TsvExporter {
@@ -23,7 +23,7 @@ impl TsvExporter {
             output_path: std::path::PathBuf::from(path),
         }
     }
-    
+
     /// Create exporter with explicit output path
     pub fn with_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         Ok(Self {
@@ -147,7 +147,8 @@ impl TsvExporter {
         }
 
         // Sum up total operations and bytes across all buckets
-        let (total_ops, total_bytes): (u64, u64) = bins.by_bucket
+        let (total_ops, total_bytes): (u64, u64) = bins
+            .by_bucket
             .values()
             .fold((0, 0), |(ops_acc, bytes_acc), (ops, bytes)| {
                 (ops_acc + ops, bytes_acc + bytes)
@@ -198,7 +199,7 @@ impl TsvExporter {
 
         // Collect all rows
         let mut rows = Vec::new();
-        
+
         // PUT operations (per-bucket)
         self.collect_op_buckets(
             &mut rows,
@@ -212,7 +213,7 @@ impl TsvExporter {
         self.collect_aggregate_row(
             &mut rows,
             "PUT",
-            99,  // bucket_idx for sorting
+            99, // bucket_idx for sorting
             &metrics.put_hists,
             &metrics.put_bins,
             metrics.wall_seconds,
@@ -230,7 +231,7 @@ impl TsvExporter {
     }
 
     /// Export per-endpoint statistics to TSV file (v0.8.23+)
-    /// 
+    ///
     /// Creates endpoint_stats.tsv with columns:
     /// - endpoint_idx: 1-based endpoint index
     /// - endpoint_uri: Full URI of the endpoint

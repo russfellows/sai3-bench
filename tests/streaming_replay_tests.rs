@@ -9,16 +9,18 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
-use sai3_bench::workload::{init_operation_logger, finalize_operation_logger, create_store_with_logger};
 use s3dlio_oplog::OpLogStreamReader;
+use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
+use sai3_bench::workload::{
+    create_store_with_logger, finalize_operation_logger, init_operation_logger,
+};
+use serial_test::serial;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::thread;
-use serial_test::serial;
 
-// ============================================================================= 
+// =============================================================================
 // Shared one-time fixture setup
 // =============================================================================
 
@@ -95,10 +97,17 @@ async fn do_create_test_oplog() -> Result<()> {
     // CRITICAL: flush the zstd frame
     finalize_operation_logger()?;
 
-    assert!(oplog_path.exists(), "Op-log file should exist after creation");
+    assert!(
+        oplog_path.exists(),
+        "Op-log file should exist after creation"
+    );
     let op_count = verify_oplog_contents(&oplog_path)?;
     // 50 PUTs + 50 GETs + 1 LIST = 101 operations
-    assert!(op_count >= 100, "Op-log should have ≥100 ops, got {}", op_count);
+    assert!(
+        op_count >= 100,
+        "Op-log should have ≥100 ops, got {}",
+        op_count
+    );
     println!("✓ Op-log fixture ready: {} operations", op_count);
     Ok(())
 }
@@ -116,13 +125,13 @@ fn get_test_data_dir() -> PathBuf {
 /// Verify op-log contents using streaming reader
 fn verify_oplog_contents(oplog_path: &Path) -> Result<usize> {
     let stream = OpLogStreamReader::from_file(oplog_path)?;
-    
+
     let mut count = 0;
     for entry_result in stream {
         let _entry = entry_result?;
         count += 1;
     }
-    
+
     Ok(count)
 }
 
@@ -140,7 +149,11 @@ async fn test_01_generate_oplog() -> Result<()> {
     let oplog_path = get_test_oplog_path();
     assert!(oplog_path.exists(), "Op-log file should exist");
     let op_count = verify_oplog_contents(&oplog_path)?;
-    assert!(op_count >= 100, "Should have at least 100 operations, got {}", op_count);
+    assert!(
+        op_count >= 100,
+        "Should have at least 100 operations, got {}",
+        op_count
+    );
     println!("✓ Op-log verified: {} operations", op_count);
     println!("✓ Test data at: {}", oplog_path.parent().unwrap().display());
     Ok(())
@@ -155,15 +168,15 @@ async fn test_01_generate_oplog() -> Result<()> {
 async fn test_02_replay_basic() -> Result<()> {
     ensure_oplog_created();
     let oplog_path = get_test_oplog_path();
-    
+
     println!("=== BASIC REPLAY TEST ===");
     println!("Reading op-log: {}", oplog_path.display());
-    
+
     // Verify we can read the op-log
     let op_count = verify_oplog_contents(&oplog_path)?;
     println!("Op-log contains {} operations", op_count);
     assert!(op_count >= 100, "Expected at least 100 operations");
-    
+
     // Replay at high speed
     println!("Replaying at 100x speed...");
     let replay_config = ReplayRunConfig {
@@ -175,10 +188,10 @@ async fn test_02_replay_basic() -> Result<()> {
         remap_config: None,
         backpressure: None,
     };
-    
+
     replay_workload_streaming(replay_config).await?;
     println!("✓ Replay completed successfully");
-    
+
     Ok(())
 }
 
@@ -191,22 +204,22 @@ async fn test_02_replay_basic() -> Result<()> {
 async fn test_03_streaming_reader() -> Result<()> {
     ensure_oplog_created();
     let oplog_path = get_test_oplog_path();
-    
+
     println!("=== STREAMING READER TEST ===");
     println!("Processing op-log with streaming reader...");
-    
+
     // Use streaming reader to count operations without loading all into memory
     let stream = OpLogStreamReader::from_file(&oplog_path)?;
-    
+
     let mut total = 0;
     for entry_result in stream {
         let _entry = entry_result?;
         total += 1;
     }
-    
+
     println!("✓ Processed {} operations with constant memory", total);
     assert!(total >= 100, "Should have processed many operations");
-    
+
     Ok(())
 }
 
@@ -219,18 +232,18 @@ async fn test_03_streaming_reader() -> Result<()> {
 async fn test_04_uri_remapping() -> Result<()> {
     ensure_oplog_created();
     let oplog_path = get_test_oplog_path();
-    
+
     println!("=== URI REMAPPING TEST ===");
-    
+
     // Create a different target directory
     let target_dir = std::env::temp_dir().join("sai3-bench-streaming-tests/remapped");
     fs::create_dir_all(&target_dir)?;
     let target_uri = format!("file://{}", target_dir.display());
-    
+
     println!("Replaying to remapped URI: {}", target_uri);
     println!("NOTE: GET operations will fail (files don't exist at new location)");
     println!("Using continue_on_error=true to demonstrate URI translation");
-    
+
     // Replay to different target with continue_on_error
     // PUT operations will create files at new location
     // GET/DELETE operations will fail (files don't exist) - this is expected
@@ -243,10 +256,10 @@ async fn test_04_uri_remapping() -> Result<()> {
         remap_config: None,
         backpressure: None,
     };
-    
+
     replay_workload_streaming(replay_config).await?;
     println!("✓ URI remapping test completed (with expected failures)");
-    
+
     Ok(())
 }
 
@@ -260,13 +273,13 @@ async fn test_05_continue_on_error() -> Result<()> {
     ensure_oplog_created();
     let oplog_path = get_test_oplog_path();
     let _data_dir = get_test_data_dir();
-    
+
     println!("=== CONTINUE ON ERROR TEST ===");
-    
+
     // Delete the data directory so GET operations will fail
     let temp_dir = std::env::temp_dir().join("sai3-bench-streaming-tests/error-test");
     fs::create_dir_all(&temp_dir)?;
-    
+
     println!("Replaying with continue_on_error=true (expect some failures)...");
     let replay_config = ReplayRunConfig {
         op_log_path: oplog_path,
@@ -277,11 +290,11 @@ async fn test_05_continue_on_error() -> Result<()> {
         remap_config: None,
         backpressure: None,
     };
-    
+
     // Should complete despite errors
     replay_workload_streaming(replay_config).await?;
     println!("✓ Error handling test passed");
-    
+
     Ok(())
 }
 
@@ -294,9 +307,9 @@ async fn test_05_continue_on_error() -> Result<()> {
 async fn test_06_concurrent_limits() -> Result<()> {
     ensure_oplog_created();
     let oplog_path = get_test_oplog_path();
-    
+
     println!("=== CONCURRENT EXECUTION TEST ===");
-    
+
     // Test with low concurrency
     println!("Testing with max_concurrent=5...");
     let replay_config = ReplayRunConfig {
@@ -309,7 +322,7 @@ async fn test_06_concurrent_limits() -> Result<()> {
         backpressure: None,
     };
     replay_workload_streaming(replay_config).await?;
-    
+
     // Test with high concurrency
     println!("Testing with max_concurrent=100...");
     let replay_config = ReplayRunConfig {
@@ -322,8 +335,8 @@ async fn test_06_concurrent_limits() -> Result<()> {
         backpressure: None,
     };
     replay_workload_streaming(replay_config).await?;
-    
+
     println!("✓ Concurrent execution test passed");
-    
+
     Ok(())
 }

@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.90-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.92-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-655%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-712%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.92)**: **Credential forwarding + HTTP/2 + pre-flight improvements** — Controller now forwards cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) to agents over gRPC via `--env-file <path>` or from its own environment (disable with `--no-forward-env`). Agents apply credentials before pre-flight, eliminating the manual step of copying secrets to each host. See [docs/CREDENTIAL_FORWARDING.md](docs/CREDENTIAL_FORWARDING.md). s3dlio v0.9.90 adds **HTTP/2 (h2c) support** for S3-protocol `http://` endpoints: auto-probes h2c on first connection and falls back to HTTP/1.1 if refused; `https://` endpoints negotiate via TLS ALPN transparently. Enable via `S3DLIO_H2C=1` or `s3dlio_optimization.h2c: true` in YAML. Pre-flight fixes: per-agent endpoint filtering (fixes 64-error agent-2 regression), bucket-grouped output, actionable `[PERM]`/`[AUTH]`/`[CONF]`/`[NET]` error classification, agent version check table, and two new config validation warnings (redundant multi_endpoint, missing credentials hint). +57 tests (712 total).
 
 **🚀 NEW (v0.8.90)**: **`populate_ledger.tsv` + dgen-data zero-copy fills** — Every prepare phase now writes a lightweight `populate_ledger.tsv` (always-on, independent of the KV cache) recording object counts, bytes, and throughput — usable even at trillion-object scale where listing is infeasible. Data generation rewritten using [`dgen-data`](https://crates.io/crates/dgen-data) v0.2.3: a rolling-pointer pool generates one 1 MB buffer and vends zero-copy `Bytes::slice()` windows per PUT, eliminating per-object allocation. PUT latency now split into **setup** vs. **I/O** histograms for better profiling.
 
@@ -52,6 +54,7 @@ A comprehensive storage performance testing tool supporting multiple backends th
 10. **Machine-Readable Output**: TSV export with per-bucket and aggregate rows for automated analysis
 11. **Performance Logging**: Time-series perf-log with 31 columns including mean/p50/p90/p99 latencies, CPU metrics, and warmup filtering (v0.8.17+)
 12. **Results Analysis Tool**: Excel spreadsheet generation consolidating multiple test results (sai3-analyze, v0.8.17+)
+13. **Automatic Credential Distribution**: Controller forwards cloud credentials to agents over gRPC so each host needs no manual secret setup — with an allow-list, local-wins policy, and audit logging (v0.8.92+)
 
 ## 🎯 Supported Storage Backends
 

@@ -1,7 +1,7 @@
 # Per-agent multi-endpoint configuration example
 # Each agent targets specific subset of endpoints for static mapping
 #
-# Use case: 4 test hosts, 8 storage IPs (VAST system), 2 IPs per host
+# Use case: 4 test hosts, 8 storage IPs (multi-NIC storage system), 2 IPs per host
 # Result: Perfect load distribution - each IP used by exactly one host
 #
 # Architecture:
@@ -13,7 +13,7 @@ duration: 300s
 concurrency: 64
 
 distributed:
-  shared_filesystem: true  # VAST provides unified namespace across all IPs
+  shared_filesystem: true  # Storage provides a unified namespace across all IPs
   tree_creation_mode: coordinator  # Controller creates tree once
   path_selection: random  # All agents access any directory
   

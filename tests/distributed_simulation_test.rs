@@ -37,11 +37,13 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Simulate controller's address resolution logic
     let ssh_enabled = dist.ssh.as_ref().map(|s| s.enabled).unwrap_or(false);
-    
-    let resolved_addrs: Vec<String> = dist.agents.iter()
+
+    let resolved_addrs: Vec<String> = dist
+        .agents
+        .iter()
         .map(|a| {
             if ssh_enabled {
                 // SSH mode: add port if missing
@@ -60,16 +62,16 @@ workload:
             }
         })
         .collect();
-    
+
     assert_eq!(resolved_addrs[0], "vm1.example.com:7167");
     assert_eq!(resolved_addrs[1], "vm2.example.com:8888");
-    assert_eq!(resolved_addrs[2], "10.0.1.50:7167");  // Uses default port
-    
+    assert_eq!(resolved_addrs[2], "10.0.1.50:7167"); // Uses default port
+
     println!("✓ Agent addresses resolved correctly:");
     for (idx, addr) in resolved_addrs.iter().enumerate() {
         println!("  Agent {}: {}", idx + 1, addr);
     }
-    
+
     Ok(())
 }
 
@@ -107,20 +109,22 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Simulate applying overrides
     let base_target = config.target.as_ref().unwrap();
     let base_concurrency = config.concurrency;
-    
+
     for (idx, agent) in dist.agents.iter().enumerate() {
-        let effective_target = agent.target_override.as_ref()
-            .unwrap_or(base_target);
-        let effective_concurrency = agent.concurrency_override
-            .unwrap_or(base_concurrency);
-        
-        println!("Agent {}: target={}, concurrency={}", 
-                 agent.id.as_ref().unwrap(), effective_target, effective_concurrency);
-        
+        let effective_target = agent.target_override.as_ref().unwrap_or(base_target);
+        let effective_concurrency = agent.concurrency_override.unwrap_or(base_concurrency);
+
+        println!(
+            "Agent {}: target={}, concurrency={}",
+            agent.id.as_ref().unwrap(),
+            effective_target,
+            effective_concurrency
+        );
+
         match idx {
             0 => {
                 assert_eq!(effective_target, "s3://default-bucket/data/");
@@ -137,9 +141,9 @@ workload:
             _ => panic!("Unexpected agent count"),
         }
     }
-    
+
     println!("✓ Per-agent overrides applied correctly");
-    
+
     Ok(())
 }
 
@@ -173,7 +177,7 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Simulate env var collection for Docker commands
     for agent in &dist.agents {
         println!("Agent: {}", agent.address);
@@ -181,13 +185,16 @@ workload:
             println!("  -e {}={}", key, value);
         }
     }
-    
+
     assert_eq!(dist.agents[0].env.len(), 2);
     assert_eq!(dist.agents[1].env.len(), 3);
-    assert_eq!(dist.agents[1].env.get("CUSTOM_VAR"), Some(&"custom-value".to_string()));
-    
+    assert_eq!(
+        dist.agents[1].env.get("CUSTOM_VAR"),
+        Some(&"custom-value".to_string())
+    );
+
     println!("✓ Environment variables configured correctly");
-    
+
     Ok(())
 }
 
@@ -219,7 +226,7 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Simulate volume mount command generation
     for agent in &dist.agents {
         println!("Agent: {}", agent.address);
@@ -227,13 +234,13 @@ workload:
             println!("  -v {}", volume);
         }
     }
-    
+
     assert_eq!(dist.agents[0].volumes.len(), 2);
     assert_eq!(dist.agents[0].volumes[1], "/tmp/results:/results:ro");
     assert_eq!(dist.agents[1].volumes[0], "/mnt/ssd:/mnt/ssd");
-    
+
     println!("✓ Volume mounts parsed correctly");
-    
+
     Ok(())
 }
 
@@ -262,19 +269,19 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     // Simulate path template resolution (like controller does)
     let path_template = &dist.path_template;
-    
+
     for idx in 0..dist.agents.len() {
         let resolved_path = path_template.replace("{id}", &(idx + 1).to_string());
         println!("Agent {}: path prefix = {}", idx + 1, resolved_path);
-        
+
         assert_eq!(resolved_path, format!("agent-{}/", idx + 1));
     }
-    
+
     println!("✓ Path templates resolved correctly");
-    
+
     Ok(())
 }
 
@@ -293,13 +300,15 @@ workload:
 "#;
 
     let config: Config = serde_yaml::from_str(yaml)?;
-    
+
     // Simulate controller logic
     let cli_agents = vec!["agent1:7167".to_string(), "agent2:7167".to_string()];
-    
+
     let (agent_addrs, ssh_deployment) = if let Some(ref dist_config) = config.distributed {
         // Would use config.distributed.agents
-        let addrs: Vec<String> = dist_config.agents.iter()
+        let addrs: Vec<String> = dist_config
+            .agents
+            .iter()
             .map(|a| a.address.clone())
             .collect();
         (addrs, Some(dist_config.clone()))
@@ -307,12 +316,12 @@ workload:
         // Fallback to CLI agents
         (cli_agents.clone(), None)
     };
-    
+
     assert_eq!(agent_addrs, cli_agents);
     assert!(ssh_deployment.is_none());
-    
+
     println!("✓ Backward compatibility maintained - CLI --agents works");
-    
+
     Ok(())
 }
 
@@ -355,13 +364,17 @@ workload:
 
     let config: Config = serde_yaml::from_str(yaml)?;
     let dist = config.distributed.as_ref().unwrap();
-    
+
     assert_eq!(dist.agents.len(), 4);
-    
+
     // Verify we can mix different storage backends
-    let backends: Vec<String> = dist.agents.iter()
+    let backends: Vec<String> = dist
+        .agents
+        .iter()
         .map(|a| {
-            let target = a.target_override.as_ref()
+            let target = a
+                .target_override
+                .as_ref()
                 .unwrap_or(config.target.as_ref().unwrap());
             if target.starts_with("s3://") {
                 "S3".to_string()
@@ -374,17 +387,17 @@ workload:
             }
         })
         .collect();
-    
+
     assert_eq!(backends[0], "S3");
     assert_eq!(backends[1], "S3");
     assert_eq!(backends[2], "File");
     assert_eq!(backends[3], "Azure");
-    
+
     println!("✓ Mixed storage backends supported:");
     for (idx, backend) in backends.iter().enumerate() {
         println!("  Agent {}: {}", idx + 1, backend);
     }
-    
+
     Ok(())
 }
 
@@ -425,7 +438,7 @@ workload:
     let dist = config.distributed.as_ref().unwrap();
     let deploy = dist.deployment.as_ref().unwrap();
     let agent = &dist.agents[0];
-    
+
     // Simulate building docker run command (like ssh_deploy.rs does)
     let mut docker_cmd = vec![
         "docker run -d".to_string(),
@@ -433,41 +446,41 @@ workload:
         format!("--name sai3bench-agent-{}", agent.id.as_ref().unwrap()),
         format!("--network {}", deploy.network_mode),
     ];
-    
+
     // Add env vars
     for (key, value) in &agent.env {
         docker_cmd.push(format!("-e {}={}", key, value));
     }
-    
+
     // Add volumes
     for volume in &agent.volumes {
         docker_cmd.push(format!("-v {}", volume));
     }
-    
+
     // Add extra args
     for arg in &deploy.docker_args {
         docker_cmd.push(arg.clone());
     }
-    
+
     // Image and command
     docker_cmd.push(deploy.image.clone());
     docker_cmd.push("sai3bench-agent".to_string());
     docker_cmd.push("--listen".to_string());
     docker_cmd.push(format!("0.0.0.0:{}", agent.listen_port));
-    
+
     let full_cmd = docker_cmd.join(" ");
-    
+
     println!("Simulated docker command:");
     println!("{}", full_cmd);
-    
+
     assert!(full_cmd.contains("--network host"));
     assert!(full_cmd.contains("-e RUST_LOG=info"));
     assert!(full_cmd.contains("-v /data:/data"));
     assert!(full_cmd.contains("--cpus=2"));
     assert!(full_cmd.contains("sai3bench:v0.6.11"));
     assert!(full_cmd.contains("--listen 0.0.0.0:7167"));
-    
+
     println!("✓ Docker command built correctly");
-    
+
     Ok(())
 }
