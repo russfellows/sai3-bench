@@ -3,6 +3,11 @@
 // Licensed under the GNU General Public License v3.0 or later
 //
 
+// jemalloc as global allocator: eliminates glibc arena contention and fragmentation.
+// Profiling shows glibc malloc_consolidate at 3% + allocator frame at ~52% of CPU cycles.
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // -----------------------------------------------------------------------------
 // sai3-bench - Multi-protocol I/O benchmarking suite built on s3dlio
 // -----------------------------------------------------------------------------

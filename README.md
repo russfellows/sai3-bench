@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.92-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.94-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-712%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.94)**: **jemalloc global allocator + s3dlio v0.9.92** — Replaced the default glibc allocator with [tikv-jemallocator](https://crates.io/crates/tikv-jemallocator) v0.6 (`#[global_allocator]`), eliminating glibc arena contention and fragmentation. Profiling showed `malloc_consolidate` at ~3% and the allocator frame at ~52% of CPU cycles under load; jemalloc removes both bottlenecks. Measured improvement: **+3.6% throughput at t=32** (32,634 → 33,812 ops/s). Updated s3dlio dependency from v0.9.90 → **v0.9.92** (pinned tag).
 
 **🚀 NEW (v0.8.92)**: **Credential forwarding + HTTP/2 + pre-flight improvements** — Controller now forwards cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) to agents over gRPC via `--env-file <path>` or from its own environment (disable with `--no-forward-env`). Agents apply credentials before pre-flight, eliminating the manual step of copying secrets to each host. See [docs/CREDENTIAL_FORWARDING.md](docs/CREDENTIAL_FORWARDING.md). s3dlio v0.9.90 adds **HTTP/2 (h2c) support** for S3-protocol `http://` endpoints: auto-probes h2c on first connection and falls back to HTTP/1.1 if refused; `https://` endpoints negotiate via TLS ALPN transparently. Enable via `S3DLIO_H2C=1` or `s3dlio_optimization.h2c: true` in YAML. Pre-flight fixes: per-agent endpoint filtering (fixes 64-error agent-2 regression), bucket-grouped output, actionable `[PERM]`/`[AUTH]`/`[CONF]`/`[NET]` error classification, agent version check table, and two new config validation warnings (redundant multi_endpoint, missing credentials hint). +57 tests (712 total).
 
