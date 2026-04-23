@@ -1,11 +1,15 @@
 [package]
 name = "sai3-bench"
-version = "0.8.92"
+version = "0.8.94"
 edition = "2021"
 build   = "build.rs"
 
 [dependencies]
-# AWS SDK - aligned with s3dlio v0.9.90
+# jemalloc: replaces glibc allocator to eliminate fragmentation and arena contention
+# Expected gain: +10-25% throughput based on heap churn analysis (malloc_consolidate hot)
+tikv-jemallocator = "0.6"
+
+# AWS SDK - aligned with s3dlio v0.9.92
 aws-config = "=1.8.15"
 aws-sdk-s3 = "=1.129.0"
 anyhow = "^1"
@@ -26,11 +30,9 @@ num_cpus = "^1.16"
 # s3dlio: git-tagged release dependency for portable builds on any machine.
 # Force full cloud backends (AWS+Azure+GCS) so sai3-bench default build retains
 # az:// and gs:// support even though s3dlio's own default profile is S3-focused.
-s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.90", features = ["full-backends"] }
+s3dlio = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.92", features = ["full-backends"] }
 # ⚠️ MUST keep s3dlio-oplog tag in sync with s3dlio tag above — both live in the same repo/commit.
-s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.90" }
-# Development: s3dlio = { path = "../s3dlio", features = ["full-backends"] }
-# Development: s3dlio-oplog = { path = "../s3dlio/crates/s3dlio-oplog" }
+s3dlio-oplog = { git = "https://github.com/russfellows/s3dlio.git", tag = "v0.9.92" }
 
 # High-performance data generation (replaces s3dlio::fill_controlled_data in data_gen_pool.rs)
 # default-features = false: excludes PyO3 python-bindings (not needed in a pure Rust binary)
@@ -123,3 +125,5 @@ tempfile = "^3.20"
 bytes = "^1.10"
 tokio = { version = "1", features = ["full"] }
 serial_test = "3.2"
+
+

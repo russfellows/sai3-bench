@@ -6,6 +6,25 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.94] - 2026-04-23
+
+### Changed
+
+- **jemalloc global allocator** — replaced the default glibc allocator with
+  `tikv-jemallocator` (`#[global_allocator]`).  Profiling showed `malloc_consolidate` and
+  allocator frames consuming ~55% of CPU cycles at high PUT concurrency; jemalloc eliminates
+  arena contention and fragmentation under multi-threaded workloads.
+  Expected gain: +10–25% throughput at t=32+.
+  Measured gain: +3.6% at t=32 (31,492 → 32,634 ops/s, loopback, 1 KiB PUTs, 30 s).
+
+### Dependencies
+
+- **`s3dlio`**: updated from v0.9.90 → **v0.9.92** — unlimited connection pool
+  (`DEFAULT_POOL_MAX_IDLE_PER_HOST = usize::MAX`), removed 32-thread runtime cap,
+  `warmup_connection_pool()` and `configure_for_concurrency(n)` APIs.
+- **`s3dlio-oplog`**: updated from v0.9.90 → **v0.9.92** (kept in sync with s3dlio).
+- **`tikv-jemallocator = "0.6"`**: new dependency (jemalloc allocator).
+
 ## [0.8.92] - 2026-04-18
 
 ### Added
