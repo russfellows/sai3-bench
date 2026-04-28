@@ -1,5 +1,6 @@
 # S3 Multi-Endpoint Testing Guide
 
+> **See also**: [tests/configs/MULTI_ENDPOINT_README.md](../tests/configs/MULTI_ENDPOINT_README.md) — quick-start examples and config file inventory.
 ## Overview
 
 This guide explains how to adapt your NFS multi-mount testing to S3 multi-endpoint testing using sai3-bench's multi-endpoint capabilities with s3dlio.
@@ -127,7 +128,44 @@ aws_access_key_id = your-access-key
 aws_secret_access_key = your-secret-key
 ```
 
-### 2. Update Endpoint IPs
+### 2. Choose Your Endpoint Configuration Method
+
+There are **two ways** to specify multiple endpoints:
+
+#### Method A: YAML `multi_endpoint:` block (recommended)
+
+Add a `multi_endpoint:` block to your config. All operations — PUT, GET, LIST, STAT, DELETE — are automatically load-balanced across all listed endpoints.
+
+```yaml
+multi_endpoint:
+  strategy: round_robin      # or: least_connections
+  endpoints:
+    - "s3://192.168.1.1:9000/benchmark/"
+    - "s3://192.168.1.2:9000/benchmark/"
+    - "s3://192.168.1.3:9000/benchmark/"
+    - "s3://192.168.1.4:9000/benchmark/"
+```
+
+> **Do NOT set `AWS_ENDPOINT_URL`** when using `multi_endpoint:` — the host is encoded in each endpoint URI.
+
+#### Method B: `S3_ENDPOINT_URIS` environment variable (v0.8.96+)
+
+Set a comma-separated list of URIs to enable multi-endpoint at runtime **without changing any YAML file**:
+
+```bash
+export S3_ENDPOINT_URIS="s3://192.168.1.1:9000/benchmark/,s3://192.168.1.2:9000/benchmark/,s3://192.168.1.3:9000/benchmark/"
+sai3-bench run --config my_config.yaml   # automatically uses all 3 endpoints
+```
+
+**Priority rules** (highest wins):
+1. YAML `multi_endpoint:` block — always takes precedence
+2. `S3_ENDPOINT_URIS` env var — round-robin; used when no YAML block present
+3. `AWS_ENDPOINT_URL` — single-endpoint fallback
+4. AWS SDK default (`s3.amazonaws.com`)
+
+At startup, a banner shows which source is active and lists all resolved endpoints.
+
+### 3. Update Endpoint IPs
 
 Edit `distributed_4node_8endpoint_s3_test.yaml`:
 ```yaml
@@ -316,7 +354,7 @@ barrier_sync:
 
 ## Additional Resources
 
-- **s3dlio Multi-Endpoint Guide**: `/home/eval/Documents/Code/s3dlio/docs/supplemental/MULTI_ENDPOINT_GUIDE.md`
-- **s3dlio Performance Tuning**: `docs/S3DLIO_PERFORMANCE_TUNING.md`
-- **sai3-bench Config Syntax**: `docs/CONFIG_SYNTAX.md`
-- **Example Configs**: `tests/configs/MULTI_ENDPOINT_README.md`
+- **Example configs & quick-start**: [tests/configs/MULTI_ENDPOINT_README.md](../tests/configs/MULTI_ENDPOINT_README.md)
+- **s3dlio Performance Tuning**: [docs/S3DLIO_PERFORMANCE_TUNING.md](S3DLIO_PERFORMANCE_TUNING.md)
+- **sai3-bench Config Syntax**: [docs/CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)
+- **Distributed Testing Guide**: [docs/DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)

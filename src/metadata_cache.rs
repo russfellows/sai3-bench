@@ -5104,7 +5104,7 @@ mod tests {
         // Create a fresh MetadataCache with no objects
         let cache = MetadataCache::new(
             &results_dir,
-            &[storage_uri.clone()],
+            std::slice::from_ref(&storage_uri),
             config_hash.to_string(),
             None,
             None,
@@ -5133,7 +5133,7 @@ mod tests {
         {
             let cache = MetadataCache::new(
                 &results_dir,
-                &[storage_uri.clone()],
+                std::slice::from_ref(&storage_uri),
                 config_hash.to_string(),
                 None,
                 None,
@@ -5256,7 +5256,7 @@ mod tests {
             let entry = restored
                 .get_object(config_hash, i)
                 .expect("get_object should not fail")
-                .expect(&format!("Object {} should be present", i));
+                .unwrap_or_else(|| panic!("Object {i} should be present"));
 
             assert_eq!(
                 entry.state,

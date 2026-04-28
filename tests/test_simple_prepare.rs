@@ -28,7 +28,6 @@ async fn test_single_agent_prepare() {
             fill: FillPattern::Zero,
             dedup_factor: 1,
             compress_factor: 1,
-            use_multi_endpoint: false,
         }],
         directory_structure: None, // No directory structure - flat files
         skip_verification: false,

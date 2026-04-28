@@ -4942,8 +4942,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s3dlio"
-version = "0.9.92"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.92#2a8fc8adf04d7420977d15c8504ec0eb493884be"
+version = "0.9.96"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.96#bbdd560d15bc6b14a70957845fdead34d6a0b91a"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5013,8 +5013,8 @@ dependencies = [
 
 [[package]]
 name = "s3dlio-oplog"
-version = "0.9.92"
-source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.92#2a8fc8adf04d7420977d15c8504ec0eb493884be"
+version = "0.9.96"
+source = "git+https://github.com/russfellows/s3dlio.git?tag=v0.9.96#bbdd560d15bc6b14a70957845fdead34d6a0b91a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5033,7 +5033,7 @@ dependencies = [
 
 [[package]]
 name = "sai3-bench"
-version = "0.8.94"
+version = "0.8.96"
 dependencies = [
  "anyhow",
  "assert_cmd",

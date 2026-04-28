@@ -365,13 +365,39 @@ pub struct MultiEndpointConfig {
     #[serde(default = "default_load_balance_strategy")]
     pub strategy: String,
 
-    /// List of endpoint URIs to load balance across
-    /// All endpoints must present identical namespace (same files accessible from each)
+    /// List of endpoint URIs to load balance across.
+    ///
+    /// Must have between 1 and `s3dlio::constants::MAX_ENDPOINTS` entries
+    /// (currently 32).  A single-element list works exactly like a direct
+    /// target URI with no load balancing overhead beyond one extra indirection.
+    ///
     /// Examples:
     ///   - S3: ["s3://192.168.1.10:9000/bucket/", "s3://192.168.1.11:9000/bucket/"]
     ///   - NFS: ["file:///mnt/nfs1/data/", "file:///mnt/nfs2/data/"]
     ///   - Azure: ["az://account/container/", "az://192.168.1.10:10000/container/"]
     pub endpoints: Vec<String>,
+}
+
+impl MultiEndpointConfig {
+    /// Validate that the endpoint list is within acceptable bounds.
+    ///
+    /// The maximum is defined once in s3dlio and queried here so that both
+    /// libraries always agree on the limit without duplicating the constant.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let max = s3dlio::constants::max_endpoints();
+        if self.endpoints.is_empty() {
+            anyhow::bail!("multi_endpoint.endpoints must contain at least 1 entry");
+        }
+        if self.endpoints.len() > max {
+            anyhow::bail!(
+                "multi_endpoint.endpoints has {} entries; maximum allowed is {} \
+                 (s3dlio::constants::MAX_ENDPOINTS)",
+                self.endpoints.len(),
+                max
+            );
+        }
+        Ok(())
+    }
 }
 
 fn default_load_balance_strategy() -> String {
@@ -443,15 +469,7 @@ pub struct WeightedOp {
 pub enum OpSpec {
     /// GET with a single key, a prefix (ending in '/'), or a glob with '*'.
     /// Can be absolute URI (s3://bucket/key) or relative path (data/file.txt) when target is set.
-    Get {
-        path: String,
-
-        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
-        /// When true, operations are distributed across all configured endpoints
-        /// Default: false (use path directly as single endpoint)
-        #[serde(default)]
-        use_multi_endpoint: bool,
-    },
+    Get { path: String },
 
     /// PUT objects with configurable sizes.
     /// Uses 'path' relative to target, or absolute URI.
@@ -463,6 +481,12 @@ pub enum OpSpec {
     /// 2. Size distribution (v0.5.3+):
     ///    Put { path: "data/", size_distribution: { type: "lognormal", mean: 1048576, ... } }
     Put {
+        /// Target path/prefix for PUT objects.
+        /// May be an absolute S3 URI ("s3://host:port/bucket/prefix/"),
+        /// a relative path (resolved against `target:`), or empty string
+        /// when a `multi_endpoint:` block is present — in which case the base URI
+        /// is taken from `multi_endpoint.endpoints[0]`.
+        #[serde(default)]
         path: String,
 
         /// Fixed object size in bytes (backward compatible)
@@ -482,49 +506,19 @@ pub enum OpSpec {
         /// Controls compressibility of generated data (v0.5.3+)
         #[serde(default = "default_compress_factor")]
         compress_factor: usize,
-
-        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
-        /// When true, operations are distributed across all configured endpoints
-        /// Default: false (use path directly as single endpoint)
-        #[serde(default)]
-        use_multi_endpoint: bool,
     },
 
     /// LIST objects under a path/prefix.
     /// Uses 'path' relative to target, or absolute URI.
-    List {
-        path: String,
-
-        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
-        /// When true, operations are distributed across all configured endpoints
-        /// Default: false (use path directly as single endpoint)
-        #[serde(default)]
-        use_multi_endpoint: bool,
-    },
+    List { path: String },
 
     /// STAT/HEAD a single object to get metadata.
     /// Uses 'path' relative to target, or absolute URI.
-    Stat {
-        path: String,
-
-        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
-        /// When true, operations are distributed across all configured endpoints
-        /// Default: false (use path directly as single endpoint)
-        #[serde(default)]
-        use_multi_endpoint: bool,
-    },
+    Stat { path: String },
 
     /// DELETE objects (single or glob pattern).
     /// Uses 'path' relative to target, or absolute URI.
-    Delete {
-        path: String,
-
-        /// Use multi-endpoint configuration for load balancing (v0.8.22+)
-        /// When true, operations are distributed across all configured endpoints
-        /// Default: false (use path directly as single endpoint)
-        #[serde(default)]
-        use_multi_endpoint: bool,
-    },
+    Delete { path: String },
 
     /// MKDIR - Create a directory (filesystem backends only).
     /// Uses 'path' relative to target, or absolute URI (file:// or direct://).
@@ -644,20 +638,13 @@ pub struct PrepareConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnsureSpec {
     /// Base URI for object creation (e.g., "s3://bucket/prefix/")
-    /// When use_multi_endpoint=true, this provides the path component only (after the endpoint)
     ///
-    /// **Optional in Isolated Mode**: When tree_creation_mode=isolated and use_multi_endpoint=true,
-    /// base_uri can be omitted. In this case, each agent will use the first URI from its
-    /// multi_endpoint configuration for prepare/listing operations.
+    /// **Optional when `multi_endpoint:` block is present**: If omitted, the first URI
+    /// from the `multi_endpoint` configuration is used for prepare/listing operations.
+    /// In distributed isolated-mode runs each agent uses the first URI from its own
+    /// `multi_endpoint` block.
     #[serde(default)]
     pub base_uri: Option<String>,
-
-    /// Use multi-endpoint configuration for object creation (v0.8.22+)
-    /// When true, objects are distributed across all configured endpoints
-    /// This is CRITICAL for performance when endpoints represent different network paths
-    /// Default: false (use base_uri directly)
-    #[serde(default)]
-    pub use_multi_endpoint: bool,
 
     /// Target number of objects to ensure exist
     #[serde(deserialize_with = "crate::serde_helpers::deserialize_u64_with_separators")]
@@ -691,33 +678,23 @@ pub struct EnsureSpec {
 }
 
 impl EnsureSpec {
-    /// Get the effective base_uri for this agent
+    /// Get the effective base URI for this prepare spec.
     ///
-    /// In isolated mode with multi_endpoint, if base_uri is None, this will use the first
-    /// URI from the provided multi_endpoint_uris (the agent's own endpoints).
-    ///
-    /// # Arguments
-    /// * `multi_endpoint_uris` - Optional list of URIs from agent's multi_endpoint config
-    ///
-    /// # Returns
-    /// Ok(uri) if a valid base_uri can be determined, Err otherwise
+    /// Priority:
+    /// 1. `base_uri` if explicitly set
+    /// 2. First entry of `multi_endpoint_uris` when no `base_uri` was provided
+    /// 3. Error if neither is available
     pub fn get_base_uri(&self, multi_endpoint_uris: Option<&[String]>) -> anyhow::Result<String> {
         if let Some(ref uri) = self.base_uri {
-            // Explicit base_uri provided
             Ok(uri.clone())
-        } else if self.use_multi_endpoint {
-            // No base_uri, but use_multi_endpoint=true - use first endpoint
-            if let Some(uris) = multi_endpoint_uris {
-                if let Some(first) = uris.first() {
-                    Ok(first.clone())
-                } else {
-                    anyhow::bail!("use_multi_endpoint=true with no base_uri, but multi_endpoint list is empty")
-                }
+        } else if let Some(uris) = multi_endpoint_uris {
+            if let Some(first) = uris.first() {
+                Ok(first.clone())
             } else {
-                anyhow::bail!("use_multi_endpoint=true with no base_uri, but no multi_endpoint configuration provided")
+                anyhow::bail!("multi_endpoint list is empty — cannot determine base_uri")
             }
         } else {
-            anyhow::bail!("base_uri is required when use_multi_endpoint=false")
+            anyhow::bail!("base_uri is required when no multi_endpoint configuration is provided")
         }
     }
 
@@ -847,6 +824,10 @@ impl Config {
 
     /// Get the resolved PUT target and size specification (v0.5.3+)
     /// Returns (base_uri, SizeSpec) for use with SizeGenerator
+    ///
+    /// When a `multi_endpoint:` block is present and `path` is empty, the base
+    /// URI is taken from `endpoints[0]` so that the constructed object URI always
+    /// matches one of the endpoint prefixes that MultiEndpointStore can rewrite.
     pub fn get_put_size_spec(&self, put_op: &OpSpec) -> (String, SizeSpec) {
         match put_op {
             OpSpec::Put {
@@ -855,7 +836,17 @@ impl Config {
                 size_spec,
                 ..
             } => {
-                let base_uri = self.resolve_uri(path);
+                // When a multi_endpoint block is present and path is empty, anchor
+                // to endpoints[0] so MultiEndpointStore rewrite logic can route it.
+                let base_uri = if path.is_empty() && self.multi_endpoint.is_some() {
+                    self.multi_endpoint
+                        .as_ref()
+                        .and_then(|me| me.endpoints.first())
+                        .cloned()
+                        .unwrap_or_else(|| self.resolve_uri(path))
+                } else {
+                    self.resolve_uri(path)
+                };
 
                 // Backward compatibility: convert object_size to SizeSpec::Fixed
                 let spec = if let Some(spec) = size_spec {

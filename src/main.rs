@@ -2208,6 +2208,12 @@ fn run_workload(
     let mut config: Config = serde_yaml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config file: {}", config_path))?;
 
+    // Validate multi_endpoint block if present (endpoint count bounds, etc.)
+    if let Some(ref me) = config.multi_endpoint {
+        me.validate()
+            .with_context(|| format!("Invalid multi_endpoint config in: {}", config_path))?;
+    }
+
     // Apply s3dlio optimization settings as environment variables (v0.8.63+)
     if let Some(ref s3dlio_opt) = config.s3dlio_optimization {
         s3dlio_opt.apply();
@@ -4002,14 +4008,14 @@ mod tests {
     fn test_channels_per_thread_zero_rejected() {
         // 0 is never a valid multiplier — would mean 0 channels
         let csv = parse_csv_usize("0").unwrap();
-        assert!(csv.iter().any(|&v| v == 0), "parsed 0 as usize");
+        assert!(csv.contains(&0), "parsed 0 as usize");
         // The actual rejection happens in autotune_cmd() after parsing.
         // Simulate that check directly:
         let cpts = parse_csv_usize("1,0,4").unwrap();
-        assert!(cpts.iter().any(|&v| v == 0));
+        assert!(cpts.contains(&0));
         // Confirm a clean list with no zeros passes the check
         let ok = parse_csv_usize("1,2,4").unwrap();
-        assert!(!ok.iter().any(|&v| v == 0));
+        assert!(!ok.contains(&0));
     }
 
     #[test]

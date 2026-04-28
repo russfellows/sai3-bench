@@ -502,7 +502,6 @@ mod tests {
                 weight: 100,
                 spec: OpSpec::Get {
                     path: "data/*".to_string(),
-                    use_multi_endpoint: false,
                 },
                 concurrency: None,
             }],
@@ -682,7 +681,6 @@ mod tests {
                 weight: 100,
                 spec: OpSpec::Get {
                     path: "data/*".to_string(),
-                    use_multi_endpoint: false,
                 },
                 concurrency: None,
             }],
@@ -754,7 +752,6 @@ mod tests {
                     weight: 70,
                     spec: OpSpec::Get {
                         path: "objects/*".to_string(),
-                        use_multi_endpoint: false,
                     },
                     concurrency: None,
                 },
@@ -766,7 +763,6 @@ mod tests {
                         size_spec: None,
                         dedup_factor: 1,
                         compress_factor: 1,
-                        use_multi_endpoint: false,
                     },
                     concurrency: None,
                 },

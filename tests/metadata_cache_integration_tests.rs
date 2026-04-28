@@ -231,9 +231,9 @@ async fn test_resume_after_partial_prepare() {
         // Verify all objects now created
         let totals = cache.aggregate_progress(&config_hash).unwrap();
         assert_eq!(totals.get(&ObjectState::Created), Some(&100));
-        assert!(
-            totals.get(&ObjectState::Planned).is_none()
-                || totals.get(&ObjectState::Planned) == Some(&0),
+        assert_eq!(
+            totals.get(&ObjectState::Planned).copied().unwrap_or(0),
+            0,
             "No objects should be in Planned state"
         );
     }
@@ -323,9 +323,9 @@ async fn test_resume_after_failures() {
         // Verify all objects now created
         let totals = cache.aggregate_progress(&config_hash).unwrap();
         assert_eq!(totals.get(&ObjectState::Created), Some(&50));
-        assert!(
-            totals.get(&ObjectState::Failed).is_none()
-                || totals.get(&ObjectState::Failed) == Some(&0),
+        assert_eq!(
+            totals.get(&ObjectState::Failed).copied().unwrap_or(0),
+            0,
             "No failed objects should remain"
         );
     }

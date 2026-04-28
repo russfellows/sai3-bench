@@ -37,7 +37,9 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                 if dist.shared_filesystem {
                     // SHARED STORAGE: All agents access same underlying storage
                     // Validate that multi_endpoint configs are compatible
-                    if spec.use_multi_endpoint {
+                    let any_agent_has_multi_ep =
+                        dist.agents.iter().any(|a| a.multi_endpoint.is_some());
+                    if any_agent_has_multi_ep || config.multi_endpoint.is_some() {
                         // Check if all agents have multi_endpoint configured
                         let agents_without_multiep: Vec<String> = dist
                             .agents
@@ -55,7 +57,7 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                                     agents_without_multiep.len()
                                 ),
                                 suggestion: format!(
-                                    "With shared_filesystem: true and use_multi_endpoint: true, all agents\n\
+                                    "With shared_filesystem: true and multi_endpoint configured, all agents\n\
                                      should have multi_endpoint configurations pointing to the shared storage.\n\n\
                                      Agents without multi_endpoint: {}\n\n\
                                      These agents will use the global target URI instead, which may work\n\
@@ -69,9 +71,11 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                     }
                 } else {
                     // PER-AGENT STORAGE: Each agent has independent storage
-                    // THE BUG: base_uri specified in isolated mode with use_multi_endpoint
+                    // Detect: base_uri specified in isolated mode when agents have their own endpoints
                     // This causes listing to use base_uri instead of each agent's first endpoint
-                    if spec.use_multi_endpoint
+                    let any_agent_has_multi_ep =
+                        dist.agents.iter().any(|a| a.multi_endpoint.is_some());
+                    if any_agent_has_multi_ep
                         && spec.base_uri.is_some()
                         && dist.tree_creation_mode == TreeCreationMode::Isolated
                     {
@@ -84,7 +88,7 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                                 "RECOMMENDED FIX: Remove 'base_uri' field from ensure_objects.\n\n\
                                  Current configuration:\n\
                                  - tree_creation_mode: isolated (each agent creates separate tree)\n\
-                                 - use_multi_endpoint: true (multi-endpoint load balancing)\n\
+                                 - multi_endpoint: configured (multi-endpoint load balancing)\n\
                                  - shared_filesystem: false (per-agent storage)\n\
                                  - base_uri: {} (PROBLEM - causes listing failures)\n\n\
                                  When base_uri is omitted, each agent uses its FIRST multi_endpoint URI\n\
@@ -108,15 +112,17 @@ pub fn validate_distributed_config(config: &Config) -> Result<Vec<ValidationResu
                     }
                 }
 
-                // Check for missing base_uri when NOT using multi_endpoint
-                if !spec.use_multi_endpoint && spec.base_uri.is_none() {
+                // Check for missing base_uri when no multi_endpoint configuration is present
+                let any_multi_ep = config.multi_endpoint.is_some()
+                    || dist.agents.iter().any(|a| a.multi_endpoint.is_some());
+                if !any_multi_ep && spec.base_uri.is_none() {
                     results.push(ValidationResult {
                         level: ResultLevel::Error,
                         error_type: Some(ErrorType::Configuration),
-                        message: "base_uri is required when use_multi_endpoint=false".to_string(),
-                        suggestion: "Add 'base_uri' field to ensure_objects, or set use_multi_endpoint: true".to_string(),
+                        message: "base_uri is required when no multi_endpoint configuration is present".to_string(),
+                        suggestion: "Add 'base_uri' field to ensure_objects, or add a multi_endpoint configuration".to_string(),
                         details: Some(
-                            "When use_multi_endpoint is false, base_uri specifies where objects\n\
+                            "When no multi_endpoint is configured, base_uri specifies where objects\n\
                              are created and accessed.".to_string()
                         ),
                         test_phase: "config_validation".to_string(),
@@ -313,7 +319,6 @@ mod tests {
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
                     base_uri: Some("file:///mnt/filesys1/benchmark/".to_string()), // THE BUG
-                    use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
                     max_size: None,
@@ -380,7 +385,6 @@ mod tests {
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
                     base_uri: Some(shared_uri),
-                    use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
                     max_size: None,
@@ -451,7 +455,6 @@ mod tests {
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
                     base_uri: None, // THE FIX - each agent uses its own first endpoint
-                    use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
                     max_size: None,
@@ -523,7 +526,6 @@ mod tests {
             Some(PrepareConfig {
                 ensure_objects: vec![EnsureSpec {
                     base_uri: Some("s3://shared-bucket/test/".to_string()),
-                    use_multi_endpoint: true,
                     count: 100,
                     min_size: None,
                     max_size: None,

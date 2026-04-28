@@ -342,6 +342,24 @@ pub fn create_store_from_config(
         return Ok(Box::new(ArcMultiEndpointWrapper(multi_store)));
     }
 
+    // Priority 2.5: S3_ENDPOINT_URIS environment variable fallback
+    // When no YAML multi_endpoint block is present, check whether the s3dlio-specific
+    // S3_ENDPOINT_URIS env var is set.  It may contain one or more comma-separated URIs
+    // and acts as a runtime multi-endpoint config without requiring a YAML edit.
+    // YAML always wins: we only reach this point when config.multi_endpoint is None.
+    if let Ok(raw) = std::env::var("S3_ENDPOINT_URIS") {
+        if !raw.trim().is_empty() {
+            use s3dlio::multi_endpoint::{LoadBalanceStrategy, MultiEndpointStore};
+            let store = MultiEndpointStore::from_env(LoadBalanceStrategy::RoundRobin, None)
+                .context("S3_ENDPOINT_URIS is set but failed to create MultiEndpointStore")?;
+            info!(
+                "Using S3_ENDPOINT_URIS env var fallback: {} endpoint(s)",
+                store.endpoint_count()
+            );
+            return Ok(Box::new(ArcMultiEndpointWrapper(Arc::new(store))));
+        }
+    }
+
     // Priority 3: Per-agent target override
     if let Some(agent) = agent_config {
         if let Some(ref target_override) = agent.target_override {
@@ -364,7 +382,7 @@ pub fn create_store_from_config(
         );
     }
 
-    bail!("No target configuration specified: must provide 'target', 'multi_endpoint', or per-agent override")
+    bail!("No target configuration specified: must provide 'target', 'multi_endpoint', S3_ENDPOINT_URIS env var, or per-agent override")
 }
 
 /// Create MultiEndpointStore from configuration
@@ -906,6 +924,11 @@ pub type StoreCache =
 pub type MultiEndpointCache =
     Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<s3dlio::MultiEndpointStore>>>>;
 
+/// HashMap key for the pre-created MultiEndpointStore used by ALL operation types
+/// (put, get, list, stat, delete) when a `multi_endpoint:` block is present.
+/// Impossible to collide with any real storage URI.
+const MULTI_EP_STORE_KEY: &str = "__multi_endpoint_store__";
+
 /// Extract base URI from full URI (protocol + bucket/container, no path)
 /// Examples:
 ///   "s3://bucket/path/file.dat" -> "s3://bucket"
@@ -928,16 +951,26 @@ fn extract_base_uri(uri: &str) -> String {
 /// All stores were created during initialization, so this is a simple lookup with zero contention
 ///
 /// # Arguments
-/// * `use_multi_endpoint` - Operation-level flag to enable multi-endpoint routing (v0.8.23+)
-///   Currently ignored since multi-endpoint stores are also pre-created
+/// * `use_multi_endpoint` - When true, return the pre-created MultiEndpointStore instead of
+///   looking up by URI.  The MultiEndpointStore handles endpoint selection and URI rewriting
+///   internally (round-robin or least-connections).
 fn get_cached_store(
     uri: &str,
     cache: &PreCreatedStores,
     _multi_ep_cache: &MultiEndpointCache,
     _config: &Config,
     _agent_config: Option<&crate::config::AgentConfig>,
-    _use_multi_endpoint: bool,
+    use_multi_endpoint: bool,
 ) -> anyhow::Result<Arc<Box<dyn ObjectStore>>> {
+    if use_multi_endpoint {
+        return cache.get(MULTI_EP_STORE_KEY).cloned().ok_or_else(|| {
+            anyhow!(
+                "multi_endpoint: block present but MultiEndpointStore was not pre-created \
+                 (internal error — this should not happen)."
+            )
+        });
+    }
+
     // Extract base URI and lookup in pre-created cache
     // NO mutex, NO locking - just a simple HashMap read!
     let base_uri = extract_base_uri(uri);
@@ -1963,9 +1996,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
         for wo in &cfg.workload {
             match &wo.spec {
-                OpSpec::Get {
-                    use_multi_endpoint, ..
-                } => {
+                OpSpec::Get { .. } => {
                     let original_uri = cfg.get_uri(&wo.spec);
                     let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
 
@@ -1977,8 +2008,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     }
                     info!("Resolving GET pattern: {}", uri);
 
-                    // v0.8.24: Use multi-endpoint resolution if enabled for this operation
-                    let prefetch_result = if *use_multi_endpoint {
+                    // Use multi-endpoint resolution whenever a multi_endpoint block is present.
+                    let prefetch_result = if cfg.multi_endpoint.is_some() {
                         if let Some(ref multi_store) = multi_store_for_resolution {
                             prefetch_uris_multi_endpoint(&uri, multi_store).await
                         } else {
@@ -2033,9 +2064,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         }
                     }
                 }
-                OpSpec::Delete {
-                    use_multi_endpoint, ..
-                } => {
+                OpSpec::Delete { .. } => {
                     let original_uri = cfg.get_meta_uri(&wo.spec);
                     let uri = rewrite_pattern_for_pool(&original_uri, true, needs_separate_pools);
 
@@ -2047,8 +2076,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     }
                     info!("Resolving DELETE pattern: {}", uri);
 
-                    // v0.8.24: Use multi-endpoint resolution if enabled for this operation
-                    let prefetch_result = if *use_multi_endpoint {
+                    // Use multi-endpoint resolution whenever a multi_endpoint block is present.
+                    let prefetch_result = if cfg.multi_endpoint.is_some() {
                         if let Some(ref multi_store) = multi_store_for_resolution {
                             prefetch_uris_multi_endpoint(&uri, multi_store).await
                         } else {
@@ -2078,9 +2107,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                         }
                     }
                 }
-                OpSpec::Stat {
-                    use_multi_endpoint, ..
-                } => {
+                OpSpec::Stat { .. } => {
                     let original_uri = cfg.get_meta_uri(&wo.spec);
                     let uri = rewrite_pattern_for_pool(&original_uri, false, needs_separate_pools);
 
@@ -2092,8 +2119,8 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                     }
                     info!("Resolving STAT pattern: {}", uri);
 
-                    // v0.8.24: Use multi-endpoint resolution if enabled for this operation
-                    let prefetch_result = if *use_multi_endpoint {
+                    // Use multi-endpoint resolution whenever a multi_endpoint block is present.
+                    let prefetch_result = if cfg.multi_endpoint.is_some() {
                         if let Some(ref multi_store) = multi_store_for_resolution {
                             prefetch_uris_multi_endpoint(&uri, multi_store).await
                         } else {
@@ -2344,9 +2371,13 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         }
     }
 
-    // Add PUT operation base URIs
+    // Pre-creation: skip PUT ops that will be served by the MultiEndpointStore;
+    // we still need individual stores for explicit-path PUT ops (no multi_endpoint block).
     for wo in &cfg.workload {
         if let OpSpec::Put { .. } = &wo.spec {
+            if cfg.multi_endpoint.is_some() {
+                continue; // MultiEndpointStore handles routing; no per-URI store needed
+            }
             let (uri, _spec) = cfg.get_put_size_spec(&wo.spec);
             unique_base_uris.insert(extract_base_uri(&uri));
         }
@@ -2367,6 +2398,26 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
         debug!("Pre-created store for: {}", base_uri);
     }
 
+    // Pre-create ONE MultiEndpointStore for ALL operation types (put, get, list, stat, delete)
+    // when a multi_endpoint: block is present. It handles endpoint selection and URI rewriting
+    // internally, so the hot path needs no per-endpoint logic.
+    let mut multi_ep_put_store: Option<Arc<s3dlio::MultiEndpointStore>> = None;
+    if let Some(ref me_cfg) = cfg.multi_endpoint {
+        info!(
+            "Pre-creating MultiEndpointStore ({} endpoints, strategy: {})",
+            me_cfg.endpoints.len(),
+            me_cfg.strategy
+        );
+        let multi_store =
+            create_multi_endpoint_store(me_cfg, cfg.range_engine.as_ref(), cfg.page_cache_mode)?;
+        let multi_store_for_stats = multi_store.clone();
+        store_map.insert(
+            MULTI_EP_STORE_KEY.to_string(),
+            Arc::new(Box::new(ArcMultiEndpointWrapper(multi_store)) as Box<dyn ObjectStore>),
+        );
+        multi_ep_put_store = Some(multi_store_for_stats);
+    }
+
     let store_cache: PreCreatedStores = Arc::new(store_map);
     info!(
         "Store pool ready: {} instances, NO MUTEX, direct HashMap access",
@@ -2375,6 +2426,15 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
     // v0.8.22: Create parallel cache for MultiEndpointStore instances (for stats collection)
     let multi_ep_cache: MultiEndpointCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // Register the multi-endpoint PUT store in the stats cache so per-endpoint
+    // stats are collected and reported alongside other endpoint stats.
+    if let Some(store) = multi_ep_put_store {
+        multi_ep_cache
+            .lock()
+            .unwrap()
+            .insert(MULTI_EP_STORE_KEY.to_string(), store);
+    }
 
     // v0.7.13: Create error tracker for resilient error handling
     let error_tracker = ErrorTracker::new(cfg.error_handling.clone());
@@ -2485,9 +2545,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                 let op = &workload[idx].spec;
 
                 match op {
-                    OpSpec::Get { use_multi_endpoint, .. } => {
-                        // v0.8.23: Extract use_multi_endpoint flag for routing
-                        let use_multi_ep = *use_multi_endpoint;
+                    OpSpec::Get { .. } => {
+                        // Multi-endpoint routing is automatic when a multi_endpoint block is present.
+                        let use_multi_ep = cfg.multi_endpoint.is_some();
 
                         // v0.7.13: Wrap GET operation with error handling
                         // URI resolution needs to happen outside the retry closure
@@ -2577,9 +2637,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Put { dedup_factor, compress_factor, use_multi_endpoint, .. } => {
-                        // v0.8.23: Extract use_multi_endpoint flag for routing
-                        let use_multi_ep = *use_multi_endpoint;
+                    OpSpec::Put { dedup_factor, compress_factor, .. } => {
+                        // Multi-endpoint routing is automatic when a multi_endpoint block is present.
+                        let use_multi_ep = cfg.multi_endpoint.is_some();
 
                         // Capture start-of-handler time to measure internal (setup) latency:
                         // everything from here through data-gen / URI construction / Arc clones,
@@ -2707,9 +2767,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::List { use_multi_endpoint, .. } => {
-                        // v0.8.23: Extract use_multi_endpoint flag for routing
-                        let use_multi_ep = *use_multi_endpoint;
+                    OpSpec::List { .. } => {
+                        // Multi-endpoint routing is automatic when a multi_endpoint block is present.
+                        let use_multi_ep = cfg.multi_endpoint.is_some();
 
                         // v0.7.13: Wrap LIST operation with error handling
                         let uri = cfg.get_meta_uri(op);
@@ -2761,9 +2821,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Stat { use_multi_endpoint, .. } => {
-                        // v0.8.23: Extract use_multi_endpoint flag for routing
-                        let use_multi_ep = *use_multi_endpoint;
+                    OpSpec::Stat { .. } => {
+                        // Multi-endpoint routing is automatic when a multi_endpoint block is present.
+                        let use_multi_ep = cfg.multi_endpoint.is_some();
 
                         // v0.7.13: Wrap STAT operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {
@@ -2846,9 +2906,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
                         }
                     }
-                    OpSpec::Delete { use_multi_endpoint, .. } => {
-                        // v0.8.23: Extract use_multi_endpoint flag for routing
-                        let use_multi_ep = *use_multi_endpoint;
+                    OpSpec::Delete { .. } => {
+                        // Multi-endpoint routing is automatic when a multi_endpoint block is present.
+                        let use_multi_ep = cfg.multi_endpoint.is_some();
 
                         // v0.7.13: Wrap DELETE operation with error handling
                         let full_uri = if let Some(ref selector) = path_selector {

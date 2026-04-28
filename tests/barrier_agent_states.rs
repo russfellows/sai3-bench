@@ -17,7 +17,7 @@ fn test_barrier_states_defined() {
     // - PhaseCleaning, PhaseCompleted, PhaseFailed, PhaseAborting
 
     // We know these exist from the protobuf definitions
-    assert!(true, "WorkloadPhase enum has required variants");
+    // WorkloadPhase enum has required variants
 }
 
 #[test]
@@ -43,8 +43,7 @@ fn test_implementation_status_v0826() {
 
     // ❌ Not Yet Implemented:
     // - Full E2E integration tests with real multi-agent processes
-
-    assert!(true, "See test comments for v0.8.26 implementation status");
+    // See test comments for v0.8.26 implementation status
 }
 
 #[tokio::test]
@@ -66,11 +65,7 @@ async fn test_barrier_manager_unit_tests_pass() {
     // - v0.8.26 check_barrier_ready release info
     // - v0.8.26 clear_barrier prevents re-release
     // - v0.8.26 multiple barriers independent
-
-    assert!(
-        true,
-        "Run `cargo test barrier_sync --bin sai3bench-ctl` to verify all 30 tests pass"
-    );
+    // Run `cargo test barrier_sync --bin sai3bench-ctl` to verify all 30 tests pass
 }
 
 #[tokio::test]
@@ -90,11 +85,7 @@ async fn test_live_stats_unit_tests_pass() {
     // - serialize_histograms with data
     // - serialize_histograms roundtrip
     // - reset clears histograms
-
-    assert!(
-        true,
-        "Run `cargo test live_stats --lib` to verify all 11 tests pass"
-    );
+    // Run `cargo test live_stats --lib` to verify all 11 tests pass
 }
 
 #[tokio::test]

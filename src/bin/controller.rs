@@ -7018,7 +7018,6 @@ distributed:
 workload:
   - op: get
     path: "testdata/*"
-    use_multi_endpoint: true
     weight: 100
 "#;
 
@@ -7970,12 +7969,12 @@ workload:
         fn test_ct_channels_per_thread_zero_rejected() {
             // 0 is never a valid multiplier — would mean 0 channels
             let cpts = parse_csv_u32("1,0,4").unwrap();
-            assert!(cpts.iter().any(|&v| v == 0));
+            assert!(cpts.contains(&0));
             // Confirm the check logic: any zero is invalid
-            assert!(cpts.iter().any(|&v| v == 0));
+            assert!(cpts.contains(&0));
             // A clean list with no zeros passes
             let ok = parse_csv_u32("1,2,4").unwrap();
-            assert!(!ok.iter().any(|&v| v == 0));
+            assert!(!ok.contains(&0));
         }
     }
 

@@ -232,7 +232,6 @@ ensure_objects:
       std_dev: 1MiB
       min: 1MiB
       max: 16MiB
-    use_multi_endpoint: true
 
 cleanup: false
 "#;
@@ -514,5 +513,5 @@ fn test_calculate_required_timeouts_for_scale() {
     }
 
     // This test always passes - it's for documentation/analysis
-    assert!(true, "Timeout analysis complete");
+    // Timeout analysis complete
 }

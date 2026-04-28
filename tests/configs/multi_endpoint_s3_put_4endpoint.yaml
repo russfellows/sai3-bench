@@ -1,0 +1,42 @@
+# sai3-bench: pure PUT 1 KiB benchmark across 4 S3 endpoints
+#
+# Multi-endpoint variant of the sai3-20260422-1817 config.
+# Workload is distributed evenly across all 4 endpoints via round-robin.
+#
+# Required env vars:
+#   export AWS_ACCESS_KEY_ID=minioadmin
+#   export AWS_SECRET_ACCESS_KEY=minioadmin
+#   export AWS_REGION=us-east-1
+#
+# NOTE: AWS_ENDPOINT_URL is NOT set here — multi_endpoint overrides it.
+#       Each endpoint below is a full URI including bucket.
+#
+# Pre-flight (create the bucket on each endpoint if needed):
+#   s3-cli create-bucket s3://sai3bench-1k    # run once per endpoint
+#
+# Dry-run first:
+#   sai3-bench --dry-run run --config put-1k-4endpoint.yaml
+#
+# Run:
+#   sai3-bench -v run --config put-1k-4endpoint.yaml
+
+concurrency: 128
+duration: 30m
+enable_metadata_cache: false
+
+# Replace the IPs and port below with your actual 4 endpoint addresses.
+# Port 80 is typical for VAST / h2c setups; adjust if yours differs.
+multi_endpoint:
+  strategy: round_robin
+  endpoints:
+    - "s3://10.9.0.17:80/sai3bench-1k/"   # TODO: replace with endpoint 1
+    - "s3://10.9.0.18:80/sai3bench-1k/"   # TODO: replace with endpoint 2
+    - "s3://10.9.0.19:80/sai3bench-1k/"   # TODO: replace with endpoint 3
+    - "s3://10.9.0.20:80/sai3bench-1k/"   # TODO: replace with endpoint 4
+
+workload:
+  - op: put
+    path: "put-data/"
+    weight: 100
+    object_size: 1024
+    use_multi_endpoint: true

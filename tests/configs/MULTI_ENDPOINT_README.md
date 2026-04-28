@@ -1,6 +1,93 @@
 # Multi-Endpoint Configuration Examples
 
-These configuration files demonstrate the multi-endpoint load balancing feature added in v0.8.22.
+These configuration files demonstrate the multi-endpoint load balancing feature added in v0.8.22 and improved in v0.8.96.
+
+> **Full guide**: [docs/S3_MULTI_ENDPOINT_GUIDE.md](../../docs/S3_MULTI_ENDPOINT_GUIDE.md) — architecture comparison, distributed setup, troubleshooting, and expected results.
+
+## How to Use Multiple Endpoints
+
+There are **two ways** to target multiple S3/object-storage endpoints in sai3-bench:
+
+---
+
+### Method 1: YAML `multi_endpoint:` block (recommended)
+
+Add a `multi_endpoint:` block to your config file. All operations — PUT, GET, LIST, STAT, and DELETE — are automatically load-balanced across the listed endpoints. No per-operation flags are needed.
+
+```yaml
+# Distribute all I/O across 4 storage nodes using round-robin
+multi_endpoint:
+  strategy: round_robin      # or: least_connections
+  endpoints:
+    - "s3://10.9.0.17:80/my-bucket/data/"
+    - "s3://10.9.0.18:80/my-bucket/data/"
+    - "s3://10.9.0.19:80/my-bucket/data/"
+    - "s3://10.9.0.20:80/my-bucket/data/"
+
+concurrency: 128
+duration: 60s
+
+workload:
+  - op: put
+    object_size: 1048576    # 1 MiB
+    weight: 100
+```
+
+**Key points**:
+- The `path:` field under each workload op is **optional** when `multi_endpoint:` is present — the path embedded in each endpoint URI is used.
+- A single-element `endpoints:` list works identically to a plain `target:` URI (no load balancing overhead).
+- `strategy: round_robin` cycles through endpoints sequentially (predictable, even distribution).
+- `strategy: least_connections` routes to the endpoint with the fewest active requests (best for heterogeneous latency).
+- Maximum 32 endpoints per config (set by `s3dlio::constants::MAX_ENDPOINTS`).
+
+**Required environment variables** (credentials, not endpoints):
+```bash
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export AWS_REGION=us-east-1
+# Do NOT set AWS_ENDPOINT_URL — the host is encoded in the endpoint URIs above
+```
+
+---
+
+### Method 2: `S3_ENDPOINT_URIS` environment variable (v0.8.96+)
+
+Set `S3_ENDPOINT_URIS` to a comma-separated list of fully-qualified URIs. This enables multi-endpoint load balancing at **runtime without modifying any YAML file**.
+
+```bash
+export S3_ENDPOINT_URIS="s3://10.9.0.17:80/my-bucket/data/,s3://10.9.0.18:80/my-bucket/data/,s3://10.9.0.19:80/my-bucket/data/"
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export AWS_REGION=us-east-1
+
+# Run any existing single-endpoint config — it will automatically use all 3 endpoints
+sai3-bench run --config tests/configs/sai3_put_100k-1k.yaml
+```
+
+**Priority rules** (highest wins):
+1. **YAML `multi_endpoint:` block** — always takes precedence over env vars
+2. **`S3_ENDPOINT_URIS`** — used when no YAML block present; round-robin strategy
+3. **`AWS_ENDPOINT_URL`** — single-endpoint fallback (existing behavior)
+4. **AWS SDK default** — `s3.amazonaws.com`
+
+At startup, sai3-bench prints a clear banner showing which endpoint source is active:
+```
+╔═══════════════════════════════════════════════════════════════════════╗
+║  ✅  NO multi_endpoint YAML — using S3_ENDPOINT_URIS fallback        ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║  Endpoints (3):                                                       ║
+║    [0] s3://10.9.0.17:80/my-bucket/data/                             ║
+║    [1] s3://10.9.0.18:80/my-bucket/data/                             ║
+║    [2] s3://10.9.0.19:80/my-bucket/data/                             ║
+╚═══════════════════════════════════════════════════════════════════════╝
+```
+
+**Whitespace is trimmed** — spaces around commas are ignored:
+```bash
+export S3_ENDPOINT_URIS="s3://node1:80/bucket/ , s3://node2:80/bucket/ , s3://node3:80/bucket/"
+```
+
+---
 
 ## Overview
 
@@ -13,6 +100,24 @@ Multi-endpoint configuration enables distributing I/O operations across multiple
 - Maximizing bandwidth across bonded NICs
 
 ## Configuration Files
+
+### 0. `multi_endpoint_s3_put_4endpoint.yaml` - S3 PUT across 4 nodes (new in v0.8.96)
+
+**Scenario**: Pure PUT benchmark across 4 S3-compatible endpoints (one bucket, round-robin).
+
+**Run**:
+```bash
+# Set credentials
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+export AWS_REGION=us-east-1
+
+# Edit the endpoint IPs in the YAML to match your cluster, then:
+sai3-bench --dry-run run --config tests/configs/multi_endpoint_s3_put_4endpoint.yaml
+sai3-bench -v run --config tests/configs/multi_endpoint_s3_put_4endpoint.yaml
+```
+
+---
 
 ### 1. `multi_endpoint_global.yaml` - Global Shared Endpoint Pool
 
@@ -262,10 +367,10 @@ distributed:
 
 ## See Also
 
-- [CONFIG_SYNTAX.md](../docs/CONFIG_SYNTAX.md) - Full configuration reference
-- [MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](../docs/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) - Design document
-- [DISTRIBUTED_TESTING_GUIDE.md](../docs/DISTRIBUTED_TESTING_GUIDE.md) - Distributed architecture
+- [S3_MULTI_ENDPOINT_GUIDE.md](../../docs/S3_MULTI_ENDPOINT_GUIDE.md) - Full architecture guide, distributed setup, troubleshooting
+- [CONFIG_SYNTAX.md](../../docs/CONFIG_SYNTAX.md) - Full configuration reference
+- [DISTRIBUTED_TESTING_GUIDE.md](../../docs/DISTRIBUTED_TESTING_GUIDE.md) - Distributed architecture
 
 ## Questions?
 
-See [MULTI_ENDPOINT_ENHANCEMENT_PLAN.md](../docs/MULTI_ENDPOINT_ENHANCEMENT_PLAN.md) for detailed technical discussion and implementation plan.
+See [S3_MULTI_ENDPOINT_GUIDE.md](../../docs/S3_MULTI_ENDPOINT_GUIDE.md) for detailed architecture discussion and troubleshooting.
