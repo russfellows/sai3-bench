@@ -4,6 +4,7 @@
 //! retry logic, and adaptive strategies.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::config::PrepareConfig;
 
@@ -1248,8 +1249,6 @@ mod tests {
         let (existing_count, _existing_indices): (u64, std::collections::HashSet<u64>) =
             if skip_verification && !force_overwrite {
                 (spec_count, std::collections::HashSet::new())
-            } else if force_overwrite {
-                (0, std::collections::HashSet::new())
             } else {
                 (0, std::collections::HashSet::new())
             };
@@ -1306,8 +1305,6 @@ mod tests {
         let force = true;
         let (existing, _): (u64, std::collections::HashSet<u64>) = if skip && !force {
             (spec_count, std::collections::HashSet::new())
-        } else if force {
-            (0, std::collections::HashSet::new())
         } else {
             (0, std::collections::HashSet::new())
         };
@@ -1322,8 +1319,6 @@ mod tests {
         let force = false;
         let (existing, _): (u64, std::collections::HashSet<u64>) = if skip && !force {
             (spec_count, std::collections::HashSet::new())
-        } else if force {
-            (0, std::collections::HashSet::new())
         } else {
             (0, std::collections::HashSet::new())
         };
@@ -1621,7 +1616,6 @@ mod kv_cache_tests {
         let prepare_config = PrepareConfig {
             ensure_objects: vec![EnsureSpec {
                 base_uri: Some(storage_uri.to_string()),
-                use_multi_endpoint: false,
                 count: 4,
                 min_size: Some(1024),
                 max_size: Some(1024),
@@ -1783,7 +1777,6 @@ mod kv_cache_detailed_tests {
         let prepare_config = PrepareConfig {
             ensure_objects: vec![EnsureSpec {
                 base_uri: Some(storage_uri.clone()),
-                use_multi_endpoint: false,
                 count,
                 min_size: Some(min_size),
                 max_size: Some(max_size),

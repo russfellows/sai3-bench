@@ -284,7 +284,7 @@ fn test_controller_detects_and_corrects_desync() {
     }
 
     // Simulate 4 agents with one desynced
-    let agents = vec![
+    let agents = [
         AgentProgress {
             agent_id: "agent-1".to_string(),
             current_stage: 3,

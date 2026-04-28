@@ -1,10 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.94-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.96-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-712%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-713%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+
+**🚀 NEW (v0.8.96)**: **Multi-endpoint S3 routing fixed + `S3_ENDPOINT_URIS` env var support** — All operation types (GET, PUT, LIST, STAT, DELETE) now correctly route through `MultiEndpointStore` when a `multi_endpoint:` block is present; previously only PUT was routed, causing GETs and LISTs to fall back to a single endpoint. A new `S3_ENDPOINT_URIS` environment variable (comma-separated URIs) lets you enable multi-endpoint load balancing at runtime without editing YAML — YAML config always takes precedence. Validation output clearly shows which endpoint source is active. Updated to s3dlio v0.9.96. +1 test (713 total). See [tests/configs/MULTI_ENDPOINT_README.md](tests/configs/MULTI_ENDPOINT_README.md) for usage.
 
 **🚀 NEW (v0.8.94)**: **jemalloc global allocator + s3dlio v0.9.92** — Replaced the default glibc allocator with [tikv-jemallocator](https://crates.io/crates/tikv-jemallocator) v0.6 (`#[global_allocator]`), eliminating glibc arena contention and fragmentation. Profiling showed `malloc_consolidate` at ~3% and the allocator frame at ~52% of CPU cycles under load; jemalloc removes both bottlenecks. Measured improvement: **+3.6% throughput at t=32** (32,634 → 33,812 ops/s). Updated s3dlio dependency from v0.9.90 → **v0.9.92** (pinned tag).
 

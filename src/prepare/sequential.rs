@@ -77,46 +77,40 @@ pub(crate) async fn prepare_sequential(
             );
 
             // v0.8.22: Multi-endpoint support for prepare phase
-            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
-            // This distributes object creation across all endpoints for maximum network bandwidth
+            // Use MultiEndpointStore when a multi_endpoint block is configured; otherwise use
+            // a single-endpoint store targeting base_uri directly.
             // v0.8.23: Use Arc<Box<...>> to allow sharing store across concurrent PUT tasks
             let shared_store: Arc<Box<dyn s3dlio::object_store::ObjectStore>> =
-                if spec.use_multi_endpoint {
-                    if let Some(multi_ep) = multi_endpoint_config {
-                        info!(
-                            "  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy",
-                            multi_ep.endpoints.len(),
-                            multi_ep.strategy
-                        );
+                if let Some(multi_ep) = multi_endpoint_config {
+                    info!(
+                        "  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy",
+                        multi_ep.endpoints.len(),
+                        multi_ep.strategy
+                    );
 
-                        // Create cache key for prepare phase multi-endpoint store
-                        let cache_key = format!(
-                            "prepare_seq:{}:{}:{}",
-                            base_uri,
-                            multi_ep.strategy,
-                            multi_ep.endpoints.join(",")
-                        );
+                    // Create cache key for prepare phase multi-endpoint store
+                    let cache_key = format!(
+                        "prepare_seq:{}:{}:{}",
+                        base_uri,
+                        multi_ep.strategy,
+                        multi_ep.endpoints.join(",")
+                    );
 
-                        // Create Arc<MultiEndpointStore> - can be used for both operations and stats
-                        let arc_multi_store =
-                            crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
+                    // Create Arc<MultiEndpointStore> - can be used for both operations and stats
+                    let arc_multi_store =
+                        crate::workload::create_multi_endpoint_store(multi_ep, None, None)?;
 
-                        // Store in multi_ep_cache for stats collection
-                        {
-                            let mut cache_lock = multi_ep_cache.lock().unwrap();
-                            cache_lock.insert(cache_key, Arc::clone(&arc_multi_store));
-                        }
-
-                        // Wrap for Arc<Box<dyn ObjectStore>>
-                        Arc::new(
-                            Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store))
-                                as Box<dyn s3dlio::object_store::ObjectStore>,
-                        )
-                    } else {
-                        anyhow::bail!(
-                            "use_multi_endpoint=true but no multi_endpoint configuration provided"
-                        );
+                    // Store in multi_ep_cache for stats collection
+                    {
+                        let mut cache_lock = multi_ep_cache.lock().unwrap();
+                        cache_lock.insert(cache_key, Arc::clone(&arc_multi_store));
                     }
+
+                    // Wrap for Arc<Box<dyn ObjectStore>>
+                    Arc::new(
+                        Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store))
+                            as Box<dyn s3dlio::object_store::ObjectStore>,
+                    )
                 } else {
                     Arc::new(create_store_for_uri(&base_uri)?)
                 };

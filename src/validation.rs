@@ -611,7 +611,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     }
 
     // Multi-endpoint configuration for standalone mode (v0.8.22+)
-    if config.multi_endpoint.is_some() && config.distributed.is_none() {
+    if config.distributed.is_none() {
         if let Some(ref multi) = config.multi_endpoint {
             println!("┌─ Multi-Endpoint Configuration ───────────────────────────────────────┐");
             println!("│ Strategy:     {}", multi.strategy);
@@ -620,6 +620,209 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│   {}: {}", idx + 1, endpoint);
             }
             println!("└──────────────────────────────────────────────────────────────────────┘");
+            println!();
+        } else {
+            // No multi_endpoint block in YAML.
+            // Determine what will actually be used, in priority order:
+            //   1. S3_ENDPOINT_URIS (multi-endpoint env var fallback, v0.8.96+)
+            //   2. AWS_ENDPOINT_URL (single-endpoint env var fallback)
+            //   3. AWS SDK built-in default (s3.amazonaws.com)
+
+            let aws_url = std::env::var("AWS_ENDPOINT_URL").ok();
+            let s3_uris_raw = std::env::var("S3_ENDPOINT_URIS").ok();
+
+            // Parse S3_ENDPOINT_URIS into individual URIs (same logic as s3dlio)
+            let s3_uris_parsed: Vec<String> = s3_uris_raw
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !s3_uris_parsed.is_empty() {
+                // S3_ENDPOINT_URIS is set and valid — will be used as multi-endpoint
+                let count = s3_uris_parsed.len();
+                println!(
+                    "╔═══════════════════════════════════════════════════════════════════════╗"
+                );
+                if count == 1 {
+                    println!(
+                        "║  ⚠️  WARNING: NO multi_endpoint BLOCK IN YAML                        ║"
+                    );
+                } else {
+                    println!(
+                        "║  ✅  NO multi_endpoint YAML — using S3_ENDPOINT_URIS fallback        ║"
+                    );
+                }
+                println!(
+                    "╠═══════════════════════════════════════════════════════════════════════╣"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  No 'multi_endpoint:' block in YAML.  S3_ENDPOINT_URIS env var is    ║"
+                );
+                println!(
+                    "║  set and will be used automatically as the endpoint source.           ║"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                let count_line = format!("║  S3_ENDPOINT_URIS → {} endpoint(s) detected:", count);
+                println!("{:<72}║", count_line);
+                for (i, uri) in s3_uris_parsed.iter().enumerate() {
+                    let truncated = if uri.len() > 62 {
+                        format!("{}…", &uri[..62])
+                    } else {
+                        uri.clone()
+                    };
+                    println!("║    {}: {:<65}║", i + 1, truncated);
+                }
+                println!(
+                    "║                                                                       ║"
+                );
+                if count == 1 {
+                    println!(
+                        "║  Load balancing: DISABLED (only 1 endpoint)                          ║"
+                    );
+                    println!(
+                        "║  Strategy:       round_robin (default, no effect with 1 endpoint)    ║"
+                    );
+                } else {
+                    println!(
+                        "║  Load balancing: ENABLED  (round_robin, default)                     ║"
+                    );
+                    println!(
+                        "║  Strategy:       round_robin (set multi_endpoint: in YAML to change) ║"
+                    );
+                }
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  TIP: Move these endpoints into your YAML for full control:           ║"
+                );
+                println!(
+                    "║    multi_endpoint:                                                    ║"
+                );
+                println!(
+                    "║      strategy: round_robin   # or: least_connections                 ║"
+                );
+                println!(
+                    "║      endpoints:                                                       ║"
+                );
+                for uri in s3_uris_parsed.iter().take(3) {
+                    let truncated = if uri.len() > 50 {
+                        format!("{}…", &uri[..50])
+                    } else {
+                        uri.clone()
+                    };
+                    println!("║        - \"{:<59}║", format!("{}\"", truncated));
+                }
+                if s3_uris_parsed.len() > 3 {
+                    println!(
+                        "║        - ...  ({} more)                                              ║",
+                        s3_uris_parsed.len() - 3
+                    );
+                }
+                println!(
+                    "╚═══════════════════════════════════════════════════════════════════════╝"
+                );
+            } else {
+                // S3_ENDPOINT_URIS is not set — show single-endpoint fallback warning
+                println!(
+                    "╔═══════════════════════════════════════════════════════════════════════╗"
+                );
+                println!(
+                    "║  ⚠️  WARNING: NO multi_endpoint BLOCK IN YAML                        ║"
+                );
+                println!(
+                    "╠═══════════════════════════════════════════════════════════════════════╣"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  No 'multi_endpoint:' block in YAML and S3_ENDPOINT_URIS is not set. ║"
+                );
+                println!(
+                    "║  Only a SINGLE endpoint will be used — load will NOT be spread       ║"
+                );
+                println!(
+                    "║  across multiple storage nodes.                                      ║"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                if let Some(ref url) = aws_url {
+                    let truncated = if url.len() > 55 {
+                        format!("{}…", &url[..55])
+                    } else {
+                        url.clone()
+                    };
+                    println!(
+                        "║  Endpoint source:  AWS_ENDPOINT_URL env var                           ║"
+                    );
+                    println!("║  AWS_ENDPOINT_URL = {:<51}║", truncated);
+                } else {
+                    println!(
+                        "║  ❌ AWS_ENDPOINT_URL is NOT set — AWS SDK built-in default:           ║"
+                    );
+                    println!(
+                        "║     https://s3.amazonaws.com will be used.                           ║"
+                    );
+                }
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  S3_ENDPOINT_URIS = (not set)                                        ║"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  To enable multi-endpoint load balancing, either:                    ║"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  Option A — add to your YAML:                                        ║"
+                );
+                println!(
+                    "║    multi_endpoint:                                                    ║"
+                );
+                println!(
+                    "║      strategy: round_robin   # or: least_connections                 ║"
+                );
+                println!(
+                    "║      endpoints:                                                       ║"
+                );
+                println!(
+                    "║        - \"s3://192.168.1.10:9000/bucket/\"                           ║"
+                );
+                println!(
+                    "║        - \"s3://192.168.1.11:9000/bucket/\"  # up to 32 endpoints    ║"
+                );
+                println!(
+                    "║                                                                       ║"
+                );
+                println!(
+                    "║  Option B — set env var (round_robin, no YAML change needed):        ║"
+                );
+                println!(
+                    "║    export S3_ENDPOINT_URIS=\"s3://192.168.1.10:9000/bucket/,\\        ║"
+                );
+                println!(
+                    "║                             s3://192.168.1.11:9000/bucket/\"          ║"
+                );
+                println!(
+                    "╚═══════════════════════════════════════════════════════════════════════╝"
+                );
+            }
             println!();
         }
     }
@@ -679,6 +882,49 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│     {}: {}", idx + 1, endpoint);
             }
             println!("│   (applies to agents without per-agent override)");
+        } else {
+            // No global multi_endpoint in YAML for this distributed config.
+            // Check S3_ENDPOINT_URIS fallback (v0.8.96+), then AWS_ENDPOINT_URL.
+            let s3_uris_raw = std::env::var("S3_ENDPOINT_URIS").ok();
+            let s3_uris: Vec<&str> = s3_uris_raw
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            println!("│");
+            println!("│ ⚠️  WARNING: NO global multi_endpoint BLOCK IN YAML");
+            if !s3_uris.is_empty() {
+                println!(
+                    "│   S3_ENDPOINT_URIS fallback is active: {} endpoint(s) detected.",
+                    s3_uris.len()
+                );
+                for (i, uri) in s3_uris.iter().enumerate() {
+                    let truncated = if uri.len() > 60 {
+                        format!("{}…", &uri[..60])
+                    } else {
+                        (*uri).to_string()
+                    };
+                    println!("│     {}: {}", i + 1, truncated);
+                }
+                if s3_uris.len() > 1 {
+                    println!(
+                        "│   Load will be spread across {} endpoints (round_robin).",
+                        s3_uris.len()
+                    );
+                } else {
+                    println!("│   Only 1 endpoint in S3_ENDPOINT_URIS — no load spreading.");
+                }
+            } else {
+                let aws_url = std::env::var("AWS_ENDPOINT_URL").ok();
+                let url_display = aws_url.as_deref().unwrap_or("(not set — AWS SDK default)");
+                println!("│   S3_ENDPOINT_URIS is not set.");
+                println!("│   Each agent will use a SINGLE endpoint (no load spreading).");
+                println!("│   Fallback: AWS_ENDPOINT_URL = {}", url_display);
+            }
+            println!("│   To spread load, add a 'multi_endpoint:' block at the top level");
+            println!("│   or per-agent under each agent entry.");
         }
 
         println!("│");
@@ -737,6 +983,31 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 }
             } else if config.multi_endpoint.is_some() {
                 println!("│      Multi-Endpoint:  (using global configuration)");
+            } else {
+                // No per-agent multi_endpoint AND no global multi_endpoint.
+                // Check S3_ENDPOINT_URIS fallback (v0.8.96+), then AWS_ENDPOINT_URL.
+                let s3_uris_raw = std::env::var("S3_ENDPOINT_URIS").ok();
+                let s3_uris: Vec<&str> = s3_uris_raw
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !s3_uris.is_empty() {
+                    println!("│      ⚠️  Multi-Endpoint: NO YAML config — using S3_ENDPOINT_URIS fallback");
+                    println!(
+                        "│         S3_ENDPOINT_URIS → {} endpoint(s) (round_robin)",
+                        s3_uris.len()
+                    );
+                } else {
+                    let aws_url = std::env::var("AWS_ENDPOINT_URL").ok();
+                    let url_display = aws_url.as_deref().unwrap_or("(not set — AWS SDK default)");
+                    println!(
+                        "│      ⚠️  Multi-Endpoint: NOT CONFIGURED — single endpoint fallback"
+                    );
+                    println!("│         AWS_ENDPOINT_URL = {}", url_display);
+                }
             }
 
             if idx < dist.agents.len() - 1 {
@@ -1292,7 +1563,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 }
 
                 // Determine URI display based on configuration mode
-                let uri_display = if spec.base_uri.is_none() && spec.use_multi_endpoint {
+                let uri_display = if spec.base_uri.is_none() && config.multi_endpoint.is_some() {
                     // In distributed mode with multi_endpoint, each agent uses its own endpoints
                     if config.distributed.is_some() {
                         String::from("Per-agent multi-endpoint (see agent configs)")
@@ -1598,14 +1869,19 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                 println!("│ Sample:       0 objects (nothing to generate)");
             } else {
                 let spec = &prepare.ensure_objects[0];
-                let (endpoints, base_uri_label) = if spec.use_multi_endpoint {
-                    if let Some(ref multi) = config.multi_endpoint {
-                        (multi.endpoints.clone(), "global multi-endpoint")
-                    } else if let Some(ref dist) = config.distributed {
-                        let first_agent =
-                            dist.agents.first().and_then(|a| a.multi_endpoint.as_ref());
-                        if let Some(agent_multi) = first_agent {
-                            (agent_multi.endpoints.clone(), "agent-1 multi-endpoint")
+                let (endpoints, base_uri_label) =
+                    if config.multi_endpoint.is_some() || spec.base_uri.is_none() {
+                        if let Some(ref multi) = config.multi_endpoint {
+                            (multi.endpoints.clone(), "global multi-endpoint")
+                        } else if let Some(ref dist) = config.distributed {
+                            let first_agent =
+                                dist.agents.first().and_then(|a| a.multi_endpoint.as_ref());
+                            if let Some(agent_multi) = first_agent {
+                                (agent_multi.endpoints.clone(), "agent-1 multi-endpoint")
+                            } else {
+                                let base_uri = spec.get_base_uri(None)?;
+                                (vec![base_uri], "base_uri")
+                            }
                         } else {
                             let base_uri = spec.get_base_uri(None)?;
                             (vec![base_uri], "base_uri")
@@ -1613,11 +1889,7 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
                     } else {
                         let base_uri = spec.get_base_uri(None)?;
                         (vec![base_uri], "base_uri")
-                    }
-                } else {
-                    let base_uri = spec.get_base_uri(None)?;
-                    (vec![base_uri], "base_uri")
-                };
+                    };
 
                 let base_uri = endpoints
                     .first()
@@ -1719,29 +1991,19 @@ pub fn display_config_summary(config: &Config, config_path: &str) -> Result<()> 
     // v0.8.53: Multi-endpoint + directory tree validation with sample file paths
     if let Some(ref prepare) = config.prepare {
         if let Some(ref dir_config) = prepare.directory_structure {
-            // Check if any operation uses multi_endpoint
-            let has_multi_endpoint_ops = prepare
-                .ensure_objects
-                .iter()
-                .any(|spec| spec.use_multi_endpoint);
-            let workload_uses_multi_ep = config.workload.iter().any(|wo| {
-                matches!(
-                    &wo.spec,
-                    crate::config::OpSpec::Get {
-                        use_multi_endpoint: true,
-                        ..
-                    } | crate::config::OpSpec::Put {
-                        use_multi_endpoint: true,
-                        ..
-                    } | crate::config::OpSpec::Stat {
-                        use_multi_endpoint: true,
-                        ..
-                    } | crate::config::OpSpec::Delete {
-                        use_multi_endpoint: true,
-                        ..
-                    }
-                )
-            });
+            // Multi-endpoint routing is active when a multi_endpoint block is present in the config.
+            let has_multi_endpoint_ops = config.multi_endpoint.is_some();
+            // Multi-endpoint routing is now automatic when a multi_endpoint block is present.
+            let workload_uses_multi_ep = config.multi_endpoint.is_some()
+                && config.workload.iter().any(|wo| {
+                    matches!(
+                        &wo.spec,
+                        crate::config::OpSpec::Get { .. }
+                            | crate::config::OpSpec::Put { .. }
+                            | crate::config::OpSpec::Stat { .. }
+                            | crate::config::OpSpec::Delete { .. }
+                    )
+                });
 
             if has_multi_endpoint_ops || workload_uses_multi_ep {
                 println!("┌─ Multi-Endpoint File Distribution ──────────────────────────────────┐");

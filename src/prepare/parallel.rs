@@ -86,22 +86,13 @@ pub(crate) async fn prepare_parallel(
 
     // Phase 1: List existing objects and build task specs for all sizes
     for spec in &config.ensure_objects {
-        // Get endpoints for file distribution
-        // v0.8.24: Use all endpoints for multi-endpoint mode, not just the first one
-        let endpoints: Vec<String> = if spec.use_multi_endpoint {
-            if let Some(multi_ep) = multi_endpoint_config {
-                multi_ep.endpoints.clone()
-            } else {
-                // Fallback: use get_base_uri if no multi_endpoint config
-                vec![spec
-                    .get_base_uri(None)
-                    .context("Failed to determine base_uri")?]
-            }
+        // Get endpoints for file distribution across all configured endpoints
+        let endpoints: Vec<String> = if let Some(multi_ep) = multi_endpoint_config {
+            multi_ep.endpoints.clone()
         } else {
-            // Single endpoint mode
-            let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
+            // No multi_endpoint configured — use the single explicit base_uri
             vec![spec
-                .get_base_uri(multi_endpoint_uris)
+                .get_base_uri(None)
                 .context("Failed to determine base_uri for prepare phase")?]
         };
 
@@ -124,10 +115,9 @@ pub(crate) async fn prepare_parallel(
                 pool_desc, spec.count, base_uri
             );
 
-            // v0.8.22: Multi-endpoint support for prepare phase
-            // If use_multi_endpoint=true, create MultiEndpointStore instead of single-endpoint store
-            // This distributes object creation across all endpoints for maximum network bandwidth
-            let store: Box<dyn s3dlio::object_store::ObjectStore> = if spec.use_multi_endpoint {
+            // Use MultiEndpointStore when a multi_endpoint block is configured; otherwise use
+            // a single-endpoint store targeting base_uri directly.
+            let store: Box<dyn s3dlio::object_store::ObjectStore> =
                 if let Some(multi_ep) = multi_endpoint_config {
                     info!(
                         "  ✓ Using multi-endpoint configuration: {} endpoints, {} strategy",
@@ -157,13 +147,8 @@ pub(crate) async fn prepare_parallel(
                     Box::new(crate::workload::ArcMultiEndpointWrapper(arc_multi_store))
                         as Box<dyn s3dlio::object_store::ObjectStore>
                 } else {
-                    anyhow::bail!(
-                        "use_multi_endpoint=true but no multi_endpoint configuration provided"
-                    );
-                }
-            } else {
-                create_store_for_uri(&base_uri)?
-            };
+                    create_store_for_uri(&base_uri)?
+                };
 
             // List existing objects with this prefix (unless skip_verification is enabled)
             // Issue #40: skip_verification config option
@@ -377,19 +362,11 @@ pub(crate) async fn prepare_parallel(
         // Reconstruct existing objects from specs
         for spec in &config.ensure_objects {
             // Get endpoints for file distribution (same logic as creation)
-            // v0.8.24: Use all endpoints for multi-endpoint mode
-            let endpoints: Vec<String> = if spec.use_multi_endpoint {
-                if let Some(multi_ep) = multi_endpoint_config {
-                    multi_ep.endpoints.clone()
-                } else {
-                    vec![spec
-                        .get_base_uri(None)
-                        .context("Failed to determine base_uri")?]
-                }
+            let endpoints: Vec<String> = if let Some(multi_ep) = multi_endpoint_config {
+                multi_ep.endpoints.clone()
             } else {
-                let multi_endpoint_uris = multi_endpoint_config.map(|cfg| cfg.endpoints.as_slice());
                 vec![spec
-                    .get_base_uri(multi_endpoint_uris)
+                    .get_base_uri(None)
                     .context("Failed to determine base_uri for reconstructing existing objects")?]
             };
 

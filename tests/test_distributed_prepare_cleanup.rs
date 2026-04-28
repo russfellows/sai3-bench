@@ -27,7 +27,6 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
             fill: FillPattern::Zero,
             dedup_factor: 1,
             compress_factor: 1,
-            use_multi_endpoint: false,
         }],
         directory_structure: Some(DirectoryStructureConfig {
             width: 3,

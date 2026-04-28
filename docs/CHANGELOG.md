@@ -6,6 +6,70 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.96] - 2026-04-28
+
+### Fixed
+
+- **Multi-endpoint routing for all operation types** — GET, LIST, STAT, and DELETE operations
+  now correctly route through `MultiEndpointStore` when a `multi_endpoint:` block is present.
+  Previously only PUT was routed through the store; all other op types fell back to a single
+  endpoint (typically the first), silently defeating the purpose of multi-endpoint configuration.
+  The fix pre-creates one shared `MultiEndpointStore` per run and shares it across all op types
+  via a well-known internal key (`__multi_endpoint_store__`).
+
+### Added
+
+- **`S3_ENDPOINT_URIS` environment variable fallback** — a comma-separated list of fully-
+  qualified URIs enables multi-endpoint load balancing at runtime without modifying any YAML
+  file.  Priority order (highest wins):
+  1. YAML `multi_endpoint:` block
+  2. `S3_ENDPOINT_URIS` env var (new) — round-robin across all listed URIs
+  3. `AWS_ENDPOINT_URL` — single-endpoint fallback
+  4. AWS SDK default (`s3.amazonaws.com`)
+
+  Whitespace around commas is trimmed.  At startup, a bordered banner shows the active source
+  and lists all resolved endpoints.
+
+  Example:
+  ```bash
+  export S3_ENDPOINT_URIS="s3://10.9.0.17:80/bucket/,s3://10.9.0.18:80/bucket/,s3://10.9.0.19:80/bucket/"
+  sai3-bench run --config my_existing_config.yaml   # automatically uses all 3 endpoints
+  ```
+
+- **`multi_endpoint.endpoints` count validation** — the YAML parser now validates that the
+  endpoint list has at least 1 entry and does not exceed `s3dlio::constants::MAX_ENDPOINTS`
+  (32).  A clear error is returned at config-load time rather than at first I/O.
+
+- **`S3_ENDPOINT_URIS` consistency tests** (5 new tests in `src/config_tests.rs`):
+  - `test_s3_endpoint_uris_fallback_uses_all_4_endpoints`
+  - `test_yaml_multi_endpoint_wins_over_s3_endpoint_uris`
+  - `test_s3_endpoint_uris_whitespace_trimmed_consistently`
+  - `test_s3_endpoint_uris_unset_falls_through_to_target`
+  - `test_s3_endpoint_uris_valid_counts_match_s3dlio`
+
+- **Validation banner for endpoint source** — `--dry-run` and startup validation now print
+  which endpoint source is active (YAML block, `S3_ENDPOINT_URIS`, or `AWS_ENDPOINT_URL`),
+  with a warning when `S3_ENDPOINT_URIS` contains only a single URI (likely misconfigured).
+
+- **Example config: `tests/configs/multi_endpoint_s3_put_4endpoint.yaml`** — a ready-to-use
+  PUT benchmark config targeting 4 S3-compatible endpoints (one bucket per endpoint URI),
+  with instructions for dry-run and live execution.
+
+- **`tests/configs/MULTI_ENDPOINT_README.md` expanded** — new "How to Use Multiple Endpoints"
+  section at the top covering both configuration methods (YAML block and `S3_ENDPOINT_URIS`
+  env var), priority rules, startup banner, and whitespace behaviour.
+
+### Dependencies
+
+- **`s3dlio`**: updated from v0.9.92 → **v0.9.96** — multi-endpoint correctness fixes,
+  `S3_ENDPOINT_URIS` enforcement, new `s3-cli` options (`--endpoint-url`, `--region`,
+  `--ca-bundle`), `MAX_ENDPOINTS` constant, `create_multi_endpoint_store_from_env()` Python API.
+- **`s3dlio-oplog`**: updated from v0.9.92 → **v0.9.96** (kept in sync with s3dlio).
+
+### Tests
+
+- Total: **713 passing** (was 712)
+
 ## [0.8.94] - 2026-04-23
 
 ### Changed
