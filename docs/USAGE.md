@@ -1461,3 +1461,401 @@ The agent reports its version on ping:
 # connected to node1:7167 (agent version X.Y.Z)
 ```
 Keep controller/agent binaries from the same source build when testing.
+
+---
+
+## Workload Config Examples
+
+### Simple Single-Node Config
+
+```yaml
+target: "file:///tmp/benchmark/"
+duration: "60s"
+concurrency: 16
+
+prepare:
+  ensure_objects:
+    - base_uri: "data/"
+      count: 1000
+      min_size: 1048576
+      max_size: 1048576
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+  - op: put
+    path: "data/"
+    size_spec: 1048576
+    weight: 30
+```
+
+```bash
+sai3-bench run --config my-test.yaml --dry-run
+sai3-bench run --config my-test.yaml
+```
+
+### Distributed Config
+
+```yaml
+target: "file:///shared/benchmark/"
+duration: "120s"
+concurrency: 32
+
+perf_log:
+  enabled: true
+  interval: 1s
+
+distributed:
+  shared_filesystem: true
+  tree_creation_mode: coordinator
+  path_selection: random
+  agents:
+    - address: "host1:7167"
+      id: "agent-1"
+    - address: "host2:7167"
+      id: "agent-2"
+
+prepare:
+  ensure_objects:
+    - base_uri: "data/"
+      count: 5000
+      min_size: 524288
+      max_size: 10485760
+      fill: random
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 60
+  - op: put
+    path: "data/"
+    size_spec: 2097152
+    weight: 30
+  - op: list
+    path: "data/"
+    weight: 10
+```
+
+```bash
+# Start agents on test hosts
+./target/release/sai3bench-agent --listen 0.0.0.0:7167
+
+# Run from controller
+./target/release/sai3bench-ctl run --config distributed-test.yaml
+```
+
+---
+
+## Directory Tree Workloads
+
+Test realistic shared filesystem scenarios with configurable directory hierarchies:
+
+```yaml
+prepare:
+  directory_structure:
+    width: 3              # Subdirectories per level
+    depth: 2              # Tree depth (2 = 3 + 9 directories)
+    files_per_dir: 10     # Files per directory
+    distribution: bottom  # "bottom" (leaf only) or "all" (every level)
+    dir_mask: "d%d_w%d.dir"
+
+  ensure_objects:
+    - base_uri: "file:///tmp/tree-test/"
+      count: 0            # Files created by directory_structure above
+      size_spec:
+        type: uniform
+        min: 4096         # 4 KiB
+        max: 16384        # 16 KiB
+      fill: random
+      dedup_factor: 1
+      compress_factor: 1
+```
+
+> **Fill pattern**: Always use `fill: random` for benchmarks. `zero` triggers storage dedup/compression and produces unrealistic results.
+
+**Key notes**:
+- `distribution: bottom` — files only in leaf directories (most realistic for filesystem workloads)
+- `distribution: all` — files at every level
+- `--dry-run` shows total directory/file counts and data size before execution
+- Works with S3, Azure Blob, GCS (implicit directories), and all `file://` paths
+- `TreeManifest` ensures collision-free file numbering across distributed agents
+
+```bash
+./sai3-bench run --config tree-test.yaml --dry-run
+# Output: Total Directories: 12, Total Files: 60, Total Data: 600 KiB
+
+./sai3-bench run --config tree-test.yaml
+```
+
+See [tests/configs/directory-tree/README.md](../tests/configs/directory-tree/README.md) for example configs.
+
+---
+
+## Workload Replay
+
+Capture production I/O traces via s3dlio op-logs, then replay against any target with original
+timing, accelerated speed, or remapped URIs.
+
+### Capturing with s3dlio — Python
+
+```python
+import s3dlio
+
+s3dlio.init_op_log("/tmp/production_trace.tsv.zst")
+
+data = s3dlio.get("s3://bucket/model.bin")
+s3dlio.put("s3://bucket/results/output.json", result_bytes)
+files = s3dlio.list("s3://bucket/data/")
+
+s3dlio.finalize_op_log()
+```
+
+### Capturing with s3dlio — Rust
+
+```rust
+use s3dlio::{init_op_logger, store_for_uri, LoggedObjectStore, global_logger};
+
+init_op_logger("production_trace.tsv.zst")?;
+
+let store = store_for_uri("s3://bucket/")?;
+let logged_store = LoggedObjectStore::new(Arc::from(store), global_logger().unwrap());
+
+let data = logged_store.get("s3://bucket/file.bin").await?;
+```
+
+> **Note**: sai3-bench can also capture op-logs during benchmark runs with `--op-log`, primarily for
+> analyzing benchmark I/O patterns rather than capturing production workloads.
+
+### Replaying Captured Traces
+
+```bash
+# Replay against test environment with original timing
+sai3-bench replay --op-log /tmp/production_trace.tsv.zst --target "az://test-storage/"
+
+# Replay at 5x speed for accelerated load testing
+sai3-bench replay --op-log /tmp/production_trace.tsv.zst --speed 5.0
+```
+
+### Backpressure Configuration
+
+When target storage can't sustain the recorded I/O rate:
+
+```yaml
+# replay_config.yaml
+lag_threshold: 5s        # Switch to best-effort when lag exceeds this
+recovery_threshold: 1s   # Switch back when lag drops below this
+max_flaps_per_minute: 3  # Exit gracefully if oscillating too much
+max_concurrent: 1000     # Maximum in-flight operations
+drain_timeout: 10s       # Timeout for draining on exit
+```
+
+```bash
+sai3-bench replay --op-log trace.tsv.zst --config replay_config.yaml --target "s3://bucket/"
+```
+
+### URI Remapping
+
+```yaml
+# remap.yaml — 1:1 bucket rename
+rules:
+  - match:
+      bucket: "prod-bucket"
+    map_to:
+      bucket: "staging-bucket"
+      prefix: "migrated/"
+```
+
+```bash
+sai3-bench replay --op-log trace.tsv.zst --remap remap.yaml --target "s3://staging-bucket/"
+```
+
+**Remapping strategies**: 1→1 (rename), 1→N (fanout with `round_robin`/`sticky_key`), N→1 (consolidate), N→M (regex-based cross-cloud).
+
+See [tests/configs/remap_examples.yaml](../tests/configs/remap_examples.yaml) for complete examples.
+
+**Use Cases**: Pre-migration validation, performance regression testing, capacity planning, cross-cloud comparison.
+
+---
+
+## Storage Efficiency Testing
+
+Validate vendor dedup/compression claims with controlled data patterns. Both `dedup_factor` and
+`compress_factor` default to `1` (no dedup, no compression) if omitted.
+
+### Default — No Dedup/Compression
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/unique-media/"
+      count: 500
+      size_spec: 10485760   # 10 MB
+      fill: random
+      # dedup_factor: 1  (default — all blocks unique)
+      # compress_factor: 1  (default — incompressible)
+```
+
+### 3:1 Deduplication
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/vm-snapshots/"
+      count: 100
+      size_spec: 52428800   # 50 MB
+      fill: random
+      dedup_factor: 3       # 1/3 blocks unique, 2/3 duplicates
+      compress_factor: 1
+```
+
+100 files × 50 MB = 5 GB logical → ~1.67 GB unique (3:1 dedup).
+
+### Combined Dedup + Compression
+
+```yaml
+prepare:
+  ensure_objects:
+    - base_uri: "s3://bucket/log-archives/"
+      count: 200
+      size_spec:
+        type: uniform
+        min: 5242880    # 5 MB
+        max: 52428800   # 50 MB
+      fill: random
+      dedup_factor: 5   # 5:1 dedup — 1/5 unique
+      compress_factor: 2  # 2:1 compression — 50% zeros
+```
+
+Avg 28.5 MB × 200 = 5.7 GB logical → ~1.14 GB unique → ~570 MB after compression.
+
+### Ratio Reference
+
+| Setting | Value | Meaning | Storage Impact |
+|---------|-------|---------|----------------|
+| `dedup_factor: 1` | 1:1 | All unique (default) | No savings |
+| `dedup_factor: 3` | 3:1 | 1/3 unique | 67% savings |
+| `dedup_factor: 5` | 5:1 | 1/5 unique | 80% savings |
+| `compress_factor: 1` | 1:1 | Incompressible (default) | No savings |
+| `compress_factor: 2` | 2:1 | 50% zeros | 50% savings |
+| `compress_factor: 4` | 4:1 | 75% zeros | 75% savings |
+
+> **Fill pattern**: Always use `fill: random`. `zero` triggers storage dedup/compression and produces unrealistic benchmark results.
+
+---
+
+## Realistic Size Distributions
+
+```yaml
+workload:
+  - op: put
+    path: "data/"
+    weight: 100
+    size_spec:
+      type: lognormal    # many small files, few large (realistic)
+      mean: 1048576      # 1 MB
+      std_dev: 524288    # 512 KB
+      min: 1024          # floor: 1 KB
+      max: 10485760      # ceiling: 10 MB
+    fill: random
+```
+
+**Distribution types**:
+- `lognormal` — realistic; requires `mean` and `std_dev`
+- `uniform` — even spread between `min` and `max`
+- Fixed integer — e.g. `size_spec: 1048576`
+
+Research shows object storage naturally follows lognormal distributions (many small configs/thumbnails, few large videos/backups).
+
+---
+
+## Distributed Testing — Advanced Patterns
+
+### SSH Deployment
+
+```bash
+# One-time setup — configure passwordless SSH
+sai3bench-ctl ssh-setup --hosts ubuntu@vm1,ubuntu@vm2,ubuntu@vm3
+
+# Run distributed test — agents deploy automatically
+sai3bench-ctl run --config distributed-workload.yaml
+```
+
+### Per-Agent Overrides
+
+```yaml
+distributed:
+  agents:
+    - address: "vm1.example.com"
+      id: "us-west-agent"
+      target_override: "s3://us-west-bucket/"
+      concurrency_override: 128
+      env: { AWS_PROFILE: "benchmark" }
+    - address: "vm2.example.com"
+      id: "us-east-agent"
+      target_override: "s3://us-east-bucket/"
+
+  ssh:
+    enabled: true
+    key_path: "~/.ssh/sai3bench_id_rsa"
+
+  deployment:
+    container_runtime: "docker"    # or "podman"
+    image: "sai3bench:latest"
+    network_mode: "host"
+```
+
+### Scale-Out vs Scale-Up
+
+**Scale-Out** (multiple VMs — maximum bandwidth, fault tolerance):
+```yaml
+agents:
+  - { address: "vm1:7167", id: "agent-1" }
+  - { address: "vm2:7167", id: "agent-2" }
+  # ... vm3-vm8
+```
+
+**Scale-Up** (single large VM — cost optimization, lower latency):
+```yaml
+agents:
+  - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
+  - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
+  # ... c3-c8
+```
+
+Cloud automation scripts: `scripts/gcp_distributed_test.sh`, `scripts/cloud_test_template.sh`, `scripts/local_docker_test.sh`.
+
+---
+
+## I/O Rate Control
+
+```yaml
+io_rate:
+  iops: 1000
+  distribution: exponential   # Poisson arrivals (realistic)
+                               # "uniform" — fixed intervals
+                               # "deterministic" — precise timing
+```
+
+- Per-worker division: target IOPS is automatically split across concurrent workers
+- Drift compensation via `tokio::time::Interval` for uniform distribution
+- Zero overhead when `io_rate:` is omitted
+
+See [docs/IO_RATE_CONTROL_GUIDE.md](IO_RATE_CONTROL_GUIDE.md) for detailed usage.
+
+## Per-Operation Concurrency
+
+```yaml
+concurrency: 32   # global default
+
+workload:
+  - op: get
+    path: "data/*"
+    weight: 70
+    concurrency: 64   # more GET workers
+  - op: put
+    path: "uploads/"
+    weight: 30
+    concurrency: 8    # fewer PUT workers
+```

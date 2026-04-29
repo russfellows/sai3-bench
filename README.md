@@ -6,41 +6,7 @@
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-**🚀 NEW (v0.8.96)**: **Multi-endpoint S3 routing fixed + `S3_ENDPOINT_URIS` env var support** — All operation types (GET, PUT, LIST, STAT, DELETE) now correctly route through `MultiEndpointStore` when a `multi_endpoint:` block is present; previously only PUT was routed, causing GETs and LISTs to fall back to a single endpoint. A new `S3_ENDPOINT_URIS` environment variable (comma-separated URIs) lets you enable multi-endpoint load balancing at runtime without editing YAML — YAML config always takes precedence. Validation output clearly shows which endpoint source is active. Updated to s3dlio v0.9.96. +1 test (713 total). See [tests/configs/MULTI_ENDPOINT_README.md](tests/configs/MULTI_ENDPOINT_README.md) for usage.
-
-**🚀 NEW (v0.8.94)**: **jemalloc global allocator + s3dlio v0.9.92** — Replaced the default glibc allocator with [tikv-jemallocator](https://crates.io/crates/tikv-jemallocator) v0.6 (`#[global_allocator]`), eliminating glibc arena contention and fragmentation. Profiling showed `malloc_consolidate` at ~3% and the allocator frame at ~52% of CPU cycles under load; jemalloc removes both bottlenecks. Measured improvement: **+3.6% throughput at t=32** (32,634 → 33,812 ops/s). Updated s3dlio dependency from v0.9.90 → **v0.9.92** (pinned tag).
-
-**🚀 NEW (v0.8.92)**: **Credential forwarding + HTTP/2 + pre-flight improvements** — Controller now forwards cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) to agents over gRPC via `--env-file <path>` or from its own environment (disable with `--no-forward-env`). Agents apply credentials before pre-flight, eliminating the manual step of copying secrets to each host. See [docs/CREDENTIAL_FORWARDING.md](docs/CREDENTIAL_FORWARDING.md). s3dlio v0.9.90 adds **HTTP/2 (h2c) support** for S3-protocol `http://` endpoints: auto-probes h2c on first connection and falls back to HTTP/1.1 if refused; `https://` endpoints negotiate via TLS ALPN transparently. Enable via `S3DLIO_H2C=1` or `s3dlio_optimization.h2c: true` in YAML. Pre-flight fixes: per-agent endpoint filtering (fixes 64-error agent-2 regression), bucket-grouped output, actionable `[PERM]`/`[AUTH]`/`[CONF]`/`[NET]` error classification, agent version check table, and two new config validation warnings (redundant multi_endpoint, missing credentials hint). +57 tests (712 total).
-
-**🚀 NEW (v0.8.90)**: **`populate_ledger.tsv` + dgen-data zero-copy fills** — Every prepare phase now writes a lightweight `populate_ledger.tsv` (always-on, independent of the KV cache) recording object counts, bytes, and throughput — usable even at trillion-object scale where listing is infeasible. Data generation rewritten using [`dgen-data`](https://crates.io/crates/dgen-data) v0.2.3: a rolling-pointer pool generates one 1 MB buffer and vends zero-copy `Bytes::slice()` windows per PUT, eliminating per-object allocation. PUT latency now split into **setup** vs. **I/O** histograms for better profiling.
-
-**🚀 NEW (v0.8.89)**: **`enable_metadata_cache` config option** — disables the internal Fjall KV metadata cache for very large or simple workloads (> ~1 B objects/batch). Default `true` (fully backward-compatible). Set `false` to eliminate ~3.4 GB disk usage per 50 M objects and the ~15 s resume scan, at the cost of crash-resume capability. Both standalone and distributed dry-runs print a clear banner showing the current setting. Reference config: [`tests/configs/test_prepare_no_kvcache.yaml`](tests/configs/test_prepare_no_kvcache.yaml).
-
-**🚀 NEW (v0.8.88)**: **KV cache compact encoding + coverage observability** — KV cache entries now use [postcard](https://crates.io/crates/postcard) binary encoding (56% smaller, 2× faster scans). At startup, a one-line cache summary reports object count and total logical storage (`📊 Cache summary: N objects | X.XX GiB`). Progressive WARN messages fire if a coverage scan exceeds 10 s. Preflight now queries the cache per-spec and logs coverage. Safe write-probe cycle validates writable endpoints before any benchmark I/O. Agent port changed to **7167** (was 7761) with automatic port-conflict detection on startup. +17 new tests.
-
-**🚀 NEW (v0.8.86)**: **GCS RAPID storage fully working** (s3dlio v0.9.86) — `BidiWriteObject` PUTs and `BidiReadObject` GETs verified against Hyperdisk ML RAPID buckets. RAPID mode is auto-detected per bucket or forced via `gcs_rapid_mode: true`. Worker drain deadline bug fixed (execute stage now runs its full configured duration). Timer observability logs added.
-
-**🚀 NEW (v0.8.70)**: **GCS RAPID gRPC support** (s3dlio v0.9.70) — per-trial channel count, range-download control, and write-chunk-size control sent over RPC to agents. **Autotune redesign** — all tuning parameters are YAML-only; new `channels_per_thread` parameter scales gRPC subchannels with thread count; `--dry-run` prints the full sweep plan (computed sizes, loop order, total cases, I/O estimate) before executing.
-
-**🚀 NEW (v0.8.63)**: **Multi-endpoint checkpoint race condition fix** - Eliminates fatal workload aborts at 99% completion for shared storage. **s3dlio optimization support** - +76% GET throughput for large objects (≥64MB).
-
-**🚀 NEW (v0.8.62)**: **Streaming prepare + dry-run memory sampling + stage-aligned perf-log timing** for safer large-scale runs.
-
-**🚀 NEW (v0.8.61)**: **Explicit distributed stages + numeric barrier indices** for consistent orchestration across multi-agent runs. Use the new `convert` command to upgrade legacy YAML files.
-
-**🚀 NEW (v0.8.60)**: **KV cache checkpoint restoration** - Complete resume capability! Checkpoints now automatically restored on startup, enabling agents to resume long-running prepare operations after crashes/restarts. Works for both standalone and distributed modes.
-
-**🚀 (v0.8.53)**: **Critical multi-endpoint + directory tree fix** - GET/PUT/STAT/DELETE operations now correctly route to round-robin endpoints, fixing 0-ops workload failures. Enhanced dry-run shows ALL endpoints with full URIs.
-
-**🚀 (v0.8.52)**: **Deferred retry for prepare failures** eliminates "missing object" errors during execution. Failed creates are automatically retried after the main loop with aggressive exponential backoff (10 attempts, up to 30s delay), ensuring completeness without impacting fast path performance. **Thousand separator display** in dry-run (64,032,768 files) and optional YAML input support ("64,032,768"). **Human-readable time units** in YAML: use "5m", "2h", "30s" instead of seconds (300, 7200, 30).
-
-**🚀 NEW (v0.8.51)**: **Critical blocking I/O fixes** for large-scale deployments (>100K files). Configurable `agent_ready_timeout` (default 120s), non-blocking glob operations, and periodic yielding in prepare loops prevent executor starvation. [See docs/CHANGELOG.md](docs/CHANGELOG.md) for details.
-
-**🚀 NEW (v0.8.50)**: **YAML-driven stage orchestration** with 6 stage types, **barrier synchronization** for coordinated multi-host testing, and **comprehensive timeout configuration** (global/stage/barrier hierarchy).
-
-**🚀 NEW (v0.8.23)**: Pre-flight distributed configuration validation prevents common misconfigurations (base_uri with isolated mode) before execution.
-
-**🚀 NEW (v0.8.22)**: Multi-endpoint load balancing with per-agent static endpoint mapping for shared storage systems with multiple endpoints (NFS, S3, or object storage).
+**Latest: v0.8.96** — Multi-endpoint load balancing now works for all operation types (GET, PUT, LIST, STAT, DELETE); new `S3_ENDPOINT_URIS` env var enables multi-endpoint at runtime without YAML changes. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
@@ -170,97 +136,21 @@ sai3-bench supports two testing modes: **Single-Node** and **Distributed**.
 
 ### Running Your First Workload
 
-**Single-Node Mode** - Test local filesystem:
+Example configs are in [`tests/configs/`](tests/configs/). See [docs/USAGE.md](docs/USAGE.md) for full annotated examples.
+
+**Single-Node Mode**:
 ```bash
-# Create a simple config file
-cat > my-test.yaml <<EOF
-target: "file:///shared/benchmark/"
-duration: "60s"
-concurrency: 16
-
-distributed:
-  shared_filesystem: true
-  tree_creation_mode: coordinator
-  path_selection: random
-  agents:
-    - address: "host1:7167"
-      id: "agent-1"
-    - address: "host2:7167"
-      id: "agent-2"
-
-prepare:
-  ensure_objects:
-    - base_uri: "data/"
-      count: 1000
-      min_size: 1048576
-      max_size: 1048576
-      fill: random
-
-workload:
-  - op: get
-    path: "data/*"
-    weight: 70
-  - op: put
-    path: "data/"
-    size_spec: 1048576
-    weight: 30
-EOF
-
-# Validate config (dry-run)
-./target/release/sai3-bench run --config my-test.yaml --dry-run
-
-# Run the workload
-./target/release/sai3-bench run --config my-test.yaml
+sai3-bench run --config tests/configs/sai3_put_100k-1k.yaml --dry-run
+sai3-bench run --config tests/configs/sai3_put_100k-1k.yaml
 ```
 
-**Distributed Mode** - Multi-host testing:
+**Distributed Mode**:
 ```bash
-# On each test host (Host 1, Host 2, etc.), start an agent:
+# Start agents on each test host
 ./target/release/sai3bench-agent --listen 0.0.0.0:7167
 
-# On the controller host, create a distributed config:
-cat > distributed-test.yaml <<EOF
-target: "file:///shared/benchmark/"
-duration: "120s"
-concurrency: 32
-
-perf_log:
-  enabled: true
-  interval: 1s
-
-distributed:
-  shared_filesystem: true
-  tree_creation_mode: coordinator
-  path_selection: random
-  agents:
-    - address: "host1:7167"
-      id: "agent-1"
-    - address: "host2:7167"
-      id: "agent-2"
-
-prepare:
-  ensure_objects:
-    - base_uri: "data/"
-      count: 5000
-      min_size: 524288
-      max_size: 10485760
-      fill: random
-
-workload:
-  - op: get
-    path: "data/*"
-    weight: 60
-  - op: put
-    path: "data/"
-    size_spec: 2097152
-    weight: 30
-  - op: list
-    path: "data/"
-    weight: 10
-EOF
-
-# Run distributed workload (controller coordinates agents)
-./target/release/sai3bench-ctl run --config distributed-test.yaml
+# Run from the controller host
+./target/release/sai3bench-ctl run --config tests/configs/distributed-test.yaml
 ```
 
 **Common Operations**:
@@ -288,51 +178,9 @@ See [Usage Guide](docs/USAGE.md) for detailed examples and [Distributed Testing 
 
 ## 🌳 Directory Tree Workloads
 
-Test realistic shared filesystem scenarios with configurable directory hierarchies:
+Test realistic shared filesystem workloads with configurable directory depth, width, and file distribution. Works across all backends (file, S3, Azure, GCS). Supports `distribution: bottom` (leaf nodes only) or `all` (every level). `--dry-run` shows total counts and data size before execution.
 
-```yaml
-prepare:
-  directory_structure:
-    width: 3              # Subdirectories per level
-    depth: 2              # Tree depth (2 = 3 + 9 directories)
-    files_per_dir: 10     # Files per directory
-    distribution: bottom  # "bottom" (leaf only) or "all" (every level)
-    dir_mask: "d%d_w%d.dir"  # Directory naming pattern
-  
-  ensure_objects:
-    - base_uri: "file:///tmp/tree-test/"
-      count: 0            # Files created by directory_structure
-      size_spec: 
-        type: uniform
-        min: 4096         # 4 KiB
-        max: 16384        # 16 KiB
-      fill: random        # Cryptographic random data (recommended)
-      dedup_factor: 1     # 1 = unique, 2+ = duplicate blocks
-      compress_factor: 1  # 1 = incompressible, 2+ = compressible
-```
-
-**Fill Pattern Options:**
-- **`random`** (default, recommended): Cryptographic random data - realistic, incompressible
-- ***⚠️ `zero`: DO NOT USE for benchmarks - triggers dedup/compression, produces unrealistic results***
-
-**Key Features:**
-- **Enhanced `--dry-run`**: Shows directory/file counts and total data size before execution
-- **Multi-level distributions**: Place files only in leaves (`bottom`) or at all levels (`all`)
-- **Cloud storage compatible**: Works seamlessly with S3, Azure Blob, GCS (implicit directories)
-- **Distributed coordination**: TreeManifest ensures collision-free file numbering across agents
-- **Realistic data**: Random fill default provides compression-resistant patterns
-
-**Example:**
-```bash
-# Validate configuration with enhanced dry-run
-./sai3-bench run --config tree-test.yaml --dry-run
-# Output: Total Directories: 12, Total Files: 60, Total Data: 600 KiB
-
-# Run workload on Azure Blob Storage
-./sai3-bench run --config tree-test.yaml
-```
-
-See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for examples.
+See [tests/configs/directory-tree/README.md](tests/configs/directory-tree/README.md) for annotated example configs, and [docs/USAGE.md](docs/USAGE.md) for a full configuration walkthrough.
 
 ## 📦 Architecture & Binaries
 
@@ -357,313 +205,45 @@ See [Directory Tree Test Configs](tests/configs/directory-tree/README.md) for ex
 
 ## 🔬 Workload Replay
 
-Capture production I/O traces with s3dlio and replay them with microsecond-accurate timing.
+Capture I/O traces from production applications via s3dlio op-logs, then replay them against any target with original timing, accelerated speed, or remapped URIs. Supports backpressure handling and 1→1, 1→N, N→1, and N→M URI remapping strategies.
 
-### Capturing Workloads with s3dlio
-
-The [s3dlio library](https://github.com/russfellows/s3dlio) provides op-log capture for applications using storage APIs. This is the recommended way to capture real production workloads:
-
-**Python Application:**
-```python
-import s3dlio
-
-# Initialize op-log capture at application startup
-s3dlio.init_op_log("/tmp/production_trace.tsv.zst")
-
-# Your application's normal storage operations - all are logged
-data = s3dlio.get("s3://bucket/model.bin")
-s3dlio.put("s3://bucket/results/output.json", result_bytes)
-files = s3dlio.list("s3://bucket/data/")
-
-# Finalize when done (flushes and closes the log)
-s3dlio.finalize_op_log()
-```
-
-**Rust Application:**
-```rust
-use s3dlio::{init_op_logger, store_for_uri, LoggedObjectStore, global_logger};
-
-// Initialize op-log capture
-init_op_logger("production_trace.tsv.zst")?;
-
-// Wrap your ObjectStore with logging
-let store = store_for_uri("s3://bucket/")?;
-let logged_store = LoggedObjectStore::new(Arc::from(store), global_logger().unwrap());
-
-// All operations now captured to op-log
-let data = logged_store.get("s3://bucket/file.bin").await?;
-```
-
-### Replaying Captured Traces
-
-Once you have an op-log from production, replay it with sai3-bench:
-
-```bash
-# Replay against test environment with original timing
-sai3-bench replay --op-log /tmp/production_trace.tsv.zst --target "az://test-storage/"
-
-# Replay at 5x speed for accelerated load testing
-sai3-bench replay --op-log /tmp/production_trace.tsv.zst --speed 5.0
-```
-
-> **Note**: sai3-bench can also capture op-logs during benchmark runs with `--op-log`, but this is primarily for analyzing benchmark I/O patterns rather than capturing production workloads.
-
-### Backpressure Handling (v0.8.9+)
-When target storage can't sustain the recorded I/O rate:
-
-```yaml
-# replay_config.yaml - controls replay behavior
-lag_threshold: 5s        # Switch to best-effort when lag exceeds this
-recovery_threshold: 1s   # Switch back when lag drops below this
-max_flaps_per_minute: 3  # Exit gracefully if oscillating too much
-max_concurrent: 1000     # Maximum in-flight operations
-drain_timeout: 10s       # Timeout for draining on exit
-```
-
-```bash
-sai3-bench replay --op-log trace.tsv.zst --config replay_config.yaml --target "s3://bucket/"
-```
-
-### URI Remapping
-Transform source URIs during replay for migration testing:
-
-```yaml
-# remap.yaml - 1:1 bucket rename (simple migration)
-rules:
-  - match:
-      bucket: "prod-bucket"
-    map_to:
-      bucket: "staging-bucket"
-      prefix: "migrated/"
-```
-
-```bash
-# Apply remapping during replay
-sai3-bench replay --op-log trace.tsv.zst --remap remap.yaml --target "s3://staging-bucket/"
-```
-
-**Advanced Remapping Strategies:**
-- **1→1**: Simple bucket/prefix rename (migration validation)
-- **1→N**: Fanout to replicas (`round_robin` or `sticky_key` distribution)
-- **N→1**: Consolidate multiple sources to single target
-- **N→M**: Regex-based transformations (e.g., `s3://` → `gs://` for cross-cloud)
-
-See [remap_examples.yaml](tests/configs/remap_examples.yaml) for complete examples.
-
-**Use Cases**: Pre-migration validation, performance regression testing, capacity planning, cross-cloud comparison.
+See [docs/USAGE.md](docs/USAGE.md) for capture and replay examples including Python/Rust instrumentation, backpressure configuration, and URI remapping patterns.
 
 ## 💾 Storage Efficiency Testing
 
-Test deduplication and compression with controlled data patterns.
+Validate vendor dedup/compression claims with controlled data patterns. `dedup_factor` and `compress_factor` both default to `1` (unique, incompressible) when omitted. Always use `fill: random` — `zero` triggers storage dedup/compression and produces unrealistic results.
 
-**Important**: `dedup_factor` and `compress_factor` are **optional** - if omitted, both default to `1` (no dedup, no compression).
-
-### Example 1: Default Behavior (No Dedup/Compression)
-```yaml
-prepare:
-  ensure_objects:
-    - base_uri: "s3://bucket/unique-media/"
-      count: 500
-      size_spec: 10485760  # 10 MB fixed size
-      fill: random
-      # dedup_factor: 1 (default - omitted, all blocks unique)
-      # compress_factor: 1 (default - omitted, incompressible)
-```
-
-### Example 2: Testing Storage Deduplication (3:1 Ratio)
-```yaml
-prepare:
-  ensure_objects:
-    - base_uri: "s3://bucket/vm-snapshots/"
-      count: 100
-      size_spec: 52428800  # 50 MB
-      fill: random
-      dedup_factor: 3      # 3:1 dedup (1/3 blocks unique, 2/3 duplicates)
-      compress_factor: 1   # No compression (incompressible data)
-```
-**Result**: 100 files × 50 MB = 5 GB logical, but only ~1.67 GB unique data (3:1 dedup).
-
-### Example 3: Combined Dedup + Compression (5:1 and 2:1)
-```yaml
-prepare:
-  ensure_objects:
-    - base_uri: "s3://bucket/log-archives/"
-      count: 200
-      size_spec:
-        type: uniform
-        min: 5242880       # 5 MB
-        max: 52428800      # 50 MB
-      fill: random
-      dedup_factor: 5      # 5:1 dedup (1/5 blocks unique)
-      compress_factor: 2   # 2:1 compression (50% zeros)
-```
-**Result**: Avg 28.5 MB × 200 files = 5.7 GB logical → ~1.14 GB unique (5:1) → ~570 MB after compression (2:1).
-
-### Dedup/Compression Ratios Explained
-
-| Setting | Value | Meaning | Storage Impact |
-|---------|-------|---------|----------------|
-| `dedup_factor: 1` | 1:1 (default) | All blocks unique | No dedup savings |
-| `dedup_factor: 3` | 3:1 | 1/3 unique, 2/3 duplicate | 67% space savings |
-| `dedup_factor: 5` | 5:1 | 1/5 unique, 4/5 duplicate | 80% space savings |
-| `compress_factor: 1` | 1:1 (default) | Incompressible | No compression savings |
-| `compress_factor: 2` | 2:1 | 50% zeros | 50% compression savings |
-| `compress_factor: 4` | 4:1 | 75% zeros | 75% compression savings |
-
-**Fill Pattern Guidelines:**
-| Pattern | Speed | Use Case |
-|---------|-------|----------|
-| `random` | Standard | Production benchmarks, realistic workloads (RECOMMENDED) |
-| ***⚠️ `zero`*** | Fastest | ***DO NOT USE - triggers dedup/compression, unrealistic results*** |
-
-**Use Cases**: Validate vendor dedup/compression claims, predict migration space requirements, model hot vs. cold data.
-
-See [Data Generation Guide](docs/DATA_GENERATION.md) for detailed patterns.
+See [docs/USAGE.md](docs/USAGE.md) for configuration examples and ratio reference table.
 
 ## 📐 Realistic Size Distributions
 
-Model real-world object storage patterns with statistical distributions:
-
-```yaml
-workload:
-  - op: put
-    path: "data/"
-    weight: 100
-    size_spec:
-      type: lognormal    # Many small files, few large files
-      mean: 1048576      # Mean: 1 MB
-      std_dev: 524288    # Std dev: 512 KB
-      min: 1024          # Floor: 1 KB
-      max: 10485760      # Ceiling: 10 MB
-    fill: random         # Cryptographic random (recommended)
-```
-
-**Why lognormal?** Research shows object storage naturally follows lognormal distributions (many small configs/thumbnails, few large videos/backups).
-
-**Distribution Types:**
-- `lognormal`: Realistic - many small, few large (requires `mean`, `std_dev`)
-- `uniform`: Even spread between `min` and `max`
-- Fixed size: Just use `size_spec: 1048576` (integer value)
-
-See [Config Syntax](docs/CONFIG_SYNTAX.md) for complete options.
+Model real-world access patterns using `lognormal` (many small, few large), `uniform`, or fixed-size specs for the `size_spec` field. See [docs/CONFIG_SYNTAX.md](docs/CONFIG_SYNTAX.md) for the full reference.
 
 ## 🌐 Distributed Testing
 
-Generate large-scale coordinated load across multiple nodes with automated deployment:
+Generate large-scale coordinated load across multiple nodes:
 
-### Automated SSH Deployment
-```bash
-# One-time setup: Configure passwordless SSH
-sai3bench-ctl ssh-setup --hosts ubuntu@vm1,ubuntu@vm2,ubuntu@vm3
+- **SSH deployment**: `sai3bench-ctl ssh-setup` handles passwordless SSH and automatic agent deployment
+- **Per-agent overrides**: target storage, concurrency, environment variables, and volumes per agent
+- **Cloud automation**: pre-built scripts for GCP, AWS, and Azure in `scripts/`
+- **Flexible scaling**: scale-out (multiple VMs) or scale-up (multiple containers on one large VM)
 
-# Run distributed test: Agents deploy automatically
-sai3bench-ctl run --config distributed-workload.yaml
-```
-
-### Configuration-Driven Agents
-Define all agents in YAML with per-agent customization:
-```yaml
-distributed:
-  agents:
-    - address: "vm1.example.com"
-      id: "us-west-agent"
-      target_override: "s3://us-west-bucket/"
-      concurrency_override: 128
-      env: { AWS_PROFILE: "benchmark" }
-    
-    - address: "vm2.example.com"
-      id: "us-east-agent"
-      target_override: "s3://us-east-bucket/"
-  
-  ssh:
-    enabled: true
-    key_path: "~/.ssh/sai3bench_id_rsa"
-  
-  deployment:
-    container_runtime: "docker"  # or "podman"
-    image: "sai3bench:latest"
-    network_mode: "host"
-```
-
-### Flexible Scaling Strategies
-
-**Scale-Out** (Multiple VMs): Maximum network bandwidth, fault tolerance
-```yaml
-# 8 VMs, 1 container each = 8× network interfaces
-agents:
-  - { address: "vm1:7167", id: "agent-1" }
-  - { address: "vm2:7167", id: "agent-2" }
-  # ... vm3-vm8
-```
-
-**Scale-Up** (Single VM): Cost optimization, lower latency
-```yaml
-# 1 large VM, 8 containers on different ports
-agents:
-  - { address: "big-vm:7167", id: "c1", listen_port: 7167 }
-  - { address: "big-vm:7168", id: "c2", listen_port: 7168 }
-  # ... c3-c8
-```
-
-### Cloud Automation
-Pre-built scripts for rapid deployment:
-- **GCP**: `scripts/gcp_distributed_test.sh` - Complete VM lifecycle automation
-- **AWS/Azure**: `scripts/cloud_test_template.sh` - Customizable templates
-- **Local**: `scripts/local_docker_test.sh` - Test distributed mode without cloud
-
-### Key Features
-- **Automated lifecycle**: SSH, container deployment, health checks, cleanup
-- **Per-agent overrides**: Target storage, concurrency, environment variables, volumes
-- **Graceful shutdown**: Ctrl+C handling with automatic container cleanup
-- **Result aggregation**: Proper HDR histogram merging for accurate percentiles
-- **Container flexibility**: Docker or Podman via YAML (no recompilation)
-
-**Learn More**:
-- [Distributed Testing Guide](docs/DISTRIBUTED_TESTING_GUIDE.md) - Complete workflows and patterns
-- [SSH Setup Guide](docs/SSH_SETUP_GUIDE.md) - One-command SSH automation
-- [Scale-Out vs Scale-Up](docs/SCALE_OUT_VS_SCALE_UP.md) - Performance and cost comparison
-- [Cloud Scripts Guide](scripts/README.md) - GCP automation and templates
+See [docs/DISTRIBUTED_TESTING_GUIDE.md](docs/DISTRIBUTED_TESTING_GUIDE.md) for complete workflows and [docs/USAGE.md](docs/USAGE.md) for config examples.
 
 ## ⚙️ Key Features
 
 ### I/O Rate Control (v0.7.1)
-Throttle operation start rate with realistic arrival patterns:
-```yaml
-io_rate:
-  iops: 1000              # Target operations per second
-  distribution: exponential  # Poisson arrivals (realistic)
-                             # or "uniform" (fixed intervals)
-                             # or "deterministic" (precise timing)
-```
-- **Inspired by rdf-bench**: Similar to `iorate=` parameter with enhanced distributions
-- **Three distribution types**: Exponential (Poisson), Uniform (fixed), Deterministic (precise)
-- **Drift compensation**: tokio::time::Interval for uniform distribution accuracy
-- **Zero overhead when disabled**: Optional wrapper for maximum performance
-- **Per-worker division**: Target IOPS automatically split across concurrent workers
-
-See [I/O Rate Control Guide](docs/IO_RATE_CONTROL_GUIDE.md) for detailed usage and examples.
+Throttle operation start rate with Poisson (`exponential`), fixed-interval (`uniform`), or precise (`deterministic`) distributions. Per-worker IOPS division, drift compensation, zero overhead when disabled. See [docs/IO_RATE_CONTROL_GUIDE.md](docs/IO_RATE_CONTROL_GUIDE.md).
 
 ### TSV Export with Aggregate Rows
 Machine-readable output with per-bucket and aggregate summary rows:
-- **Per-bucket rows**: Statistics for each size bucket (zero, 1B-8KiB, 8KiB-64KiB, etc.)
+- **Per-bucket rows**: Statistics for each size bucket (zero, 1B–8KiB, 8KiB–64KiB, etc.)
 - **Aggregate rows**: "ALL" rows combining all size buckets per operation type (GET/PUT/META)
 - **Accurate latency merging**: HDR histogram merging for statistically correct percentiles
 - **Distributed support**: Per-agent TSVs and consolidated TSV with overall aggregates
 
 ### Per-Operation Concurrency
-Fine-grained worker pool control:
-```yaml
-concurrency: 32  # Global default
-workload:
-  - op: get
-    path: "data/*"
-    weight: 70
-    concurrency: 64  # More GET workers
-  - op: put
-    path: "uploads/"
-    weight: 30
-    concurrency: 8   # Fewer PUT workers
-```
+Set a global `concurrency:` with per-op overrides in the workload block. See [docs/CONFIG_SYNTAX.md](docs/CONFIG_SYNTAX.md) and [docs/USAGE.md](docs/USAGE.md) for examples.
 
 ### Config Validation
 Verify YAML before execution:

@@ -15,6 +15,9 @@ Thumbs.db # Windows
 # Added by cargo
 
 /target
+
+# Local environment / credential files — never commit
+.env*
 local-env
 
 # Test result files (auto-generated)
