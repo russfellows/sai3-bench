@@ -670,6 +670,84 @@ distributed:
         strategy: least_connections
 ```
 
+### Specifying Endpoints Without Editing YAML (`S3_ENDPOINT_URIS`, v0.8.96+)
+
+You can enable multi-endpoint at runtime **without changing any config file** by setting
+a comma-separated list of URIs in the `S3_ENDPOINT_URIS` environment variable:
+
+```bash
+export S3_ENDPOINT_URIS="s3://192.168.1.1:9000/benchmark/,s3://192.168.1.2:9000/benchmark/,s3://192.168.1.3:9000/benchmark/"
+sai3-bench run --config my_config.yaml   # automatically uses all 3 endpoints
+```
+
+**Priority rules** (highest wins):
+1. YAML `multi_endpoint:` block — always takes precedence
+2. `S3_ENDPOINT_URIS` env var — round-robin; used when no YAML block is present
+3. `AWS_ENDPOINT_URL` — single-endpoint fallback
+4. AWS SDK default (`s3.amazonaws.com`)
+
+At startup, sai3-bench logs which source is active and lists all resolved endpoints.
+
+> **Do NOT set `AWS_ENDPOINT_URL`** when using `multi_endpoint:` or `S3_ENDPOINT_URIS` —
+> the host is encoded in each endpoint URI.
+
+### Single Shared Bucket vs Multiple Buckets
+
+**Strongly recommended: single shared bucket** across all endpoints.
+
+With a hash-distributed object store (MinIO, VAST, Pure, etc.), all endpoint IPs are
+gateways into the same storage pool. A single bucket means:
+- ✅ All agents share one namespace — no data replication needed
+- ✅ Simpler prepare phase
+- ✅ Realistic: tests actual storage-side load distribution
+- ✅ Works with any S3-compatible storage
+
+Using a separate bucket per endpoint is almost always wrong:
+- ❌ Requires preparing/replicating 64M× objects separately for each bucket
+- ❌ Doesn't reflect real object storage architecture
+
+### Migrating from NFS Multi-Mount to S3 Multi-Endpoint
+
+| Aspect | NFS Config | S3 Config |
+|--------|-----------|-----------|
+| **Endpoint Syntax** | `file:///mnt/filesysN/` | `s3://IP:PORT/bucket/` |
+| **Namespace** | Per-mount (shared only if NFS-shared) | Always shared (single bucket) |
+| **shared_filesystem** | `true` (NFS is POSIX-shared) | `false` (S3 is object storage) |
+| **tree_creation_mode** | `coordinator` | `coordinator` |
+| **Credentials** | Not needed (filesystem) | `AWS_ACCESS_KEY_ID` + `_SECRET` |
+
+```yaml
+# NFS: 4 agents × 4 mounts = 16 mount points
+distributed:
+  agents:
+    - id: "agent-1"
+      multi_endpoint:
+        endpoints:
+          - "file:///mnt/filesys1/"
+          - "file:///mnt/filesys2/"
+          - "file:///mnt/filesys3/"
+          - "file:///mnt/filesys4/"
+
+# S3 equivalent: 4 agents × 2 gateway IPs = 8 endpoints (same storage pool)
+distributed:
+  agents:
+    - id: "agent-1"
+      multi_endpoint:
+        endpoints:
+          - "s3://192.168.1.1:9000/benchmark/"
+          - "s3://192.168.1.2:9000/benchmark/"
+        strategy: round_robin
+    - id: "agent-2"
+      multi_endpoint:
+        endpoints:
+          - "s3://192.168.1.3:9000/benchmark/"
+          - "s3://192.168.1.4:9000/benchmark/"
+        strategy: round_robin
+```
+
+See [tests/configs/MULTI_ENDPOINT_README.md](../tests/configs/MULTI_ENDPOINT_README.md) for
+quick-start examples and a full config file inventory.
+
 ---
 
 ## Advanced Patterns

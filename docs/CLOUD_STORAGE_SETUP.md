@@ -433,7 +433,77 @@ workload:
 - **RAPID (Hyperdisk ML)**: Fully supported as of sai3-bench v0.8.86 / s3dlio v0.9.84.
   Uses `BidiWriteObject` for PUTs and `BidiReadObject` for GETs.
   Auto-detected per bucket, or force via `gcs_rapid_mode: true` in `s3dlio_optimization`.
-  See [GCS_INTEGRATION.md](GCS_INTEGRATION.md) for YAML examples.
+
+### RAPID vs Standard GCS
+
+| | Standard | RAPID (Hyperdisk ML) |
+|--|----------|---------------------|
+| **PUT API** | `InsertObject` | `BidiWriteObject` |
+| **GET API** | `ReadObject` | `BidiReadObject` |
+| **Auto-detected** | — | Yes (via `GetStorageLayout`) |
+| **Force via YAML** | `gcs_rapid_mode: false` | `gcs_rapid_mode: true` |
+
+RAPID objects must be read back with the bidi-read API. s3dlio handles this automatically.
+
+```yaml
+# Standard GCS workload — no extra config needed
+target: "gs://my-bucket/bench/"
+concurrency: 32
+
+# RAPID bucket
+target: "gs://my-rapid-bucket/bench/"
+concurrency: 32
+
+s3dlio_optimization:
+  gcs_rapid_mode: true
+  enable_range_downloads: false   # default; see Range Downloads section below
+```
+
+Omit `gcs_rapid_mode` and s3dlio will call `GetStorageLayout` on first access to
+determine the bucket type (result cached for the process lifetime).
+
+### Optional: Override gRPC Channel Count
+
+For very high concurrency or multi-host workloads, the channel count can be tuned:
+
+```yaml
+concurrency: 32
+
+s3dlio_optimization:
+  gcs_channel_count: 4    # total gRPC subchannels = 4
+  gcs_rapid_mode: true
+```
+
+When `gcs_channel_count` is absent (the usual case), sai3-bench sets one channel
+per concurrent task automatically.
+
+### Range Downloads with RAPID
+
+`enable_range_downloads: true` splits large GETs into concurrent partial reads.
+
+**Trade-off for RAPID buckets**: each range chunk issues a `ReadObject` RPC with
+a byte-range header, **not** a `BidiReadObject`. RAPID's bidi-streaming transport
+is therefore bypassed per chunk. Parallelism is real, but RAPID transport efficiency
+is sacrificed. Whether this is a net win depends on object sizes and network
+conditions — benchmark before enabling in production.
+
+```yaml
+# Enable parallel range GETs for large objects (experimental on RAPID)
+s3dlio_optimization:
+  gcs_rapid_mode: true
+  enable_range_downloads: true
+  range_threshold_mb: 64   # only split objects ≥ 64 MB
+```
+
+### GCS Environment Variable Overrides
+
+Prefer YAML fields over environment variables. Available overrides:
+
+| Variable | Purpose |
+|----------|---------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to ADC JSON (if not using `gcloud auth`) |
+| `S3DLIO_GCS_RAPID` | Force `true` / `false` / `auto` |
+| `S3DLIO_GCS_GRPC_CHANNELS` | Override subchannel count |
 
 ---
 

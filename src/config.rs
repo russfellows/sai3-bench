@@ -189,6 +189,21 @@ pub struct Config {
     /// `--env-file` on the controller command line instead.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub distributed_env: std::collections::HashMap<String, String>,
+
+    /// When true, newly PUT objects are added to the GET selection pool during the
+    /// execute phase, so GET workers can immediately access them (issue #82).
+    /// This matches warp's mixed-mode behavior where mixed PUT+GET workloads
+    /// eventually converge on steady state with a growing object population.
+    ///
+    /// Default: false — the GET pool stays frozen (more reproducible: every run
+    /// GETs from the same fixed set regardless of PUT throughput).
+    ///
+    /// Example — enable for warp-style mixed workloads:
+    /// ```yaml
+    /// dynamic_put_pool: true
+    /// ```
+    #[serde(default)]
+    pub dynamic_put_pool: bool,
 }
 
 fn default_duration() -> std::time::Duration {
@@ -632,6 +647,22 @@ pub struct PrepareConfig {
     /// Default: tolerant (allows resuming interrupted cleanup operations)
     #[serde(default)]
     pub cleanup_mode: CleanupMode,
+
+    /// Hex prefix shards for load distribution across hash-routed storage (v0.8.97+).
+    ///
+    /// When > 0, each flat-mode object key is prefixed with `format!("{:02x}/", idx % key_prefix_shards)`.
+    /// Recommended value: `256` — gives a 2-char hex prefix (`00`–`ff`), creating 256 distinct
+    /// shard directories that distribute load uniformly across all storage nodes.
+    ///
+    /// **Use case**: Storage systems like VAST that hash object key prefixes for routing.
+    /// sai3-bench's default `prepared-NNNNNNNN.dat` naming has zero prefix entropy (all keys
+    /// start with `prepared-`), concentrating all metadata on one server node. With
+    /// `key_prefix_shards: 256`, keys become e.g. `2a/prepared-00000042.dat`, spreading
+    /// load uniformly.
+    ///
+    /// Default: 0 (disabled — keys unchanged, existing configs unaffected).
+    #[serde(default)]
+    pub key_prefix_shards: u32,
 }
 
 /// Specification for ensuring objects exist

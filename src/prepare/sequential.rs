@@ -183,7 +183,14 @@ pub(crate) async fn prepare_sequential(
                     (listing_result.file_count, listing_result.indices)
                 } else {
                     // Flat file mode: use streaming list with progress
-                    let list_pattern = if base_uri.ends_with('/') {
+                    let list_pattern = if config.key_prefix_shards > 0 {
+                        // Sharded: objects live under hex subdirs — list the whole base URI
+                        if base_uri.ends_with('/') {
+                            base_uri.clone()
+                        } else {
+                            format!("{}/", base_uri)
+                        }
+                    } else if base_uri.ends_with('/') {
                         format!("{}{}-", base_uri, prefix)
                     } else {
                         format!("{}/{}-", base_uri, prefix)
@@ -254,7 +261,11 @@ pub(crate) async fn prepare_sequential(
                         .context("Failed to create size generator")?;
 
                     for i in 0..spec.count {
-                        let key = format!("{}-{:08}.dat", prefix, i);
+                        let key = if config.key_prefix_shards > 0 {
+                            format!("{:02x}/{}-{:08}.dat", i % config.key_prefix_shards as u64, prefix, i)
+                        } else {
+                            format!("{}-{:08}.dat", prefix, i)
+                        };
                         let uri = if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, key)
                         } else {
@@ -416,7 +427,11 @@ pub(crate) async fn prepare_sequential(
                         if num_agents > 1 && (idx as usize % num_agents) != agent_id {
                             continue;
                         }
-                        let key = format!("{}-{:08}.dat", prefix, idx);
+                        let key = if config.key_prefix_shards > 0 {
+                            format!("{:02x}/{}-{:08}.dat", idx % config.key_prefix_shards as u64, prefix, idx)
+                        } else {
+                            format!("{}-{:08}.dat", prefix, idx)
+                        };
                         let uri = if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, key)
                         } else {

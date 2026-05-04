@@ -72,6 +72,7 @@ pub(crate) async fn prepare_parallel(
         force_overwrite: bool,
         skip_verification: bool,
         seed: u64,
+        prefix_shards: u32,
     }
 
     let mut plans: Vec<PreparePlan> = Vec::new();
@@ -219,7 +220,14 @@ pub(crate) async fn prepare_parallel(
                     (listing_result.file_count, listing_result.indices)
                 } else {
                     // Flat file mode: use streaming list with progress
-                    let pattern = if base_uri.ends_with('/') {
+                    let pattern = if config.key_prefix_shards > 0 {
+                        // Sharded: objects live under hex subdirs — list the whole base URI
+                        if base_uri.ends_with('/') {
+                            base_uri.clone()
+                        } else {
+                            format!("{}/", base_uri)
+                        }
+                    } else if base_uri.ends_with('/') {
                         format!("{}{}-", base_uri, prefix)
                     } else {
                         format!("{}/{}-", base_uri, prefix)
@@ -348,6 +356,7 @@ pub(crate) async fn prepare_parallel(
                     force_overwrite: config.force_overwrite,
                     skip_verification: config.skip_verification,
                     seed,
+                    prefix_shards: config.key_prefix_shards,
                 });
 
                 total_to_create += actual_to_create;
@@ -397,8 +406,12 @@ pub(crate) async fn prepare_parallel(
                             continue; // Skip if manifest doesn't have this index
                         }
                     } else {
-                        // Flat mode: traditional naming
-                        let key = format!("{}-{:08}.dat", prefix, i);
+                        // Flat mode: traditional or sharded naming
+                        let key = if config.key_prefix_shards > 0 {
+                            format!("{:02x}/{}-{:08}.dat", i % config.key_prefix_shards as u64, prefix, i)
+                        } else {
+                            format!("{}-{:08}.dat", prefix, i)
+                        };
                         if base_uri.ends_with('/') {
                             format!("{}{}", base_uri, key)
                         } else {
@@ -595,7 +608,11 @@ pub(crate) async fn prepare_parallel(
                     }
                 }
             } else {
-                let key = format!("{}-{:08}.dat", plan.prefix, idx);
+                let key = if plan.prefix_shards > 0 {
+                    format!("{:02x}/{}-{:08}.dat", idx % plan.prefix_shards as u64, plan.prefix, idx)
+                } else {
+                    format!("{}-{:08}.dat", plan.prefix, idx)
+                };
                 if endpoint.ends_with('/') {
                     format!("{}{}", endpoint, key)
                 } else {

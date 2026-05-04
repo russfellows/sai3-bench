@@ -437,6 +437,128 @@ docker exec sai3-agent ls -lh /tmp/sai3-*
 
 ---
 
+## Credential Forwarding (v0.8.92+)
+
+In a distributed run every agent host must have object-storage credentials
+available before it can validate or run a workload. Starting with v0.8.92,
+`sai3bench-ctl` can **forward** credential environment variables to all agents
+automatically. The credentials travel inside the existing gRPC control channel
+and are applied to each agent's process environment before any storage
+operations begin.
+
+### Quick Start
+
+**Option A — Forward from the controller's own environment** (default)
+
+```bash
+export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# Credentials are forwarded to all agents automatically
+sai3bench-ctl run --config workload.yaml
+```
+
+**Option B — Use a dedicated credentials file**
+
+```bash
+# /etc/sai3bench/creds.env
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_DEFAULT_REGION=us-east-1
+```
+
+```bash
+sai3bench-ctl --env-file /etc/sai3bench/creds.env run --config workload.yaml
+```
+
+The file is read on the controller; its contents are **not** applied to the
+controller's own environment.
+
+**Option C — Disable forwarding (agents self-configure)**
+
+```bash
+sai3bench-ctl --no-forward-env run --config workload.yaml
+```
+
+Use this when agents already have credentials configured locally (e.g. via IAM
+instance roles or Kubernetes secrets) and you do not want the controller to
+interfere.
+
+### Security Model
+
+**Allow-list**: Only these prefixes are ever forwarded. All other variables are
+silently ignored, even when present in an `--env-file`.
+
+| Prefix / Key | Cloud / SDK |
+|---|---|
+| `AWS_*` | AWS SDK (access key, secret, session token, region, endpoint URL, …) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | GCP — service account JSON key path |
+| `AZURE_STORAGE_*` | Azure Blob Storage (account name, key, SAS token, connection string) |
+
+**Local environment wins**: If a key already exists in the agent's own
+environment (e.g. an instance IAM role sets `AWS_ROLE_ARN`), the forwarded
+value is silently skipped.
+
+**Audit trail**: The controller logs the key names (never values) it is forwarding:
+```
+🔑 Forwarding 2 credential variables from controller environment to all agents: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+```
+
+**TLS warning**: Credentials are embedded in the gRPC control message. When
+the connection is plaintext (no `--tls`), the controller emits a warning.
+Enable `--tls` and provide `--agent-ca` for production deployments on shared
+networks.
+
+**Never written to disk**: The `distributed_env` field that carries credentials
+uses `skip_serializing_if = "is_empty"` — it never appears in YAML config
+files, dry-run output, or results saved to disk.
+
+### CLI Reference
+
+```
+sai3bench-ctl [OPTIONS] run --config <FILE>
+
+  --env-file <FILE>     Path to a .env file whose credential variables are
+                        forwarded to every agent.
+  --no-forward-env      Disable all credential forwarding.
+  --tls                 Enable TLS for gRPC connections.
+  --agent-ca <FILE>     PEM file for the agent's self-signed certificate (TLS).
+```
+
+### `.env` File Format
+
+Standard `key=value` format; comments (`# ...`) and blank lines supported:
+
+```dotenv
+# AWS credentials
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_DEFAULT_REGION=us-east-1
+
+# Custom S3-compatible endpoint (e.g. MinIO)
+AWS_ENDPOINT_URL=http://10.9.0.1:9000
+
+# GCP
+# GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/sa-key.json
+
+# Azure
+# AZURE_STORAGE_ACCOUNT=mystorageaccount
+# AZURE_STORAGE_KEY=base64encodedkey==
+```
+
+Non-credential lines are silently ignored — they are parsed but not forwarded.
+
+### Credential Forwarding Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `403 Forbidden` / `AccessDenied` during pre-flight | Credentials not forwarded or wrong | Check controller log for "Forwarding N credential variables" |
+| `No credentials detected` warning | Controller env has no matching keys and no `--env-file` | Set `AWS_ACCESS_KEY_ID` on controller or pass `--env-file` |
+| Agent ignores forwarded credentials | Agent already has the same key set locally | Local env wins by design; unset the local key if you want the forwarded value |
+| `Cannot read env file: …` error | `--env-file` path is wrong or not readable | Verify path and file permissions |
+
+---
+
 ## See Also
 
 - [USAGE.md](USAGE.md) - Workload configuration syntax

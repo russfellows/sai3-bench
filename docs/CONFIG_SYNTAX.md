@@ -120,6 +120,9 @@ op_log_path: /data/oplog.tsv.zst  # s3dlio operation log path (optional, v0.8.1+
                                    # Agent appends agent_id to prevent collisions
                                    # Supports S3DLIO_OPLOG_BUF env var (buffer size)
                                    # Note: Sorting requires post-processing (sai3-bench sort)
+dynamic_put_pool: false            # Add newly PUT objects to GET selection pool (v0.8.97+)
+                                   # false (default): frozen pool — reproducible GET selection
+                                   # true: warp-style mixed mode — GETs can hit freshly PUT objects
 
 # Prepare stage (optional)
 prepare:
@@ -1980,6 +1983,14 @@ prepare:
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test
+
+  # Namespace sharding for hash-based storage (v0.8.97+, issue #81)
+  # Spreads object keys across N hex-prefix shard directories.
+  # Default: 0 (no sharding — backward compatible).
+  # Recommended: 256 for VAST, Weka, and other hash-partitioned systems.
+  # With 256 shards, keys become:  00/prepared-00000000.dat
+  #                                a3/prepared-00000001.dat  etc.
+  key_prefix_shards: 256
 ```
 
 **Note: Thousand Separators in YAML Numbers (v0.8.52+)**
@@ -2007,6 +2018,44 @@ prepare:
     - count: 250 000
       min_size: 262 144        # 256 KiB
 ```
+
+### Namespace Sharding (v0.8.97+)
+
+**`key_prefix_shards`** solves a performance problem specific to storage systems that
+route namespace operations by key-prefix hash (VAST, Weka, some S3-compatible clusters):
+when all prepared-object keys share the same long common prefix (e.g. `prepared-0000…`),
+the hash function maps all keys to the same director node, creating a metadata hotspot.
+
+Setting `key_prefix_shards: 256` inserts a 2-character hex shard directory before every
+key, giving 256 distinct top-level prefixes (`00/` … `ff/`) and distributing the metadata
+load evenly across all director nodes.
+
+```yaml
+prepare:
+  key_prefix_shards: 256   # recommended for VAST and other hash-partitioned systems
+  ensure_objects:
+    - base_uri: "s3://bucket/data/"
+      count: 1000000
+      min_size: 1048576
+      max_size: 1048576
+```
+
+**Resulting key format** (with `key_prefix_shards: 256`):
+```
+00/prepared-00000000.dat    ← shard 00
+a3/prepared-00000001.dat    ← shard a3
+ff/prepared-00000002.dat    ← shard ff
+…                           (deterministic — index % 256 maps to shard)
+```
+
+The shard prefix is also applied to **workload PUT operations** so live-written objects
+are spread the same way:
+```
+2b/obj_13792847362          ← workload PUT key
+```
+
+**Default**: `0` (disabled — unchanged behaviour, full backward compatibility).
+**Recommended**: `256` for all VAST deployments and any system with prefix-based routing.
 
 ### Cleanup-Only Mode (v0.8.7+)
 

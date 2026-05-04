@@ -6,6 +6,83 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.8.97] - 2026-05-03
+
+### Added
+
+- **`prepare.key_prefix_shards: <N>` — namespace sharding for hash-based storage (issue #81)**
+
+  Spreads prepared and PUT object keys across N hexadecimal directory shards to avoid
+  concentrating metadata on a single director node (critical for VAST and similar
+  hash-partitioned storage systems).
+
+  When set to a value greater than 0 (recommended: `256`), every object key gains a
+  two-hex-character prefix shard directory:
+
+  ```
+  # key_prefix_shards: 0 (default — all keys share the same namespace prefix)
+  prepared-00000000.dat
+  prepared-00000001.dat
+  ...
+
+  # key_prefix_shards: 256 — 256 distinct shard directories
+  00/prepared-00000000.dat
+  a3/prepared-00000001.dat
+  ff/prepared-00000002.dat
+  ```
+
+  The shard is derived deterministically from the object index (prepare phase) or from
+  the random 64-bit object ID (workload PUT phase), so the distribution is uniform across
+  all N shards.
+
+  **Why it matters**: Storage systems that route namespace requests by key prefix hash
+  (VAST, Weka, some S3-compatible clusters) will concentrate all metadata operations on
+  one director node when all keys share the same long common prefix (e.g.
+  `prepared-0000…`).  Setting `key_prefix_shards: 256` gives 256 distinct prefixes,
+  distributing metadata load evenly across all director nodes.
+
+  **Backward compatible**: Default is `0` (unchanged key format).  Existing configs and
+  prepared datasets are unaffected.
+
+  ```yaml
+  prepare:
+    key_prefix_shards: 256    # 256 hex shards: 00/…, 01/…, …, ff/…
+    ensure_objects:
+      - base_uri: "s3://bucket/data/"
+        count: 1000000
+        min_size: 1048576
+        max_size: 1048576
+  ```
+
+- **`dynamic_put_pool: true` — live GET pool growth during mixed workloads (issue #82)**
+
+  When a workload mixes PUT and GET operations, newly PUT objects are added to the GET
+  selection pool in real time so GET workers can immediately access them.  This matches
+  warp's mixed-mode behavior where the object population grows during the test.
+
+  **Implementation**: `UriSource.full_uris` is now an `Arc<RwLock<Vec<String>>>` shared
+  across all worker clones.  After each successful PUT, the new URI is appended to the
+  matching GET pool entry via a write lock held for nanoseconds — negligible overhead
+  against millisecond-scale network I/O.
+
+  **Default is `false`** (frozen pool) to preserve benchmark reproducibility: two runs
+  with the same pre-populated dataset produce identical GET pool membership regardless of
+  PUT throughput variation.  Set to `true` for warp-style mixed workloads where organic
+  object population growth is part of the test scenario.
+
+  ```yaml
+  dynamic_put_pool: true      # Add newly PUT objects to GET pool (warp mixed-mode parity)
+
+  workload:
+    - op: put
+      path: "s3://bucket/data/new-"
+      object_size: 1048576
+      weight: 30
+    - op: get
+      path: "s3://bucket/data/prepared-*.dat"
+      weight: 70
+  ```
+
 ## [0.8.96] - 2026-04-28
 
 ### Fixed

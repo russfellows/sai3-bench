@@ -640,6 +640,80 @@ distributed:
 
 For complete multi-endpoint documentation including NFS examples, troubleshooting, and isolated vs shared storage modes, see **[CONFIG_SYNTAX.md § Multi-Endpoint Load Balancing](CONFIG_SYNTAX.md#multi-endpoint-load-balancing)**.
 
+## Namespace Sharding for Hash-Partitioned Storage (v0.8.97+)
+
+Storage systems like VAST, Weka, and some S3-compatible clusters route namespace requests
+by a hash of the key prefix.  When all prepared objects share a long common prefix
+(e.g. `prepared-0000…`), they hash to the **same director node**, concentrating metadata
+load and limiting throughput.
+
+`key_prefix_shards` inserts a 2-hex-character shard directory before every key, giving
+256 distinct top-level prefixes (`00/` through `ff/`) and distributing metadata evenly
+across all director nodes.
+
+```yaml
+prepare:
+  key_prefix_shards: 256          # 256 hex shard dirs: 00/ … ff/
+  ensure_objects:
+    - base_uri: "s3://bucket/data/"
+      count: 1000000
+      min_size: 1048576
+      max_size: 1048576
+```
+
+Object keys produced:
+```
+00/prepared-00000000.dat    ← shard 00  (index % 256 = 0)
+a3/prepared-00000001.dat    ← shard a3
+ff/prepared-00000002.dat    ← shard ff
+```
+
+Workload PUT operations are also sharded automatically — no extra config needed:
+```
+2b/obj_13792847362          ← live PUT (random key % 256)
+```
+
+**Default**: `0` (disabled, full backward compatibility).  
+**Recommended**: `256` for any VAST deployment or hash-partitioned system.
+
+## Dynamic GET Pool for Mixed Workloads (v0.8.97+)
+
+By default the list of objects available for GET selection is frozen at startup
+(pre-resolved from the prepare stage or a glob scan).  In a mixed PUT+GET workload
+this means GET workers cannot access any of the objects written during the run.
+
+Setting `dynamic_put_pool: true` adds each successfully PUT object URI to the GET pool
+in real time, matching warp's mixed-mode behavior:
+
+```yaml
+dynamic_put_pool: true
+
+workload:
+  - op: put
+    path: "s3://bucket/data/new-"
+    object_size: 1048576
+    weight: 30
+  - op: get
+    path: "s3://bucket/data/prepared-*.dat"
+    weight: 70
+```
+
+**How it works**: All worker tasks share the same `Arc<RwLock<Vec<String>>>` GET pool.
+After each PUT completes, the new URI is appended via a write lock held for nanoseconds —
+negligible overhead relative to millisecond network I/O.  The pool grows monotonically
+throughout the run; no objects are ever removed.
+
+**When to use `dynamic_put_pool: true`**:
+- Warp-style mixed workloads where organic object population growth is the test scenario
+- Validating that a storage system scales smoothly as the namespace grows during load
+
+**Why the default is `false`** (frozen pool):
+- Reproducibility: two runs with the same pre-populated dataset produce identical GET
+  pool membership regardless of PUT throughput variation
+- Simpler latency analysis: GET latency doesn't drift as pool size changes
+
+
+
 ## YAML-Driven Stage Orchestration (v0.8.50+)
 
 Define multi-stage test workflows beyond traditional prepare→execute→cleanup:
