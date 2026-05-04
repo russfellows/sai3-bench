@@ -79,7 +79,7 @@ Tab names are automatically truncated to 31 characters if needed (Excel limitati
 
 Given this directory structure:
 
-```
+```text
 GCP-sai3_22-Dec-2025/
 ├── sai3-20251222-1744-sai3-resnet50_1hosts/
 │   ├── results.tsv
@@ -93,11 +93,13 @@ GCP-sai3_22-Dec-2025/
 ```
 
 Running:
+
 ```bash
 sai3-analyze --pattern "sai3-*" --base-dir GCP-sai3_22-Dec-2025 --output gcp-results.xlsx
 ```
 
 Creates `gcp-results.xlsx` with 6 tabs:
+
 1. `1222-1744-resnet50_1h-R` - Results from first run
 2. `1222-1744-resnet50_1h-P` - Prepare results from first run
 3. `1222-1914-resnet50_8h-R` - Results from second run
@@ -108,6 +110,7 @@ Creates `gcp-results.xlsx` with 6 tabs:
 ## Data Preservation
 
 The tool preserves all data from TSV files:
+
 - **Headers**: Bold formatting applied
 - **Numbers**: Parsed and stored as numeric values (enables Excel calculations)
 - **Strings**: Preserved as text
@@ -154,6 +157,7 @@ sai3bench-analyze --pattern "sai3-*" --include-agents --output full-results.xlsx
 ```
 
 This will add additional tabs for each agent:
+
 - `1222-1744-resnet50_1h-agent1-R`
 - `1222-1744-resnet50_1h-agent1-P`
 - `1222-1744-resnet50_1h-agent2-R`

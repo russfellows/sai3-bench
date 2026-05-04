@@ -7,6 +7,7 @@ Starting in v0.8.61, sai3-bench requires all configurations to use **explicit st
 ## What Changed in v0.8.61
 
 ### Old Format (Implicit Stages)
+
 ```yaml
 duration: 30s
 concurrency: 32
@@ -18,12 +19,14 @@ workload:
 ```
 
 **Implicit behavior**: Automatically runs stages in order:
+
 1. Preflight validation (hidden)
 2. Prepare (if prepare section exists)
 3. Execute workload for `duration`
 4. Cleanup (if prepare.cleanup=true)
 
 ### New Format (Explicit Stages)
+
 ```yaml
 duration: 30s
 concurrency: 32
@@ -48,6 +51,7 @@ distributed:
 ```
 
 **Explicit behavior**: Stages are defined explicitly with:
+
 - **name**: Stage identifier
 - **order**: Execution sequence (1, 2, 3, ...)
 - **type**: Stage type (validation, prepare, execute, cleanup)
@@ -141,6 +145,7 @@ Both formats work identically - stages are required even for single-node executi
 ### Example 1: Simple GET Workload
 
 **Before**:
+
 ```yaml
 duration: 10s
 concurrency: 8
@@ -152,6 +157,7 @@ workload:
 ```
 
 **After**:
+
 ```yaml
 duration: 10s
 concurrency: 8
@@ -178,6 +184,7 @@ distributed:
 ### Example 2: With Prepare and Cleanup
 
 **Before**:
+
 ```yaml
 duration: 60s
 concurrency: 16
@@ -195,6 +202,7 @@ workload:
 ```
 
 **After**:
+
 ```yaml
 # ... (full config preserved) ...
 distributed:
@@ -258,6 +266,7 @@ If you need custom stage ordering or hybrid completion:
 3. Validate with `--dry-run`
 
 Example custom ordering:
+
 ```yaml
 distributed:
   stages:
@@ -283,18 +292,22 @@ distributed:
 ## Troubleshooting
 
 ### "No distributed/workload section - skipping"
+
 **Cause**: Config has no `workload` section (invalid config)
 **Fix**: Add a valid workload section or this is not an executable config
 
 ### "Already has stages section - skipping"
+
 **Cause**: Config already converted to new format
 **Fix**: No action needed - file is already in new format
 
 ### "Validation failed"
+
 **Cause**: Converted config has syntax errors or invalid fields
 **Fix**: Check error message, restore from `.bak`, fix manually
 
 ### Converted file is very verbose
+
 **Cause**: serde_yaml serializes all fields including defaults
 **Fix**: Functionally correct but verbose; manually clean up if needed
 
@@ -303,21 +316,25 @@ distributed:
 For large projects with many configs:
 
 1. **Inventory**: Find all YAML configs
+
    ```bash
    find . -name "*.yaml" -type f
    ```
 
 2. **Test Batch**: Convert a few representative configs
+
    ```bash
    ./target/release/sai3-bench convert --files test1.yaml test2.yaml --dry-run
    ```
 
 3. **Validate**: Test converted configs work
+
    ```bash
    ./target/release/sai3-bench run --config test1.yaml --dry-run
    ```
 
 4. **Convert All**: Batch convert all configs
+
    ```bash
    ./target/release/sai3-bench convert --files *.yaml
    ```
@@ -327,6 +344,7 @@ For large projects with many configs:
 6. **Test Suite**: Run full test suite with new configs
 
 7. **Remove Backups**: After confirming everything works
+
    ```bash
    rm *.yaml.bak
    ```

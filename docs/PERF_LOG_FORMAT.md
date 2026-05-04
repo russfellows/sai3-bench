@@ -62,28 +62,35 @@ The perf-log feature captures time-series performance metrics at configurable in
 ## Column Groups
 
 ### Identity (1 column)
+
 - `agent_id`: Identifies the worker/agent generating this row
 
 ### Timing (3 columns)
+
 - `timestamp_epoch_ms`: Absolute time for correlation with external logs
 - `elapsed_s`: Relative time for plotting workload progression
 - `stage`: Current execution phase
 
 ### GET Metrics (8 columns)
+
 - Operations, bytes, IOPS, throughput, mean latency, and percentiles (p50, p90, p99) for read operations
 
 ### PUT Metrics (8 columns)
+
 - Operations, bytes, IOPS, throughput, mean latency, and percentiles (p50, p90, p99) for write operations
 
 ### META Metrics (6 columns)
+
 - Operations, IOPS, mean latency, and percentiles (p50, p90, p99) for metadata operations (LIST, STAT, DELETE)
 - Note: META operations don't have bytes/mbps (metadata doesn't transfer data)
 
 ### CPU Metrics (3 columns)
+
 - User, system, and I/O wait CPU utilization percentages
 - Useful for identifying CPU-bound vs I/O-bound workloads
 
 ### Status (2 columns)
+
 - `errors`: Track error rates over time
 - `is_warmup`: Filter out warmup period from analysis
 
@@ -102,9 +109,9 @@ warmup_period: "10s"
 ## Example Output
 
 ```tsv
-agent_id	timestamp_epoch_ms	elapsed_s	stage	get_ops	get_bytes	get_iops	get_mbps	get_mean_us	get_p50_us	get_p90_us	get_p99_us	put_ops	put_bytes	put_iops	put_mbps	put_mean_us	put_p50_us	put_p90_us	put_p99_us	meta_ops	meta_iops	meta_mean_us	meta_p50_us	meta_p90_us	meta_p99_us	cpu_user_pct	cpu_system_pct	cpu_iowait_pct	errors	is_warmup
-standalone	1766470049067	1.000	Workload	5350	9586720768	5348.0	9139.22	2459	531	5667	25631	1073	88076132	1072.6	83.96	470	323	924	2557	2949	2947.9	356	112	986	2823	0.0	0.0	0.0	0	0
-standalone	1766470050067	2.001	Workload	5930	10191196160	5926.0	9712.52	2355	520	5423	24719	1172	96202448	1171.2	91.68	478	319	939	2553	3365	3362.7	331	103	921	2409	39.8	45.9	0.0	0	0
+agent_id timestamp_epoch_ms elapsed_s stage get_ops get_bytes get_iops get_mbps get_mean_us get_p50_us get_p90_us get_p99_us put_ops put_bytes put_iops put_mbps put_mean_us put_p50_us put_p90_us put_p99_us meta_ops meta_iops meta_mean_us meta_p50_us meta_p90_us meta_p99_us cpu_user_pct cpu_system_pct cpu_iowait_pct errors is_warmup
+standalone 1766470049067 1.000 Workload 5350 9586720768 5348.0 9139.22 2459 531 5667 25631 1073 88076132 1072.6 83.96 470 323 924 2557 2949 2947.9 356 112 986 2823 0.0 0.0 0.0 0 0
+standalone 1766470050067 2.001 Workload 5930 10191196160 5926.0 9712.52 2355 520 5423 24719 1172 96202448 1171.2 91.68 478 319 939 2553 3365 3362.7 331 103 921 2409 39.8 45.9 0.0 0 0
 ```
 
 ## Statistical Validity Note (v0.8.17+)
@@ -114,6 +121,7 @@ standalone	1766470050067	2.001	Workload	5930	10191196160	5926.0	9712.52	2355	520
 In distributed mode with multiple agents, the aggregate `perf_log.tsv` percentiles (p50, p90, p99) are computed using **weighted averaging**, which is a mathematical approximation. Percentiles cannot be accurately averaged - they should be computed from merged HDR histograms.
 
 **For statistically accurate percentile analysis:**
+
 - ✅ Use **per-agent perf_log files** (`results/agents/{agent-id}/perf_log.tsv`) - Accurate, computed from local HDR histograms
 - ✅ Use **final workload_results.tsv** - Accurate, uses HDR histogram merging across all agents
 
@@ -124,12 +132,14 @@ The aggregate perf_log is suitable for **monitoring during execution** and visua
 ## Analysis Tips
 
 ### Filtering Warmup Data
+
 ```bash
 # Remove warmup rows for analysis (column 31)
 awk -F'\t' 'NR==1 || $31==0' perf_metrics.tsv > perf_metrics_no_warmup.tsv
 ```
 
 ### Plotting with gnuplot
+
 ```gnuplot
 set datafile separator "\t"
 set xlabel "Elapsed Time (s)"
@@ -138,6 +148,7 @@ plot "perf_metrics.tsv" using 3:7 with lines title "GET IOPS"
 ```
 
 ### Aggregating Multi-Agent Data
+
 ```bash
 # Combine perf-logs from multiple agents
 # Header from first file, data from all

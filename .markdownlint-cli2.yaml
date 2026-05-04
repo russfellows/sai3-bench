@@ -1,0 +1,34 @@
+# markdownlint-cli2 configuration for sai3-bench
+# Run:  markdownlint-cli2 "docs/**/*.md"
+# Fix:  markdownlint-cli2 --fix "docs/**/*.md"
+
+config:
+  # MD013: line-length — disabled; 80-char limit is impractical for
+  # technical docs with URLs, tables, shell commands, and code paths.
+  MD013: false
+
+  # MD024: no-duplicate-heading — disabled; headings like "## Overview"
+  # or "## See Also" appear legitimately in multiple sections/files.
+  MD024: false
+
+  # MD029: ordered-list-item-prefix — use "ordered" (1. 2. 3.)
+  # rather than requiring every item to start with "1."
+  MD029:
+    style: ordered
+
+  # MD060: table-column-style — disabled; the rule flags separator rows
+  # (|---|---|) as inconsistent with spaced data rows (| cell |), but this
+  # is universally-accepted standard markdown table syntax.
+  MD060: false
+
+  # MD033: no-inline-html — disabled; Rust generic type syntax (<u8>, <path>)
+  # and angle-bracket CLI placeholders are misidentified as HTML tags.
+  MD033: false
+
+  # MD025: single-title/single-h1 — disabled; USAGE.md and similar large
+  # reference docs intentionally use H1 for numbered top-level sections.
+  MD025: false
+
+  # MD001: heading-increment — disabled; heading level jumps (e.g. H2→H4)
+  # sometimes intentional for visual weight without creating false TOC depth.
+  MD001: false

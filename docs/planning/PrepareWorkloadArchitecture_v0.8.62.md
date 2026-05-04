@@ -14,6 +14,7 @@
 Previous prepare/workload generation (pre-v0.8.62) happened on the scheduling thread, directly interleaved with task creation and I/O. For tiny objects, per-item CPU overhead (size generation, string formatting, manifest lookup, endpoint selection) could dominate and throttle I/O throughput.
 
 **Solution implemented:**
+
 - Bounded memory (no full precompute)
 - Deterministic generation (same config = same paths/sizes)
 - High throughput for small-object workloads
@@ -24,18 +25,23 @@ Previous prepare/workload generation (pre-v0.8.62) happened on the scheduling th
 ## 2) Design Goals (Achieved in v0.8.62)
 
 **Performance** ✅
+
 - Sustain generation throughput >= target I/O throughput (up to 1M ops/s)
 
 **Memory** ✅
+
 - Bounded queue sizes with back-pressure (see `TASK_CHUNK_SIZE = 100_000`)
 
 **Determinism** ✅
+
 - Stable per-object mapping (size, path, endpoint, agent partition) independent of runtime timing
 
 **Extensibility** ✅
+
 - Multiple queue backends tested and selected (FuturesUnordered with semaphore)
 
 **Observability** ✅
+
 - Real-time metrics: throughput, progress, latency tracking
 
 ---
@@ -55,6 +61,7 @@ Key idea: **decouple generation from I/O** while preserving deterministic orderi
 ## 4) Core Data Structures (Implemented)
 
 ### 4.1 PrepareTask (src/prepare/parallel.rs:53)
+
 Represents a single object operation unit.
 
 ```rust
@@ -69,6 +76,7 @@ struct PrepareTask {
 ```
 
 ### 4.2 PreparePlan (src/prepare/parallel.rs:64)
+
 Immutable plan derived from config.
 
 ```rust
@@ -88,6 +96,7 @@ struct PreparePlan {
 ```
 
 ### 4.3 PlanState (src/prepare/parallel.rs:462)
+
 Mutable iterator state per plan, used by generator.
 
 ```rust
@@ -99,6 +108,7 @@ struct PlanState<'a> {
 ```
 
 ### 4.4 Batch Processing
+
 Prepared items are passed in chunks to amortize overhead.
 
 ```rust
@@ -113,6 +123,7 @@ let mut chunk_tasks: Vec<PrepareTask> = Vec::with_capacity(TASK_CHUNK_SIZE);
 ### 5.1 PrepareGenerator (round-robin interleave)
 
 **Implementation** (src/prepare/parallel.rs:486-550):
+
 - Maintains `PlanState` for each ensure_objects entry
 - Round-robin across plans to maintain size mixing
 - Skips indices using `existing_indices`, agent partitioning, and verification rules
@@ -122,6 +133,7 @@ let mut chunk_tasks: Vec<PrepareTask> = Vec::with_capacity(TASK_CHUNK_SIZE);
 - Endpoint selection: `idx % endpoints.len()`
 
 **Key Code** (src/prepare/parallel.rs:515-540):
+
 ```rust
 let endpoint = &plan.endpoints[idx as usize % plan.endpoints.len()];
 let uri = if let Some(manifest) = tree_manifest {
@@ -136,6 +148,7 @@ let uri = if let Some(manifest) = tree_manifest {
 ```
 
 ### 5.2 WorkloadGenerator
+
 - PUT: generate sizes/paths similar to prepare
 - GET/STAT/DELETE: derive paths from manifest/listing precomputed indices
 - LIST: generate list patterns instead of per-object items
@@ -148,12 +161,14 @@ let uri = if let Some(manifest) = tree_manifest {
 **Selected Implementation**: `FuturesUnordered` with `Semaphore` for concurrency control
 
 **Rationale**:
+
 - Native tokio integration (no external dependencies)
 - Efficient async task management
 - Natural back-pressure through semaphore
 - Tested and proven at production scale
 
 **Implementation** (src/prepare/parallel.rs:436-550):
+
 ```rust
 let sem = Arc::new(Semaphore::new(concurrency));
 let mut futs = FuturesUnordered::new();
@@ -168,6 +183,7 @@ for task in chunk_tasks {
 ```
 
 **Alternatives Evaluated**:
+
 - `crossbeam::queue::ArrayQueue` - Considered but tokio integration preferred
 - `crossbeam_channel::bounded` - Good, but FuturesUnordered more idiomatic
 - `ringbuf` crate - SPSC only, needed MPMC capability
@@ -180,6 +196,7 @@ for task in chunk_tasks {
 **Selected**: Spawn per batch (chunk of 100K items)
 
 **Implementation**:
+
 1. Generate chunk of PrepareTask items (up to `TASK_CHUNK_SIZE`)
 2. Convert entire chunk to async tasks via `tokio::spawn`
 3. Use semaphore for I/O concurrency control
@@ -188,6 +205,7 @@ for task in chunk_tasks {
 **Performance**: Amortizes spawn overhead, maintains determinism, enables back-pressure
 
 **Alternatives Rejected**:
+
 - Spawn per item: Too slow for tiny objects (100x overhead)
 - Fixed async loop: Tested but chunking provided better control
 
@@ -196,6 +214,7 @@ for task in chunk_tasks {
 ## 8) Generation Strategy (Implemented)
 
 **Key Optimizations**:
+
 - `SizeGenerator::new_with_seed(&spec, seed)` for deterministic sizes (src/prepare/parallel.rs:471)
 - `String::with_capacity()` for efficient URI creation
 - Endpoint choice: `idx % endpoints.len()` (consistent round-robin)
@@ -210,21 +229,25 @@ for task in chunk_tasks {
 ### Micro-Benchmarks Conducted
 
 **A) Queue/Buffer Throughput** ✅
+
 - Tested: `FuturesUnordered` vs `crossbeam_channel::bounded` vs `flume`
 - Result: FuturesUnordered selected for tokio integration and performance
 - Metrics: Sustained 1M+ ops/s, <10µs latency overhead
 
 **B) Scheduling Overhead** ✅
+
 - Compared: spawn-per-item vs spawn-per-batch vs fixed loop
 - Result: Batch size of 100K optimal for CPU/memory tradeoff
 - Impact: 100x reduction in overhead vs spawn-per-item
 
 **C) Generation Throughput** ✅
+
 - Tested: Path generation, size generation, manifest lookup separately
 - Result: Generation is NOT the bottleneck (even at 1M ops/s)
 - Validated: Deterministic output matches sequential generation
 
 **D) End-to-End** ✅
+
 - Tested: 4 KiB, 1 MiB, 16 MiB object sizes
 - Result: Zero performance regression vs previous implementation
 - Improvement: Better scaling for small objects (4 KiB workloads)
@@ -234,12 +257,14 @@ for task in chunk_tasks {
 ## 10) Rust Features / Crates (Used)
 
 **Crates**
+
 - `tokio` - Async runtime, task scheduling, semaphores
 - `futures` - FuturesUnordered for concurrent task management
 - `bytes` - Buffer generation and zero-copy operations
 - `anyhow` - Error handling with context
 
 **Language Features**
+
 - `Arc` - Shared ownership for multi-threaded access
 - `AtomicU64` - Lock-free counters for progress tracking
 - `std::time::Instant` - Latency and throughput metrics
@@ -252,6 +277,7 @@ for task in chunk_tasks {
 ## 11) Metrics / Observability (Implemented)
 
 **Tracked Metrics** (src/prepare/parallel.rs:390-428):
+
 - Generator throughput (items/s) - Live progress bar
 - Operations counter (ops completed) - `AtomicU64`
 - Bytes counter (total data) - `AtomicU64`
@@ -260,6 +286,7 @@ for task in chunk_tasks {
 - Error tracking - `PrepareErrorTracker` with rate limiting
 
 **Real-Time Display**:
+
 ```
 Preparing 1000000 objects ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 16 workers | 1048576 ops/s | 4096.0 MiB/s | avg 0.015ms
@@ -281,6 +308,7 @@ Preparing 1000000 objects ━━━━━━━━━━━━━━━━━━
 ## 13) Implementation Status (v0.8.62)
 
 ✅ **Completed**:
+
 1. Generator module in `src/prepare/parallel.rs`
 2. Queue implementation using `FuturesUnordered` with `Semaphore`
 3. Batch-based scheduling (`TASK_CHUNK_SIZE = 100_000`)
@@ -289,11 +317,13 @@ Preparing 1000000 objects ━━━━━━━━━━━━━━━━━━
 6. Performance validated (sustained high IOPS)
 
 **Key Files**:
+
 - `src/prepare/parallel.rs`: Core prepare pipeline (918 lines)
 - `src/workload.rs`: Workload execution with round-robin endpoint selection
 - `src/size_generator.rs`: Deterministic size generation with seeds
 
 **Performance Results**:
+
 - Supports 1M+ ops/s for small objects
 - Bounded memory via chunking and semaphores
 - Zero performance regression vs sequential generation

@@ -5,8 +5,7 @@ use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, trace, warn};
 
@@ -2052,7 +2051,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             }
 
                             pre.get_lists.push(UriSource {
-                                full_uris: full_uris.clone(),
+                                full_uris: Arc::new(RwLock::new(full_uris.clone())),
                                 uri: uri.clone(),
                             });
                         }
@@ -2095,7 +2094,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 uri
                             );
                             pre.delete_lists.push(UriSource {
-                                full_uris: full_uris.clone(),
+                                full_uris: Arc::new(RwLock::new(full_uris.clone())),
                                 uri: uri.clone(),
                             });
                         }
@@ -2138,7 +2137,7 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                                 uri
                             );
                             pre.stat_lists.push(UriSource {
-                                full_uris: full_uris.clone(),
+                                full_uris: Arc::new(RwLock::new(full_uris.clone())),
                                 uri: uri.clone(),
                             });
                         }
@@ -2343,17 +2342,17 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
     // Collect base URIs from pre-resolved GET/DELETE/STAT patterns
     for source in &pre.get_lists {
-        for uri in &source.full_uris {
+        for uri in source.full_uris.read().unwrap().iter() {
             unique_base_uris.insert(extract_base_uri(uri));
         }
     }
     for source in &pre.delete_lists {
-        for uri in &source.full_uris {
+        for uri in source.full_uris.read().unwrap().iter() {
             unique_base_uris.insert(extract_base_uri(uri));
         }
     }
     for source in &pre.stat_lists {
-        for uri in &source.full_uris {
+        for uri in source.full_uris.read().unwrap().iter() {
             unique_base_uris.insert(extract_base_uri(uri));
         }
     }
@@ -2580,8 +2579,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             let uri = rewrite_pattern_for_pool(&original_uri, false, separate_pools);
                             let src = pre.get_for_uri(&uri).unwrap();
                             let mut r = rng();
-                            let uri_idx = r.random_range(0..src.full_uris.len());
-                            src.full_uris[uri_idx].clone()
+                            let uris_guard = src.full_uris.read().unwrap();
+                            let uri_idx = r.random_range(0..uris_guard.len());
+                            uris_guard[uri_idx].clone()
                         };
 
                         let store_cache_get = store_cache.clone();
@@ -2686,7 +2686,15 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             };
                             let key = {
                                 let mut r = rng();
-                                format!("obj_{}", r.random::<u64>())
+                                let rand_val = r.random::<u64>();
+                                let shards = cfg.prepare.as_ref()
+                                    .map(|p| p.key_prefix_shards)
+                                    .unwrap_or(0);
+                                if shards > 0 {
+                                    format!("{:02x}/obj_{}", rand_val % shards as u64, rand_val)
+                                } else {
+                                    format!("obj_{}", rand_val)
+                                }
                             };
                             let full_uri = if base_uri.ends_with('/') {
                                 format!("{}{}", base_uri, key)
@@ -2748,6 +2756,21 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
 
                                 if let Some(ref tracker) = cfg.live_stats_tracker {
                                     tracker.record_put(sz as usize, total_dur);
+                                }
+
+                                // Issue #82: dynamic PUT pool — add newly PUT objects to GET
+                                // selection so GET workers see them immediately (warp parity).
+                                // Only in flat mode (tree mode paths are already in the manifest).
+                                if cfg.dynamic_put_pool && path_selector.is_none() {
+                                    for get_src in &pre.get_lists {
+                                        let src_base = get_src.uri.trim_end_matches('/');
+                                        if full_uri.starts_with(&format!("{}/", src_base))
+                                            || full_uri.starts_with(src_base)
+                                        {
+                                            get_src.full_uris.write().unwrap().push(full_uri.clone());
+                                            break;
+                                        }
+                                    }
                                 }
 
                                 local_ops += 1;
@@ -2853,8 +2876,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             let src = pre.stat_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for STAT pattern: {}", pattern))?;
                             let mut r = rng();
-                            let uri_idx = r.random_range(0..src.full_uris.len());
-                            src.full_uris[uri_idx].clone()
+                            let uris_guard = src.full_uris.read().unwrap();
+                            let uri_idx = r.random_range(0..uris_guard.len());
+                            uris_guard[uri_idx].clone()
                         };
 
                         let store_cache_stat = store_cache.clone();
@@ -2938,8 +2962,9 @@ pub async fn run(cfg: &Config, tree_manifest: Option<TreeManifest>) -> Result<Su
                             let src = pre.delete_for_uri(&pattern)
                                 .ok_or_else(|| anyhow!("No pre-resolved URIs for DELETE pattern: {}", pattern))?;
                             let mut r = rng();
-                            let uri_idx = r.random_range(0..src.full_uris.len());
-                            src.full_uris[uri_idx].clone()
+                            let uris_guard = src.full_uris.read().unwrap();
+                            let uri_idx = r.random_range(0..uris_guard.len());
+                            uris_guard[uri_idx].clone()
                         };
 
                         let store_cache_delete = store_cache.clone();
@@ -3379,8 +3404,10 @@ struct PreResolved {
 }
 #[derive(Clone)]
 struct UriSource {
-    full_uris: Vec<String>, // Pre-resolved full URIs for random selection
-    uri: String,            // Original pattern for lookup compatibility
+    /// Shared across all worker clones via Arc. New PUTs may append when
+    /// `dynamic_put_pool: true` is set (issue #82).
+    full_uris: Arc<RwLock<Vec<String>>>,
+    uri: String, // Original pattern for lookup compatibility
 }
 impl PreResolved {
     fn get_for_uri(&self, uri: &str) -> Option<&UriSource> {

@@ -12,6 +12,7 @@
 Enable sai3-bench to perform raw block I/O operations on physical disks, NVMe devices, and LUNs without filesystem overhead. This is critical for storage array testing, NVMe performance characterization, and SAN validation.
 
 **Example Usage**:
+
 ```bash
 # Test NVMe device raw performance
 ./sai3-bench run --config nvme_test.yaml
@@ -321,6 +322,7 @@ impl Drop for BlockDevice {
 ### 3. Integration with ObjectStore Pattern
 
 Option A: **Extend s3dlio library** (Recommended)
+
 ```rust
 // In s3dlio repo: src/block_store.rs
 pub struct BlockDeviceObjectStore {
@@ -347,6 +349,7 @@ impl ObjectStore for BlockDeviceObjectStore {
 ```
 
 Option B: **Direct integration in sai3-bench** (Faster prototype)
+
 ```rust
 // src/workload.rs - add block-specific operations
 async fn get_object_block_device(uri: &str, device: &BlockDevice) -> Result<Vec<u8>> {
@@ -445,6 +448,7 @@ if cfg.target.as_ref().map(|t| t.starts_with("block://")).unwrap_or(false) {
 ### Phase 1: Core Infrastructure (Week 1-2)
 
 **Tasks**:
+
 1. Create `src/block_device.rs` with BlockDevice struct
 2. Implement `open()`, `get_device_size()`, `get_block_size()`
 3. Implement `read_aligned()` with alignment validation
@@ -452,6 +456,7 @@ if cfg.target.as_ref().map(|t| t.starts_with("block://")).unwrap_or(false) {
 5. Add to `BackendType` enum
 
 **Testing**:
+
 ```bash
 # Create loop device for testing
 sudo dd if=/dev/zero of=/tmp/test_block.img bs=1M count=100
@@ -471,6 +476,7 @@ sudo losetup -d /dev/loop20
 ### Phase 2: Write Operations & Safety (Week 3)
 
 **Tasks**:
+
 1. Implement `write_aligned()` with safety checks
 2. Add `--allow-write` CLI flag
 3. Add confirmation prompts
@@ -478,6 +484,7 @@ sudo losetup -d /dev/loop20
 5. Add comprehensive error messages
 
 **Testing**:
+
 ```bash
 # Test write operations (destructive - use loop device!)
 sudo ./target/release/sai3-bench --allow-write --yes \
@@ -491,6 +498,7 @@ sudo ./target/release/sai3-bench --allow-write --yes \
 ### Phase 3: ObjectStore Integration (Week 4)
 
 **Tasks**:
+
 1. Decide: Extend s3dlio vs direct integration
 2. Implement URI parsing for block:// scheme
 3. Add block-specific operations to workload.rs
@@ -498,6 +506,7 @@ sudo ./target/release/sai3-bench --allow-write --yes \
 5. Add proper error handling for unsupported operations (list, delete)
 
 **Testing**:
+
 ```bash
 # Random read workload
 ./sai3-bench run --config tests/configs/block_random_read.yaml
@@ -514,6 +523,7 @@ sudo ./target/release/sai3-bench --allow-write --yes \
 ### Phase 4: Advanced Features (Week 5-6)
 
 **Tasks**:
+
 1. Sequential access pattern support
 2. Range specification (offset, size in URI or config)
 3. Performance optimization (io_uring on Linux 5.1+)
@@ -521,6 +531,7 @@ sudo ./target/release/sai3-bench --allow-write --yes \
 5. Documentation and examples
 
 **Testing**:
+
 ```bash
 # Sequential read benchmark
 ./sai3-bench run --config tests/configs/block_sequential.yaml
@@ -536,12 +547,14 @@ sudo ./target/release/sai3-bench --allow-write --yes \
 ## Safety Considerations
 
 ### 1. **Data Loss Prevention**
+
 - Read-only by default
 - Explicit `--allow-write` flag required
 - Interactive confirmation before writes
 - Clear warning messages
 
 ### 2. **Path Validation**
+
 ```rust
 // Prevent accidental writes to system disks
 const PROTECTED_DEVICES: &[&str] = &[
@@ -561,6 +574,7 @@ fn validate_device_path(path: &str, allow_write: bool) -> Result<()> {
 ```
 
 ### 3. **Permission Checks**
+
 ```rust
 // Ensure user has appropriate permissions
 fn check_permissions(path: &Path, allow_write: bool) -> Result<()> {
@@ -582,6 +596,7 @@ fn check_permissions(path: &Path, allow_write: bool) -> Result<()> {
 ```
 
 ### 4. **Alignment Validation**
+
 - All operations validated before execution
 - Clear error messages for misaligned access
 - Automatic rounding/padding (with warning) as option
@@ -656,6 +671,7 @@ block:///dev/sdb#sequential   # Sequential access pattern
 3. **Use read-only mode first to validate config**
 4. **Monitor with iostat/iotop during tests**
 5. **Backup any data before testing**
+
 ```
 
 ### 2. Technical Reference: `docs/BLOCK_IO_API.md`
@@ -725,6 +741,7 @@ echo "All tests passed!"
 ### 3. Performance Validation
 
 Compare with known benchmarks:
+
 ```bash
 # fio baseline
 fio --name=random_read --ioengine=libaio --direct=1 \
@@ -759,6 +776,7 @@ mod io_uring_impl {
 ### 2. **Batching & Queueing**
 
 Implement I/O batching for higher IOPS:
+
 ```rust
 pub struct BatchedBlockIO {
     device: BlockDevice,
@@ -770,6 +788,7 @@ pub struct BatchedBlockIO {
 ### 3. **NUMA Awareness**
 
 For multi-socket systems, bind threads to NUMA nodes:
+
 ```rust
 #[cfg(target_os = "linux")]
 fn set_numa_affinity(node: usize) -> Result<()> {
@@ -782,16 +801,19 @@ fn set_numa_affinity(node: usize) -> Result<()> {
 ## Platform Support
 
 ### Linux (Primary Target)
+
 - ✅ Full support
 - Uses: `O_DIRECT`, `pread`/`pwrite`, ioctl for device info
 - Tested on: Ubuntu 22.04+, RHEL 8+, Arch Linux
 
 ### macOS (Secondary)
+
 - ⚠️  Limited support
 - Uses: `F_NOCACHE` (not as strict as O_DIRECT)
 - Block devices: `/dev/diskN` (requires `diskutil`)
 
 ### Windows (Future)
+
 - ❌ Not yet supported
 - Would require: `CreateFile` with `FILE_FLAG_NO_BUFFERING`
 - Device paths: `\\.\PhysicalDriveN`
@@ -810,6 +832,7 @@ rd=run1,wd=wd1,iorate=1000,elapsed=60,interval=5
 ```
 
 Equivalent sai3-bench config:
+
 ```yaml
 target: "block:///dev/sdb"
 allow_write: true

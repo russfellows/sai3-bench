@@ -28,6 +28,7 @@ sai3bench-ctl ssh-setup --hosts vm1,vm2,vm3 --user ubuntu
 ```
 
 **What it does:**
+
 1. Generates SSH key pair (`~/.ssh/sai3bench_id_rsa`)
 2. Distributes public key to each VM (prompts for password once)
 3. Verifies passwordless access
@@ -35,7 +36,8 @@ sai3bench-ctl ssh-setup --hosts vm1,vm2,vm3 --user ubuntu
 5. Generates config template
 
 **Example output:**
-```
+
+```text
 === Setting up SSH access to ubuntu@vm1.aws.com ===
 ✓ SSH key generated: /home/user/.ssh/sai3bench_id_rsa
 ✓ SSH key copied to vm1.aws.com
@@ -101,6 +103,7 @@ distributed:
 ```
 
 The controller will automatically:
+
 - SSH to each host
 - Start `sai3bench-agent` in background
 - Connect via gRPC
@@ -116,6 +119,7 @@ The controller will automatically:
 Simplest setup - agents bind directly to host ports:
 
 **On each agent host:**
+
 ```bash
 docker run -d \
   --name sai3-agent \
@@ -129,12 +133,14 @@ docker run -d \
 ```
 
 **Check status:**
+
 ```bash
 docker logs sai3-agent
 # Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Controller config:**
+
 ```yaml
 distributed:
   agents:
@@ -162,6 +168,7 @@ docker run -d \
 ### Passing Cloud Credentials
 
 **AWS:**
+
 ```bash
 docker run -d --net=host \
   -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
@@ -172,6 +179,7 @@ docker run -d --net=host \
 ```
 
 **Azure:**
+
 ```bash
 docker run -d --net=host \
   -e AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT}" \
@@ -181,6 +189,7 @@ docker run -d --net=host \
 ```
 
 **GCS (via service account file):**
+
 ```bash
 docker run -d --net=host \
   -v /path/to/gcs-key.json:/gcs-key.json:ro \
@@ -217,6 +226,7 @@ docker push myregistry/sai3-bench:v0.8.22
 ### Problem: SSH Disconnection During Long Tests
 
 When running distributed tests in cloud environments:
+
 - **Interactive mode** (`-it`): See output, but SSH disconnect kills test
 - **Daemon mode** (`-d`): Survives disconnect, but no visibility
 
@@ -252,6 +262,7 @@ echo "Or: tail -f ${LOG_DIR}/agent-${AGENT_ID}.log"
 ```
 
 Run on each host:
+
 ```bash
 ./run_agent.sh agent-1 7167
 ```
@@ -276,12 +287,14 @@ sai3bench-ctl run --config distributed-test.yaml
 While controller runs:
 
 **View live stats:**
+
 ```bash
 # Controller output shows aggregate stats every second
 # Ctrl-B, then D to detach without stopping
 ```
 
 **Check agent logs:**
+
 ```bash
 # SSH to agent host
 tail -f /home/ubuntu/sai3-logs/agent-1.log
@@ -291,6 +304,7 @@ docker logs -f sai3-agent-agent-1
 ```
 
 **Check running status:**
+
 ```bash
 # List all running agents
 docker ps | grep sai3-agent
@@ -301,6 +315,7 @@ docker ps | grep sai3-agent
 For cross-region testing:
 
 **Agent hosts in different regions:**
+
 ```yaml
 distributed:
   agents:
@@ -324,6 +339,7 @@ workload:
 ```
 
 **Region-specific configurations:**
+
 ```bash
 # US East agent
 docker run -d --net=host \
@@ -341,11 +357,13 @@ docker run -d --net=host \
 ### Firewall/Security Group Configuration
 
 **Required ports:**
+
 - Agent: TCP 7167 (or custom port) - inbound from controller
 - Controller: No inbound required (initiates connections)
 
 **AWS Security Group example:**
-```
+
+```text
 Type: Custom TCP
 Port: 7167
 Source: <controller-security-group-id>
@@ -353,6 +371,7 @@ Description: sai3-bench agent gRPC
 ```
 
 **Verify connectivity:**
+
 ```bash
 # From controller
 telnet vm1.example.com 7167
@@ -362,6 +381,7 @@ telnet vm1.example.com 7167
 ### Cleanup
 
 **Stop all agents:**
+
 ```bash
 # Via Docker
 docker stop sai3-agent
@@ -372,6 +392,7 @@ docker rm sai3-agent
 ```
 
 **Remove logs:**
+
 ```bash
 rm -rf /home/ubuntu/sai3-logs
 ```
@@ -383,11 +404,13 @@ rm -rf /home/ubuntu/sai3-logs
 ### Agent won't start
 
 **Check logs:**
+
 ```bash
 docker logs sai3-agent
 ```
 
 **Common issues:**
+
 - Port already in use: `lsof -i :7167`
 - Missing credentials: verify env vars are set
 - Network: ensure port is accessible from controller
@@ -395,17 +418,20 @@ docker logs sai3-agent
 ### Controller can't connect to agent
 
 **Test network:**
+
 ```bash
 telnet agent-host 7167
 ```
 
 **Check agent is listening:**
+
 ```bash
 docker logs sai3-agent | grep "listening"
 # Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Verify credentials:**
+
 ```bash
 docker exec sai3-agent env | grep AWS
 ```
@@ -413,6 +439,7 @@ docker exec sai3-agent env | grep AWS
 ### SSH timeout/disconnection
 
 **Use tmux:**
+
 ```bash
 tmux new -s sai3-test
 sai3bench-ctl run --config test.yaml
@@ -420,6 +447,7 @@ sai3bench-ctl run --config test.yaml
 ```
 
 **Monitor from outside tmux:**
+
 ```bash
 tail -f sai3-*/results.tsv
 ```
@@ -427,13 +455,138 @@ tail -f sai3-*/results.tsv
 ### Results not appearing
 
 **Check controller output:**
+
 - Look for "Results saved to:" message
 - Verify directory was created
 
 **Check agent results:**
+
 ```bash
 docker exec sai3-agent ls -lh /tmp/sai3-*
 ```
+
+---
+
+## Credential Forwarding (v0.8.92+)
+
+In a distributed run every agent host must have object-storage credentials
+available before it can validate or run a workload. Starting with v0.8.92,
+`sai3bench-ctl` can **forward** credential environment variables to all agents
+automatically. The credentials travel inside the existing gRPC control channel
+and are applied to each agent's process environment before any storage
+operations begin.
+
+### Quick Start
+
+**Option A — Forward from the controller's own environment** (default)
+
+```bash
+export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# Credentials are forwarded to all agents automatically
+sai3bench-ctl run --config workload.yaml
+```
+
+**Option B — Use a dedicated credentials file**
+
+```bash
+# /etc/sai3bench/creds.env
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_DEFAULT_REGION=us-east-1
+```
+
+```bash
+sai3bench-ctl --env-file /etc/sai3bench/creds.env run --config workload.yaml
+```
+
+The file is read on the controller; its contents are **not** applied to the
+controller's own environment.
+
+**Option C — Disable forwarding (agents self-configure)**
+
+```bash
+sai3bench-ctl --no-forward-env run --config workload.yaml
+```
+
+Use this when agents already have credentials configured locally (e.g. via IAM
+instance roles or Kubernetes secrets) and you do not want the controller to
+interfere.
+
+### Security Model
+
+**Allow-list**: Only these prefixes are ever forwarded. All other variables are
+silently ignored, even when present in an `--env-file`.
+
+| Prefix / Key | Cloud / SDK |
+|---|---|
+| `AWS_*` | AWS SDK (access key, secret, session token, region, endpoint URL, …) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | GCP — service account JSON key path |
+| `AZURE_STORAGE_*` | Azure Blob Storage (account name, key, SAS token, connection string) |
+
+**Local environment wins**: If a key already exists in the agent's own
+environment (e.g. an instance IAM role sets `AWS_ROLE_ARN`), the forwarded
+value is silently skipped.
+
+**Audit trail**: The controller logs the key names (never values) it is forwarding:
+
+```text
+🔑 Forwarding 2 credential variables from controller environment to all agents: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+```
+
+**TLS warning**: Credentials are embedded in the gRPC control message. When
+the connection is plaintext (no `--tls`), the controller emits a warning.
+Enable `--tls` and provide `--agent-ca` for production deployments on shared
+networks.
+
+**Never written to disk**: The `distributed_env` field that carries credentials
+uses `skip_serializing_if = "is_empty"` — it never appears in YAML config
+files, dry-run output, or results saved to disk.
+
+### CLI Reference
+
+```text
+sai3bench-ctl [OPTIONS] run --config <FILE>
+
+  --env-file <FILE>     Path to a .env file whose credential variables are
+                        forwarded to every agent.
+  --no-forward-env      Disable all credential forwarding.
+  --tls                 Enable TLS for gRPC connections.
+  --agent-ca <FILE>     PEM file for the agent's self-signed certificate (TLS).
+```
+
+### `.env` File Format
+
+Standard `key=value` format; comments (`# ...`) and blank lines supported:
+
+```dotenv
+# AWS credentials
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_DEFAULT_REGION=us-east-1
+
+# Custom S3-compatible endpoint (e.g. MinIO)
+AWS_ENDPOINT_URL=http://10.9.0.1:9000
+
+# GCP
+# GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/sa-key.json
+
+# Azure
+# AZURE_STORAGE_ACCOUNT=mystorageaccount
+# AZURE_STORAGE_KEY=base64encodedkey==
+```
+
+Non-credential lines are silently ignored — they are parsed but not forwarded.
+
+### Credential Forwarding Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `403 Forbidden` / `AccessDenied` during pre-flight | Credentials not forwarded or wrong | Check controller log for "Forwarding N credential variables" |
+| `No credentials detected` warning | Controller env has no matching keys and no `--env-file` | Set `AWS_ACCESS_KEY_ID` on controller or pass `--env-file` |
+| Agent ignores forwarded credentials | Agent already has the same key set locally | Local env wins by design; unset the local key if you want the forwarded value |
+| `Cannot read env file: …` error | `--env-file` path is wrong or not readable | Verify path and file permissions |
 
 ---
 

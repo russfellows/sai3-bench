@@ -64,10 +64,12 @@ match op {
 ### The Routing Decision Point
 
 We need to decide **at store creation time** whether to:
+
 - Create a `MultiEndpointStore` (load balances across N endpoints)
 - Create a regular single-endpoint store (uses URI directly)
 
 **Key Insight**: The URI passed to `get_object_cached()` is already fully resolved (e.g., `file:///tmp/ep1/testdata/obj_123`). But for multi-endpoint, we need to:
+
 1. Extract the path component (`testdata/obj_123`)
 2. Combine with multi-endpoint configuration (4 endpoint roots)
 3. Create MultiEndpointStore that can access all 4 endpoints
@@ -150,15 +152,18 @@ OpSpec::Delete { use_multi_endpoint, .. } => { ... }
 **URI Path Extraction Challenge**:
 
 When `use_multi_endpoint: true`, we receive a URI like:
+
 - `file:///tmp/ep1/testdata/obj_123`
 
 We need to:
+
 1. Detect which endpoint prefix it matches (`file:///tmp/ep1/`)
 2. Extract the path component (`testdata/obj_123`)
 3. Create MultiEndpointStore configured with all endpoints
 4. Request will be routed by MultiEndpointStore's load balancing
 
 **Code Pattern**:
+
 ```rust
 if should_use_multi_ep {
     // Get multi-endpoint config
@@ -179,18 +184,21 @@ if should_use_multi_ep {
 ```
 
 **Pros**:
+
 - ✅ Clean separation: flag flows explicitly through call chain
 - ✅ Type-safe: compiler enforces parameter threading
 - ✅ Clear precedence: operation flag + config existence
 - ✅ Consistent with existing parameter patterns
 
 **Cons**:
+
 - ❌ Requires updating 5 function signatures
 - ❌ Requires updating ~20+ call sites across codebase
 - ❌ More complex for distributed mode (agent.rs call sites)
 - ❌ URI path extraction logic needed (which endpoint prefix matches?)
 
 **Risk Assessment**: **LOW**
+
 - Mechanical change (add parameter, pass through)
 - Compiler catches all missing updates
 - No silent failures
@@ -228,10 +236,12 @@ fn get_cached_store(uri: &str, ...) -> Result<...> {
 ```
 
 **Pros**:
+
 - ✅ No signature changes
 - ✅ Minimal call site changes
 
 **Cons**:
+
 - ❌ **MAJOR**: Violates URI scheme standards
 - ❌ **MAJOR**: Magic string coupling ("multi-ep:" scattered across code)
 - ❌ Debugging nightmare (URIs in logs are fake)
@@ -257,17 +267,20 @@ fn get_object_cached(
 ```
 
 **Pros**:
+
 - ✅ Extensible: easy to add more operation metadata
 - ✅ Cleaner signatures (one context parameter vs multiple)
 - ✅ Groups related configuration
 
 **Cons**:
+
 - ❌ Still requires updating 5 function signatures
 - ❌ Still requires updating ~20+ call sites
 - ❌ More boilerplate (create context object at each call site)
 - ❌ Doesn't solve the URI path extraction problem
 
 **Risk Assessment**: **MEDIUM-HIGH**
+
 - 2A is architecturally unsound (fake URIs)
 - 2B is just Option 1 with extra wrapper
 
@@ -277,7 +290,8 @@ fn get_object_cached(
 
 **Approach**: Instead of having `get_cached_store()` decide, have the cached operation functions do smart lookup.
 
-**Current**: 
+**Current**:
+
 ```
 get_object_cached() 
   → get_cached_store()  // Makes routing decision
@@ -285,6 +299,7 @@ get_object_cached()
 ```
 
 **Proposed**:
+
 ```
 get_object_cached(use_multi_endpoint: bool)
   → if use_multi_endpoint:
@@ -342,17 +357,20 @@ async fn get_object_cached(
 ```
 
 **Pros**:
+
 - ✅ Routing decision at operation level (closer to source of truth)
 - ✅ Clear separation: multi-endpoint path vs single-endpoint path
 - ✅ Easier to reason about flow
 
 **Cons**:
+
 - ❌ Duplicates logic across 5 cached functions
 - ❌ Still requires path extraction logic
 - ❌ Inconsistent with current architecture (get_cached_store does routing)
 - ❌ Harder to maintain (routing logic in multiple places)
 
 **Risk Assessment**: **MEDIUM**
+
 - Code duplication increases maintenance burden
 - Still complex due to path extraction
 
@@ -363,6 +381,7 @@ async fn get_object_cached(
 **Approach**: At workload start, preprocess operations and set global/per-agent multi-endpoint mode.
 
 **Concept**:
+
 ```rust
 // At start of run():
 let effective_multi_ep_mode = determine_multi_endpoint_mode(&config);
@@ -372,16 +391,19 @@ let effective_multi_ep_mode = determine_multi_endpoint_mode(&config);
 ```
 
 **Pros**:
+
 - ✅ No per-operation overhead
 - ✅ Simpler execution path
 
 **Cons**:
+
 - ❌ **FATAL**: Loses per-operation granularity
 - ❌ Can't mix multi-endpoint and single-endpoint operations in same workload
 - ❌ Defeats the purpose of per-operation `use_multi_endpoint` flag
 - ❌ Prepare vs workload can't have different endpoint strategies
 
 **Risk Assessment**: **UNACCEPTABLE**
+
 - Violates fundamental requirement for per-operation control
 
 ---
@@ -391,12 +413,14 @@ let effective_multi_ep_mode = determine_multi_endpoint_mode(&config);
 **All options require solving this**:
 
 Given:
+
 - URI: `file:///tmp/ep1/testdata/obj_123`
 - Multi-endpoint config: `[file:///tmp/ep1/, file:///tmp/ep2/, file:///tmp/ep3/, file:///tmp/ep4/]`
 
 Extract: `testdata/obj_123`
 
 **Challenge**: The URI could have been constructed in multiple ways:
+
 1. From pattern resolution (prepare/workload with base_uri)
 2. From directory tree selector
 3. From explicit full URIs in config
@@ -404,6 +428,7 @@ Extract: `testdata/obj_123`
 **Solution Approaches**:
 
 **A. String Prefix Matching**:
+
 ```rust
 fn extract_path_from_multi_endpoint_uri(
     uri: &str,
@@ -422,6 +447,7 @@ fn extract_path_from_multi_endpoint_uri(
 **Cons**: Fragile with trailing slashes, doesn't handle all URI schemes
 
 **B. URI Parsing**:
+
 ```rust
 fn extract_path_component(uri: &str, endpoints: &[String]) -> Result<String> {
     // Parse URI to components
@@ -452,6 +478,7 @@ fn extract_path_component(uri: &str, endpoints: &[String]) -> Result<String> {
    - Total requests = sum of endpoint requests
 
 **Test Config**:
+
 ```yaml
 multi_endpoint:
   strategy: round_robin
@@ -469,6 +496,7 @@ workload:
 ```
 
 **Expected Output**:
+
 ```
 Per-Endpoint Statistics:
   Endpoint 1: file:///tmp/ep1/
@@ -493,7 +521,7 @@ Per-Endpoint Statistics:
 
 **Questions to Answer**:
 
-1. **Architectural Purity vs Pragmatism**: 
+1. **Architectural Purity vs Pragmatism**:
    - Is Option 1's parameter threading worth the boilerplate?
    - Or is there a cleaner abstraction we're missing?
 
@@ -554,6 +582,7 @@ Per-Endpoint Statistics:
 **Branch**: `feature/multi-endpoint-support`
 
 **Uncommitted Changes**:
+
 - ✅ Statistics infrastructure (ready to commit)
 - ❌ Config field additions (ready to commit)
 - ❌ Routing logic (pending architectural decision)

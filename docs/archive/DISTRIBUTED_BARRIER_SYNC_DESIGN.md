@@ -7,6 +7,7 @@
 ## Problem Statement
 
 Currently, agents in distributed mode work semi-independently with minimal coordination:
+
 - Pre-flight validation runs sequentially on all agents (barrier exists)
 - Workload execution starts independently (no barrier - agents can be in different phases)
 - No synchronization between **prepare → execution → cleanup** phases
@@ -19,6 +20,7 @@ Currently, agents in distributed mode work semi-independently with minimal coord
 ## Current Phase Flow
 
 ### Controller Orchestration
+
 ```
 1. Connect to all agents (parallel)
    └─ FAIL if ANY agent unreachable
@@ -38,6 +40,7 @@ Currently, agents in distributed mode work semi-independently with minimal coord
 ```
 
 ### Agent State Machine
+
 ```rust
 enum WorkloadState {
     Idle,      // Ready to accept new workload
@@ -177,6 +180,7 @@ distributed:
 1. Add new states to `WorkloadState` enum
 2. Add state transition validation with detailed error messages
 3. Add phase reporting in LiveStats:
+
    ```rust
    message LiveStats {
        // ... existing fields ...
@@ -605,6 +609,7 @@ async fn run_distributed_workload(...) -> Result<()> {
 ## Error Recovery Strategies
 
 ### Scenario 1: Agent Dies During Prepare
+
 - **Detection**: 3 consecutive heartbeats missed (90s default)
 - **Action**:
   1. Controller sends `QueryAgentStatus` RPC
@@ -618,6 +623,7 @@ async fn run_distributed_workload(...) -> Result<()> {
   6. Exclude failed agent from subsequent phases
 
 ### Scenario 2: Agent Slow During Prepare (Not Dead, Just Slow)
+
 - **Detection**: Heartbeats still arriving, but progress_rate near zero
 - **Action**:
   1. Agent reports `is_stuck: false` with valid progress (e.g., "created 1M/10M objects")
@@ -630,6 +636,7 @@ async fn run_distributed_workload(...) -> Result<()> {
 **Key Insight**: Slow is OK, stuck/dead is not. Heartbeats differentiate.
 
 ### Scenario 3: Agent Reports Stuck (Deadlock/Infinite Loop)
+
 - **Detection**: Agent sends `is_stuck: true` with reason
 - **Action**:
   1. Log error: "Agent X reports stuck: {stuck_reason}"
@@ -638,6 +645,7 @@ async fn run_distributed_workload(...) -> Result<()> {
   4. Optionally: Send abort signal to stuck agent
 
 ### Scenario 4: Network Partition (Agent Unreachable But Alive)
+
 - **Detection**: Heartbeats stop, `QueryAgentStatus` timeout
 - **Action**:
   1. Retry query with exponential backoff (3 attempts over ~7s)
@@ -652,12 +660,14 @@ async fn run_distributed_workload(...) -> Result<()> {
      - If ahead (shouldn't happen) → error and abort that agent
 
 ### Scenario 5: Controller Restart (All Agents Still Running)
+
 - **Current Behavior**: Agents continue independently, no coordination
 - **With Heartbeats**: Agents detect controller disconnect
 - **Solution**:
   1. Agents continue work but buffer heartbeats in memory (last 10)
   2. Controller restart queries all agents for status
   3. Rebuild barrier state from agent responses:
+
      ```rust
      // Query all agents for current state
      for agent in agents {
@@ -666,6 +676,7 @@ async fn run_distributed_workload(...) -> Result<()> {
      }
      // Barrier manager now has current state, continue from there
      ```
+
   4. Resume coordination from current phase
 
 ---
@@ -673,6 +684,7 @@ async fn run_distributed_workload(...) -> Result<()> {
 ## Configuration Examples
 
 ### Strict Mode (Research/Benchmarking - Need Exact Coordination)
+
 ```yaml
 distributed:
   barrier_sync:
@@ -707,6 +719,7 @@ distributed:
 ```
 
 ### Relaxed Mode (Production Testing - Tolerance for Failures)
+
 ```yaml
 distributed:
   barrier_sync:
@@ -741,6 +754,7 @@ distributed:
 ```
 
 ### Long-Running Mode (Multi-Day Workloads)
+
 ```yaml
 distributed:
   barrier_sync:
@@ -777,11 +791,13 @@ distributed:
 ```
 
 ### Current Behavior (No Barriers - Legacy)
+
 ```yaml
 distributed:
   barrier_sync:
     enabled: false  # DEFAULT for backward compatibility
 ```
+
       type: all_or_nothing
       timeout: 30s
     prepare:
@@ -796,6 +812,7 @@ distributed:
       type: all_or_nothing  # Clean environment
       timeout: 300s
       retry_count: 1
+
 ```
 
 ### Relaxed Mode (Production Testing - Tolerance for Failures)
@@ -821,6 +838,7 @@ distributed:
 ```
 
 ### Current Behavior (No Barriers - Legacy)
+
 ```yaml
 distributed:
   barrier_sync:
@@ -848,6 +866,7 @@ Barrier: 1/4 ready (need 3/4 for majority) | Elapsed: 18m 42s | ETA: ~4m (based 
 ```
 
 **Legend**:
+
 - ✅ **Ready**: Agent at barrier, waiting for others
 - 🏃 **Working**: Agent actively making progress (heartbeats arriving)
 - ⚠️ **Query**: Missed heartbeats, controller querying agent
@@ -857,6 +876,7 @@ Barrier: 1/4 ready (need 3/4 for majority) | Elapsed: 18m 42s | ETA: ~4m (based 
 ### Detailed Agent Status (On Demand via Hotkey)
 
 Press `d` for detailed agent status:
+
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Agent: agent-4 (⚠️  Querying)
@@ -892,17 +912,20 @@ Agent: agent-4 (⚠️  Querying)
 ### Overhead (Heartbeat-Based Approach)
 
 **Network Traffic**:
+
 - **Per Agent**: 1 heartbeat every 30s = ~500 bytes/heartbeat
 - **4 Agents**: 4 × 500 bytes = 2 KB every 30s = ~67 bytes/sec
 - **100 Agents**: 100 × 500 bytes = 50 KB every 30s = ~1.7 KB/sec
 - **Negligible**: Even with 1000 agents, <20 KB/sec total
 
 **CPU/Memory**:
+
 - **Heartbeat Processing**: ~10μs per heartbeat (HashMap lookup + timestamp update)
 - **Liveness Check**: ~100μs per agent (iterate HashMap, check timestamps)
 - **Per-second overhead**: <1ms CPU even with 100 agents
 
 **Comparison to Fixed Timeout Approach**:
+
 - ✅ **Better**: No artificial phase timeouts (works for any duration)
 - ✅ **Better**: Faster failure detection (90s vs 5 min timeout)
 - ✅ **Better**: Real-time progress visibility (know WHY agent is slow)
@@ -910,6 +933,7 @@ Agent: agent-4 (⚠️  Querying)
 - ✅ **Same**: Barrier coordination logic (still need to check all/majority/best-effort)
 
 ### Scalability
+
 - **Small Scale (1-10 agents)**: Negligible impact (<0.1% overhead)
 - **Medium Scale (10-100 agents)**: Still negligible (<1% overhead)
 - **Large Scale (100-1000 agents)**: ~1-2% overhead from heartbeat processing
@@ -929,6 +953,7 @@ Agent: agent-4 (⚠️  Querying)
 **Rule of Thumb**: Heartbeat interval should be ~1-2% of expected phase duration, with 90s-5min liveness latency acceptable for most workloads.
 
 ---
+
 - **Medium Scale (10-100 agents)**: Linear scaling, ~10-50ms per agent
 - **Large Scale (100+ agents)**: May need hierarchical barriers (v2 feature)
 
@@ -937,17 +962,20 @@ Agent: agent-4 (⚠️  Querying)
 ## Testing Strategy
 
 ### Unit Tests
+
 1. `BarrierManager::check_barrier()` logic for all types
 2. Timeout calculation and retry logic
 3. State transition validation
 
 ### Integration Tests
+
 1. 4-agent test with all agents reaching barriers
 2. 4-agent test with 1 slow agent (timeout scenarios)
 3. 4-agent test with 1 dead agent (failure scenarios)
 4. Network partition simulation (reconnect logic)
 
 ### Manual Testing
+
 1. **4-host remote test** with barriers enabled
 2. Kill one agent during prepare → verify majority proceeds
 3. Slow network simulation (tc/netem) → verify timeouts work
@@ -958,6 +986,7 @@ Agent: agent-4 (⚠️  Querying)
 ## Rollout Plan
 
 ### v0.8.25: Foundation (1 week)
+
 - [ ] Extend agent state machine
 - [ ] Add phase reporting in LiveStats
 - [ ] Update proto definitions
@@ -965,18 +994,21 @@ Agent: agent-4 (⚠️  Querying)
 - [ ] Default: `barrier_sync.enabled: false` (backward compatible)
 
 ### v0.8.26: Controller Integration (1 week)
+
 - [ ] Integrate barriers into `run_distributed_workload()`
 - [ ] Add console display for barrier status
 - [ ] Configuration parsing and validation
 - [ ] Documentation and examples
 
 ### v0.8.27: Error Recovery (1 week)
+
 - [ ] Agent failure detection and handling
 - [ ] Network partition recovery
 - [ ] Straggler detection and warnings
 - [ ] Comprehensive testing on 4-host system
 
 ### v0.8.28: Advanced Features (optional)
+
 - [ ] Hierarchical barriers for 100+ agents
 - [ ] Dynamic barrier timeout adjustment
 - [ ] Barrier skip for specific phases
@@ -1029,6 +1061,7 @@ Agent: agent-4 (⚠️  Querying)
 ## Conclusion
 
 **Heartbeat-based barrier synchronization solves BOTH problems**:
+
 1. **Coordination**: Agents move through phases together
 2. **Flexibility**: Works for any duration (minutes to days) via heartbeats
 
@@ -1044,6 +1077,7 @@ Agent: agent-4 (⚠️  Querying)
 | Network overhead | Same | Same | 🟰 Tie |
 
 ### Benefits
+
 1. **Visibility**: Console shows real-time progress for each agent
 2. **Control**: Admin decides strictness per phase (all/majority/best-effort)
 3. **Reliability**: Handles failures gracefully without hanging forever
@@ -1052,6 +1086,7 @@ Agent: agent-4 (⚠️  Querying)
 6. **Debugging**: Know exactly why barriers are waiting (agent X at 51%, 92K ops/sec)
 
 ### Configuration Simplicity
+
 ```yaml
 # Simple: Just set heartbeat interval (not phase duration!)
 barrier_sync:
@@ -1060,6 +1095,7 @@ barrier_sync:
 ```
 
 **vs old approach**:
+
 ```yaml
 # Complex: Need to guess phase duration for EACH phase
 prepare:
@@ -1067,16 +1103,18 @@ prepare:
 execute:
   timeout: 60s    # Wrong for 24-hour run!
 ```
+
 ### Implementation is tractable
+
 - **Week 1-2**: Proto changes + agent state machine + heartbeat infrastructure
 - **Week 3**: Controller barrier manager + liveness checking
 - **Week 4**: Integration + testing on 4-host system
 
 ### Rollout Strategy
+
 1. **v0.8.25**: Core infrastructure (`enabled: false` by default)
 2. **v0.8.26**: User testing with `prepare` barrier only
 3. **v0.8.27**: Full 3-phase barriers + error recovery
 4. **v0.8.28**: Polish + hierarchical scaling
 
 **Next Steps**: Discuss priority, start with prepare-only barrier in v0.8.25?
-

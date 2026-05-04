@@ -9,12 +9,14 @@
 For very large workloads (64 million+ files/objects), sai3-bench faces significant overhead:
 
 ### 1. **Directory Tree Generation** (Computational)
+
 - `DirectoryTree::generate()` computes all paths in-memory
 - 64M files with depth=4, width=100 → millions of directories
 - Path string allocations, HashMap inserts, file range calculations
 - **Current**: Every test run regenerates the entire tree
 
 ### 2. **File Path Lookups** (O(n) iteration)
+
 ```rust
 // TreeManifest::get_file_path(global_idx) - SLOW for large n
 for (dir_path, (start, end)) in &self.file_ranges {  // ← Iterates ALL dirs
@@ -23,21 +25,25 @@ for (dir_path, (start, end)) in &self.file_ranges {  // ← Iterates ALL dirs
     }
 }
 ```
+
 - **64M files scenario**: Up to 64M linear scans for workload path resolution
 - **Multi-endpoint**: Additional endpoint calculation per file
 
 ### 3. **Object Storage LIST Operations** (I/O bound)
+
 - S3/Azure/GCS listing: ~20k objects/sec maximum throughput
 - **64M objects**: 53+ minutes for a single LIST (3200 seconds / 60)
 - Multiple agents help, but still hours of total I/O
 - **Current**: Every test run LISTs all objects from scratch
 
 ### 4. **Multi-Endpoint Distribution** (Repeated calculations)
+
 - Round-robin: `file_idx % num_endpoints` computed millions of times
 - Agent assignments: `file_idx % num_agents` for distributed mode
 - **Current**: Recomputed every operation
 
 ### 5. **Reproducibility** (State tracking)
+
 - No saved RNG seeds → cannot reproduce exact file distributions
 - Config changes invalidate previous test data
 - Lost metadata when tests abort mid-flight
@@ -45,6 +51,7 @@ for (dir_path, (start, end)) in &self.file_ranges {  // ← Iterates ALL dirs
 ## Solution: fjall-based Metadata Cache
 
 [fjall](https://docs.rs/fjall/) is an embedded LSM-tree KV store (similar to RocksDB, written in Rust):
+
 - **Embedded**: No external server, just library dependency
 - **Fast**: O(log n) lookups vs O(n) iteration
 - **Persistent**: Disk-backed, survives restarts
@@ -60,7 +67,7 @@ for (dir_path, (start, end)) in &self.file_ranges {  // ← Iterates ALL dirs
 
 ### Cache Location (Per-Endpoint)
 
-```
+```text
 Endpoint 1: file:///mnt/nvme1/testdata/
 ├── sai3-kv-cache/              ← Cache database for this endpoint only
 │   ├── file_paths/             ← Only files on nvme1
@@ -107,7 +114,8 @@ Shared Coordinator Cache: {results_dir}/.sai3-coordinator-cache/
 Stored in results directory: `.sai3-coordinator-cache/`
 
 ##### 1. `tree_manifests` Keyspace
-```
+
+```text
 Key:   "{config_hash}:manifest"
 Value: JSON-serialized TreeManifest
 ```
@@ -115,6 +123,7 @@ Value: JSON-serialized TreeManifest
 **Rationale**: Store complete tree structure once, shared across all endpoints.
 
 **Example**:
+
 ```json
 {
   "09af2e4c1b7d:manifest": {
@@ -132,12 +141,14 @@ Value: JSON-serialized TreeManifest
 **Storage**: ~50 MB for 64M files (compressed JSON)
 
 ##### 2. `endpoint_registry` Keyspace
-```
+
+```text
 Key:   "{config_hash}:endpoint:{endpoint_index}"
 Value: JSON endpoint metadata
 ```
 
 **Example**:
+
 ```json
 {
   "09af2e4c:endpoint:0": {
@@ -165,7 +176,8 @@ Value: JSON endpoint metadata
 Each endpoint has its own `sai3-kv-cache/` directory
 
 ##### 3. `file_paths` Keyspace (Per-Endpoint)
-```
+
+```text
 Key:   "{config_hash}:{file_idx:08}"
 Value: "relative/path/to/file_NNNNNNNN.dat"
 ```
@@ -173,14 +185,16 @@ Value: "relative/path/to/file_NNNNNNNN.dat"
 **CRITICAL**: Each endpoint only stores paths for files it contains (based on round-robin).
 
 **Endpoint 0 example** (files where `idx % 4 == 0`):
-```
+
+```text
 "09af2e4c:00000000" → "d1_w1.dir/d2_w1.dir/file_00000000.dat"
 "09af2e4c:00000004" → "d1_w1.dir/d2_w1.dir/file_00000004.dat"
 "09af2e4c:00000008" → "d1_w1.dir/d2_w2.dir/file_00000008.dat"
 ```
 
 **Endpoint 1 example** (files where `idx % 4 == 1`):
-```
+
+```text
 "09af2e4c:00000001" → "d1_w1.dir/d2_w1.dir/file_00000001.dat"
 "09af2e4c:00000005" → "d1_w1.dir/d2_w1.dir/file_00000005.dat"
 "09af2e4c:00000009" → "d1_w1.dir/d2_w2.dir/file_00000009.dat"
@@ -189,11 +203,13 @@ Value: "relative/path/to/file_NNNNNNNN.dat"
 **Storage per endpoint**: ~2 GB for 16M files (64M / 4 endpoints, compressed)
 
 **Cache population**:
+
 - **Lazy**: Cache paths as workload accesses them (saves I/O)
 - **Eager**: Pre-populate during prepare phase (faster subsequent lookups)
 
 ##### 4. `listing_cache` Keyspace (Per-Endpoint)
-```
+
+```text
 Key:   "{config_hash}:list_timestamp:{timestamp}"
 Value: zstd-compressed list of file paths (only this endpoint's files)
 ```
@@ -201,7 +217,8 @@ Value: zstd-compressed list of file paths (only this endpoint's files)
 **Rationale**: Cache LIST results per-endpoint. Each endpoint only caches its own files.
 
 **Endpoint 0 example** (`s3://bucket/testdata/`):
-```
+
+```text
 "09af2e4c:list_timestamp:1738886400" → 
   [compressed] "d1_w1.dir/file_00000000.dat\nd1_w1.dir/file_00000004.dat\n..."
 ```
@@ -211,12 +228,14 @@ Value: zstd-compressed list of file paths (only this endpoint's files)
 **Storage per endpoint**: ~1 GB for 16M files (zstd compressed paths)
 
 **TTL Strategy**:
+
 - Object storage (s3://, az://, gs://): 24 hours default
 - Local file:// : No caching (direct filesystem access is fast)
 - Force refresh: `--refresh-cache` flag
 
 ##### 5. `endpoint_metadata` Keyspace (Per-Endpoint)
-```
+
+```text
 Key:   "{config_hash}:{me_strategy}:{file_idx:08}"
 Value: endpoint_index (u16 or u32)
 ```
@@ -224,7 +243,8 @@ Value: endpoint_index (u16 or u32)
 **Rationale**: Pre-compute multi-endpoint round-robin distribution once.
 
 **Example** (4 endpoints, round-robin):
-```
+
+```text
 "09af2e4c:round_robin:00000000" → 0
 "09af2e4c:round_robin:00000001" → 1
 "09af2e4c:round_robin:00000002" → 2
@@ -233,7 +253,8 @@ Value: endpoint_index (u16 or u32)
 ```
 
 #### 5. `agent_map` Keyspace
-```
+
+```text
 Key:   "{config_hash}:{num_agents}:{file_idx:08}"
 Value: agent_id (u16)
 ```
@@ -241,7 +262,8 @@ Value: agent_id (u16)
 **Rationale**: Pre-compute agent assignments for distributed cleanup/verification.
 
 **Example** (8 agents):
-```
+
+```text
 "09af2e4c:8:00000000" → 0
 "09af2e4c:8:00000001" → 1
 "09af2e4c:8:00000007" → 7
@@ -249,12 +271,14 @@ Value: agent_id (u16)
 ```
 
 ##### 7. `config_metadata` Keyspace
-```
+
+```text
 Key:   "{config_hash}"
 Value: JSON metadata about test configuration and endpoints
 ```
 
 **Example**:
+
 ```json
 {
   "config_hash": "09af2e4c1b7d",
@@ -814,6 +838,7 @@ sai3bench-ctl run --config huge_test.yaml --cache-ttl 3600
 #### File Path Lookup Optimization
 
 **Before** (O(n) iteration):
+
 ```rust
 // TreeManifest::get_file_path() - slow
 for (dir_path, (start, end)) in &self.file_ranges {  // 64M iterations worst case
@@ -824,6 +849,7 @@ for (dir_path, (start, end)) in &self.file_ranges {  // 64M iterations worst cas
 ```
 
 **After** (O(1) cache lookup):
+
 ```rust
 // Fast path: Check cache first
 if let Some(cache) = self.metadata_cache {
@@ -841,6 +867,7 @@ Ok(path)
 ```
 
 **Performance impact**:
+
 - 64M file workload with 1M GET operations
 - **Before**: 64M × 1M = 64 trillion comparisons (hours of CPU time)
 - **After**: 1M cache lookups (milliseconds)
@@ -879,6 +906,7 @@ let endpoint_idx = metadata_cache
 ### Distributed Cache Benefits
 
 **Parallel Operations** (4 endpoints):
+
 - **LIST caching**: 4 × 16M files in parallel instead of 1 × 64M serial
   - Each endpoint LISTs and caches its 16M files independently
   - Total time: max(LIST_endpoint) instead of sum(LIST_all)
@@ -889,6 +917,7 @@ let endpoint_idx = metadata_cache
   - Scales linearly with endpoint count
 
 **Subsequent Test Runs (Same Config)**:
+
 1. **Tree manifest**: Load from coordinator cache **(0.5s)**
 2. **Listing**: Load 4 × 16M paths in parallel **(~8 seconds total)**
    - Endpoint 0: 16M paths from nvme1 cache (2s)
@@ -904,11 +933,13 @@ let endpoint_idx = metadata_cache
 Scenario: Test run from 6 months ago, want to re-run workload
 
 **Without cache**:
+
 - LIST 64M objects from S3 (53 minutes)
 - Compute tree structure (45 seconds)
 - Total: ~55 minutes before workload starts
 
 **With distributed cache**:
+
 1. Check each endpoint for `sai3-kv-cache/` directory **(instant)**
 2. Load coordinator cache from results dir **(0.5s)**
 3. Open all endpoint caches in parallel **(2s)**
@@ -949,7 +980,8 @@ sai3-bench util cache-import --input cache_backup.tar.zst
 ### Distributed Storage (64M files, 4 endpoints example)
 
 #### Coordinator Cache (Shared, in results directory)
-```
+
+```text
 .sai3-coordinator-cache/
 ├── tree_manifests:      ~50 MB   (global tree structure)
 ├── endpoint_registry:   ~1 KB    (endpoint metadata)
@@ -962,7 +994,7 @@ Coordinator Total:       ~51 MB   (shared across all endpoints)
 
 Each endpoint stores ONLY its assigned files (16M / 64M total):
 
-```
+```text
 Endpoint 0: file:///mnt/nvme1/testdata/sai3-kv-cache/
 ├── file_paths:          ~2 GB    (16M × 128 bytes, compressed)
 ├── listing_cache:       ~1 GB    (16M paths, zstd compressed)
@@ -981,10 +1013,12 @@ rand = { version = "0.8", features = ["std_rng"] }  # Seeded RNG
 **No external services required** - fjall is fully embedded.
 
 **Object storage sync**: For s3://, az://, gs:// endpoints, cache objects are synced bidirectionally:
+
 - **First run**: Local fjall cache → Upload as objects to endpoint
 - **Subsequent runs**: Download cache objects → Local fjall database
 - Uses s3dlio `ObjectStore` trait for unified access across all backends
-```
+
+```text
 Coordinator cache:       ~51 MB    (results directory)
 Endpoint 0 cache:        ~3 GB     (nvme1)
 Endpoint 1 cache:        ~3 GB     (nvme2)
@@ -995,6 +1029,7 @@ Total (distributed):     ~12 GB    (automatically distributed)
 ```
 
 **Key Benefits**:
+
 - ✅ **Distributed I/O**: Cache reads/writes happen in parallel across endpoints
 - ✅ **Proportional scaling**: More endpoints = more distributed cache storage
 - ✅ **Locality**: Metadata stored with data it describes
@@ -1032,10 +1067,12 @@ tokio::spawn(async move {
 ```
 
 **Checkpoint process**:
+
 1. **Force flush** with `SyncAll` to guarantee database consistency
 2. **Verify database files** (manifest + partitions/) exist before archiving
 3. **Create tar.zst archive** with proper directory structure:
-   ```
+
+   ```text
    archive.tar.zst
    ├── {cache-dir-name}/manifest
    └── {cache-dir-name}/partitions/
@@ -1043,10 +1080,12 @@ tokio::spawn(async move {
        ├── partition-0001.sst
        └── ...
    ```
+
 4. **Upload to storage** at `checkpoint-{timestamp}.tar.zst`
 5. **Keep only latest** (automatic cleanup of old checkpoints)
 
 **Storage location**: Same URI as cache base location
+
 - `file:///tmp/my-cache/` → `file:///tmp/my-cache/checkpoint-1738886400.tar.zst`
 - `s3://bucket/cache/` → `s3://bucket/cache/checkpoint-1738886400.tar.zst`
 
@@ -1064,6 +1103,7 @@ cache.open_database()?;
 ```
 
 **Restoration process**:
+
 1. **Find latest checkpoint** by listing `checkpoint-*.tar.zst` files
 2. **Download checkpoint** from object storage to temp location
 3. **Extract archive** to cache directory
@@ -1071,6 +1111,7 @@ cache.open_database()?;
 5. **Log restoration details** (file count, timestamp, source)
 
 **Resume Capability**:
+
 - **Interrupted run**: If prepare is killed at 80% (e.g., 51.2M of 64M files), restart resumes from last checkpoint (~45M files), avoiding re-listing/re-stating already-prepared objects
 - **Long-running workloads**: Minimize startup cost by restoring known-good cache state
 - **Distributed agents**: Each agent can resume independently from its own checkpoint
@@ -1078,18 +1119,21 @@ cache.open_database()?;
 ### Configuration
 
 **Enable checkpoints** (automatic if `results_dir` provided):
+
 ```yaml
 # Checkpoints enabled automatically when using --results-dir
 # (standalone CLI and distributed agents)
 ```
 
 **Logging checkpoints** (use `-vv` for verbose checkpoint messages):
+
 ```bash
 sai3-bench -vv run --config test.yaml --results-dir ./results/
 ```
 
 Example checkpoint logs:
-```
+
+```text
 [DEBUG] Attempting to restore cache checkpoint from file:///tmp/test-cache/
 [INFO] Found checkpoint: checkpoint-1738886400.tar.zst (51.2M files)
 [INFO] Downloading checkpoint from object storage...
@@ -1103,6 +1147,7 @@ Example checkpoint logs:
 **Problem**: Original implementation used `maybe_flush()` which could fail silently, creating empty checkpoints that appeared to restore successfully but contained no data.
 
 **Solution**:
+
 1. **Force flush** with retries and `SyncAll` durability guarantee
 2. **Verify database files** exist before archiving (manifest + partitions/)
 3. **Fail-fast** if flush or verification fails (don't create corrupt checkpoint)
@@ -1132,16 +1177,19 @@ if !partitions_dir.exists() || partitions_dir.read_dir()?.count() == 0 {
 ### Storage Overhead
 
 **Checkpoint size** (compressed with tar.zst):
+
 - **64M files**: ~3 GB checkpoint (same as runtime cache size)
 - **1M files**: ~50 MB checkpoint
 - **Compression**: ~4-5x ratio (tar.zst on top of fjall's LZ4)
 
 **Storage cost**:
+
 - **One checkpoint per endpoint**: Latest checkpoint only (old ones auto-deleted)
 - **Distributed**: 4 endpoints × 3 GB = 12 GB total checkpoint storage
 - **Local**: Single endpoint = 3 GB checkpoint
 
 **Network cost** (cloud storage):
+
 - **Upload**: Once per 5 minutes during prepare (only if changed)
 - **Download**: Once on startup (only if checkpoint exists)
 - **Bandwidth**: ~3 GB download for 64M files (one-time cost)
@@ -1178,6 +1226,7 @@ sai3-bench -vv run --config 64m_files.yaml --results-dir ./results/
 ```
 
 **Time savings**:
+
 - **Without checkpoints**: Restart = 0% → 100% (full re-prepare)
 - **With checkpoints**: Restart = 70% → 100% (resume from last checkpoint)
 - **64M files**: Save ~2 hours of re-listing and re-stating on resume
@@ -1198,15 +1247,18 @@ rand = { version = "0.8", features = ["std_rng"] }  # Seeded RNG
 ## Migration Path
 
 ### v0.8.54: Opt-in Cache
+
 - Feature flag: `--enable-cache` (default: off)
 - Warning if workload >1M files without cache
 - Comprehensive logging of cache hits/misses
 
 ### v0.8.55: Auto-enable for Large Workloads
+
 - Auto-enable if `total_files > 100_000`
 - User can still override with `--no-cache`
 
 ### v0.8.56: Default Enabled
+
 - Cache enabled by default
 - Minimal performance impact for small workloads (<10k files)
 - Users can disable with `--no-cache`
@@ -1231,12 +1283,14 @@ rand = { version = "0.8", features = ["std_rng"] }  # Seeded RNG
 4. **Distributed tests**: Multi-agent with shared cache directory
 
 ## Security Considerations
+
 Cache Synchronization for Object Storage
 
 For object storage endpoints (s3://, az://, gs://), cache is stored AS objects:
 
 ### Upload Strategy (After Prepare)
-```
+
+```text
 Local fjall database → Serialize keyspaces → Upload as objects
 
 Example S3 structure:
@@ -1262,27 +1316,31 @@ Distributed fjall-based metadata caching solves the fundamental scalability bott
 ✅ **Auto-discovery** (reattach to existing test data instantly)  
 
 **Key Advantage Over Centralized**:
+
 - **Parallel I/O**: 4 endpoints = 4 parallel cache operations
 - **Proportional scaling**: 100 endpoints = 100-way parallelism
 - **No single point of failure**: Each endpoint cache is independent
 - **Storage distribution**: 64M files → 16M per endpoint (4 endpoints)
 
 **Example Performance** (64M files, 4 endpoints):
+
 - **First run**: 55 minutes (LIST + cache creation)
 - **Second run**: 10 seconds (parallel cache loads)
 - **Reattach after 6 months**: 3 seconds (auto-discovery)
 
-**Next steps**: 
+**Next steps**:
+
 1. ✅ Review and approve distributed design
 2. Implement Phase 1 (EndpointCache + CoordinatorCache)
 3. Implement object storage sync (upload/download cache)
 4. Benchmark with 1M file test (4 endpoints)
 5. Scale test with 10M files (validate performance)
 6. Production deployment with 64M+ filesheck for cache)
-2. Download to /tmp/sai3-cache/endpoint-{hash}/
-3. Open fjall database from local directory
-4. Use for O(1) lookups during workload
-```
+7. Download to /tmp/sai3-cache/endpoint-{hash}/
+8. Open fjall database from local directory
+9. Use for O(1) lookups during workload
+
+```text
 
 **Auto-detection**:
 ```rust
@@ -1296,6 +1354,7 @@ if endpoint_has_cache(&endpoint_uri).await? {
 ```
 
 ### Benefits
+
 - ✅ **Persistent**: Cache survives between test runs
 - ✅ **Shareable**: Multiple agents download same cache
 - ✅ **Versioned**: Config hash in object keys prevents conflicts
@@ -1310,11 +1369,11 @@ if endpoint_has_cache(&endpoint_uri).await? {
 5. **Cross-region cache replication**: Share cache across distributed regions
 6. **Cache compression tuning**: Adaptive compression based on storage type
 
-1. **Remote cache sharing**: Multiple agents share cache via NFS/S3
-2. **Incremental updates**: Delta caching for partial LIST results
-3. **Predictive pre-population**: Cache likely queries before workload starts
-4. **Query statistics**: Track cache hit rates, optimize keyspace sizes
-5. **Snapshot versioning**: Tag caches by test iteration
+7. **Remote cache sharing**: Multiple agents share cache via NFS/S3
+8. **Incremental updates**: Delta caching for partial LIST results
+9. **Predictive pre-population**: Cache likely queries before workload starts
+10. **Query statistics**: Track cache hit rates, optimize keyspace sizes
+11. **Snapshot versioning**: Tag caches by test iteration
 
 ---
 
@@ -1329,8 +1388,65 @@ fjall-based metadata caching solves the fundamental scalability bottleneck for 6
 ✅ **Compression-native** (13 GB for 64M files)  
 ✅ **Production-ready** (LSM-tree battle-tested design)  
 
-**Next steps**: 
+**Next steps**:
+
 1. Review and approve design
 2. Implement Phase 1 (core infrastructure)
 3. Benchmark with 1M file test case
 4. Iterate based on real-world performance data
+
+---
+
+## Flush Policy (v0.8.60)
+
+The metadata cache uses fjall v3 LSM-tree KV store to track object states during preparation. To prevent blocking I/O operations, writes use configurable flush policies.
+
+**Default**: `AsyncInterval(30)` — periodic background flush every 30 seconds.
+
+### Three Modes
+
+1. **Immediate** — Synchronous flush after every write (safe but slow)
+
+   ```rust
+   cache.set_flush_policy(FlushPolicy::Immediate);
+   ```
+
+2. **BatchSize(N)** — Flush when N pending writes accumulate
+
+   ```rust
+   cache.set_batch_flush(100);  // Flush every 100 writes
+   ```
+
+3. **AsyncInterval(secs)** — Periodic background flush (zero blocking)
+
+   ```rust
+   cache.enable_async_flush(30);  // Flush every 30 seconds
+   ```
+
+### Agent-Specific Cache Paths (Distributed Mode)
+
+When `num_agents > 1`, each agent gets its own endpoint cache to prevent lock contention:
+
+```text
+/mnt/test/target/
+├── .sai3-cache-agent-0/    # Agent 0's cache (fjall database)
+├── .sai3-cache-agent-1/    # Agent 1's cache (fjall database)
+└── prepared-000000.dat     # Actual prepared objects (shared)
+```
+
+Single-agent mode uses `sai3-kv-cache/` (backward compatible).
+
+### Performance Characteristics
+
+- **AsyncInterval mode**: 10K writes in <500ms (zero blocking)
+- **Immediate mode**: ~50ms per write (synchronous flush)
+- **Batch mode**: Flushes only when threshold reached
+- **Atomic counters**: `pending_write_count()` tracks unflushed operations
+
+### Critical Methods
+
+- `maybe_flush()` — Conditional flush based on policy (hot path)
+- `force_flush()` — Blocking flush for critical checkpoints (barriers, cleanup)
+- `pending_write_count()` — Returns number of unflushed writes
+
+All `persist()` calls replaced with `maybe_flush()` in these methods: `plan_object()`, `mark_creating()`, `mark_created()`, `mark_failed()`, `mark_deleted()`. Use `force_flush()` only at critical sync points (stage barriers, final cleanup).

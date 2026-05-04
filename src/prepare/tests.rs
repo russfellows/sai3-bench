@@ -32,6 +32,7 @@ mod tests {
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
             skip_verification: false,
             force_overwrite: false,
+            key_prefix_shards: 0,
         };
 
         // This test verifies the function compiles with the concurrency parameter
@@ -85,6 +86,7 @@ mod tests {
             prepare_strategy: crate::config::PrepareStrategy::Sequential,
             skip_verification: false,
             force_overwrite: false,
+            key_prefix_shards: 0,
         };
 
         // Test with various concurrency values

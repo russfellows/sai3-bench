@@ -57,6 +57,7 @@ async fn test_sequential_strategy_ordering() -> Result<()> {
         prepare_strategy: PrepareStrategy::Sequential,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -145,6 +146,7 @@ async fn test_parallel_strategy_mixing() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -252,6 +254,7 @@ async fn test_parallel_strategy_exact_counts() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -430,6 +433,7 @@ async fn test_parallel_with_single_size() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -497,6 +501,7 @@ async fn test_files_created_correctly() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -581,6 +586,7 @@ async fn test_parallel_directory_distribution() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -701,6 +707,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
         prepare_strategy: PrepareStrategy::Sequential,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     // Test with different concurrency values to verify parameter is accepted
@@ -759,6 +766,7 @@ async fn test_concurrency_parameter_passing() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     // Clean up previous files

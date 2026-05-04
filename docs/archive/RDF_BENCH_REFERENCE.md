@@ -38,6 +38,7 @@ This document combines feature comparison, command mapping, and implementation s
 ### Example Conversion
 
 **rdf-bench config**:
+
 ```
 sd=sd1,lun=/dev/sdb,size=100g
 wd=wd1,sd=sd1,xfersize=4k,rdpct=70,seekpct=random
@@ -45,11 +46,13 @@ rd=run1,wd=wd1,iorate=1000,elapsed=60,interval=5
 ```
 
 **rdf-bench command**:
+
 ```bash
 ./vdbench -f test.parm
 ```
 
 **sai3-bench config** (`test.yaml`):
+
 ```yaml
 target: "file:///testdata/"  # Or "direct://", "s3://", "az://", "gs://"
 duration: 60s
@@ -72,6 +75,7 @@ workload:
 ```
 
 **sai3-bench command**:
+
 ```bash
 ./sai3-bench run --config test.yaml
 ```
@@ -167,6 +171,7 @@ workload:
 | macOS | ✅ Full | ✅ Basic | Basic support |
 
 **Legend**:
+
 - ✅ Full support / Implemented
 - ⚠️  Partial/limited support
 - ❌ Not supported / Not planned
@@ -178,23 +183,27 @@ workload:
 ### ✅ Fully Implemented (v0.7.1)
 
 **Core Operations** (v0.1.0+):
+
 - GET, PUT, LIST, DELETE, STAT operations
 - file://, direct://, s3://, az://, gs:// backends
 - Async I/O with tokio runtime
 - Concurrent workers with semaphore control
 
 **Size Distributions** (v0.5.3+):
+
 - Fixed, Uniform, Lognormal distributions
 - More sophisticated than rdf-bench
 - Per-operation size specifications
 
 **Distributed Testing** (v0.6.0+):
+
 - gRPC-based multi-agent architecture
 - Controller/agent model
 - SSH automation for deployment
 - Per-agent configuration
 
 **Directory Trees** (v0.7.0+):
+
 - Width/depth hierarchical structures
 - Files per directory control
 - Tree creation in prepare phase
@@ -202,11 +211,13 @@ workload:
 - MKDIR, RMDIR, metadata operations
 
 **Metadata Operations** (v0.7.0+):
+
 - GETATTR, SETATTR, ACCESS operations
 - Cloud storage metadata support
 - Filesystem attribute management
 
 **I/O Rate Control** (v0.7.1+):
+
 - IOPS target configuration (max or fixed)
 - Three distribution types: Exponential (Poisson), Uniform (fixed intervals), Deterministic (precise)
 - Per-worker rate throttling
@@ -214,6 +225,7 @@ workload:
 - See IO_RATE_CONTROL_GUIDE.md for details
 
 **Performance** (v0.6.10+):
+
 - HDR histogram latency tracking
 - 9 response time buckets
 - p50/p95/p99/p99.9 percentiles
@@ -223,6 +235,7 @@ workload:
 ### 🚧 Planned Features
 
 **v0.8.0 Roadmap** - Sequential Access (Q1 2026):
+
 - Sequential read/write patterns
 - Skip-sequential (stride patterns)
 - Hot-banding (concentrated access)
@@ -231,6 +244,7 @@ workload:
 - See V0.8.0_IMPLEMENTATION_PLAN.md
 
 **Future Versions** (v0.9.0+):
+
 - Block device support (block:// backend) - see BLOCK_IO_IMPLEMENTATION_PLAN.md
 - File copy/move operations
 - Enhanced compression/dedup simulation
@@ -240,12 +254,14 @@ workload:
 ### ❌ Not Planned
 
 **Data Validation** (User Decision):
+
 - LBA stamping, checksums, pattern verification
 - Journaling and crash consistency testing
 - Corruption detection
 - **Reason**: Complex feature, limited immediate need, users requiring this can use rdf-bench
 
 **Platform-Specific Features**:
+
 - Solaris support
 - kstat integration (Solaris)
 - Windows PDH integration
@@ -279,6 +295,7 @@ workload:
 #### Scenario 1: Simple Random I/O
 
 **rdf-bench**:
+
 ```
 sd=sd1,lun=/testdata,openflags=o_direct
 wd=wd1,sd=sd1,xfersize=4k,rdpct=70,seekpct=random
@@ -286,6 +303,7 @@ rd=run1,wd=wd1,iorate=max,elapsed=60,threads=8
 ```
 
 **sai3-bench**:
+
 ```yaml
 target: "direct:///testdata/"
 duration: 60s
@@ -304,6 +322,7 @@ workload:
 #### Scenario 2: Rate-Limited I/O (NEW in v0.7.1)
 
 **rdf-bench**:
+
 ```
 sd=sd1,lun=/testdata
 wd=wd1,sd=sd1,xfersize=4k,rdpct=100
@@ -311,6 +330,7 @@ rd=run1,wd=wd1,iorate=1000,elapsed=60,threads=10
 ```
 
 **sai3-bench**:
+
 ```yaml
 target: "file:///testdata/"
 duration: 60s
@@ -330,6 +350,7 @@ workload:
 #### Scenario 3: Directory Tree Testing
 
 **rdf-bench**:
+
 ```
 sd=sd1,lun=/shared
 wd=wd1,sd=sd1,width=10,depth=3,files=100,operations=(create,mkdir)
@@ -337,6 +358,7 @@ rd=run1,wd=wd1,elapsed=30
 ```
 
 **sai3-bench**:
+
 ```yaml
 target: "file:///shared/"
 duration: 30s
@@ -364,6 +386,7 @@ workload:
 #### Scenario 4: Multi-Host Distributed
 
 **rdf-bench**:
+
 ```
 hd=default,system=host1,jvms=1
 hd=host2,system=host2,jvms=1
@@ -373,6 +396,7 @@ rd=run1,wd=wd1,elapsed=60
 ```
 
 **sai3-bench**:
+
 ```yaml
 target: "file:///shared/data/"
 duration: 60s
@@ -399,6 +423,7 @@ workload:
 **No rdf-bench equivalent** - rdf-bench doesn't support cloud storage
 
 **sai3-bench**:
+
 ```yaml
 target: "s3://my-bucket/test-data/"
 duration: 60s
@@ -420,12 +445,14 @@ workload:
 ### Key Advantages by Tool
 
 **rdf-bench advantages**:
+
 - Data validation (LBA stamping, checksums)
 - Raw block device testing
 - Advanced workload patterns (hot-banding, cache simulation)
 - Mature feature set (20+ years development)
 
 **sai3-bench advantages**:
+
 - Modern cloud storage support (S3, Azure, GCS)
 - Rust safety and performance
 - gRPC distributed testing (vs legacy protocols)
@@ -439,11 +466,13 @@ workload:
 ## Performance Comparison
 
 ### rdf-bench Reported Performance
+
 - **Block I/O**: 500K+ IOPS on NVMe
 - **File I/O**: Limited by filesystem overhead
 - **Cloud**: Not supported
 
 ### sai3-bench Measured Performance
+
 - **File I/O**: 100K+ IOPS on local SSD
 - **Direct I/O**: 200K+ IOPS with O_DIRECT
 - **Cloud Storage** (GCS same-region): 2.6 GB/s throughput
@@ -455,11 +484,13 @@ workload:
 ## Questions & Support
 
 For questions about:
+
 - **rdf-bench migration**: Check examples in `tests/configs/` directory
 - **Feature requests**: Open GitHub issue with rdf-bench feature comparison
 - **Bug reports**: GitHub issues with reproduction config
 
 **Documentation**:
+
 - User Guide: USAGE.md
 - Configuration Syntax: CONFIG_SYNTAX.md
 - Distributed Testing: DISTRIBUTED_TESTING_GUIDE.md

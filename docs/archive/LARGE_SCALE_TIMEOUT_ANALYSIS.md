@@ -44,18 +44,21 @@ let max_barrier_retries = 5;
 ```
 
 **Problem**:   - Each barrier wait has 30s timeout
+
 - With 5 retries: 30s × 5 = 150s max total
 - Tree generation for 331k dirs can take 90s
 - **If tree generation takes > 30s, first timeout triggers retry**
 - **If tree generation takes > 150s, all retries exhausted → FAILURE**
 
 **Impact at Scale**:
+
 - ✅ Simple (1s tree gen): No problem
 - ✅ Medium (5s tree gen): No problem  
 - ⚠️ Large (90s tree gen): **Works but triggers 3 retries**, wastes time
 - ❌ Large + slow hardware (120s tree gen): **FAILS after 5 retries**
 
 **Solution**:
+
 ```yaml
 distributed:
   barrier_sync:
@@ -66,6 +69,7 @@ distributed:
 ```
 
 **Code Change Needed**:
+
 ```rust
 // Make barrier_timeout configurable via StageConfig or BarrierSyncConfig
 let barrier_timeout = stage.get_timeout()
@@ -86,17 +90,20 @@ let barrier_timeout = stage.get_timeout()
 **Total Timeout**: 30s (no PING) + 10s (PONG timeout) = **40 seconds**
 
 **Problem**:
+
 - If agent is busy for >40s without sending stats **→ gRPC connection drops**
 - Tree generation (90s) sends progress updates every 5000 dirs (~1-2s intervals) → **OK**
 - LIST operations send progress every 1000 files → **Depends on listing speed!**
 
 **Listing Speed Analysis**:
+
 - At 10k files/sec: 1000 files = 0.1s between updates → **OK**
 - At 1k files/sec: 1000 files = 1s between updates → **OK**
 - At 100 files/sec: 1000 files = 10s between updates → **OK**
 - At 10 files/sec: 1000 files = 100s between updates → **FAILS (> 40s)**
 
 **Recommendation**: LIST operations must maintain > 25 files/sec to avoid gRPC timeout. If listing is slower:
+
 - Reduce `LISTING_PROGRESS_INTERVAL` (currently 1000) to 500 or 250
 - Or increase gRPC keep-alive interval to 120s
 
@@ -114,6 +121,7 @@ fn default_query_retries() -> u32 { 2 }
 ```
 
 **Total Timeout Calculation**:
+
 ```
 Heartbeat timeout = interval × threshold = 30s × 3 = 90s
 Query timeout = timeout × retries = 10s × 2 = 20s
@@ -121,11 +129,13 @@ Total = 90s + 20s = 110 seconds
 ```
 
 **Problem**:
+
 - 331k tree generation takes ~90s
 - Default 110s timeout gives only **20s margin** → **Too tight!**
 - Any slowness (slow disk, CPU contention) → TIMEOUT
 
 **Recommended Config for Large Scale**:
+
 ```yaml
 distributed:
   barrier_sync:
@@ -153,6 +163,7 @@ distributed:
 ```
 
 **Total Timeout with Recommended Config**:
+
 - Prepare: 120s × 10 + 60s × 5 = **1,200s heartbeat + 300s query = 1,500s (25 min)**
 - Cleanup: 300s × 12 + 60s × 5 = **3,600s heartbeat + 300s query = 3,900s (65 min)**
 
@@ -182,11 +193,13 @@ T+97s:    Agents receive RELEASE_BARRIER, proceed to next stage
 ```
 
 **With Default Config** (30s timeout, 5 retries):
+
 - Timeouts at: T+30s, T+60s, T+90s (3 retries consumed)
 - Succeeds at: T+92s (still has 2 retries left)
 - **Result**: WORKS but inefficient (unnecessary retries)
 
 **With Recommended Config** (120s timeout):
+
 - No timeouts triggered
 - Completes at: T+92s
 - **Result**: EFFICIENT, no wasted retries
@@ -205,16 +218,19 @@ All long-running operations send progress updates to avoid timeout:
 | **Agent Heartbeat** | Every 1 second | `DEFAULT_AGENT_HEARTBEAT_SECS` | `src/constants.rs:236` |
 
 **Tree Generation Progress** (331k dirs):
+
 - Updates: 331,776 / 5,000 = 66 progress reports
 - Frequency: 90s / 66 = 1.36s per update
 - **Result**: Frequent enough to keep gRPC alive (< 30s)
 
 **LIST Operations Progress** (64M files at 10k/sec):
+
 - Updates: 64,032,768 / 1,000 = 64,032 progress reports  
 - Frequency: 6,403s / 64,032 = 0.1s per update
 - **Result**: Very frequent, no risk of timeout
 
 **LIST Operations at Slow Speed** (64M files at 10/sec):
+
 - Frequency: 1,000 files / 10 files/sec = 100s per update
 - **Result**: **EXCEEDS 40s gRPC keep-alive → CONNECTION DROP** ❌
 
@@ -225,6 +241,7 @@ All long-running operations send progress updates to avoid timeout:
 From `cargo test --test test_large_scale_timeouts`:
 
 ### Tree Size Calculations ✅
+
 ```
 ✓ Tree 24^2 = 576 dirs × 193 files/dir = 111,168 total files
 ✓ Tree 24^3 = 13,824 dirs × 193 files/dir = 2,668,032 total files  
@@ -232,6 +249,7 @@ From `cargo test --test test_large_scale_timeouts`:
 ```
 
 ### Default Timeout Analysis ⚠️
+
 ```
 ⚠ DEFAULT prepare timeout: 90s heartbeat + 20s query = 110s total
 ⚠ WARNING: Default 110s timeout may be insufficient for 331k tree (can take 90s+)
@@ -239,11 +257,13 @@ From `cargo test --test test_large_scale_timeouts`:
 ```
 
 ### Recommended Timeout Config ✅
+
 ```
 ✓ Prepare phase timeout: 1200s heartbeat + 300s query = 1500s total (25.0 min)
 ```
 
 ### Progress Reporting ✅
+
 ```
 ✓ Listing progress for 64M files:
   64,032 updates (every 1000 files)
@@ -252,6 +272,7 @@ From `cargo test --test test_large_scale_timeouts`:
 ```
 
 ### Multi-Agent Configuration ✅
+
 ```
 ✓ 4-agent distributed config validated:
   4 agents × 4 endpoints = 16 total mount points
@@ -329,11 +350,13 @@ prepare:
 **Location**: `src/bin/agent.rs:3300`
 
 **Current**:
+
 ```rust
 let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configurable
 ```
 
 **Change To**:
+
 ```rust
 // Read from stage config, defaulting to barrier_sync config, then 30s
 let barrier_timeout = stage.timeout_secs
@@ -351,6 +374,7 @@ let barrier_timeout = stage.timeout_secs
 **Location**: `src/prepare.rs:428`
 
 **Add After Progress Update**:
+
 ```rust
 // Warn if listing speed is too slow (< 25 files/sec = risk of gRPC timeout)
 let listing_speed = rate; // files/sec
@@ -368,12 +392,14 @@ if listing_speed < 25.0 {
 **Location**: `src/bin/controller.rs:815`
 
 **Current**:
+
 ```rust
 .http2_keep_alive_interval(Duration::from_secs(30))
 .keep_alive_timeout(Duration::from_secs(10))
 ```
 
 **Add Configuration**:
+
 ```rust
 // Make configurable via DistributedConfig
 let keep_alive_interval = config.grpc_keep_alive_interval_secs
@@ -401,6 +427,7 @@ let keep_alive_timeout = config.grpc_keep_alive_timeout_secs
 **Setup**: 4 agents, 331k dirs, default barrier config (110s total)
 
 **Timeline**:
+
 ```
 T+0:   Agents start tree generation
 T+90s: Tree generation completes
@@ -417,6 +444,7 @@ T+110s: ⚠️ BARRIER TIMEOUT (only 20s margin)
 **Setup**: 64M files, listing at 10 files/sec (very slow)
 
 **Timeline**:
+
 ```
 T+0:   Agent starts LIST operation
 T+100s: Progress update (1000 files @ 10/sec)
@@ -434,6 +462,7 @@ T+40s: ❌ Controller drops connection
 **Setup**: 64M files, delete at 1k/sec
 
 **Timeline**:
+
 ```
 T+0:      Start cleanup
 T+3600s:  Deleted 3.6M files (5.6% complete)
@@ -457,7 +486,7 @@ distributed:
     # Can use defaults - 110s is plenty
 ```
 
-### Medium Scale (13k dirs, 2.7M files) 
+### Medium Scale (13k dirs, 2.7M files)
 
 ```yaml
 distributed:
@@ -490,24 +519,28 @@ distributed:
 ### Log Messages to Watch For
 
 **Tree Generation Progress** (every 5000 dirs):
+
 ```
 INFO Tree generation progress: 50000/331776 (15.1%)
 INFO Tree generation progress: 100000/331776 (30.1%)
 ```
 
 **Barrier Timeout Warnings** (agent retrying):
+
 ```
 WARN Barrier retry 1/5 for 'stage_prepare' (sequence 0)
 WARN Barrier 'stage_prepare' timeout (30s), incrementing to sequence 1
 ```
 
 **Listing Speed Warnings**:
+
 ```
 WARN  ⚠️ Listing speed 8.5 files/sec is dangerously slow (< 25/sec)
 WARN  Risk of gRPC timeout after 40s
 ```
 
 **gRPC Connection Drops**:
+
 ```
 ERROR Agent agent-1 disconnected during prepare phase
 ERROR h2 protocol error: connection closed
@@ -538,4 +571,3 @@ tail -f /var/log/sai3bench-ctl.log | grep -E "PING|PONG|keep-alive"
 | **Listing progress** | Every 1000 files | Every 250 files | Ensure frequent updates |
 
 **Key Takeaway**: Default timeouts work for **simple** and **medium** scales, but **large-scale** (300k+ dirs, 64M+ files) requires custom configuration to avoid failures.
-

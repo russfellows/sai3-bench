@@ -27,8 +27,8 @@ This document defines the correct YAML configuration syntax for sai3-bench workl
   - [Agent Configuration](#agent-configuration)
   - [SSH Deployment](#ssh-deployment)
   - [Path Selection Strategies](#path-selection-strategies)
-- [Page Cache Control](#page-cache-control)
-- [Operation Logging](#operation-logging)
+- [Page Cache Control](#page-cache-control-file-uris-only)
+- [Operation Logging](#operation-logging-v081)
 - [Target URI](#target-uri)
 - [Pattern Syntax](#pattern-syntax)
 - [Operation Types](#operation-types)
@@ -44,6 +44,7 @@ sai3-bench run --config my-workload.yaml --dry-run
 ```
 
 This will:
+
 - ✅ Parse and validate YAML syntax
 - ✅ Check for required fields and correct data types
 - ✅ Display test configuration summary (duration, concurrency, backend)
@@ -52,7 +53,8 @@ This will:
 - ✅ Report any configuration errors with clear messages
 
 **Example output**:
-```
+
+```text
 ✅ Config file parsed successfully: my-workload.yaml
 
 ┌─ Test Configuration ────────────────────────────────────────┐
@@ -78,15 +80,18 @@ This will:
 `--dry-run` always generates a fixed-size sample of prepare object paths and sizes to validate deterministic generation and estimate memory impact.
 
 **What it does**:
+
 - Generates the first N objects (default: 100,000) using the same deterministic size and path rules as the real prepare phase
 - Uses directory tree logic (if configured) to resolve file paths
 - Reports elapsed time and RSS delta (Linux only, from `/proc/self/status`)
 
 **Why it matters**:
+
 - Validates that large configs can be iterated without precomputing the full dataset
 - Gives a quick memory and time estimate before running the full workload
 
 **Important**:
+
 - The sample is bounded by a fixed limit and does not scale with total object count
 - RSS may not drop immediately after sample generation because the allocator keeps freed pages for reuse
 
@@ -95,6 +100,7 @@ This will:
 **Note: Human-Readable Time Units (v0.8.52+)**
 
 All timeout and duration fields support convenient time unit suffixes for better readability:
+
 - **Supported units**: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
 - **Examples**: `"30s"`, `"5m"`, `"2h"`, `"1d"`
 - **Backward compatible**: Plain integers still work (interpreted as seconds)
@@ -120,6 +126,9 @@ op_log_path: /data/oplog.tsv.zst  # s3dlio operation log path (optional, v0.8.1+
                                    # Agent appends agent_id to prevent collisions
                                    # Supports S3DLIO_OPLOG_BUF env var (buffer size)
                                    # Note: Sorting requires post-processing (sai3-bench sort)
+dynamic_put_pool: false            # Add newly PUT objects to GET selection pool (v0.8.97+)
+                                   # false (default): frozen pool — reproducible GET selection
+                                   # true: warp-style mixed mode — GETs can hit freshly PUT objects
 
 # Prepare stage (optional)
 prepare:
@@ -178,6 +187,7 @@ workload:
 ```
 
 **Key requirements:**
+
 - All endpoints must present **identical namespace** (same files accessible from each endpoint)
 - Works with any storage backend: S3, Azure, GCS, file://, direct://
 - `use_multi_endpoint: true` required in workload operations to enable load balancing
@@ -237,6 +247,7 @@ distributed:
 ### Load Balancing Strategies
 
 **`round_robin`** (default):
+
 - Simple sequential rotation through endpoints
 - Predictable and deterministic behavior
 - Best for: Homogeneous storage backends, testing consistency
@@ -250,6 +261,7 @@ multi_endpoint:
 ```
 
 **`least_connections`**:
+
 - Routes to endpoint with fewest active requests
 - Adaptive load balancing
 - Best for: Heterogeneous backends, production-like scenarios
@@ -289,6 +301,7 @@ workload:
 ```
 
 **Requirements for NFS**:
+
 - All mount points must expose **same namespace** (same files via each mount)
 - Common with: VAST, Weka, Lustre with multi-path access
 - Each mount point typically routes to different storage backend IP
@@ -315,11 +328,13 @@ multi_endpoint:
 ```
 
 **When to use**:
+
 - **Isolated mode**: Each agent prepares data in its own endpoint
 - **Distributed data generation**: Spread prepare load across multiple endpoints
 - **Per-agent storage**: Each agent has separate mount point or bucket
 
 **When NOT to use**:
+
 - **Shared storage**: All agents need access to same prepared data
   - Use `base_uri: "s3://shared-bucket/data/"` instead
   - Set `use_multi_endpoint: false`
@@ -329,10 +344,12 @@ multi_endpoint:
 Multi-endpoint mode generates per-endpoint statistics files:
 
 **Output files** (v0.8.22+):
+
 - `workload_endpoint_stats.tsv` - Per-endpoint metrics for execute phase
 - `prepare_endpoint_stats.tsv` - Per-endpoint metrics for prepare phase
 
 **Columns**:
+
 - `endpoint`: Endpoint URI
 - `operation_count`: Number of operations to this endpoint
 - `bytes`: Total bytes transferred
@@ -340,6 +357,7 @@ Multi-endpoint mode generates per-endpoint statistics files:
 - `latency_p50_us`, `latency_p90_us`, `latency_p99_us`, `latency_p999_us`: Latency percentiles
 
 **Use cases**:
+
 - Diagnose load balancing effectiveness
 - Identify slow endpoints
 - Verify endpoint isolation in distributed tests
@@ -351,6 +369,7 @@ Multi-endpoint mode generates per-endpoint statistics files:
 **Cause**: Global `multi_endpoint` config sent to all agents
 
 **Solution**: Use per-agent endpoint configuration:
+
 ```yaml
 distributed:
   agents:
@@ -362,6 +381,7 @@ distributed:
 **Problem**: "base_uri is required" error in prepare stage
 
 **Fix**: Either set explicit base_uri OR use multi_endpoint:
+
 ```yaml
 # Option 1: Explicit base_uri (shared storage)
 prepare:
@@ -392,16 +412,19 @@ sai3bench-ctl convert --config legacy.yaml
 ### Why Stage Orchestration?
 
 **Traditional flow** (single execute stage):
-```
+
+```text
 Prepare → Execute → Cleanup
 ```
 
 **Modern multi-stage flows**:
-```
+
+```text
 Preflight Validation → Prepare Dataset → Warmup → Execute Benchmark → Cooldown → Cleanup
 ```
 
 **Real-world use cases**:
+
 - **Multi-epoch training**: Separate stages for each training epoch with checkpointing
 - **Tiered testing**: Preflight checks → Small-scale test → Full-scale test
 - **Complex workflows**: Data generation → Format conversion → Validation → Execution
@@ -523,6 +546,7 @@ Pre-flight configuration and environment checks:
 ```
 
 **Validation checks** (performed at controller):
+
 - Agent connectivity (gRPC health check)
 - Configuration consistency across agents
 - File/directory existence (if configured)
@@ -565,6 +589,7 @@ Execute custom scripts or commands:
 Each stage defines **how it knows when it's done**:
 
 **`duration`**: Complete after fixed time period
+
 ```yaml
 completion: duration
 config:
@@ -573,6 +598,7 @@ config:
 ```
 
 **`tasks_done`**: Complete when all tasks finished
+
 ```yaml
 completion: tasks_done
 config:
@@ -581,6 +607,7 @@ config:
 ```
 
 **`validation_passed`**: Complete when validation checks pass
+
 ```yaml
 completion: validation_passed
 config:
@@ -588,6 +615,7 @@ config:
 ```
 
 **`script_exit`**: Complete when external command exits
+
 ```yaml
 completion: script_exit
 config:
@@ -596,6 +624,7 @@ config:
 ```
 
 **`duration_or_tasks`**: Complete when either criterion met (hybrid)
+
 ```yaml
 completion: duration_or_tasks
 config:
@@ -698,7 +727,7 @@ stages:
 
 Each stage produces numbered TSV results files:
 
-```
+```text
 sai3-20260205-1440-test_barriers/
 ├── 01_preflight_results.tsv
 ├── 02_prepare_results.tsv
@@ -707,6 +736,7 @@ sai3-20260205-1440-test_barriers/
 ```
 
 **Benefits**:
+
 - Tab ordering preserved in Excel (01→02→03→04)
 - Clear execution progression
 - Per-stage performance analysis
@@ -718,6 +748,7 @@ sai3-20260205-1440-test_barriers/
 **Introduced in v0.8.25**
 
 Barrier synchronization ensures all agents reach coordination points before proceeding. Critical for:
+
 - **Multi-stage workflows**: All agents must complete prepare before execute
 - **Distributed testing**: Prevent timing skew between agents
 - **Large-scale tests**: Coordinate 300k+ directory creation across hosts
@@ -727,14 +758,16 @@ Barrier synchronization ensures all agents reach coordination points before proc
 ### Why Barriers?
 
 **Without barriers** (v0.8.24 and earlier):
-```
+
+```text
 Agent 1: Prepare (30s) → Execute starts at T=30
 Agent 2: Prepare (45s) → Execute starts at T=45
 Result: 15-second timing skew, invalid performance results
 ```
 
 **With barriers** (v0.8.25+):
-```
+
+```text
 Agent 1: Prepare (30s) → Wait at barrier
 Agent 2: Prepare (45s) → Reach barrier  
 Both: Barrier released → Execute starts at T=45 (synchronized)
@@ -793,6 +826,7 @@ distributed:
 ### Barrier Types
 
 **`all_or_nothing`** (strict synchronization):
+
 - **ALL agents** must reach barrier
 - Missing agents cause entire workload to abort
 - **Use case**: Critical stages where consistency required (prepare, execute)
@@ -804,6 +838,7 @@ barrier:
 ```
 
 **`majority`** (fault-tolerant):
+
 - **>50% agents** must reach barrier
 - Stragglers marked failed and excluded from next stage
 - **Use case**: Large-scale tests where occasional agent failures acceptable
@@ -815,6 +850,7 @@ barrier:
 ```
 
 **`best_effort`** (opportunistic):
+
 - Proceed when liveness check fails on stragglers
 - Stragglers continue independently (out of sync acceptable)
 - **Use case**: Cleanup stages, non-critical operations
@@ -828,24 +864,29 @@ barrier:
 ### Barrier Timing Parameters
 
 **`heartbeat_interval`**: How often agents report progress (seconds)
+
 - Default: 30 seconds
 - Recommendation: 30-60 for normal tests
 - Too low: Excessive network traffic
 - Too high: Slow failure detection
 
 **`missed_threshold`**: Missed heartbeats before query
+
 - Default: 3 (= 90 seconds with 30s interval)
 - Calculation: `timeout_before_query = interval × threshold`
 
 **`query_timeout`**: Timeout for explicit agent query (seconds)
+
 - Default: 10 seconds
 - How long to wait for query response before declaring failure
 
 **`query_retries`**: Retries for agent query
-- Default: 2 
+
+- Default: 2
 - Total query time: `timeout × (retries + 1) = 10 × 3 = 30s`
 
 **`agent_barrier_timeout`**: Agent-side wait timeout (seconds)
+
 - Default: 120 seconds
 - How long agent waits for barrier release from controller
 - **Critical sizing**: Must be > `(heartbeat_interval × missed_threshold) + (query_timeout × query_retries)`
@@ -905,11 +946,13 @@ distributed:
 **Problem**: "Barrier timeout exceeded" error
 
 **Causes**:
+
 1. Agent still working (operation not complete)
 2. Agent crashed/disconnected
 3. `agent_barrier_timeout` too short for operation
 
 **Solutions**:
+
 ```yaml
 # For long-running operations (large prepare)
 barrier:
@@ -926,6 +969,7 @@ barrier:
 **Cause**: Barriers disabled or misconfigured
 
 **Fix**:
+
 ```yaml
 distributed:
   barrier_sync:
@@ -943,6 +987,7 @@ Comprehensive timeout system prevents indefinite hangs in distributed testing. T
 3. **gRPC communication timeouts**: How long controller waits for RPC responses
 
 **Time Unit Support (v0.8.52+)**: All timeout fields support human-readable units:
+
 - **Units**: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
 - **Examples**: `"30s"`, `"5m"`, `"2h"`, `"1d"`
 - **Backward compatible**: Plain integers still work (interpreted as seconds)
@@ -978,6 +1023,7 @@ distributed:
 ```
 
 **Default timeouts** (if not specified):
+
 - Prepare: 600 seconds (10 minutes)
 - Execute: 3600 seconds (1 hour)
 - Cleanup: 3600 seconds (1 hour)
@@ -1007,6 +1053,7 @@ distributed:
 ```
 
 **Key insight**: Barrier timeout is **separate from** agent operation timeout:
+
 - **Agent timeout**: How long agent works on operation
 - **Barrier timeout**: How long agent waits for OTHER agents at barrier
 
@@ -1034,18 +1081,21 @@ distributed:
 **Parameters**:
 
 **`grpc_keepalive_interval`**: How often PING frames sent
+
 - Default: 30 seconds
 - Format: `"30s"`, `"1m"`, or plain integer `30`
 - Use case: Detect dead connections quickly
 - For slow operations (>30s): Increase to `"1m"` or `"2m"` to avoid spurious disconnects
 
 **`grpc_keepalive_timeout`**: Wait time for PONG response
+
 - Default: 10 seconds
 - Format: `"10s"`, `"30s"`, or plain integer `10`
 - Total disconnect detection time: `interval + timeout = 40s`
 - **v0.8.51 Recommendation for large-scale**: Increase to `"30s"` for deployments with >100K files
 
 **`agent_ready_timeout`**: *(v0.8.51 new)* Timeout for agents to send initial READY signal
+
 - Default: 120 seconds (2 minutes)
 - Format: `"2m"`, `"5m"`, `"10m"`, or plain integer `120`
 - Agents perform config validation (including glob pattern expansion) before sending READY
@@ -1057,6 +1107,7 @@ distributed:
   - Very large (>1M files): 600 seconds (10 minutes)
 
 **Example for large-scale deployment**:
+
 ```yaml
 distributed:
   grpc_keepalive_interval: 30
@@ -1132,6 +1183,7 @@ When multiple timeouts apply, the **most specific wins**:
 5. **Health check timeout** (fixed 30s)
 
 Example:
+
 ```yaml
 distributed:
   barrier_sync:
@@ -1154,6 +1206,7 @@ distributed:
 **Cause**: Agent operation (prepare/execute/cleanup) took longer than `timeout_secs`
 
 **Solution**: Increase stage timeout:
+
 ```yaml
 stages:
   - name: "prepare"
@@ -1165,6 +1218,7 @@ stages:
 **Cause**: gRPC call to agent timed out
 
 **Solutions**:
+
 1. Increase gRPC keepalive timings
 2. Check network connectivity
 3. Check agent is responsive (not hung)
@@ -1181,6 +1235,7 @@ distributed:
 **Cause**: gRPC keepalive interval too short for slow operations
 
 **Solution**: Increase keepalive interval:
+
 ```yaml
 distributed:
   grpc_keepalive_interval: "2m"  # 2 minutes for very slow operations (using time units)
@@ -1281,7 +1336,7 @@ distributed:
 
 1. **During prepare**: KV cache writes go to isolated location (`kv_cache_dir` or `/tmp/`)
 2. **After prepare**: Cache copied back to storage under test (e.g., `file:///mnt/test/.sai3-cache-agent-0/`)
-3. **Benefits**: 
+3. **Benefits**:
    - LSM operations (journals, compaction, version files) don't pollute workload I/O
    - Random small-block I/O isolated from sequential large-block testing
    - Accurate performance measurements for storage under test
@@ -1337,6 +1392,7 @@ cache_checkpoint_interval_secs: 0  # Disabled
 5. **At most 5 minutes of lost work** (default) if prepare crashes
 
 **Benefits**:
+
 - Protects against data loss in long-running prepares (hours, days)
 - Works for all storage backends (filesystem and cloud)
 - Automatic retry with exponential backoff (5 attempts)
@@ -1383,11 +1439,13 @@ distributed:
 **Deployment types**:
 
 **Binary mode** (`deploy_type: binary`):
+
 - Executes `sai3bench-agent` binary directly on remote host
 - Requires binary pre-installed at `binary_path`
 - Simpler, lower overhead than containers
 
 **Docker mode** (`deploy_type: docker`):
+
 - Launches agent in container
 - Requires Docker/Podman installed on remote hosts
 - Automatic image pull based on `pull_policy`
@@ -1398,39 +1456,47 @@ distributed:
 Control how agents select paths during workload execution:
 
 **`random`** (maximum contention):
+
 ```yaml
 distributed:
   path_selection: random
 ```
+
 - All agents pick any directory randomly
 - Maximum metadata contention
 - Use case: Stress testing shared filesystem metadata servers
 
 **`partitioned`** (reduced contention):
+
 ```yaml
 distributed:
   path_selection: partitioned
   partition_overlap: 0.3  # 30% chance to access other partitions
 ```
+
 - Agents prefer `hash(path) % agent_id` directories
 - `partition_overlap` controls cross-partition access (0.0-1.0)
 - Use case: Realistic distributed workload with some sharing
 
 **`exclusive`** (minimal contention):
+
 ```yaml
 distributed:
   path_selection: exclusive
 ```
+
 - Each agent ONLY uses assigned directories
 - Zero contention (purely isolated)
 - Use case: Pure performance testing without metadata contention
 
 **`weighted`** (probabilistic mix):
+
 ```yaml
 distributed:
   path_selection: weighted
   partition_overlap: 0.5  # 50% local, 50% random
 ```
+
 - Probabilistic mix of partitioned and random access
 - Controlled by `partition_overlap`
 
@@ -1439,29 +1505,35 @@ distributed:
 Control who creates directory tree structure:
 
 **`isolated`**: Each agent creates separate tree
+
 ```yaml
 distributed:
   tree_creation_mode: isolated
   path_template: "agent-{id}/"
 ```
+
 - Agent 1: Creates `agent-1/` tree
 - Agent 2: Creates `agent-2/` tree
 - Use case: Per-agent storage (isolated disks, separate buckets)
 
 **`coordinator`**: Controller creates tree once
+
 ```yaml
 distributed:
   tree_creation_mode: coordinator
 ```
+
 - Controller creates tree before agents start
 - Agents skip prepare phase (tree already exists)
 - Use case: Shared storage with expensive tree creation
 
 **`concurrent`**: All agents create same tree
+
 ```yaml
 distributed:
   tree_creation_mode: concurrent
 ```
+
 - All agents attempt same mkdir operations
 - Idempotent mkdir handles race conditions
 - Use case: Shared storage with cheap idempotent mkdir
@@ -1568,8 +1640,6 @@ workload:
     weight: 30
 ```
 
-
-
 ## Page Cache Control (file:// URIs only)
 
 The `page_cache_mode` field controls filesystem page cache behavior for `file://` URIs using `posix_fadvise()` hints on Linux/Unix systems.
@@ -1641,21 +1711,25 @@ workload:
 ### Performance Guidelines
 
 **Sequential Mode** - Use when:
+
 - Reading large files (>64MB) sequentially
 - Streaming or backup/restore workloads
 - High throughput is more important than latency
 
 **Random Mode** - Use when:
+
 - Accessing many small files randomly
 - Database-like access patterns
 - Low latency is more important than throughput
 
 **DontNeed Mode** - Use when:
+
 - Testing with large datasets that shouldn't stay in cache
 - Benchmarking cold-cache scenarios
 - Preventing cache pollution
 
 **Auto Mode** - Use when:
+
 - Mixed file sizes in workload
 - Unsure of access pattern
 - Want sensible defaults
@@ -1708,6 +1782,7 @@ distributed:
 ```
 
 **Results in**:
+
 - `/shared/storage/oplogs/trace-agent1.tsv.zst` (operations from node1)
 - `/shared/storage/oplogs/trace-agent2.tsv.zst` (operations from node2)
 
@@ -1730,6 +1805,7 @@ export S3DLIO_OPLOG_ZSTD_LEVEL=5
 ```
 
 **Note**: Operation logs are NOT sorted during capture. Use post-processing:
+
 ```bash
 # Sort by start timestamp after capture
 ./sai3-bench sort --files /data/oplog.tsv.zst
@@ -1739,13 +1815,14 @@ export S3DLIO_OPLOG_ZSTD_LEVEL=5
 
 Operation logs are TSV (tab-separated values) with zstd compression:
 
-```
+```text
 idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
 0    123     PUT            1          1048576 s3://    bucket/key       2025-11-21T...           2025-11-21T...  1234567
 1    456     GET            1          1048576 s3://    bucket/key       2025-11-21T...           2025-11-21T...  987654
 ```
 
 **Fields**:
+
 - `idx`: Operation sequence number
 - `thread`: Thread/worker ID
 - `op`: Operation type (GET, PUT, DELETE, LIST, etc.)
@@ -1792,6 +1869,7 @@ workload:
 ```
 
 **Supported schemes**:
+
 - `file://` - Local filesystem
 - `direct://` - Direct I/O (high performance local)
 - `s3://` - Amazon S3 or S3-compatible
@@ -1849,7 +1927,8 @@ Read existing objects. Requires pattern that matches existing objects.
 ```
 
 **Pattern resolution**:
-```
+
+```text
 Resolving 1 GET operation patterns...
 Found 2000 objects for GET pattern: gs://bucket/data/prepared-*.dat
 ```
@@ -1881,11 +1960,13 @@ Create new objects with auto-generated unique names.
 **Size specifications**:
 
 1. **Fixed size** (backward compatible):
+
 ```yaml
 object_size: 1048576  # Always 1 MiB
 ```
 
-2. **Uniform distribution**:
+1. **Uniform distribution**:
+
 ```yaml
 size_distribution:
   type: uniform
@@ -1893,7 +1974,8 @@ size_distribution:
   max: 10485760  # 10 MiB
 ```
 
-3. **Lognormal distribution** (realistic):
+1. **Lognormal distribution** (realistic):
+
 ```yaml
 size_distribution:
   type: lognormal
@@ -1980,6 +2062,14 @@ prepare:
       dedup_factor: 1        # Deduplication factor (1 = no dedup)
       compress_factor: 1     # Compression factor (1 = no compression)
   cleanup: true              # Remove prepared objects after test
+
+  # Namespace sharding for hash-based storage (v0.8.97+, issue #81)
+  # Spreads object keys across N hex-prefix shard directories.
+  # Default: 0 (no sharding — backward compatible).
+  # Recommended: 256 for VAST, Weka, and other hash-partitioned systems.
+  # With 256 shards, keys become:  00/prepared-00000000.dat
+  #                                a3/prepared-00000001.dat  etc.
+  key_prefix_shards: 256
 ```
 
 **Note: Thousand Separators in YAML Numbers (v0.8.52+)**
@@ -2008,6 +2098,46 @@ prepare:
       min_size: 262 144        # 256 KiB
 ```
 
+### Namespace Sharding (v0.8.97+)
+
+**`key_prefix_shards`** solves a performance problem specific to storage systems that
+route namespace operations by key-prefix hash (VAST, Weka, some S3-compatible clusters):
+when all prepared-object keys share the same long common prefix (e.g. `prepared-0000…`),
+the hash function maps all keys to the same director node, creating a metadata hotspot.
+
+Setting `key_prefix_shards: 256` inserts a 2-character hex shard directory before every
+key, giving 256 distinct top-level prefixes (`00/` … `ff/`) and distributing the metadata
+load evenly across all director nodes.
+
+```yaml
+prepare:
+  key_prefix_shards: 256   # recommended for VAST and other hash-partitioned systems
+  ensure_objects:
+    - base_uri: "s3://bucket/data/"
+      count: 1000000
+      min_size: 1048576
+      max_size: 1048576
+```
+
+**Resulting key format** (with `key_prefix_shards: 256`):
+
+```text
+00/prepared-00000000.dat    ← shard 00
+a3/prepared-00000001.dat    ← shard a3
+ff/prepared-00000002.dat    ← shard ff
+…                           (deterministic — index % 256 maps to shard)
+```
+
+The shard prefix is also applied to **workload PUT operations** so live-written objects
+are spread the same way:
+
+```text
+2b/obj_13792847362          ← workload PUT key
+```
+
+**Default**: `0` (disabled — unchanged behaviour, full backward compatibility).
+**Recommended**: `256` for all VAST deployments and any system with prefix-based routing.
+
 ### Cleanup-Only Mode (v0.8.7+)
 
 Run cleanup without prepare or workload phases - useful for cleaning up after interrupted benchmarks:
@@ -2028,11 +2158,13 @@ prepare:
 ```
 
 **When to use**:
+
 - Interrupted benchmarks left objects behind
 - Need to clean up distributed prepare phase across multiple agents
 - Testing cleanup logic independently
 
 **Performance notes**:
+
 - `skip_verification: true` is **highly recommended** for large datasets
   - Avoids expensive storage listing (can take 30+ minutes for millions of objects)
   - Uses deterministic algorithm to generate deletion list from config
@@ -2044,14 +2176,17 @@ prepare:
 ### Prepare Strategies
 
 #### Sequential Strategy (Default)
+
 Processes each `ensure_objects` entry in order. Creates all objects for the first entry, then moves to the second, etc.
 
 **Characteristics**:
+
 - **Predictable ordering**: Objects are numbered sequentially within each entry
 - **Deterministic**: Same config always produces same order
 - **Best for**: Workloads requiring specific object ordering or when debugging
 
 **Example**:
+
 ```yaml
 prepare:
   prepare_strategy: sequential  # Default, can be omitted
@@ -2063,17 +2198,21 @@ prepare:
       count: 50
       size_spec: {fixed: 1MB}
 ```
+
 Creates: All 100 small objects first, then all 50 large objects.
 
 #### Parallel Strategy
+
 Interleaves all `ensure_objects` entries for maximum throughput. Shuffles object sizes across all entries to avoid clustering.
 
 **Characteristics**:
+
 - **Better throughput**: Better storage pipeline utilization
 - **Size mixing**: Each directory gets a mix of all file sizes
 - **Best for**: Large-scale prepare operations where order doesn't matter
 
 **Example**:
+
 ```yaml
 prepare:
   prepare_strategy: parallel
@@ -2085,6 +2224,7 @@ prepare:
       count: 1000
       size_spec: {uniform: {min: 1KB, max: 1MB}}
 ```
+
 Creates: Mixes sizes from both entries, avoiding all 32KB objects followed by all 1MB objects.
 
 #### Streaming Task Generation (Large-Scale Prepare)
@@ -2101,13 +2241,13 @@ This prevents memory use from growing with total object count during prepare. Th
 
 During prepare execution, you'll see real-time performance statistics:
 
-```
+```text
 [00:00:09] [████████] 5000/5000 objects 32 workers | 464 ops/s | 487.0 MiB/s | avg 58.2ms
 ```
 
 After completion, a comprehensive performance summary is displayed:
 
-```
+```text
 Prepare Performance:
   Total ops: 5000 (3709.58 ops/s)
   Total bytes: 5242880000 (5000.00 MiB)
@@ -2137,6 +2277,7 @@ prepare:
 ```
 
 **Post-Prepare Delay**: The `post_prepare_delay` field controls how long to wait after creating objects before starting the workload. This is essential for cloud storage backends that have eventual consistency:
+
 - **Local storage** (`file://`, `direct://`): 0 seconds (no delay needed)
 - **Cloud storage** (S3, GCS, Azure): 2-5 seconds recommended
 - **Large object counts** (>1000 objects): 5-10 seconds recommended
@@ -2148,11 +2289,13 @@ The delay only applies if new objects were created. If all objects already exist
 Prepare creates objects named `prepared-NNNNNNNN.dat` where N is zero-padded 8-digit number.
 
 Examples:
+
 - `prepared-00000000.dat`
 - `prepared-00000001.dat`
 - `prepared-00001234.dat`
 
 **Match your workload patterns accordingly**:
+
 ```yaml
 prepare:
   post_prepare_delay: 3
@@ -2170,12 +2313,15 @@ workload:
 Available in both prepare stage and PUT operations.
 
 ### Fixed Size
+
 ```yaml
 object_size: 1048576  # Always exactly 1 MiB
 ```
 
 ### Uniform Distribution
+
 Evenly distributed between min and max:
+
 ```yaml
 size_distribution:
   type: uniform
@@ -2184,7 +2330,9 @@ size_distribution:
 ```
 
 ### Lognormal Distribution
+
 Realistic distribution (many small, few large files):
+
 ```yaml
 size_distribution:
   type: lognormal
@@ -2211,6 +2359,7 @@ workload:
 ```
 
 **Best practices**:
+
 1. Ensure `PUT weight ≥ DELETE weight` to avoid exhausting object pool
 2. Total weights don't need to sum to 100 (they're relative)
 3. Use realistic ratios based on production workloads
@@ -2218,11 +2367,13 @@ workload:
 ## Concurrency Control
 
 ### Global Concurrency
+
 ```yaml
 concurrency: 32  # 32 parallel workers for all operations
 ```
 
 ### Per-Operation Concurrency
+
 ```yaml
 workload:
   - op: get
@@ -2279,18 +2430,21 @@ workload:
 ## Common Pitfalls
 
 ### ❌ Using Brace Expansions
+
 ```yaml
 - op: get
   path: "obj_{00000..19999}"  # ERROR: Not supported
 ```
 
 **Fix**: Use glob patterns:
+
 ```yaml
 - op: get
   path: "prepared-*.dat"  # ✅ Correct
 ```
 
 ### ❌ DELETE Weight Too High
+
 ```yaml
 workload:
   - op: put
@@ -2300,6 +2454,7 @@ workload:
 ```
 
 **Fix**: Ensure PUT ≥ DELETE:
+
 ```yaml
 workload:
   - op: put
@@ -2309,6 +2464,7 @@ workload:
 ```
 
 ### ❌ Pattern Doesn't Match Prepared Objects
+
 ```yaml
 prepare:
   ensure_objects:
@@ -2321,6 +2477,7 @@ workload:
 ```
 
 **Fix**: Match the prepare naming:
+
 ```yaml
 workload:
   - op: get

@@ -1,12 +1,12 @@
 # sai3-bench: Multi-Protocol I/O Benchmarking Suite
 
-[![Version](https://img.shields.io/badge/version-0.8.96-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
+[![Version](https://img.shields.io/badge/version-0.8.97-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-713%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-731%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
 
-**Latest: v0.8.96** — Multi-endpoint load balancing now works for all operation types (GET, PUT, LIST, STAT, DELETE); new `S3_ENDPOINT_URIS` env var enables multi-endpoint at runtime without YAML changes. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
+**Latest: v0.8.97** — Key-prefix sharding for hash-partitioned storage (VAST/Weka), dynamic PUT pool for live-updated GET workloads. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 

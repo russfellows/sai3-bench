@@ -541,6 +541,7 @@ mod tests {
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: Default::default(),
+            dynamic_put_pool: false,
         }
     }
 
@@ -701,6 +702,7 @@ mod tests {
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: Default::default(),
+            dynamic_put_pool: false,
         };
 
         let original_duration = config.duration;
@@ -787,6 +789,7 @@ mod tests {
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: Default::default(),
+            dynamic_put_pool: false,
         };
 
         convert_config(&mut config).expect("Should convert config");

@@ -11,6 +11,7 @@ All notable changes to sai3-bench will be documented in this file.
 #### Agent Progress Bars Restored (v0.8.3)
 
 **Local Console Visibility**:
+
 - Agents now display their **own progress bars** on their **own console** (independent of controller)
 - Separate progress bars for prepare phase and workload phase (each on its own line)
 - Enables monitoring individual agents in separate terminal windows
@@ -19,6 +20,7 @@ All notable changes to sai3-bench will be documented in this file.
 - Updates every 0.5 seconds
 
 **Why This Matters**:
+
 - With 8 agents, you can monitor 8 separate consoles showing individual progress
 - Immediately see if an agent is hung, slow, or working correctly
 - No dependency on controller or gRPC connection
@@ -27,6 +29,7 @@ All notable changes to sai3-bench will be documented in this file.
 #### gRPC Communication Robustness (v0.8.3)
 
 **Unbounded Channel - Eliminates Backpressure Deadlock**:
+
 - **Root Cause**: Bounded channel (100 messages) filled up when controller was slow processing
   - 4 agents × 1 msg/sec = buffer fills in 25 seconds
   - Stream tasks blocked on `tx.send().await` → agents couldn't yield stats
@@ -36,6 +39,7 @@ All notable changes to sai3-bench will be documented in this file.
 - **Result**: No more deadlock cascade, controller never blocks agents
 
 **HTTP/2 Keepalive - Detects Dead Connections Fast**:
+
 - **Added Settings**:
   - `http2_keep_alive_interval(30s)` - Sends PING every 30 seconds
   - `keep_alive_timeout(10s)` - Waits 10 seconds for PONG
@@ -44,12 +48,14 @@ All notable changes to sai3-bench will be documented in this file.
 - **Why Critical**: Without keepalive, broken connections appear healthy until TCP timeout (minutes)
 
 **Increased Timeout Tolerance**:
+
 - Warning timeout: 30s → 60s (allows brief slowdowns)
 - Disconnected timeout: **60s → 600s (10 minutes)**
 - **Rationale**: Large prepare phases (200K objects) can legitimately take 5-10 minutes
 - Production testing saw 379s (6.3 minutes) with 400K objects - 60s timeout was way too aggressive
 
 **Fixed Premature Controller Exit**:
+
 - **Bug**: Disconnected agents were marked as "completed" → `all_completed()` returned true → controller exited
 - **Fix**: Disconnected agents stay in disconnected state, don't count toward completion
 - **Result**: Controller waits for actual completion, not timeout artifacts
@@ -57,6 +63,7 @@ All notable changes to sai3-bench will be documented in this file.
 #### User-Reported Issue Fixed
 
 **Scenario** (User: November 22, 2025):
+
 - Test with 4 agents creating 200K objects (prepare phase)
 - Working fine up to 40%, then controller stopped updating
 - Controller showed multiple warning lines: "⚠️ Agent X delayed: no updates for Y seconds"
@@ -65,12 +72,14 @@ All notable changes to sai3-bench will be documented in this file.
 - **But agents kept working and finished all 200704 objects after controller quit!**
 
 **Root Causes Identified**:
+
 1. Bounded channel deadlock (100-message buffer overflow)
 2. No HTTP/2 keepalive (couldn't detect broken connections)
 3. Timeout too aggressive (60s for prepare phases taking 5-10 minutes)
 4. Premature exit logic (disconnected = completed)
 
 **After v0.8.3 Fixes**:
+
 - Agents can always send messages (unbounded channel)
 - Dead connections detected in 40 seconds (keepalive)
 - Legitimate slow operations tolerated (10-minute timeout)
@@ -79,18 +88,21 @@ All notable changes to sai3-bench will be documented in this file.
 #### Technical Details
 
 **Architecture Changes**:
+
 ```
 Before: Stream → Bounded(100) → Controller (blocks on full buffer)
 After:  Stream → Unbounded → Controller (never blocks)
 ```
 
 **Connection Monitoring**:
+
 ```
 Before: No keepalive → broken connections hang for minutes
 After:  PING every 30s → dead connections detected in 40s
 ```
 
 **Timeout Strategy**:
+
 ```
 Before: 60s dead timeout (way too short for prepare phases)
 After:  600s dead timeout (handles legitimate slow operations)
@@ -99,11 +111,13 @@ After:  600s dead timeout (handles legitimate slow operations)
 #### Migration Notes
 
 **No Breaking Changes**:
+
 - All existing configs work unchanged
 - Agent binaries backward compatible with old controllers
 - New controllers work with old agents (graceful degradation)
 
 **Recommended Actions**:
+
 - Update both controller and agents to v0.8.3 for full benefits
 - If you see "reconnect count" in STATUS.txt, it's now safe (agents recover)
 - Large prepare phases (100K+ objects) now complete reliably
@@ -119,12 +133,14 @@ After:  600s dead timeout (handles legitimate slow operations)
 #### "X of Y Agents" Display (v0.8.2)
 
 **Live Stats Format**:
+
 - Changed from `"2 agents"` to `"2 of 2 Agents"`
 - Shows communicating agents vs. expected agents
 - During disconnection: `"1 of 2 Agents (⚠️ 1 dead)"`
 - After recovery: `"2 of 2 Agents"`
 
 **Benefits**:
+
 - Immediate visibility into agent communication status
 - Clear indication of partial availability during issues
 - Distinguishes expected vs. actual agent count
@@ -132,11 +148,13 @@ After:  600s dead timeout (handles legitimate slow operations)
 #### Reconnection Tracking (v0.8.2)
 
 **STATUS.txt Enhancement**:
+
 - New `Disconnect/Reconnect Count` field
 - Tracks total disconnect/reconnect events across all agents
 - Distinguishes between current vs. recovered connection issues
 
 **Example Output**:
+
 ```
 === Summary ===
 Total agents: 8
@@ -147,22 +165,26 @@ Disconnect/Reconnect Count: 3
 ```
 
 **Interpretation**:
+
 - `Disconnected: 0` = No agents currently disconnected (all recovered)
 - `Disconnect/Reconnect Count: 3` = Three temporary connection issues occurred and were recovered
 
 **Log Messages**:
+
 - Recovery events logged: `"🔄 Agent X RECOVERED from DISCONNECTED → Running (reconnect #N)"`
 - Provides diagnostic visibility into connection stability
 
 #### Benefits
 
 **Connection Diagnostics**:
+
 - Identifies network instability even when test succeeds
 - Helps diagnose intermittent gRPC backpressure
 - Reveals timeout threshold tuning needs
 - Useful for production deployment validation
 
 **Operational Visibility**:
+
 - Test shows SUCCESS but reconnect count reveals issues
 - Enables proactive network troubleshooting
 - Distinguishes clean runs from recovered-failure runs
@@ -178,21 +200,25 @@ Disconnect/Reconnect Count: 3
 #### Agent Operation Logging (v0.8.1)
 
 **CLI Flag Support**:
+
 - `--op-log <PATH>`: Enable s3dlio operation logging for agent workloads
 - Applies to all workloads executed by the agent
 - Can be overridden per-workload via YAML config `op_log_path`
 
 **YAML Configuration**:
+
 - `op_log_path: /path/to/oplog.tsv.zst` field in config
 - Takes precedence over CLI `--op-log` flag
 - Enables per-workload oplog control in distributed environments
 
 **Automatic Filename Management**:
+
 - Agent appends `agent_id` to filename to prevent collisions
 - Example: `/data/oplogs/trace.tsv.zst` → `/data/oplogs/trace-agent1.tsv.zst`
 - Each agent writes to separate file for independent analysis
 
 **Environment Variable Support**:
+
 - All s3dlio oplog environment variables respected:
   - `S3DLIO_OPLOG_SORT=1`: Enable automatic operation log sorting
   - `S3DLIO_OPLOG_BUF=<size>`: Configure buffer size
@@ -201,11 +227,13 @@ Disconnect/Reconnect Count: 3
 #### Error Handling Improvements (v0.8.1)
 
 **Proper Oplog Finalization**:
+
 - `finalize_operation_logger()` errors properly logged (not silently ignored)
 - Errors written to agent log for debugging
 - Workload continues even if oplog finalization fails
 
 **Partial Results on Failure**:
+
 - Controller saves partial results when agent fails
 - Uses aggregated stats to finalize results directory
 - Informs user that partial results were saved
@@ -214,6 +242,7 @@ Disconnect/Reconnect Count: 3
 #### Script Enhancements (v0.8.1)
 
 **`start_local_agents.sh` Updates**:
+
 - New 5th parameter for optional oplog base path
 - Usage: `./start_local_agents.sh <num_agents> <base_port> <verbose> <log_dir> <op_log>`
 - Example: `./start_local_agents.sh 2 7167 "-v" "/tmp" "/tmp/oplogs/trace.tsv.zst"`
@@ -222,6 +251,7 @@ Disconnect/Reconnect Count: 3
 #### Use Cases
 
 **Distributed Performance Analysis**:
+
 ```yaml
 # Enable oplog in YAML config
 op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
@@ -235,16 +265,19 @@ distributed:
 ```
 
 Results in:
+
 - `/shared/storage/oplogs/benchmark-agent1.tsv.zst` (operations from node1)
 - `/shared/storage/oplogs/benchmark-agent2.tsv.zst` (operations from node2)
 
 **Per-Agent Analysis**:
+
 - Sort and analyze each agent's operations independently
 - Compare latency distributions across agents
 - Identify per-agent performance bottlenecks
 - Replay specific agent workloads for debugging
 
 **Operation Replay**:
+
 - Capture production workload from multiple agents
 - Replay at different speeds (1x, 10x, 100x)
 - Remap URIs for different target storage
@@ -266,6 +299,7 @@ Results in:
 ### Technical Details
 
 **Implementation**:
+
 - Agent CLI: `Cli` struct with `op_log: Option<PathBuf>` field
 - Agent state: `AgentState` with `agent_op_log_path` field
 - Oplog initialization: Before workload in both `run_workload()` and `run_workload_with_live_stats()`
@@ -273,6 +307,7 @@ Results in:
 - Error handling: Wrap `finalize_operation_logger()` in `if let Err(e)` blocks
 
 **Proto Changes**:
+
 - No protocol changes required (WorkloadSummary already has `op_log_path` field)
 
 ---
@@ -286,6 +321,7 @@ Results in:
 #### Formal State Machines (v0.8.0)
 
 **Agent State Machine** - 5 states with validated transitions:
+
 - **States**: Idle → Ready → Running → (Completed/Failed) → Idle
 - **Aborting state**: Special handling for graceful shutdown
 - **Auto-reset**: Agents automatically reset from Failed → Idle after errors
@@ -295,6 +331,7 @@ Results in:
 - **Thread-safe**: All state changes use Arc<Mutex<>> for concurrent access
 
 **Controller Agent Tracking** - 9 states for comprehensive lifecycle management:
+
 - **States**: Connecting → Validating → Ready → Running → Completed/Failed/Disconnected/Stalled/Aborting
 - **Timeout detection**: Agents marked as Stalled after 10s of no updates
 - **Disconnection tracking**: Separate state for agents that disconnect mid-workload
@@ -303,6 +340,7 @@ Results in:
 #### Comprehensive Error Handling (v0.8.0)
 
 **ErrorTracker** - Thread-safe error tracking across workers:
+
 - **Configurable thresholds**:
   - `max_errors`: Total error limit (default: 1000)
   - `max_error_rate`: Errors/second limit (default: 10.0)
@@ -312,6 +350,7 @@ Results in:
 - **Error rate calculation**: Real-time errors/second tracking
 
 **Improved Logging** - Context-aware verbosity levels:
+
 - **Default (warn/error)**: Critical failures, threshold exceeded, high error rate
 - **-v (info)**: Retry attempts with 🔄 emoji indicators
 - **-vv (debug)**: Individual errors with full context and operation details
@@ -320,6 +359,7 @@ Results in:
 #### Signal Handling (v0.8.0)
 
 **Graceful Shutdown** - SIGINT/SIGTERM support:
+
 - **Signal handlers**: Tokio signal handling for Ctrl-C and terminate signals
 - **Resource cleanup**: Agents abort workloads before exit
 - **Coordination**: Controller sends abort to all agents on signal
@@ -328,6 +368,7 @@ Results in:
 #### Constants Centralization (v0.8.0)
 
 **Single Source of Truth** - All constants in `src/constants.rs`:
+
 - **Error handling**: MAX_ERRORS, MAX_ERROR_RATE, MAX_RETRIES, ERROR_BACKOFF_DURATION
 - **Timeouts**: AGENT_STARTUP_TIMEOUT, AGENT_STALL_TIMEOUT, AGENT_DISCONNECT_TIMEOUT
 - **Coordination**: COORDINATED_START_DELAY, ABORT_TIMEOUT, ABORT_RETRY_DELAY
@@ -337,12 +378,14 @@ Results in:
 #### User Experience Improvements (v0.8.0)
 
 **Countdown Display**:
+
 - **Single-line updates**: Countdown updates in place using carriage return
 - **Progress bar suspension**: Progress bar paused during countdown (no flicker)
 - **Visible final countdown**: Shows "⏳ Starting in 0s..." before "✅ Starting workload now!"
 - **Clean output**: No extra lines, professional appearance
 
 **Validation Improvements**:
+
 - **Dry-run validation**: Now matches agent validation exactly
   - PUT operations require `object_size` or `size_spec`
   - DELETE/LIST/STAT require non-empty path
@@ -370,21 +413,25 @@ Results in:
 ### Technical Details
 
 **State Machine Implementation**:
+
 - Agent: `WorkloadState` enum with `transition_to()` validation
 - Controller: `ControllerAgentState` enum replaces completed_agents/dead_agents/agent_last_seen
 - Thread-safe: Arc<Mutex<State>> pattern throughout
 
 **Error Tracking**:
+
 - `ErrorTracker` struct with atomic counters (total_errors, error_rate)
 - Per-worker instances aggregated at summary generation
 - Real-time rate calculation using Instant timestamps
 
 **Constants Module**:
+
 - `src/constants.rs`: 150+ lines defining all timeouts, limits, intervals
 - Type-safe: Duration types for time constants
 - Documented: Each constant has inline documentation
 
 **Code Quality**:
+
 - Zero compiler warnings (cargo clippy clean)
 - Zero test failures (153/153 passing)
 - Consistent formatting (rustfmt applied)
@@ -393,6 +440,7 @@ Results in:
 ## [0.7.12] - 2025-11-19
 
 ### Improved
+
 - **Flexible Agent Specification** (v0.7.12): `--agents` CLI flag now optional
   - Can specify agents in YAML config under `distributed.agents`
   - Can specify agents on CLI with `--agents host1:port,host2:port`
@@ -413,12 +461,14 @@ Results in:
   - Improves user experience during coordinated start phase
 
 ### Fixed
+
 - **Display Order**: Countdown now appears AFTER agent validation completes (not before)
   - Previous behavior showed countdown, then validated agents (confusing)
   - New behavior: validate agents → show ready → countdown → start workload
   - More logical and intuitive sequence
 
 ### Technical Details
+
 - `--agents` CLI argument changed from `String` to `Option<String>`
 - Agent parsing handles `None` case with `unwrap_or_default()`
 - Abort timeout increased from 3s to 5s with 10s retry (total 15s maximum)
@@ -565,11 +615,13 @@ Results in:
   - **HDR histogram merging**: Mathematically accurate percentile aggregation (not averages)
 
 - **Prepare Results Format** - TSV file with operation-level metrics
+
   ```
   operation  size_bucket  bucket_idx  mean_us  p50_us  p90_us  p95_us  p99_us  max_us  avg_bytes  ops_per_sec  throughput_mibps  count
   PUT        512KiB-4MiB  4           4287.18  3287    9175    9903    12359   12767   1048576    1464.52      1464.52           180
   PUT        ALL          99          4287.18  3287    9175    9903    12359   12767   1048576    1464.52      1464.52           180
   ```
+
   - **Size buckets**: Same 9 buckets as workload results (zero, 1B-8KiB, 8KiB-64KiB, ...)
   - **ALL summary row**: Combined stats across all buckets (bucket_idx=99)
   - **Consistent labels**: Uses BUCKET_LABELS from metrics.rs (not hardcoded)
@@ -603,6 +655,7 @@ Results in:
 #### Protocol Changes
 
 **proto/iobench.proto** - Added PrepareSummary message:
+
 ```protobuf
 message PrepareSummary {
     string agent_id = 1;
@@ -691,12 +744,14 @@ message PrepareSummary {
   - **Status enum**: UNKNOWN(0), READY(1), RUNNING(2), ERROR(3), COMPLETED(4)
 
 - **Real-Time Progress Display** - Beautiful progress visualization during execution
+
   ```
   [========================================] 30/30s
   2 agents
     GET: 19882 ops/s, 19.4 MiB/s (mean: 95µs, p50: 96µs, p95: 135µs)
     PUT: 8541 ops/s, 16.7 MiB/s (mean: 102µs, p50: 98µs, p95: 136µs)
   ```
+
   - **Progress bar**: Shows elapsed/total seconds with visual bar (not spinner)
   - **Live updates**: Stats refresh every 1 second during execution
   - **Multi-line display**: Agent count, GET stats, PUT stats on separate lines
@@ -719,6 +774,7 @@ message PrepareSummary {
 #### Protocol Changes
 
 **proto/iobench.proto** - Added startup handshake support:
+
 ```protobuf
 message LiveStats {
   enum Status {
@@ -736,12 +792,14 @@ message LiveStats {
 #### Implementation Details
 
 **Agent changes** (`src/bin/agent.rs`):
+
 - New `validate_workload_config()` function validates after path prefixing
 - Stream yields READY → waits for coordinated start → spawns workload → streams stats
 - Sends ERROR status with details if validation fails
 - Uses glob crate to verify file:// patterns match actual files
 
 **Controller changes** (`src/bin/controller.rs`):
+
 - Parse config early to get duration for progress bar
 - Progress bar instead of spinner: `ProgressBar::new(duration_secs)`
 - Create channel BEFORE spawning tasks (critical fix)
@@ -752,6 +810,7 @@ message LiveStats {
 - Add newlines after completion to preserve final stats
 
 **Key fixes**:
+
 1. **Message flow**: Create channel before tasks, forward immediately
 2. **Workload timing**: Spawn workload INSIDE stream after READY sent
 3. **Coordinated start**: Wait happens inside stream, not blocking creation
@@ -763,6 +822,7 @@ message LiveStats {
 #### Testing
 
 Thoroughly tested with 2-agent local setup:
+
 - Fast startup (5s vs 32s)
 - Progress bar updates every second
 - Synchronized agent execution (both finish at 30.01s)
@@ -782,6 +842,7 @@ Thoroughly tested with 2-agent local setup:
 #### New Features
 
 - **Sort Command** - Offline sorting of op-log files by start timestamp
+
   ```bash
   # Sort single file (creates .sorted.tsv.zst)
   sai3-bench sort --files /tmp/ops.tsv.zst
@@ -795,6 +856,7 @@ Thoroughly tested with 2-agent local setup:
   # Custom window size for large files
   sai3-bench sort --files huge.tsv.zst --window-size 100000
   ```
+
   - **Streaming window algorithm**: Constant memory usage (~2MB for 10K window)
   - **Configurable window size**: Default 10,000 entries (tune for file size)
   - **Handles huge files**: Successfully tested with 200K+ entries
@@ -802,15 +864,18 @@ Thoroughly tested with 2-agent local setup:
   - **Multiple files**: Sort many files in one command
 
 - **Replay Dry-Run** - Validate op-log before execution
+
   ```bash
   sai3-bench replay --op-log /tmp/ops.tsv.zst --dry-run
   ```
+
   - **Sort order check**: Validates chronological ordering (first 10,000 lines)
   - **File validation**: Checks existence, readability, and parseability
   - **Operation count**: Reports total operations to replay
   - **Target URI validation**: Verifies target backend syntax if provided
   - **Remap config validation**: Parses and validates YAML remap rules
   - **Example output**:
+
     ```
     Dry-run mode: Validating replay op-log file...
       File: /tmp/ops.tsv.zst
@@ -826,6 +891,7 @@ Thoroughly tested with 2-agent local setup:
   - **Non-blocking**: Operations execute immediately even if out of order
   - **Detailed logging**: Shows current vs. previous timestamp and delta
   - **Example warning**:
+
     ```
     WARN Out-of-order op-log entry detected during replay: 
          operation #1523 has start=2025-11-07T07:14:41.275Z, 
@@ -863,11 +929,13 @@ Thoroughly tested with 2-agent local setup:
 #### Configuration
 
 **Sort window size** (default: 10000):
+
 ```bash
 sai3-bench sort --files large.tsv.zst --window-size 50000
 ```
 
 **Multi-process merge** (automatic):
+
 ```yaml
 execution_mode: MultiProcess
 workers: 4  # Creates 4 worker files, merges at end
@@ -909,6 +977,7 @@ None - All new opt-in functionality.
   - **Clean shutdown**: Monitor tasks properly await completion
 
 - **Performance Summary** - Comprehensive post-execution statistics
+
   ```
   Prepare Performance:
     Total ops: 5000 (3709.58 ops/s)
@@ -916,6 +985,7 @@ None - All new opt-in functionality.
     Throughput: 3709.58 MiB/s
     Latency: mean=6.09ms, p50=4.11ms, p95=16.91ms, p99=42.49ms
   ```
+
   - **Matches workload format**: Consistent reporting across all phases
   - **TSV export**: Machine-readable metrics in `prepare_results.tsv`
 
@@ -925,14 +995,15 @@ None - All new opt-in functionality.
     - Creates all objects for first entry, then second, etc.
     - Predictable ordering: `obj-00000000.dat`, `obj-00000001.dat`, ...
     - Best for ordered workload requirements
-    
+
   - **Parallel Strategy** (opt-in via `prepare_strategy: parallel`):
     - Interleaves all `ensure_objects` entries for maximum throughput
     - Shuffles sizes across directories to avoid clustering
     - Better storage pipeline utilization
     - Example: Mixed 32KB, 1MB, 4MB objects in each directory
-    
+
   - **Configuration**:
+
     ```yaml
     prepare:
       prepare_strategy: parallel  # or "sequential" (default)
@@ -993,7 +1064,7 @@ None - All new opt-in functionality.
 
 #### Performance Impact
 
-- **Negligible overhead**: 
+- **Negligible overhead**:
   - Atomic operations use Relaxed ordering for minimal contention
   - Metrics collection uses thread-local histograms
   - Monitor task sleeps 100ms between checks
@@ -1027,6 +1098,7 @@ None - All new opt-in functionality.
   - **Async-aware implementation**: Uses `tokio::sync::Mutex` and `StdRng` for thread safety
 
 - **Configuration Syntax**:
+
   ```yaml
   io_rate:
     iops: 1000              # Target operations per second
@@ -1109,6 +1181,7 @@ None - All new opt-in functionality.
 | Zero overhead | ✅ | ✅ |
 
 **Migration from rdf-bench**:
+
 - `iorate=1000` → `io_rate: { iops: 1000, distribution: uniform }`
 - `iorate=max` → `io_rate: { iops: max }` (distribution ignored)
 - Poisson arrivals: Use `distribution: exponential` (new capability)
@@ -1173,6 +1246,7 @@ None - All new opt-in functionality.
   - **Migration**: Add `fill: zero` to configs if zero fill required
   
 - **New config section**: `directory_tree`
+
   ```yaml
   directory_tree:
     width: 3              # Subdirectories per level
@@ -1235,6 +1309,7 @@ None - All new opt-in functionality.
   - `src/main.rs` (+90 lines) - Enhanced dry-run with metrics
 
 - **Backend compatibility**:
+
   | Backend | MKDIR | RMDIR | LIST | STAT | DELETE | Tree Workloads |
   |---------|-------|-------|------|------|--------|----------------|
   | file:// | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ Tested |
@@ -1289,10 +1364,12 @@ None - All new opt-in functionality.
 #### Migration Guide
 
 **For existing configs:**
+
 1. Review fill type - add `fill: zero` if needed
 2. No action needed for operation mix, sizes, concurrency
 
 **For new directory tree workloads:**
+
 1. Start with `tests/configs/directory-tree/tree_test_basic.yaml`
 2. Test with `--dry-run` to validate structure
 3. Review [Directory Tree README](../tests/configs/directory-tree/README.md)
@@ -1321,6 +1398,7 @@ None - All new opt-in functionality.
   - See [SSH Setup Guide](SSH_SETUP_GUIDE.md)
 
 - **Config-Driven Agents** - Define all agents in YAML (no CLI flags needed)
+
   ```yaml
   distributed:
     agents:
@@ -1331,6 +1409,7 @@ None - All new opt-in functionality.
   ```
 
 - **Flexible Container Runtime** - Docker or Podman via YAML (no recompilation)
+
   ```yaml
   deployment:
     container_runtime: "docker"  # or "podman"
@@ -1409,6 +1488,7 @@ None - All new opt-in functionality.
 ### 📝 Files Modified
 
 **Core Implementation**:
+
 - `src/config.rs`: Added DistributedConfig, AgentConfig, SshConfig, DeploymentConfig (+180 lines)
 - `src/ssh_deploy.rs`: SSH deployment automation (NEW, 360 lines)
 - `src/ssh_setup.rs`: SSH key setup wizard (NEW, 300 lines)
@@ -1416,16 +1496,19 @@ None - All new opt-in functionality.
 - `Cargo.toml`: Added ssh2, shellexpand dependencies
 
 **Example Configs**:
+
 - `examples/distributed-ssh-automated.yaml`: Complete SSH automation example
 - `examples/distributed-scale-up.yaml`: 8 containers on 1 VM
 - `examples/distributed-scale-out.yaml`: 8 VMs, 1 container each
 
 **Testing**:
+
 - `tests/distributed_config_tests.rs`: 11 YAML parsing validation tests (NEW)
 - `tests/distributed_simulation_test.rs`: 8 controller logic tests (NEW)
 - `tests/configs/distributed_yaml_test.yaml`: Test configuration
 
 **Cloud Automation**:
+
 - `scripts/gcp_distributed_test.sh`: Complete GCP automation (NEW, 559 lines)
 - `scripts/cloud_test_template.sh`: Cloud-agnostic template (NEW, 406 lines)
 - `scripts/local_docker_test.sh`: Local multi-container testing (NEW, 399 lines)
@@ -1436,10 +1519,12 @@ None - All new opt-in functionality.
 ### 📚 Documentation Consolidation
 
 **Archived** (superseded by comprehensive distributed guides):
+
 - `docs/V0.6.4_MULTIHOST_SUMMARY.md` - Functionality now in DISTRIBUTED_TESTING_GUIDE.md
 - `docs/V0.6.4_TESTING_SUMMARY.md` - Results directory feature completed in v0.6.4
 
 **Updated**:
+
 - `README.md`: Feature-focused distributed section with links to guides
 
 ## [0.6.10] - 2025-10-19
@@ -1475,6 +1560,7 @@ None - All new opt-in functionality.
 #### Configuration
 
 Pre-stat only runs when RangeEngine is enabled:
+
 ```yaml
 range_engine:
   enabled: true      # Enables pre-stat + parallel chunk downloads
@@ -1483,6 +1569,7 @@ range_engine:
 ```
 
 **Recommendation**: Keep RangeEngine disabled (default) for same-region workloads. Enable only for:
+
 - Cross-region transfers with high latency
 - Low-bandwidth network links
 - Scenarios where parallelism helps more than coordination costs
@@ -1522,10 +1609,12 @@ range_engine:
 #### Binary Distribution Cleanup
 
 **Removed redundant binaries** for clearer user experience:
+
 - **`sai3bench-run`** - Removed (replaced by `sai3-bench run` subcommand with more features)
 - **`fs_read_bench`** - Removed (internal dev tool, not needed for production)
 
 **Clean 3-binary distribution**:
+
 - `sai3-bench` - Main unified CLI with subcommands: `run`, `replay`, `util`
 - `sai3bench-agent` - Distributed worker
 - `sai3bench-ctl` - Distributed controller
@@ -1542,11 +1631,13 @@ range_engine:
 **No breaking changes** - 100% backward compatible:
 
 Old command (removed):
+
 ```bash
 sai3bench-run --config workload.yaml
 ```
 
 New command (use this):
+
 ```bash
 sai3-bench run --config workload.yaml
 # Additional features: --dry-run, --prepare-only, --verify, --skip-prepare, --no-cleanup, --tsv-name
@@ -1570,6 +1661,7 @@ sai3-bench run --config workload.yaml
 #### Testing
 
 Test configs:
+
 - `tests/configs/direct_io_chunked_test.yaml` - Validates chunked read optimization
 - Test scripts in `benches/` for performance validation
 
@@ -1657,6 +1749,7 @@ See `docs/CONFIG_SYNTAX.md` for complete documentation.
 #### What's in the Aggregate Rows
 
 Each "ALL" row includes:
+
 - **Count**: Total operations across all size buckets
 - **Throughput**: Total MiB/s (sum of all buckets)
 - **Latency Statistics**: Properly merged HDR histogram values
@@ -1704,6 +1797,7 @@ Note: Aggregate rows use operation-specific bucket_idx (META=97, GET=98, PUT=99)
 **Utility commands now nested under `util` subcommand** to emphasize core workload execution features (run/replay). This change improves tool clarity and aligns with its primary purpose as a benchmarking suite.
 
 #### Breaking Changes
+
 - **All utility commands require `util` prefix**:
   - ❌ OLD: `sai3-bench health --uri "s3://bucket/"`
   - ✅ NEW: `sai3-bench util health --uri "s3://bucket/"`
@@ -1713,6 +1807,7 @@ Note: Aggregate rows use operation-specific bucket_idx (META=97, GET=98, PUT=99)
 - **Error message**: If you try to use old syntax (e.g., `sai3-bench health`), you'll get "unrecognized subcommand" error. Simply add `util` before the command name.
 
 #### Command Structure
+
 ```
 OLD Structure:
   sai3-bench {health|list|stat|get|delete|put|run|replay}
@@ -1723,13 +1818,16 @@ NEW Structure (v0.6.6):
 ```
 
 #### Benefits
+
 1. **Core features prominently displayed**: `run` and `replay` now appear first
 2. **Cleaner help output**: Only 3 top-level commands instead of 8
 3. **Clear tool purpose**: Emphasizes benchmarking/workload execution
 4. **Better organization**: Utility operations clearly separated from core functionality
 
 #### Migration Guide
+
 Update all utility command invocations:
+
 ```bash
 # Health checks
 sai3-bench util health --uri "file:///tmp/test/"
@@ -1747,6 +1845,7 @@ sai3-bench util delete --uri "s3://bucket/prefix/*"
 ```
 
 #### Note on Utility Commands
+
 For comprehensive storage CLI operations, consider using `s3-cli` from the [s3dlio package](https://github.com/russfellows/s3dlio). The utility commands in sai3-bench are provided as convenience helpers for quick testing and validation.
 
 ---
@@ -1758,6 +1857,7 @@ For comprehensive storage CLI operations, consider using `s3-cli` from the [s3dl
 **Config Validation with --dry-run**: Added comprehensive configuration validation and test summary display before execution. Users can now verify YAML syntax, validate configuration structure, and preview test details without running the workload.
 
 #### Core Features
+
 - **`--dry-run` Flag**: Parse and validate config with detailed summary display
   - ✅ YAML syntax validation with clear error messages
   - ✅ Configuration structure and required fields verification
@@ -1777,6 +1877,7 @@ For comprehensive storage CLI operations, consider using `s3-cli` from the [s3dl
   - References removed from README.md and docs/README.md
 
 #### Usage Examples
+
 ```bash
 # Validate config before running
 sai3-bench run --config my-workload.yaml --dry-run
@@ -1789,6 +1890,7 @@ sai3-bench run --config my-workload.yaml --dry-run
 ```
 
 #### Files Changed
+
 - `src/main.rs` - Added `--dry-run` flag and `display_config_summary()` function
 - `docs/DATA_GENERATION.md` - NEW: Comprehensive data generation guide (165 lines)
 - `docs/CONFIG_SYNTAX.md` - Added configuration validation section with examples
@@ -1797,6 +1899,7 @@ sai3-bench run --config my-workload.yaml --dry-run
 - `docs/WARP_PARITY_STATUS.md` - REMOVED (outdated)
 
 #### Testing
+
 - Validated with `tests/configs/mixed.yaml` - Basic GET/PUT operations
 - Validated with `tests/configs/size_distributions_test.yaml` - Prepare phase with distributions
 - Validated with `tests/configs/per_op_concurrency_test.yaml` - Per-operation concurrency
@@ -1810,12 +1913,14 @@ sai3-bench run --config my-workload.yaml --dry-run
 **Automatic Results Directories & Consolidated Metrics**: Implemented automatic results directory creation for both single-node and distributed workloads, with HDR histogram merging for mathematically accurate aggregate metrics across multiple agents.
 
 #### Core Features
+
 - **Timestamped Results Directories**: Automatic creation of `sai3-YYYYMMDD-HHMM-{test_name}/` directories
 - **Complete Capture**: config.yaml, console.log, metadata.json, results.tsv in every results directory
 - **Distributed Results Collection**: Per-agent results in `agents/{id}/` subdirectories with metadata
 - **HDR Histogram Merging**: Mathematically accurate percentile aggregation across multiple agents
 
 #### Results Directory Structure
+
 ```
 sai3-YYYYMMDD-HHMM-{test_name}/
 ├── config.yaml                    # Controller's workload config
@@ -1831,9 +1936,11 @@ sai3-YYYYMMDD-HHMM-{test_name}/
 ```
 
 #### HDR Histogram Merging (Critical Enhancement)
+
 **Problem**: Percentiles cannot be simply averaged across agents. If agent-1 has p95=278µs and agent-2 has p95=280µs, the aggregate p95 is NOT necessarily 279µs.
 
 **Solution**: Proper histogram merging via `hdrhistogram` library:
+
 - Agent serializes 9 size-bucketed histograms per operation type (GET/PUT/META)
 - Controller deserializes and merges histograms mathematically
 - Consolidated results.tsv contains accurate aggregate percentiles
@@ -1842,29 +1949,35 @@ sai3-YYYYMMDD-HHMM-{test_name}/
 **Performance Impact**: Negligible overhead (~1ms agent serialization, ~3ms controller merge for 2 agents)
 
 #### gRPC Protocol Extension
+
 Extended `WorkloadSummary` message with histogram fields:
+
 - `histogram_get`, `histogram_put`, `histogram_meta` (bytes) - V2 binary format
 - Efficient transfer: Few KB per agent
 - Full backward compatibility maintained
 
 #### Files Changed
+
 - `proto/iobench.proto` - Extended with histogram fields
 - `src/bin/agent.rs` - Histogram serialization (+109 lines)
 - `src/bin/controller.rs` - Histogram merging + consolidated TSV generation (+250 lines)
 - `src/pb/iobench.rs` - Auto-generated protobuf code
 
 #### Testing
+
 - Comprehensive test suite with 4 test scenarios
 - Verified 2-agent, 4-agent, and multi-size workloads
 - All tests passing with exact count verification
 - Histogram accuracy validated (proper merging, not averaging)
 
 **Test Scripts**:
+
 - `tests/verify_v0.6.4.sh` - Quick 2-agent verification
 - `tests/test_comprehensive_v0.6.4.sh` - Full test suite
 - `tests/configs/distributed_mixed_test.yaml` - Mixed workload config
 
 #### Migration Notes
+
 No breaking changes - fully backward compatible. Results directories are created automatically for all workload executions.
 
 ## [0.6.3] - 2025-10-10
@@ -1874,33 +1987,41 @@ No breaking changes - fully backward compatible. Results directories are created
 **Resolves 20-25% Performance Regression**: Upgraded to s3dlio v0.9.6 which disables RangeEngine by default across all backends, eliminating HEAD request overhead that caused significant slowdowns in typical workloads.
 
 #### Core Library Upgrade
+
 - **s3dlio**: v0.9.5 → **v0.9.6** (git tag)
 - **s3dlio-oplog**: v0.9.5 → **v0.9.6** (git tag)
 
 #### Performance Impact
+
 **Problem Identified**: s3dlio v0.9.5 enabled RangeEngine by default, which added a HEAD/STAT request before every GET operation to determine object size. This caused:
+
 - **20-25% throughput degradation** for typical workloads with mixed object sizes
 - **60% more requests** for small-object workloads (HEAD + GET vs just GET)
 - HEAD overhead exceeds RangeEngine benefits for objects < 64 MiB
 
 **Solution**: s3dlio v0.9.6 disables RangeEngine by default for ALL backends:
+
 - `AzureConfig::default()`: `enable_range_engine = false`
 - `GcsConfig::default()`: `enable_range_engine = false`
 - `FileSystemConfig::default()`: `enable_range_engine = false`
 - `DirectIOConfig::default()`: `enable_range_engine = false`
 
 **Performance Validation** (GCS with 64 MiB objects):
+
 - **Disabled (v0.9.6 default)**: 53.85 MiB/s GET throughput
 - **Enabled (explicit opt-in)**: 54.47 MiB/s GET throughput (+1.2%)
 - **Conclusion**: Minimal benefit when network bandwidth is the bottleneck
 
 #### Configuration Changes
+
 **Default Behavior** (v0.6.3):
+
 - RangeEngine **DISABLED** by default (via s3dlio v0.9.6)
 - Optimal for typical workloads with mixed object sizes
 - Single GET request per operation (no HEAD overhead)
 
 **Explicit Opt-In** (for large-file workloads ≥ 64 MiB):
+
 ```yaml
 range_engine:
   enabled: true
@@ -1910,7 +2031,9 @@ range_engine:
 ```
 
 #### Enhanced Logging
+
 **RangeEngine Status Visibility**: Added clear logging for all backends:
+
 ```
 INFO sai3_bench: RangeEngine DISABLED for Google Cloud Storage backend (default for optimal performance)
 INFO sai3_bench: RangeEngine ENABLED for Google Cloud Storage backend - files >= 16 MiB
@@ -1919,13 +2042,16 @@ INFO sai3_bench: RangeEngine ENABLED for Google Cloud Storage backend - files >=
 **Applies to**: File, DirectIO, S3, Azure, and GCS backends
 
 #### Testing & Validation
+
 **Comprehensive Testing**:
+
 - ✅ File backend: Confirmed disabled by default (940.83 MiB/s GET)
 - ✅ GCS with 1 MiB objects: 36.83 ops/s baseline performance
 - ✅ GCS with 64 MiB objects: 53.85 MiB/s disabled vs 54.47 MiB/s enabled
 - ✅ Network bandwidth validation: Real GCS testing over 500 Mb/s connection
 
 **Key Insight**: RangeEngine provides benefit only when:
+
 1. Objects are large (≥ 64 MiB)
 2. Network bandwidth is NOT the bottleneck (10+ Gbps)
 3. Parallel range downloads can overcome other bottlenecks
@@ -1933,11 +2059,13 @@ INFO sai3_bench: RangeEngine ENABLED for Google Cloud Storage backend - files >=
 For typical cloud storage workloads, disabled is optimal.
 
 #### Breaking Changes
+
 **None for most users**: Default behavior now faster for typical workloads.
 
 **Large-file workloads only**: Users relying on automatic RangeEngine for large files must explicitly enable it in configuration.
 
 #### Modified Files
+
 - `Cargo.toml`: Updated s3dlio dependencies to v0.9.6
 - `Cargo.lock`: Locked to s3dlio v0.9.6 commit hash
 - `src/config.rs`: Updated documentation for disabled default
@@ -1952,14 +2080,17 @@ For typical cloud storage workloads, disabled is optimal.
 **Breaking Through Performance Limits**: Upgraded to s3dlio v0.9.4 with RangeEngine support, providing 30-50% throughput improvements for large files on network backends.
 
 #### Core Library Upgrade
+
 - **s3dlio**: v0.8.22 (git main) → **v0.9.4** (stable git tag)
 - **s3dlio-oplog**: v0.8.22 (git main) → **v0.9.4** (stable git tag)
 - **Pinned to stable release**: Using git tag instead of branch for production stability
 
 #### RangeEngine Technology
+
 **What is RangeEngine?**: Introduced in s3dlio v0.9.3, RangeEngine dramatically improves download performance for large files by using concurrent byte-range requests. Instead of downloading a 128MB file sequentially, RangeEngine downloads it in parallel 64MB chunks.
 
 **Performance Gains** (from comprehensive testing):
+
 - **Google Cloud Storage**: 45.26 ops/s, 173ms mean latency
 - **Azure Blob Storage**: 8.46 ops/s, 912ms mean latency  
 - **GCS vs Azure**: **5.3x faster** with RangeEngine on GCS
@@ -1967,37 +2098,45 @@ For typical cloud storage workloads, disabled is optimal.
 - **Scaling**: 128MB files use 2 concurrent ranges, 256MB use 4 ranges
 
 **Key Findings**:
+
 - ✅ 8MB files: 1 range activation confirmed on Azure & GCS
 - ✅ 128MB files: 2 ranges activation confirmed on Azure & GCS
 - ✅ File backend: RangeEngine activates but shows limited benefit (already fast local I/O)
 - ✅ Network backends: 30-50% throughput improvement for large files
 
 #### Agent Modernization: Universal Backend Support
+
 **Problem**: Agent previously used S3-specific `s3_utils` functions, limiting it to S3 backend only.
 
 **Solution**: Complete migration to universal `ObjectStore` pattern:
+
 - **Before**: `get_object()`, `put_object_async()` from s3_utils (S3-only)
 - **After**: `store_for_uri()` with ObjectStore trait (all backends)
 - **Benefit**: Agent now supports file://, direct://, s3://, az://, gs:// URIs
 - **Automatic RangeEngine**: All network operations benefit from RangeEngine
 
 **Modified**: `src/bin/agent.rs`
+
 - Removed: S3-specific imports
 - Added: `store_for_uri()` for universal backend support
 - Refactored: `run_get()` and `run_put()` to use ObjectStore pattern
 - New helper: `list_keys_for_uri()` for multi-backend listing
 
 #### API Compatibility Fix
+
 **s3dlio v0.9.4 API Change**: `ObjectStore::get()` now returns `bytes::Bytes` instead of `Vec<u8>`.
 
 **Fix**: Added `.to_vec()` conversions in workload operations:
+
 - `src/workload.rs`: `get_object_multi_backend()` line 513
 - `src/workload.rs`: `get_object_no_log()` lines 584-585
 
 **Performance Impact**: Minimal - single memory copy, maintains compatibility.
 
 #### RangeEngine Configuration
+
 **New**: `RangeEngineConfig` structure in `src/config.rs` for future configurability:
+
 ```yaml
 # Optional in workload configs (uses s3dlio defaults if omitted)
 range_engine:
@@ -2011,12 +2150,14 @@ range_engine:
 **Current Status**: Documentary only - s3dlio uses optimal defaults automatically. Configuration exposed for advanced tuning if needed.
 
 #### TSV Output Improvement
+
 **Enhancement**: TSV benchmark results now sorted by `bucket_idx` for better readability.
 
 **Before**: Rows grouped by operation (GET, PUT, META) with mixed bucket order  
 **After**: All rows sorted by bucket_idx (0 → 8), making size-bucket analysis intuitive
 
 **Example**:
+
 ```
 operation  size_bucket      bucket_idx  mean_us  ...
 GET        1B-8KiB          1          2347.39   ...
@@ -2030,11 +2171,13 @@ PUT        64KiB-512KiB     3          360.61    ...
 ### 📊 Comprehensive Testing
 
 #### Backend Coverage
+
 - ✅ **File backend**: 11,188 ops/s, 19GB workload tested
 - ✅ **Azure Blob Storage**: 8.46 ops/s, RangeEngine confirmed (1-4 ranges)
 - ✅ **Google Cloud Storage**: 45.26 ops/s, RangeEngine confirmed (1-2 ranges)
 
 #### Quality Metrics
+
 - ✅ Unit tests: 18/18 passing
 - ✅ Integration tests: 1/1 passing
 - ✅ Distributed workload: Tested and working
@@ -2042,6 +2185,7 @@ PUT        64KiB-512KiB     3          360.61    ...
 - ✅ Zero compilation warnings
 
 ### 📚 New Documentation
+
 - **`docs/S3DLIO_V0.9.4_MIGRATION.md`**: Complete 400+ line migration guide
   - All changes explained with examples
   - Deprecation analysis
@@ -2059,6 +2203,7 @@ PUT        64KiB-512KiB     3          360.61    ...
   - Troubleshooting
 
 ### 🧪 New Test Configurations
+
 - **`tests/configs/gcs_rangeengine_test.yaml`**: GCS RangeEngine performance test
 - **`tests/configs/azure_rangeengine_test.yaml`**: Azure RangeEngine test (full)
 - **`tests/configs/azure_rangeengine_simple.yaml`**: Azure minimal example
@@ -2068,7 +2213,9 @@ PUT        64KiB-512KiB     3          360.61    ...
 ### 🔧 Technical Details
 
 #### Files Modified (13 total)
+
 **Core Code** (5 files):
+
 - `Cargo.toml` - Dependencies and version
 - `src/workload.rs` - Bytes compatibility
 - `src/bin/agent.rs` - ObjectStore migration
@@ -2076,14 +2223,18 @@ PUT        64KiB-512KiB     3          360.61    ...
 - `src/tsv_export.rs` - Output sorting
 
 **Test Configs** (6 files):
+
 - 3 modified: Fixed SizeSpec syntax
 - 3 created: New RangeEngine examples
 
 **Documentation** (3 files):
+
 - All new comprehensive guides
 
 #### Deprecation Status
+
 **Clean**: sai3-bench does NOT use any deprecated s3dlio APIs:
+
 - ✅ `get_object()` - Still supported
 - ✅ `put_object_async()` - Still supported
 - ✅ `parse_s3_uri()` - Still supported
@@ -2102,6 +2253,7 @@ PUT        64KiB-512KiB     3          360.61    ...
 **Backward Compatible**: No breaking changes to user-facing APIs.
 
 **Migration Steps**:
+
 1. Update dependency: `sai3-bench = "0.6.1"`
 2. Rebuild: `cargo build --release`
 3. Test: `sai3-bench run --config your-config.yaml`
@@ -2110,6 +2262,7 @@ PUT        64KiB-512KiB     3          360.61    ...
 **See Also**: `docs/S3DLIO_V0.9.4_MIGRATION.md` for detailed migration guide.
 
 ### 🙏 Acknowledgments
+
 - s3dlio maintainers for RangeEngine implementation
 - Testing on Google Cloud Platform and Azure
 
@@ -2120,11 +2273,13 @@ PUT        64KiB-512KiB     3          360.61    ...
 ### 🚀 Major Features
 
 #### Distributed Multi-Host Workload Execution
+
 **New Capability**: Run coordinated benchmarks across multiple agent nodes using gRPC.
 
 **Problem**: Previous versions could only run single-node benchmarks. Testing distributed systems at scale required manual coordination.
 
 **Solution**: Added complete distributed workload infrastructure:
+
 - **New gRPC RPC**: `RunWorkload` - Controller sends config to agents for execution
 - **Per-Agent Path Isolation**: Each agent operates in isolated subdirectory (e.g., `agent-1/`, `agent-2/`)
 - **Coordinated Start Time**: All agents begin workload simultaneously (configurable delay)
@@ -2134,12 +2289,14 @@ PUT        64KiB-512KiB     3          360.61    ...
   - **Local storage** (file://): Each agent prepares own isolated dataset
 
 **New Components**:
+
 - `sai3bench-ctl run` subcommand - Distributed workload orchestration
 - `RunWorkloadRequest` protobuf message - Config distribution with agent metadata
 - `WorkloadSummary` protobuf message - Per-agent execution results
 - `Config::apply_agent_prefix()` - Path isolation with storage-aware prepare handling
 
 **Usage**:
+
 ```bash
 # Start agents on multiple hosts
 sai3bench-agent --listen 0.0.0.0:7167  # On host 1
@@ -2174,6 +2331,7 @@ Total agents: 2
 ```
 
 **Controller Flags**:
+
 - `--config <file>` - YAML workload configuration file
 - `--path-template <template>` - Agent path prefix template (default: `agent-{id}/`)
 - `--agent-ids <list>` - Custom agent identifiers (default: `agent-1`, `agent-2`, ...)
@@ -2181,6 +2339,7 @@ Total agents: 2
 - `--shared-prepare` - Override auto-detected storage mode
 
 **Technical Details**:
+
 - Auto-detection based on URI scheme:
   - Shared: `s3://`, `az://`, `gs://`
   - Local: `file://`, `direct://`
@@ -2191,16 +2350,19 @@ Total agents: 2
 - Coordinated start time uses nanosecond-precision timestamp
 
 **Testing**:
+
 - `tests/distributed_local_test.sh` - Integration test with file:// backend
 - Verified with 2 agents creating isolated datasets (10 prepare objects each)
 - Confirmed path isolation (agent-1/ and agent-2/ subdirectories)
 - Validated result aggregation and throughput calculations
 
 **Documentation**:
+
 - `docs/V0.6.0_DISTRIBUTED_DESIGN.md` - Complete design document
 - `docs/USAGE.md` - Updated with distributed examples (TBD)
 
 ### 🔧 Technical Changes
+
 - Extended `proto/iobench.proto` with `RunWorkload` RPC
 - Added `shared_storage` field to `RunWorkloadRequest`
 - Implemented `Agent::run_workload()` handler with prepare phase
@@ -2209,6 +2371,7 @@ Total agents: 2
 - Fixed prepare `base_uri` rewriting for path isolation
 
 ### 📊 Performance Characteristics
+
 - Tested with 2 agents on localhost (file:// backend)
 - Each agent: ~10,000 ops/s, ~25 MB in 3 seconds
 - Combined throughput: ~20,000 ops/s
@@ -2220,32 +2383,39 @@ Total agents: 2
 ### ✨ Improvements
 
 #### Output Organization & Clarity
+
 **Problem**: Console output had duplication and missing metrics:
+
 - Latency histograms shown separately, then repeated in Results section
 - TSV export message shown twice (with and without checkmark)
 - Mean/average latency was missing from Results output (only p50/p95/p99 shown)
 
 **Solution**: Consolidated and enhanced Results output:
+
 - **Added mean latency**: Now shows `Latency mean: Xµs, p50: Xµs, p95: Xµs, p99: Xµs` for all operations
 - **Removed duplicate histogram**: Detailed histograms removed from workload output (was redundant)
 - **Removed duplicate TSV message**: Single export confirmation with checkmark emoji
 - **Cleaner flow**: Results section now shows all key metrics in one organized place
 
 #### Branding Consistency
+
 **Problem**: Some references still used legacy "io-bench" terminology instead of "sai3-bench".
 
 **Solution**: Fixed all remaining references:
+
 - Updated CLI help examples in `sai3-bench put`, `run`, and `replay` commands
 - Updated code comments in replay.rs and test files
 - Consistent branding across all user-facing messages
 
 ### 🔧 Technical Changes
+
 - Added `mean_us` field to `OpAgg` struct
 - Calculate mean from HDR histograms using `hist.mean()`
 - Display mean alongside percentiles in Results output
 - Code comment updates for branding consistency
 
 ### 📊 Example Output
+
 ```
 === Results ===
 Wall time: 3.03s
@@ -2275,26 +2445,31 @@ PUT operations:
 ### 🐛 Bug Fix
 
 #### GCS Pagination Fix (via s3dlio v0.8.22)
+
 **Problem**: Google Cloud Storage (GCS) list and delete operations were limited to 1,000 objects due to missing pagination handling in s3dlio v0.8.21 and earlier.
 
 **Solution**: Updated to s3dlio v0.8.22 which implements proper pagination:
+
 - List operations now retrieve all objects (not just first 1,000)
 - Delete operations now remove all matched objects (not just first 1,000)
 - Operations process in batches of 1,000 as per GCS API limits
 - Affects `list`, `delete`, and glob pattern operations on GCS
 
-**Impact**: 
+**Impact**:
+
 - **Critical for GCS users with >1,000 objects**: Previous versions silently failed to process beyond first page
 - **No impact on other backends**: S3 and Azure already had correct pagination
 - **Workload prepare**: Now correctly deletes all objects during cleanup phase
 - **DELETE operations**: Now remove all matched objects, not just first 1,000
 
 ### 🔧 Technical Changes
+
 - Updated `s3dlio` dependency: v0.8.21 → v0.8.22 (main branch)
 - Updated `s3dlio-oplog` dependency: v0.8.21 → v0.8.22 (main branch)
 - Using `branch = "main"` until v0.8.22 tag is created in s3dlio repo
 
 ### 📚 Recommendation
+
 - **GCS users**: Upgrade immediately if working with >1,000 objects
 - **Other users**: Optional upgrade, but recommended for latest fixes
 
@@ -2305,9 +2480,11 @@ PUT operations:
 ### 🔥 Critical Bug Fix
 
 #### DELETE Pool Corruption Fixed
+
 **Problem**: In v0.5.6 and earlier, all operations (GET, STAT, DELETE) shared a single object pool. DELETE operations removed objects during execution, causing GET/STAT to fail with 404 errors in mixed workloads.
 
 **Solution**: Implemented automatic separate object pools (MinIO Warp approach):
+
 - **Readonly pool** (`prepared-*.dat`): Used by GET and STAT operations, never deleted
 - **Deletable pool** (`deletable-*.dat`): Used by DELETE operations, consumed during test
 - **Automatic detection**: Detects mixed workloads (DELETE + GET/STAT) and creates separate pools
@@ -2315,6 +2492,7 @@ PUT operations:
 - **100% backward compatible**: Single pool created when no DELETE or no GET/STAT operations
 
 Example:
+
 ```yaml
 workload:
   - op: get
@@ -2329,6 +2507,7 @@ workload:
 ```
 
 Console output:
+
 ```
 Mixed workload: Using separate object pools (readonly for GET/STAT, deletable for DELETE)
 Prepared 100 objects
@@ -2341,6 +2520,7 @@ Prepared 100 objects
 ### ✨ New Features
 
 #### Automatic TSV Export with Smart Naming
+
 **Previous behavior**: TSV export required `--results-tsv` flag (easy to forget)
 
 **New behavior**: TSV export is automatic and mandatory with intelligent naming:
@@ -2356,6 +2536,7 @@ sai3-bench run --config test.yaml --tsv-name my-benchmark
 ```
 
 **Filename format**: `sai3bench-YYYY-MM-DD-HHMMSS-<config_basename>-results.tsv`
+
 - Ensures unique files for repeated runs
 - Easy identification of which config was used
 - Auto-ignored via `.gitignore` pattern
@@ -2363,6 +2544,7 @@ sai3-bench run --config test.yaml --tsv-name my-benchmark
 **Breaking change**: `--results-tsv` flag removed (use `--tsv-name` for custom naming)
 
 #### Comprehensive Throughput Reporting
+
 Added MiB/s throughput and per-operation ops/s to console output:
 
 ```
@@ -2392,6 +2574,7 @@ Matches TSV export `throughput_mibps` column for consistency.
 ### 📝 Configuration Examples
 
 #### New Test Configurations
+
 - `tests/configs/v057_mixed_workload_test.yaml` - Tests automatic pool separation
 - `tests/configs/v057_readonly_only_test.yaml` - Tests backward compatibility (single pool)
 - `tests/configs/v057_delete_only_test.yaml` - Tests DELETE-only workload
@@ -2400,31 +2583,37 @@ Matches TSV export `throughput_mibps` column for consistency.
 ### 🔧 Technical Changes
 
 **Modified Files**:
+
 - `src/workload.rs`: Pool separation logic, pattern rewriting, prepare enhancement
 - `src/main.rs`: TSV auto-export, `--tsv-name` flag, throughput reporting
 - `.gitignore`: Added `sai3bench-*.tsv` pattern
 - `Cargo.toml`: Version 0.5.6 → 0.5.7
 
 **New Functions**:
+
 - `detect_pool_requirements()`: Analyzes workload for pool needs
 - `rewrite_pattern_for_pool()`: Rewrites patterns for correct pool routing
 
 ### 📚 Documentation
+
 - Added `docs/V0.5.7_RELEASE_SUMMARY.md` (comprehensive release notes)
 - Updated `docs/CHANGELOG.md` (this file)
 - Updated `README.md` (brief v0.5.7 mention)
 
 ### ⚠️ Breaking Changes
+
 - Removed `--results-tsv` flag (use `--tsv-name` for custom naming, or rely on automatic naming)
 
 ### 🎯 Migration Guide
 
 **From v0.5.6**:
+
 1. Remove `--results-tsv` from scripts
 2. Optionally add `--tsv-name <basename>` for custom naming
 3. Mixed workloads with DELETE now work correctly (no config changes needed!)
 
 **Backward Compatibility**:
+
 - All YAML configs work unchanged
 - Readonly-only workloads use single pool (no overhead)
 - DELETE-only workloads use single pool (no overhead)
@@ -2437,9 +2626,11 @@ Matches TSV export `throughput_mibps` column for consistency.
 ### � New Features
 
 #### Configurable Post-Prepare Delay
+
 **Problem**: Cloud storage backends (GCS, S3, Azure) have eventual consistency. Objects created during the prepare phase might not be immediately readable, causing 404 errors when the workload starts.
 
 **Solution**: Added YAML-configurable delay between prepare and workload phases:
+
 ```yaml
 prepare:
   post_prepare_delay: 5  # Wait 5 seconds after creating objects
@@ -2449,14 +2640,17 @@ prepare:
 ```
 
 **Recommendations**:
+
 - Local storage (`file://`, `direct://`): 0 seconds (default)
 - Cloud storage (S3, GCS, Azure): 2-5 seconds
 - Large object counts (>1000): 5-10 seconds
 
 #### Manual Phase Execution
+
 Added CLI flags for manual control of benchmark phases:
 
 **`--verify`**: Verify prepared objects exist and are accessible
+
 ```bash
 # Step 1: Prepare objects
 sai3-bench run --config test.yaml --prepare-only
@@ -2472,6 +2666,7 @@ sai3-bench run --config test.yaml --skip-prepare
 ```
 
 **`--skip-prepare`**: Skip prepare phase, assume objects already exist
+
 ```bash
 # First run: prepare and run
 sai3-bench run --config test.yaml --no-cleanup
@@ -2481,6 +2676,7 @@ sai3-bench run --config test.yaml --skip-prepare
 ```
 
 **Verification Output**:
+
 ```
 === Verification Phase ===
 Verifying objects at gs://bucket/data/
@@ -2490,24 +2686,28 @@ Verifying objects at gs://bucket/data/
 ### 🐛 Bug Fixes
 
 #### Cloud Storage Eventual Consistency Protection
+
 **Impact**: Benchmarks on cloud storage failed with "404 Not Found" errors immediately after prepare completed.
 
 **Root Cause**: When prepare created objects very quickly (>300 objects/sec), cloud storage eventual consistency meant objects weren't immediately readable in all zones.
 
 **Example Error**:
+
 ```
 Error: Failed to get object from URI: gs://bucket/prepared-00000117.dat
 Caused by:
     GCS GET failed: HTTP status client error (404 Not Found)
 ```
 
-**Fix**: 
+**Fix**:
+
 - Added `post_prepare_delay` field to `PrepareConfig`
 - Delay only applies if new objects were created (not if they already existed)
 - Users have full control via YAML configuration
 - Manual workflow supported via `--verify` flag
 
-**Files Changed**: 
+**Files Changed**:
+
 - `src/config.rs` - Added `post_prepare_delay` field
 - `src/main.rs` - Added `--verify` and `--skip-prepare` flags, configurable delay
 - `src/workload.rs` - Added `verify_prepared_objects()` function
@@ -2521,15 +2721,18 @@ Caused by:
 ### 🔄 Migration Guide
 
 **Before (v0.5.5)**:
+
 ```yaml
 prepare:
   ensure_objects:
     - base_uri: "gs://bucket/data/"
       count: 200
 ```
+
 Objects created, workload started immediately → 404 errors on cloud storage
 
 **After (v0.5.6)**:
+
 ```yaml
 prepare:
   post_prepare_delay: 3  # Add this line for cloud storage
@@ -2537,6 +2740,7 @@ prepare:
     - base_uri: "gs://bucket/data/"
       count: 200
 ```
+
 Objects created, waits 3 seconds, workload starts → no errors
 
 **No changes required for local storage** (`file://`, `direct://`) - default delay is 0.
@@ -2550,15 +2754,18 @@ This release fixes **critical bugs** that prevented DELETE and STAT operations f
 ### 🐛 Critical Bug Fixes
 
 #### Pattern Resolution for DELETE and STAT Operations
+
 **Problem**: DELETE and STAT operations were completely broken when using glob patterns. They attempted to delete/stat the pattern string itself (e.g., `prepared-*.dat`) instead of resolving it to actual object URIs.
 
-**Impact**: 
+**Impact**:
+
 - DELETE operations always failed with "No such object" errors
 - STAT operations always failed with "No such object" errors
 - Mixed workloads (similar to MinIO Warp benchmarks) were impossible to run
 - Cloud storage benchmarking was severely limited
 
 **Fix**: Extended pre-resolution logic to handle DELETE and STAT operations:
+
 - All three operations (GET, DELETE, STAT) now pre-resolve glob patterns at startup
 - Workers randomly sample from pre-resolved URI lists during execution
 - Added `UriSource` tracking for each operation type
@@ -2567,6 +2774,7 @@ This release fixes **critical bugs** that prevented DELETE and STAT operations f
 **Files Changed**: `src/workload.rs` (lines 903-927, 563-650, 810-850)
 
 **Example**:
+
 ```yaml
 workload:
   - op: delete
@@ -2578,19 +2786,23 @@ See: `docs/PATTERN_RESOLUTION_FIX.md` for complete details
 ### ⚡ Performance Improvements
 
 #### Parallel Prepare Stage (30x faster)
+
 **Problem**: Prepare stage created objects sequentially (one at a time), making cloud storage preparation extremely slow.
 
 **Impact Before**:
+
 - 20,000 objects took ~35-50 seconds
 - Throughput: ~400-600 objects/sec
 - Cloud benchmarking required long waits before tests could begin
 
 **Fix**: Implemented parallel execution with 32 workers using semaphore-controlled concurrency:
+
 - Uses same pattern as main workload execution
 - Pre-generates URIs and sizes, then executes in parallel with `FuturesUnordered`
 - Semaphore limits concurrent tasks to prevent resource exhaustion
 
 **Impact After**:
+
 - Small objects (100 KiB): **13,179-18,677 objects/sec** (30x improvement)
 - Large objects (1 MiB): **788 objects/sec at 788 MB/sec throughput**
 - 20,000 objects (1 MiB): **25.4 seconds** vs 50+ seconds
@@ -2598,14 +2810,17 @@ See: `docs/PATTERN_RESOLUTION_FIX.md` for complete details
 **Files Changed**: `src/workload.rs` (lines 135-197)
 
 #### Parallel Cleanup Stage (30x faster)
+
 **Problem**: Cleanup stage deleted objects sequentially (one at a time), causing slow cleanup after benchmarks.
 
 **Fix**: Applied same parallel execution pattern as prepare stage:
+
 - 32 parallel workers with semaphore control
 - Graceful error handling (logs warnings but continues on single delete failures)
 - Best-effort deletion approach
 
 **Impact**:
+
 - 2,000 objects: **< 0.2 seconds** (was ~3-5 seconds)
 - 5,000 objects: **< 0.3 seconds** (was ~7-12 seconds)
 - Throughput: **>10,000 objects/sec** for small objects
@@ -2617,9 +2832,11 @@ See: `docs/PREPARE_PERFORMANCE_FIX.md` for complete benchmarking results
 ### 📝 Configuration Syntax Updates
 
 #### Glob Patterns (Not Brace Expansions)
+
 sai3-bench uses **glob patterns with wildcards**, not bash-style brace expansions:
 
 **Correct** ✅:
+
 ```yaml
 workload:
   - op: get
@@ -2627,6 +2844,7 @@ workload:
 ```
 
 **Incorrect** ❌:
+
 ```yaml
 workload:
   - op: get
@@ -2634,11 +2852,14 @@ workload:
 ```
 
 #### Object Naming in Prepare Stage
+
 Prepare stage creates objects with this naming pattern:
+
 - Format: `prepared-NNNNNNNN.dat` (8-digit zero-padded with `.dat` extension)
 - Example: `prepared-00000000.dat`, `prepared-00000001.dat`, etc.
 
 Match your workload patterns accordingly:
+
 ```yaml
 prepare:
   ensure_objects:
@@ -2653,6 +2874,7 @@ workload:
 ### 📚 Documentation Improvements
 
 #### New Documentation
+
 - `docs/PATTERN_RESOLUTION_FIX.md` - Complete guide to pattern resolution fix
 - `docs/PREPARE_PERFORMANCE_FIX.md` - Performance improvements with benchmarks (updated for cleanup)
 - `examples/README.md` - Comprehensive guide to all operation types
@@ -2660,12 +2882,14 @@ workload:
 - `examples/all-operations.yaml` - Demonstrates all 5 operation types
 
 #### Updated Examples
+
 - Moved YAML examples from `docs/` to `examples/` directory
 - All examples now use correct glob pattern syntax
 - Added detailed comments explaining each operation type
 - Included weight balancing best practices
 
 ### 🧪 Testing
+
 - Added regression tests in `tests/configs/prepare-performance/`
 - Added regression tests in `tests/configs/cleanup-performance/`
 - Added pattern resolution test: `tests/configs/pattern-resolution-test.yaml`
@@ -2674,16 +2898,19 @@ workload:
 ### 🔧 Technical Details
 
 **Concurrency Model**:
+
 - Prepare: 32 parallel workers (configurable in future release)
 - Workload: 32 parallel workers (configurable per-operation)
 - Cleanup: 32 parallel workers (matches prepare/workload)
 
 **Pattern Resolution**:
+
 - GET, DELETE, STAT: Pre-resolve patterns → sample random URIs during execution
 - PUT: Generate unique names dynamically (no pre-resolution needed)
 - LIST: Operates on directories (no pre-resolution needed)
 
 **Error Handling**:
+
 - Prepare: Fails immediately on any PUT error (strict)
 - Cleanup: Best-effort deletion (logs warnings, continues on errors)
 - Workload: Propagates errors to maintain benchmark integrity
@@ -2693,12 +2920,14 @@ workload:
 **Update your configs** to use glob patterns:
 
 Old (broken):
+
 ```yaml
 - op: delete
   path: "data/obj_{00000..19999}"
 ```
 
 New (working):
+
 ```yaml
 - op: delete
   path: "data/prepared-*.dat"
@@ -2711,6 +2940,7 @@ New (working):
 ## [0.5.4] - 2025-10-04
 
 ### 💥 BREAKING CHANGES
+
 - **Project Renamed**: `io-bench` → `sai3-bench` (final name reflecting S3/Azure/I3 unified benchmarking)
 - **Binary Names Changed**:
   - `io-bench` → `sai3-bench`
@@ -2720,12 +2950,15 @@ New (working):
 - **Module/Crate Name**: `io_bench` → `sai3_bench` in Rust code
 
 ### 📝 Documentation Updates
+
 - Updated all documentation to reflect new project name
 - Updated all command examples with new binary names
 - Updated test configuration file paths (s3bench-test → sai3bench-test)
 
 ### ℹ️ Migration Notes
+
 If upgrading from v0.5.3 (io-bench):
+
 1. Update any scripts: `io-bench` → `sai3-bench`
 2. Update agent/controller scripts: `iobench-*` → `sai3bench-*`
 3. Rebuild: `cargo build --release`
@@ -2736,21 +2969,25 @@ If upgrading from v0.5.3 (io-bench):
 ## [0.5.3] - 2025-10-04
 
 ### 🎯 Realistic Size Distributions & Advanced Configurability
+
 Surpasses MinIO Warp with realistic object size modeling and fine-grained concurrency control.
 
 ### ✨ New Features
 
 #### Object Size Distributions (`src/size_generator.rs`)
+
 **Problem**: Warp's "random" distribution is unrealistic. Real-world storage shows lognormal patterns (many small files, few large ones).
 
 **Solution**: Three distribution types for PUT operations and prepare steps:
 
 1. **Fixed Size** (backward compatible):
+
    ```yaml
    object_size: 1048576  # Exactly 1 MB
    ```
 
 2. **Uniform Distribution** (evenly distributed):
+
    ```yaml
    size_distribution:
      type: uniform
@@ -2759,6 +2996,7 @@ Surpasses MinIO Warp with realistic object size modeling and fine-grained concur
    ```
 
 3. **Lognormal Distribution** (realistic - recommended):
+
    ```yaml
    size_distribution:
      type: lognormal
@@ -2769,12 +3007,14 @@ Surpasses MinIO Warp with realistic object size modeling and fine-grained concur
    ```
 
 **Implementation**:
+
 - New `size_generator` module with `SizeSpec` enum and `SizeGenerator` struct
 - Uses `rand_distr` crate for statistical distributions
 - Rejection sampling for lognormal to respect min/max bounds
 - Comprehensive unit tests for all distribution types
 
 #### Per-Operation Concurrency
+
 Fine-grained worker pool control per operation type:
 
 ```yaml
@@ -2794,16 +3034,19 @@ workload:
 ```
 
 **Use cases**:
+
 - Model read-heavy vs write-heavy workloads
 - Simulate slow backend write performance
 - Test different concurrency levels per operation type
 
 **Implementation**:
+
 - Per-operation semaphores (replaces single global semaphore)
 - Optional `concurrency` field in `WeightedOp`
 - Logs custom concurrency settings for visibility
 
 #### Deduplication and Compression Control
+
 Leverage `s3dlio`'s controlled data generation to test storage system efficiency:
 
 ```yaml
@@ -2829,6 +3072,7 @@ workload:
 ```
 
 **Parameters**:
+
 - `dedup_factor`: Controls block uniqueness
   - `1` = all unique blocks (no deduplication)
   - `2` = 1/2 unique blocks (50% dedup ratio)
@@ -2841,12 +3085,14 @@ workload:
   - Higher values = more compressible
 
 **Use cases**:
+
 - Test storage deduplication engines (NetApp, EMC, etc.)
 - Validate compression effectiveness (ZFS, Btrfs)
 - Measure real-world storage efficiency with realistic data patterns
 - Benchmark cloud storage with various data types (logs, backups, media)
 
 **Implementation**:
+
 - Uses `s3dlio::generate_controlled_data(size, dedup, compress)` API
 - Block-based generation (BLK_SIZE = 512 bytes) with Bresenham distribution
 - Defaults both to `1` for backward compatibility
@@ -2855,14 +3101,18 @@ workload:
 ### 📚 Enhanced Documentation
 
 #### Prepare Profiles
+
 Documented realistic multi-tier preparation patterns in `docs/CONFIG.sample.yaml`:
+
 - Small files (metadata, configs) with lognormal distribution
 - Medium files (documents, images) with lognormal distribution
 - Large files (videos, backups) with uniform distribution
 - Complete production-clone example with 3 tiers
 
 #### Advanced Remapping Examples
+
 Added **N↔N (many-to-many)** remapping example to README:
+
 ```yaml
 # Map 3 source buckets → 2 destination buckets
 remap:
@@ -2875,7 +3125,9 @@ remap:
 ```
 
 #### Competitive Advantage Table
+
 Added comprehensive comparison vs Warp in README showing superiority in:
+
 - Size distributions (Uniform + Lognormal vs Random only)
 - Concurrency control (Per-operation vs Global only)
 - Backend support (5 backends vs S3 only)
@@ -2883,12 +3135,14 @@ Added comprehensive comparison vs Warp in README showing superiority in:
 - Memory usage (Constant vs High)
 
 ### 🔧 Improvements
+
 - **Config backward compatibility**: Old `object_size` and `min_size`/`max_size` syntax still works
 - **Migration helpers**: `get_size_spec()` method converts legacy syntax to new `SizeSpec`
 - **Helper methods**: `SizeGenerator::description()` for logging, `expected_mean()` for validation
 - **Human-readable formatting**: `human_bytes()` function for size display
 
 ### 🧪 Testing
+
 - **Unit tests**: 5 tests in `size_generator::tests` (fixed, uniform, lognormal, invalid specs, human_bytes)
 - **Integration tests**:
   - `tests/configs/size_distributions_test.yaml` - Mixed lognormal, uniform, and fixed sizes
@@ -2896,6 +3150,7 @@ Added comprehensive comparison vs Warp in README showing superiority in:
 - **Performance validation**: No regression (3649-5587 ops/s depending on config)
 
 ### 📊 Test Results
+
 ```
 size_distributions_test.yaml:
 - Total ops: 18457 in 5.06s (3649 ops/s)
@@ -2910,7 +3165,9 @@ per_op_concurrency_test.yaml:
 ```
 
 ### 🏆 Competitive Position
+
 With v0.5.3, **sai3-bench surpasses MinIO Warp** in:
+
 1. **Realistic workload modeling** - Lognormal distributions match real-world storage patterns
 2. **Configurability** - Per-operation concurrency for advanced scenarios
 3. **Backend support** - 5 protocols vs S3-only
@@ -2920,9 +3177,11 @@ With v0.5.3, **sai3-bench surpasses MinIO Warp** in:
 ## [0.5.2] - 2025-10-04
 
 ### 📚 Documentation Cleanup & Polish
+
 Streamlined documentation for clarity and removed obsolete files.
 
 ### 🗑️ Removed Files
+
 - **Old release notes**: Removed 4 version-specific release note files (v0.3.0, v0.3.2, v0.4.0, v0.4.3)
   - All release information consolidated into CHANGELOG.md
 - **Completed design docs**: Removed 4 completed implementation documents
@@ -2932,6 +3191,7 @@ Streamlined documentation for clarity and removed obsolete files.
   - DEVELOPMENT_NOTES.md (old v0.3.0 technical notes)
 
 ### ✨ Improvements
+
 - **README.md**: Updated to v0.5.2 with comprehensive badges and modern examples
   - Added version, build, tests, license, and Rust version badges
   - Updated Quick Start with TSV export and advanced remapping examples
@@ -2942,7 +3202,9 @@ Streamlined documentation for clarity and removed obsolete files.
 - **Kept recent work**: Preserved v0.5.x implementation summaries and reference materials
 
 ### 📂 Documentation Structure (40% reduction)
+
 From 20 files to 12 essential documents:
+
 - 4 user guides (USAGE, AZURE_SETUP, CONFIG samples)
 - 4 reference docs (CHANGELOG, INTEGRATION_CONTEXT, Warp parity docs)
 - 4 recent implementation records (v0.5.0/v0.5.1 summaries, POLARWARP analysis)
@@ -2950,11 +3212,13 @@ From 20 files to 12 essential documents:
 ## [0.5.1] - 2025-10-04
 
 ### 🎯 Machine-Readable Results & Enhanced Metrics
+
 Phase 2.5 of Warp Parity: Add TSV export for automated analysis and complete size-bucketed histogram collection.
 
 ### ✨ New Features
 
 #### TSV Export (`src/tsv_export.rs`)
+
 - **Machine-readable results**: Export benchmark data in tab-separated format for automated analysis
 - **CLI flag**: `--results-tsv <path>` for run command (creates `<path>-results.tsv`)
 - **Format**: 13-column TSV with operation, size_bucket, bucket_idx, mean_us, p50_us, p90_us, p95_us, p99_us, max_us, avg_bytes, ops_per_sec, throughput_mibps, count
@@ -2963,6 +3227,7 @@ Phase 2.5 of Warp Parity: Add TSV export for automated analysis and complete siz
 - **Automated parsing**: Compatible with pandas, polars, and standard TSV tools
 
 #### Enhanced Metrics Collection
+
 - **Shared metrics module** (`src/metrics.rs`): Unified histogram infrastructure
 - **Mean (average) latency**: Added alongside median (p50) for better statistical analysis
 - **Size-bucketed histograms**: Now consistent across all execution modes (CLI commands and workload runs)
@@ -2971,19 +3236,23 @@ Phase 2.5 of Warp Parity: Add TSV export for automated analysis and complete siz
 - **Actual byte tracking**: SizeBins.by_bucket provides real ops/bytes per size bucket
 
 ### 🐛 Fixes
+
 - **Workload histogram consistency**: Fixed missing size-bucketed collection in `workload::run()`
 - **Code deduplication**: Removed 90+ lines of duplicate histogram code from main.rs
 
 ### 🔧 Changes
+
 - **Default concurrency**: Increased from 20 to 32 workers
 - **Cargo.toml**: Version bump to 0.5.1, added chrono dependency
 
 ### 📚 Documentation
+
 - **POLARWARP_ANALYSIS.md**: Reference analysis of polarWarp TSV format
 - **V0.5.1_PLAN.md**: Complete implementation plan for TSV export
 - **V0.5.1_PROGRESS.md**: Progress tracking and validation results
 
 ### ✅ Validation
+
 - **Multi-size test**: 4 size ranges (1KB, 128KB, 2MB, 16MB) showing 65x latency scaling
 - **Mean vs median**: Demonstrated mean significantly higher than p50 for small objects (up to 934% difference)
 - **TSV parsing**: Verified machine-readability with 13 properly formatted columns
@@ -2992,16 +3261,19 @@ Phase 2.5 of Warp Parity: Add TSV export for automated analysis and complete siz
 ## [0.5.0] - 2025-10-04
 
 ### 🎯 Warp Parity Phase 2: Advanced Replay Remapping
+
 Complete warp-replay compatibility with flexible URI remapping for multi-target testing and migration.
 
 ### ✨ New Features
 
 #### Remap Engine (`src/remap.rs`)
+
 Advanced URI remapping system supporting multiple mapping strategies:
 
 1. **Simple 1→1 Remapping**
    - Direct bucket/prefix replacement
    - Use case: Migrate workloads between environments
+
    ```yaml
    rules:
      - match: {bucket: "prod"}
@@ -3012,6 +3284,7 @@ Advanced URI remapping system supporting multiple mapping strategies:
    - Distribute operations across multiple targets
    - Three strategies: `round_robin`, `random`, `sticky_key`
    - Use case: Load testing, multi-region replication, chaos engineering
+
    ```yaml
    rules:
      - match: {bucket: "source"}
@@ -3026,6 +3299,7 @@ Advanced URI remapping system supporting multiple mapping strategies:
 3. **N→1 Consolidation**
    - Merge multiple sources to single target
    - Use case: Data consolidation, backup aggregation
+
    ```yaml
    rules:
      - match_any:
@@ -3037,6 +3311,7 @@ Advanced URI remapping system supporting multiple mapping strategies:
 4. **N↔N Regex-based Remapping**
    - Pattern matching with capture groups
    - Use case: Complex transformations, dynamic routing
+
    ```yaml
    rules:
      - regex: "^s3://prod-([^/]+)/(.*)$"
@@ -3046,16 +3321,19 @@ Advanced URI remapping system supporting multiple mapping strategies:
 #### Fanout Strategies
 
 **round_robin**: Sequential distribution for even load balancing
+
 - Operation 1 → Target A
 - Operation 2 → Target B
 - Operation 3 → Target C
 - Operation 4 → Target A (cycles)
 
 **random**: Random selection for chaos testing
+
 - Each operation randomly assigned to a target
 - Useful for testing eventual consistency
 
 **sticky_key**: Consistent hashing for session affinity
+
 - Same object always goes to same target
 - Deterministic based on object key hash
 - Maintains data locality across runs
@@ -3063,6 +3341,7 @@ Advanced URI remapping system supporting multiple mapping strategies:
 ### 🔧 CLI Enhancements
 
 #### New Replay Flag
+
 ```bash
 # Basic remapping
 sai3-bench replay --op-log production.tsv.zst --remap remap.yaml
@@ -3077,12 +3356,14 @@ sai3-bench replay --op-log prod.tsv.zst --remap remap_fanout.yaml
 ### 🏗️ Architecture
 
 #### Core Components
+
 - **`RemapConfig`**: YAML-driven configuration with ordered rules
 - **`RemapRule`**: Enum supporting 4 rule types (Simple, Fanout, Consolidate, Regex)
 - **`RemapEngine`**: Rule execution engine with state management
 - **`ParsedUri`**: S3/file URI parser extracting scheme/bucket/prefix/key
 
 #### Integration
+
 - Extended `ReplayConfig` with optional `remap_config` field
 - Remap applied before each operation execution in replay loop
 - Zero overhead when remapping not used
@@ -3090,6 +3371,7 @@ sai3-bench replay --op-log prod.tsv.zst --remap remap_fanout.yaml
 ### 📝 Configuration Schema
 
 #### MatchSpec (for matching source URIs)
+
 ```yaml
 match:
   host: "optional-host"      # Match specific host (rarely used)
@@ -3098,6 +3380,7 @@ match:
 ```
 
 #### TargetSpec (for destination URIs)
+
 ```yaml
 map_to:
   bucket: "dest-bucket"
@@ -3105,6 +3388,7 @@ map_to:
 ```
 
 #### Path Preservation Logic
+
 - **Empty target prefix**: Preserve original path structure
   - `s3://src/data/file.dat` → `s3://dest/data/file.dat`
 - **Non-empty target prefix**: Replace original prefix
@@ -3113,6 +3397,7 @@ map_to:
 ### ✅ Testing & Validation
 
 #### Unit Tests (10 tests, all passing)
+
 - **`test_parse_uri_s3`**: S3 URI parsing (`s3://bucket/prefix/key`)
 - **`test_parse_uri_file`**: File URI parsing (`file:///path/to/file`)
 - **`test_simple_remap`**: 1→1 bucket/prefix replacement
@@ -3122,6 +3407,7 @@ map_to:
 - Existing replay tests continue to pass
 
 #### Build Verification
+
 ```bash
 cargo test --lib
 test result: ok. 10 passed; 0 failed
@@ -3133,17 +3419,20 @@ Finished `release` profile [optimized] in 13.20s
 ### 🔨 Implementation Details
 
 #### State Management
+
 - **Round-robin**: `HashMap<rule_idx, counter>` per rule
 - **Sticky-key**: `HashMap<key, target_idx>` for consistent hashing
 - Thread-safe with `Arc<Mutex<>>`
 - Per-rule state prevents interference
 
 #### Ordered Rule Matching
+
 - Rules evaluated sequentially; first match wins
 - Allows specific rules before general rules
 - Override patterns via ordering
 
 #### URI Parsing
+
 ```rust
 // S3 URI structure
 s3://bucket/prefix/path/to/key.dat
@@ -3156,11 +3445,13 @@ s3://bucket/prefix/path/to/key.dat
 ### 📦 Files Modified
 
 **New Files**:
+
 - `src/remap.rs` (488 lines): Complete remap engine
 - `tests/configs/remap_examples.yaml`: Comprehensive configuration examples
 - `tests/configs/remap_fanout_test.yaml`: Simple fanout test
 
 **Modified Files**:
+
 - `Cargo.toml`: Version 0.4.3 → 0.5.0
 - `src/lib.rs`: Added `pub mod remap;`
 - `src/replay_streaming.rs`: Extended `ReplayConfig`, integrated remap engine
@@ -3170,6 +3461,7 @@ s3://bucket/prefix/path/to/key.dat
 ### 🎓 Example Configurations
 
 #### Complete Multi-Rule Configuration
+
 ```yaml
 rules:
   # Rule 1: Simple bucket rename
@@ -3199,25 +3491,31 @@ rules:
 ### 🐛 Bug Fixes
 
 #### Path Structure Preservation
+
 **Fixed**: URI remapping now correctly handles:
+
 - Empty target prefix → preserve original path structure
 - Non-empty target prefix → replace prefix, keep key
 - Prevents both "lost path" and "double path" issues
 
 #### S3 URI Parsing
+
 **Fixed**: S3 URIs correctly parsed without "host" component
+
 - `s3://bucket/path` → bucket="bucket", not host="bucket"
 - Consistent with S3 URL structure
 
 ### 🚀 Roadmap
 
 #### v0.5.1 (Phase 3): UX Polish
+
 - Enhanced documentation with examples
 - Variable substitution in configs
 - Improved CLI help text
 - Warp-compatible defaults
 
 #### v0.5.2 (Phase 4): Testing & Validation
+
 - Integration tests with real backends
 - Performance benchmarking
 - Warp comparison validation
@@ -3228,11 +3526,13 @@ rules:
 ## [0.4.3] - 2025-10-04
 
 ### 🎯 Warp Parity Phase 1: Prepare/Pre-population
+
 MinIO Warp compatibility features enabling near-identical test workflows between sai3-bench and Warp.
 
 ### ✨ New Features
 
 #### Prepare Step (Pre-population)
+
 - **ensure_objects**: Guarantee test objects exist before timed workload execution
   - Configurable count, size range (min_size/max_size), and fill pattern (zero/random)
   - Skips creation if sufficient objects already exist (idempotent)
@@ -3245,9 +3545,11 @@ MinIO Warp compatibility features enabling near-identical test workflows between
   - CLI override via `--no-cleanup` flag
 
 #### CLI Enhancements
+
 - `--prepare-only`: Execute prepare step then exit (for pre-populating test data)
 - `--no-cleanup`: Override config cleanup setting (keep all objects)
 - Examples:
+
   ```bash
   # Prepare objects once, run tests multiple times
   sai3-bench run --config mixed.yaml --prepare-only
@@ -3261,6 +3563,7 @@ MinIO Warp compatibility features enabling near-identical test workflows between
 ### 🔧 Configuration Schema Extensions
 
 #### New PrepareConfig Structure
+
 ```yaml
 prepare:
   ensure_objects:
@@ -3273,6 +3576,7 @@ prepare:
 ```
 
 ### 🎯 Warp Compatibility Examples
+
 ```yaml
 # Warp-style mixed workload
 duration: 300s      # 5 minutes
@@ -3294,6 +3598,7 @@ workload:
 ### � Bug Fixes & Improvements
 
 #### Progress Bar Consistency
+
 - **Unified Visual Style**: All progress bars now use consistent block characters (`████`)
   - Prepare phase: `[████████████] 1000/1000 objects`
   - Test phase: `[████████████] 10/10s`
@@ -3301,12 +3606,14 @@ workload:
   - Previously: Test phase used ugly `###>---` style
 
 #### s3dlio Native Methods
+
 - **STAT Operations**: Now use s3dlio's native `stat()` method (v0.8.8+)
   - Previously: Used workaround with `get()` to measure size
   - Now: Proper HEAD-like metadata operations
   - Benefit: More efficient, less data transfer, correct semantics
   
 #### Pattern Matching Clarification
+
 - **Documented Approach**: Added comments explaining sai3-bench's URI pattern matching
   - s3dlio's ObjectStore doesn't provide native glob support in `list()`
   - sai3-bench implements list-and-filter for `*` patterns at application level
@@ -3314,6 +3621,7 @@ workload:
   - For local file operations, s3dlio has `generic_upload_files()` with glob crate
 
 ### �🔨 Implementation Details
+
 - **src/config.rs**: Added `PrepareConfig`, `EnsureSpec`, `FillPattern` types
   - `default_concurrency()` changed from 16 → 20 (match Warp)
   - All new fields are optional (backward compatible)
@@ -3332,6 +3640,7 @@ workload:
   - Conditional phase execution with clear console output
 
 ### ✅ Validation & Testing
+
 - **Performance**: 500+ objects/sec prepare speed (1 MiB objects on local file backend)
 - **Idempotency**: Repeated prepare-only calls skip existing objects
 - **Cleanup**: Verified only prepared-*.dat removed, test-* preserved
@@ -3341,11 +3650,13 @@ workload:
 - **Example Configs**: `tests/configs/warp_parity_mixed.yaml`, `tests/configs/warp_cleanup_test.yaml`
 
 ### 📦 Dependencies
+
 - **rand**: Updated API usage (deprecated `thread_rng()` → `rng()`, `gen_range()` → `random_range()`)
 - **indicatif**: Progress bars for prepare and cleanup phases
 - **s3dlio v0.8.8+**: Leveraging native `stat()` method
 
 ### 🚀 Roadmap
+
 - **v0.5.0**: Phase 2 - Advanced replay remapping (1→N, N→1, N↔N)
 - **v0.5.1**: Phase 3 - UX polish and documentation
 - **v0.5.2**: Phase 4 - Comprehensive testing and Warp comparison validation
@@ -3355,6 +3666,7 @@ workload:
 ## [0.4.2] - 2025-10-03
 
 ### 🌐 Google Cloud Storage Backend Support
+
 - **New Backend**: Added comprehensive GCS support as the 5th storage backend
   - **URI Schemes**: Both `gs://bucket/prefix/` and `gcs://bucket/prefix/` supported
   - **Authentication**: Google Application Default Credentials (ADC) integration
@@ -3365,6 +3677,7 @@ workload:
   - **Performance**: 9-11 MB/s for large objects (5MB), ~400-600ms latency for small objects
 
 ### 🔧 Implementation Details
+
 - **src/workload.rs**: Added `Gcs` variant to `BackendType` enum
   - URI scheme detection for `gs://` and `gcs://`
   - Backend name: "Google Cloud Storage"
@@ -3374,6 +3687,7 @@ workload:
   - Updated error messages to include `gs://`
 
 ### ✅ Testing & Validation
+
 - **8 Comprehensive Integration Tests** (tests/gcs_tests.rs)
   - Backend detection and ObjectStore creation
   - PUT/GET/DELETE cycle with content verification
@@ -3394,9 +3708,11 @@ workload:
   - Environment variable support for `GCS_BUCKET`
 
 ### 📦 Dependencies
+
 - **tokio**: Added to dev-dependencies with "full" features for async tests
 
 ### 📝 Documentation
+
 - **README.md**: Updated from "4 storage backends" to "5 storage backends"
 - **GCS_INTEGRATION_COMPLETE.md**: Comprehensive integration documentation
   - Authentication setup instructions
@@ -3404,7 +3720,9 @@ workload:
   - Test results and verification checklist
 
 ### 🎯 Real-World Testing
+
 Successfully tested against Google Cloud Storage:
+
 - Bucket: gs://signal65-russ-b1/
 - Project: signal65-testing
 - All 8 Rust integration tests passed in 14.76s
@@ -3413,6 +3731,7 @@ Successfully tested against Google Cloud Storage:
 ## [0.4.1] - 2025-10-03
 
 ### 🚀 Major Updates
+
 - **Streaming Op-log Replay**: Memory-efficient replay using s3dlio-oplog streaming reader
   - **Constant Memory Usage**: ~1.5 MB regardless of op-log size (vs. unbounded Vec-based approach)
   - **Background Decompression**: Parallel zstd decompression in dedicated thread
@@ -3422,6 +3741,7 @@ Successfully tested against Google Cloud Storage:
   - **Shared Types**: Uses `s3dlio_oplog::{OpLogEntry, OpType, OpLogStreamReader}` for consistency
 
 ### 🔧 Technical Improvements
+
 - **Non-logging Replay Operations**: Added `*_no_log()` variants in workload.rs
   - Prevents circular logging during replay (replay operations are not logged)
   - Eliminates "sending on a closed channel" errors when global logger is finalized
@@ -3433,6 +3753,7 @@ Successfully tested against Google Cloud Storage:
   - Updated `src/main.rs` to use streaming replay by default
 
 ### 📦 Dependencies
+
 - **s3dlio**: Updated from tag v0.8.12 to branch "main" (v0.8.19+)
   - Includes 10+ releases with bug fixes and performance improvements
   - GCS backend support (gs:// and gcs:// URIs) - ready for future integration
@@ -3441,6 +3762,7 @@ Successfully tested against Google Cloud Storage:
   - Provides `OpLogStreamReader` for memory-efficient iteration
 
 ### ✅ Testing
+
 - **Comprehensive Integration Tests**: 6 tests validating streaming replay
   - Round-trip test: s3dlio generates op-log → sai3-bench replays
   - Memory efficiency test: 100+ operations with constant memory
@@ -3453,16 +3775,20 @@ Successfully tested against Google Cloud Storage:
   - Other tests read and replay existing op-logs (no logging)
 
 ### 📝 Documentation
+
 - **docs/S3DLIO_UPDATE_PLAN.md**: Comprehensive update strategy for s3dlio v0.8.19+
 - **STREAMING_REPLAY_COMPLETE.md**: Implementation summary and validation results
 
 ### 🔮 Future Work
+
 - GCS backend integration (Phase 2 - ready in s3dlio)
 - Advanced URI remapping (M:N, sticky sessions)
 - Op-log filtering and transformation
 
 ## [0.4.0] - 2025-10-01
+
 ### Added
+
 - **Op-log Replay**: Full timing-faithful workload replay from TSV op-log files
   - Absolute timeline scheduling for microsecond-precision timing (~10µs accuracy)
   - Auto-detection of zstd compression (.zst extension)
@@ -3474,6 +3800,7 @@ Successfully tested against Google Cloud Storage:
   - Microsecond-precision sleep via `std::thread::sleep` wrapped in `tokio::task::spawn_blocking`
 
 ### Dependencies
+
 - Added `csv = "1.3"` for TSV parsing
 - Added `chrono = "0.4"` for timestamp handling
 - Added `zstd = "0.13"` for op-log decompression
@@ -3481,6 +3808,7 @@ Successfully tested against Google Cloud Storage:
 ## [0.3.2] - 2025-09-30
 
 ### ✨ NEW FEATURES
+
 - **Universal Operation Logging (Op-Log)**: Comprehensive operation tracing across all storage backends
   - **Multi-Backend Support**: Captures operations from file://, direct://, s3://, and az:// backends
   - **Automatic Compression**: All op-logs are zstd-compressed (.tsv.zst format)
@@ -3489,7 +3817,7 @@ Successfully tested against Google Cloud Storage:
   - **Replay Ready**: TSV format designed for future workload replay functionality (planned v0.4.0)
 
 - **Enhanced Logging System**: Unified tracing framework with pass-through to s3dlio
-  - **Verbosity Levels**: 
+  - **Verbosity Levels**:
     - No flags: Warnings and errors only
     - `-v`: INFO level for sai3-bench, minimal s3dlio output
     - `-vv`: DEBUG level for sai3-bench, INFO level for s3dlio (operational details)
@@ -3498,6 +3826,7 @@ Successfully tested against Google Cloud Storage:
   - **Unified Framework**: Both crates use `tracing` crate for consistent log formatting
 
 ### 🚀 DEPENDENCY UPDATES
+
 - **s3dlio**: Upgraded to v0.8.12 (from git tag, no local patches)
   - Universal op-log support across all backends
   - Migration from `log` to `tracing` crate
@@ -3505,25 +3834,30 @@ Successfully tested against Google Cloud Storage:
   - Operation logger API: `init_op_logger()`, `finalize_op_logger()`, `global_logger()`
 
 ### 📊 OPERATION LOGGING FORMAT
+
 ```tsv
 idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
 ```
+
 - Compressed with zstd (typically 10-20x reduction)
 - Compatible with standard TSV tools after decompression
 - Design documented in `docs/OP_LOG_REPLAY_DESIGN.md` for future replay feature
 
 ### 🔧 TECHNICAL IMPROVEMENTS
+
 - **Build System**: Simplified dependency management, removed local patches
 - **Logging Architecture**: EnvFilter configuration for per-crate log levels
 - **ObjectStore Integration**: Enhanced with logger support via `store_for_uri_with_logger()`
 - **All Operations Instrumented**: GET, PUT, DELETE, LIST, STAT operations support op-logging
 
 ### 📖 DOCUMENTATION
+
 - Added `docs/OP_LOG_REPLAY_DESIGN.md`: Complete replay feature specification for v0.4.0
 - Updated `.github/copilot-instructions.md`: Added ripgrep (rg) usage guide and op-log examples
 - Enhanced CLI help text: Clarified compression behavior and use cases
 
 ### 🧪 TESTING
+
 - Validated op-log capture across all backends (file://, s3://, az://)
 - Verified zstd compression and decompression workflow
 - Tested logging level pass-through with -v, -vv, -vvv flags
@@ -3532,6 +3866,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 ## [0.3.1] - 2025-09-30
 
 ### ✨ NEW FEATURES
+
 - **Interactive Progress Bars**: Professional progress visualization for all operations
   - **Time-based Progress**: Smooth animated progress bars for timed workloads with elapsed/remaining time
   - **Operation-based Progress**: Object count progress tracking for GET, PUT, DELETE commands
@@ -3540,6 +3875,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
   - **Async-friendly Design**: Non-blocking progress updates every 100ms
 
 ### 🚀 USER EXPERIENCE IMPROVEMENTS
+
 - **Enhanced Default Output**: Improved feedback without verbose flags
   - **Preparation Status**: Clear indication of workload setup and GET pattern resolution
   - **Execution Progress**: Real-time visual feedback during operation execution
@@ -3548,12 +3884,14 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 - **Informative Progress Messages**: Context-aware messages showing worker counts and data transfer amounts
 
 ### 🔧 TECHNICAL ENHANCEMENTS
+
 - **indicatif Integration**: Added professional progress bar library for smooth animations
 - **Concurrent Progress Tracking**: Thread-safe progress updates using `Arc<ProgressBar>`
 - **Minimal Performance Impact**: Efficient 100ms update intervals for smooth user experience
 - **Cross-terminal Compatibility**: Progress bars work across different terminal widths and configurations
 
 ### 📦 DEPENDENCY UPDATES
+
 - Added `indicatif = "0.17"` for progress bar functionality
 
 ## [0.3.0] - 2025-09-30
@@ -3563,6 +3901,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 This release represents a fundamental transformation from an S3-only tool to a comprehensive multi-protocol I/O benchmarking suite.
 
 ### 💥 BREAKING CHANGES
+
 - **Project Renamed**: `s3-bench` → `sai3-bench` (reflects multi-protocol nature)
 - **Binary Names Changed**:
   - `s3-bench` → `sai3-bench`
@@ -3572,6 +3911,7 @@ This release represents a fundamental transformation from an S3-only tool to a c
 - **gRPC Protocol**: Package renamed from `s3bench` to `iobench`
 
 ### ✨ NEW FEATURES
+
 - **Complete Multi-Backend Support**: Full CLI and workload support for all 4 storage backends
   - File system (`file://`) - Local filesystem operations
   - Direct I/O (`direct://`) - High-performance direct I/O
@@ -3583,6 +3923,7 @@ This release represents a fundamental transformation from an S3-only tool to a c
 - **Advanced Glob Patterns**: Cross-backend wildcard support for GET operations
 
 ### 🚀 MAJOR IMPROVEMENTS
+
 - **Phase 1: CLI Migration** - Complete transition from S3-specific to multi-backend commands
 - **Phase 2: Dependency Analysis** - Thorough investigation and documentation of s3dlio requirements
 - **Phase 3: Backend Validation** - Systematic testing and validation of all storage backends
@@ -3591,6 +3932,7 @@ This release represents a fundamental transformation from an S3-only tool to a c
 - **Error Handling**: Improved error messages and backend-specific guidance
 
 ### 🔧 TECHNICAL ENHANCEMENTS
+
 - **ObjectStore Abstraction**: Complete migration to s3dlio ObjectStore trait
 - **Glob Pattern Matching**: Fixed URI scheme normalization for pattern matching
 - **Azure Authentication**: Proper support for Azure storage account keys and CLI authentication
@@ -3598,12 +3940,14 @@ This release represents a fundamental transformation from an S3-only tool to a c
 - **Distributed gRPC**: Validated and tested distributed agent/controller functionality
 
 ### 🐛 BUG FIXES
+
 - **Direct I/O Glob Patterns**: Fixed glob pattern matching for direct:// backend operations
 - **Azure URI Format**: Corrected URI format to `az://STORAGE_ACCOUNT/CONTAINER/`
 - **URI Scheme Normalization**: Resolved cross-scheme pattern matching issues
 - **Build Dependencies**: Documented and resolved aws-smithy-http-client patch requirements
 
 ### 📚 DOCUMENTATION
+
 - **Azure Setup Guide**: Comprehensive Azure Blob Storage configuration documentation
 - **Multi-Backend Examples**: Updated all examples to showcase 4-backend support
 - **Configuration Samples**: Enhanced config examples with environment variable usage
@@ -3611,31 +3955,37 @@ This release represents a fundamental transformation from an S3-only tool to a c
 - **Backend-Specific Guides**: Tailored setup instructions for each storage backend
 
 ### 🧪 TESTING & VALIDATION
+
 - **Backend Test Suite**: Created comprehensive test configurations for all backends
 - **Performance Validation**: Verified performance characteristics across all storage types
 - **Integration Tests**: Updated gRPC integration tests with new binary names
 - **Azure Connectivity**: Validated real-world Azure Blob Storage operations
 
 ### 📊 PERFORMANCE CHARACTERISTICS
+
 - **File Backend**: 25k+ ops/s, sub-millisecond latencies
 - **Direct I/O Backend**: 10+ MB/s throughput, ~100ms latencies
 - **Azure Blob Storage**: 2-3 ops/s, ~700ms latencies (network dependent)
 - **Cross-Backend Workloads**: Tested mixed workload scenarios
 
 ### 🔧 INTERNAL CHANGES
+
 - **Protobuf Schema**: Renamed from `s3bench.proto` to `iobench.proto`
 - **Module Structure**: Updated all internal references and imports
 - **Binary Generation**: Updated build system for new binary names
 - **Test Framework**: Adapted integration tests for renamed binaries
 
 ### 📋 MIGRATION GUIDE
+
 For users upgrading from 0.2.x:
+
 1. Update binary names in scripts and automation
 2. Review Azure URI format if using Azure backend
 3. Update any gRPC integrations to use `iobench` package
 4. Verify environment variables for Azure authentication
 
 ### 🎯 NEXT STEPS
+
 - Complete S3 backend validation when access becomes available
 - Enhanced distributed testing capabilities
 - Performance optimization across backends
@@ -3651,6 +4001,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.3] - 2025-09-30
 
 ### Added
+
 - **Microsecond Precision Metrics**: All timing measurements now use microsecond precision instead of milliseconds
 - **Three-Category Operation Tracking**: Added META-DATA operations category alongside GET and PUT
   - LIST operations: Directory/prefix listings with timing metrics
@@ -3661,6 +4012,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated reporting displays with microsecond (µs) units across all binaries
 
 ### Changed
+
 - **BREAKING**: Changed timing precision from milliseconds to microseconds in all metrics
 - **BREAKING**: Updated histogram bounds from (1, 60_000, 3) to (1, 60_000_000, 3) for microsecond scale
 - **BREAKING**: Renamed struct fields from `p50_ms/p95_ms/p99_ms` to `p50_us/p95_us/p99_us`
@@ -3669,6 +4021,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved help message to reflect multi-backend I/O testing capabilities
 
 ### Fixed
+
 - Consistent microsecond reporting across main CLI and run binary
 - Proper operation category separation in metrics collection and reporting
 - Enhanced ObjectStore integration for metadata operations
@@ -3676,6 +4029,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.2] - 2025-09-30
 
 ### Added
+
 - **Stage 2 Migration Complete**: Full ObjectStore trait implementation for all operations
 - Multi-backend URI support: `file://`, `direct://`, and `s3://` schemes
 - Comprehensive logging infrastructure with tracing crate
@@ -3684,6 +4038,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File backend testing and validation with successful operations
 
 ### Changed
+
 - **BREAKING**: Migrated from AWS SDK direct calls to ObjectStore trait for all operations
 - Replaced `get_object()` and `put_object_async()` with `get_object_multi_backend()` and `put_object_multi_backend()`
 - Updated URI handling to use full URIs with ObjectStore instead of bucket/key splitting
@@ -3691,23 +4046,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced configuration pattern matching to use proper destructuring
 
 ### Removed
+
 - Deprecated `prefetch_keys()` and `list_keys_async()` functions using AWS SDK
 - Unused AWS SDK imports: `aws_config`, `aws_sdk_s3`, `RegionProviderChain`
 - Legacy `parse_s3_uri` usage in workload.rs (still available in main.rs for CLI operations)
 - Dead code: unused struct fields and variables in pattern matching
 
 ### Fixed
+
 - All compiler warnings resolved through proper code analysis (not cheap underscore fixes)
 - ObjectStore URI usage corrected to use full URIs following s3dlio test patterns
 - Redundant pattern destructuring where config methods handled field extraction
 - Proper handling of GetSource struct with only necessary fields
 
 ### Performance
+
 - File backend testing shows excellent performance: 25,462 ops/s with 38.77 MB/s throughput
 - Multi-backend operations maintain low latency: p50: 1ms, p95: 1ms, p99: 1ms
 - Successful concurrent operations with proper semaphore-based concurrency control
 
 ### Technical Details
+
 - ObjectStore operations now use `store_for_uri()` for automatic backend detection
 - All operations handle full URIs natively without bucket/key splitting
 - Logging provides visibility into ObjectStore creation and operation execution
@@ -3716,27 +4075,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - 2025-09-29
 
 ### Added
+
 - s3dlio v0.8.7 integration with ObjectStore trait support
 - Multi-backend foundation for file:// and direct:// URI support
 - Fork patch system for aws-smithy-http-client v1.1.1 compatibility
 
 ### Changed
+
 - **BREAKING**: Updated to s3dlio v0.8.7 (pinned to rev cd4ee2e)
 - Updated import structure to support both legacy s3_utils and new object_store APIs
 - Improved BackendType::from_uri to use string matching for URI scheme detection
 
 ### Fixed
+
 - Compilation issues with AWS SDK version conflicts
 - list_objects function calls now include required recursive parameter
 - Removed unused imports, variables, and dead code warnings
 - Applied aws-smithy-http-client fork patch to expose hyper_builder method
 
 ### Technical Details
+
 - All binaries (s3-bench, s3bench-agent, s3bench-ctl) compile successfully
 - Maintains backward compatibility with existing S3 workloads
 - Prepares foundation for Stage 2 migration to ObjectStore trait operations
 
 ## [0.2.0] - Previous Release
+
 - Initial distributed execution with gRPC agents
 - HDR histogram metrics collection
 - Single-node CLI and multi-agent controller modes

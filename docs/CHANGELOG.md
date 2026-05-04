@@ -3,8 +3,86 @@
 All notable changes to sai3-bench are documented in this file.
 
 **For historical changes:**
+
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
+
+## [0.8.97] - 2026-05-03
+
+### Added
+
+- **`prepare.key_prefix_shards: <N>` — namespace sharding for hash-based storage (issue #81)**
+
+  Spreads prepared and PUT object keys across N hexadecimal directory shards to avoid
+  concentrating metadata on a single director node (critical for VAST and similar
+  hash-partitioned storage systems).
+
+  When set to a value greater than 0 (recommended: `256`), every object key gains a
+  two-hex-character prefix shard directory:
+
+  ```text
+  # key_prefix_shards: 0 (default — all keys share the same namespace prefix)
+  prepared-00000000.dat
+  prepared-00000001.dat
+  ...
+
+  # key_prefix_shards: 256 — 256 distinct shard directories
+  00/prepared-00000000.dat
+  a3/prepared-00000001.dat
+  ff/prepared-00000002.dat
+  ```
+
+  The shard is derived deterministically from the object index (prepare phase) or from
+  the random 64-bit object ID (workload PUT phase), so the distribution is uniform across
+  all N shards.
+
+  **Why it matters**: Storage systems that route namespace requests by key prefix hash
+  (VAST, Weka, some S3-compatible clusters) will concentrate all metadata operations on
+  one director node when all keys share the same long common prefix (e.g.
+  `prepared-0000…`).  Setting `key_prefix_shards: 256` gives 256 distinct prefixes,
+  distributing metadata load evenly across all director nodes.
+
+  **Backward compatible**: Default is `0` (unchanged key format).  Existing configs and
+  prepared datasets are unaffected.
+
+  ```yaml
+  prepare:
+    key_prefix_shards: 256    # 256 hex shards: 00/…, 01/…, …, ff/…
+    ensure_objects:
+      - base_uri: "s3://bucket/data/"
+        count: 1000000
+        min_size: 1048576
+        max_size: 1048576
+  ```
+
+- **`dynamic_put_pool: true` — live GET pool growth during mixed workloads (issue #82)**
+
+  When a workload mixes PUT and GET operations, newly PUT objects are added to the GET
+  selection pool in real time so GET workers can immediately access them.  This matches
+  warp's mixed-mode behavior where the object population grows during the test.
+
+  **Implementation**: `UriSource.full_uris` is now an `Arc<RwLock<Vec<String>>>` shared
+  across all worker clones.  After each successful PUT, the new URI is appended to the
+  matching GET pool entry via a write lock held for nanoseconds — negligible overhead
+  against millisecond-scale network I/O.
+
+  **Default is `false`** (frozen pool) to preserve benchmark reproducibility: two runs
+  with the same pre-populated dataset produce identical GET pool membership regardless of
+  PUT throughput variation.  Set to `true` for warp-style mixed workloads where organic
+  object population growth is part of the test scenario.
+
+  ```yaml
+  dynamic_put_pool: true      # Add newly PUT objects to GET pool (warp mixed-mode parity)
+
+  workload:
+    - op: put
+      path: "s3://bucket/data/new-"
+      object_size: 1048576
+      weight: 30
+    - op: get
+      path: "s3://bucket/data/prepared-*.dat"
+      weight: 70
+  ```
 
 ## [0.8.96] - 2026-04-28
 
@@ -31,6 +109,7 @@ All notable changes to sai3-bench are documented in this file.
   and lists all resolved endpoints.
 
   Example:
+
   ```bash
   export S3_ENDPOINT_URIS="s3://10.9.0.17:80/bucket/,s3://10.9.0.18:80/bucket/,s3://10.9.0.19:80/bucket/"
   sai3-bench run --config my_existing_config.yaml   # automatically uses all 3 endpoints
@@ -136,7 +215,8 @@ All notable changes to sai3-bench are documented in this file.
 
 - **Agent version check before pre-flight** — the controller now pings all agents and prints a
   version table before starting pre-flight validation:
-  ```
+
+  ```text
   🔌 Agent Version Check
   agent-1 (host1:7167) ✅ v0.8.92
   agent-2 (host2:7167) ⚠️  v0.8.88 (controller is v0.8.92 — update recommended)
@@ -216,9 +296,11 @@ All notable changes to sai3-bench are documented in this file.
   The cache tracks per-object creation state and enables crash/resume for long-running
   prepares; it now has a documented sweet-spot and can be turned off for very large or
   simple workloads:
+
   ```yaml
   enable_metadata_cache: false   # disable for > ~1 Billion objects/batch
   ```
+
   - **Default: `true`** — fully backward-compatible, no config changes required for
     existing workloads.
   - **Sweet spot: 1 M – 1 B objects per batch** — crash-resume value exceeds overhead.
@@ -237,6 +319,7 @@ All notable changes to sai3-bench are documented in this file.
     `objects_existed`, `total_objects`, `total_bytes`, `avg_bytes`, `wall_seconds`,
     `ops_per_sec`
   - Sum across batches without listing:
+
     ```sh
     awk -F'\t' 'NR>1 && $3!="AGGREGATE" {sum += $5} END {print sum}' \
         sai3-*/populate_ledger.tsv
@@ -354,10 +437,12 @@ All notable changes to sai3-bench are documented in this file.
 
 - **KV cache coverage summary at startup** — after a KV cache checkpoint is restored,
   both `sequential.rs` and `parallel.rs` now log a one-line human-readable summary:
-  ```
+
+  ```text
   ⚡ KV cache checkpoint shows all 64032768 objects already Created — skipping LIST
   📊 Cache summary: 64032768 objects | 7.63 GiB total storage
   ```
+
   The storage total is accumulated in the same single fjall scan that counts objects
   by state, so there is zero additional I/O overhead.
 
@@ -516,7 +601,6 @@ All notable changes to sai3-bench are documented in this file.
   - **Fix 2 (correct listing if it does happen)**: `glob_list_params()` helper fixes both
     listing bugs — safe prefix (strips to last `/` before first `*`) and `recursive=true`
     when `*` appears inside a directory component.
-
 
   - Workload start: duration, drain budget, total max wall time
   - Worker join phase: worker count, drain deadline offset
@@ -862,11 +946,13 @@ This release completes the checkpoint implementation with automatic restoration 
 ### Configuration
 
 **New top-level field:**
+
 ```yaml
 cache_checkpoint_interval_secs: 300  # Default: 5 minutes, 0 = disabled
 ```
 
 **Checkpoint locations:**
+
 - `file:///path/` → `{path}/.sai3-cache-agent-{id}.tar.zst`
 - `s3://bucket/` → `s3://bucket/.sai3-cache-agent-{id}.tar.zst`
 - `az://container/` → `az://container/.sai3-cache-agent-{id}.tar.zst`
@@ -1020,13 +1106,16 @@ This release improves code maintainability, enhances prepare phase resilience wi
 **No breaking changes** - All updates are backward compatible.
 
 **Optional enhancements:**
+
 1. Use thousand separators in YAML configs for better readability:
+
    ```yaml
    prepare:
      ensure_objects:
        - count: 10,000,000  # More readable than 10000000
          min_size: 1,048,576  # Clearly shows 1 MiB
    ```
+
 2. Review prepare phase retry behavior in logs - new adaptive strategy may change retry patterns
 3. Monitor prepare phase warnings for configuration conflicts
 
@@ -1105,6 +1194,7 @@ This release addresses four critical executor starvation issues identified in pr
 **No breaking changes** - All fixes are backward compatible. Existing configurations will use default timeout values.
 
 **Recommended actions for large-scale deployments:**
+
 1. Add `agent_ready_timeout` to distributed config based on file count
 2. Verify glob patterns resolve quickly or increase timeout accordingly
 3. Monitor agent READY times in logs to tune timeout values
@@ -1262,6 +1352,7 @@ This release represents a fundamental architectural evolution of sai3-bench, tra
 ### Configuration Examples
 
 **Multi-stage workflow with barriers:**
+
 ```yaml
 stages:
   - name: preflight
@@ -1300,6 +1391,7 @@ stages:
 ```
 
 **Per-stage timeout customization:**
+
 ```yaml
 # Global gRPC timeout
 distributed:
@@ -1331,12 +1423,14 @@ stages:
 ### Migration Notes
 
 **From v0.8.23 and earlier:**
+
 - Old single-stage configs still work (auto-converted to single execute stage)
 - To use multi-stage features, restructure config with `stages` array
 - sai3-analyze automatically detects numbered vs legacy TSV format
 - No action required for existing test scripts or automation
 
 **Excel workbook changes:**
+
 - Tab names no longer include timestamps (cleaner, more readable)
 - Tab names now include stage numbers for proper ordering (01_, 02_, etc.)
 - Multi-stage tests produce multiple tabs per workload (one per stage)
@@ -1427,7 +1521,7 @@ stages:
   - Added `create_multi_endpoint_store()` internal helper function
 
 - **Excel timestamp formatting** in sai3-analyze
-  - Auto-detects timestamp columns by suffix (_ms, _us, _ns)
+  - Auto-detects timestamp columns by suffix (_ms,_us, _ns)
   - Converts epoch timestamps to Excel datetime format: "2026-01-29 22:21:51.000"
   - Column width: 22 for timestamps, 15 for regular columns
   - Fixes scientific notation display (1.77E+18 → readable dates)
@@ -1454,6 +1548,7 @@ stages:
 ### Configuration Examples
 
 **Global multi-endpoint** (all agents share endpoints):
+
 ```yaml
 multi_endpoint:
   strategy: round_robin
@@ -1464,6 +1559,7 @@ multi_endpoint:
 ```
 
 **Per-agent static mapping** (each agent gets specific endpoints):
+
 ```yaml
 distributed:
   agents:
@@ -1483,6 +1579,7 @@ distributed:
 ```
 
 **NFS multi-mount**:
+
 ```yaml
 multi_endpoint:
   strategy: round_robin

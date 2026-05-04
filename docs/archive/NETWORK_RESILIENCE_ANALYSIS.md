@@ -10,6 +10,7 @@
 ```
 
 **Timeline:**
+
 1. All 8 agents started successfully
 2. All 8 agents validated config and sent READY
 3. Controller sent coordinated START
@@ -25,6 +26,7 @@
 **Root cause**: Network interruption on agent-6 host.
 
 Possible causes:
+
 - SSH connection timeout (your suspicion - likely correct)
 - AWS network maintenance/rebalancing
 - Agent VM restart or resource exhaustion
@@ -37,6 +39,7 @@ Possible causes:
 ### Fail-Fast Strategy
 
 The controller uses **fail-fast** approach:
+
 ```rust
 // src/bin/controller.rs, line 1800
 if stats.status == 3 {  // ERROR status
@@ -46,12 +49,14 @@ if stats.status == 3 {  // ERROR status
 ```
 
 **Rationale:**
+
 1. **Data consistency**: Distributed workload results depend on all agents
 2. **Reproducibility**: Partial results may be misleading
 3. **Early detection**: Catch configuration/permission errors quickly
 4. **Resource efficiency**: Don't waste time if test is already compromised
 
 **Drawback:**
+
 - Transient network issues destroy long-running tests
 - 7 healthy agents get killed because 1 had network glitch
 - No retry mechanism for recoverable errors
@@ -63,12 +68,14 @@ if stats.status == 3 {  // ERROR status
 Allow test to continue with N-1 agents when one fails:
 
 **Pros:**
+
 - Tolerates transient network issues
 - Useful for availability testing
 - Partial results better than no results
 - Natural for "at least N agents" workloads
 
 **Cons:**
+
 - Results may not be comparable across runs
 - Harder to detect configuration errors
 - Need to mark results as "partial"
@@ -81,12 +88,14 @@ Allow test to continue with N-1 agents when one fails:
 Attempt to reconnect to failed agents before aborting:
 
 **Pros:**
+
 - Handles transient network glitches
 - Maintains full agent count if recoverable
 - Fail-fast still happens for permanent failures
 - Most robust approach
 
 **Cons:**
+
 - Adds retry latency (could be 30-60s)
 - More complex state machine
 - Need to handle partial prepare phase completion
@@ -107,11 +116,13 @@ distributed:
 ```
 
 **Pros:**
+
 - Flexible for different use cases
 - Can be strict for correctness testing, lenient for throughput testing
 - User controls trade-offs
 
 **Cons:**
+
 - Most complex to implement
 - Need to validate policy makes sense
 - Documentation burden
@@ -125,6 +136,7 @@ Since implementing retry logic is complex, here are immediate solutions:
 ### 1. Prevent Network Interruptions (Best)
 
 **SSH connection management:**
+
 ```bash
 # On your local machine, edit ~/.ssh/config:
 Host *.amazonaws.com
@@ -136,11 +148,13 @@ Host *.amazonaws.com
 This sends keepalive every 60s, allowing 10 missed keepalives (10 minutes of unresponsiveness) before disconnect.
 
 **tmux on controller** (already recommended):
+
 - Even if SSH dies, controller keeps running
 - Reconnect with `tmux attach -t sai3-test`
 - See full output from beginning
 
 **Agents in daemon mode** (already recommended):
+
 - Agents don't care about SSH - they're HTTP servers
 - They keep running even if you disconnect
 
@@ -203,6 +217,7 @@ echo "✅ All network checks passed - safe to start distributed workload"
 ### 3. Shorter Tests First
 
 Instead of one long test, run multiple shorter tests:
+
 - 5 x 60s tests instead of 1 x 300s test
 - Reduces chance of network interruption
 - Easier to restart if failure occurs
@@ -229,17 +244,20 @@ let channel = tonic::transport::Channel::from_shared(uri)?
 Based on your use case (long-running distributed tests in cloud environments), I recommend:
 
 **Phase 1** (Immediate - you can do this now):
+
 1. ✅ Use tmux for controller (survives SSH disconnect)
 2. ✅ Use daemon mode + logging for agents
 3. ✅ Add SSH keepalive configuration
 4. ✅ Run network validation before each test
 
 **Phase 2** (Code changes - 2-3 days):
+
 1. Add retry logic with exponential backoff (2 retries, 10s delay)
 2. Add `--continue-on-agent-failure` CLI flag for best-effort mode
 3. Mark results as "PARTIAL" if any agent fails
 
 **Phase 3** (Future enhancement - 1 week):
+
 1. Implement full reconnection support
 2. Agents can resume from last checkpoint
 3. Controller tracks disconnect/reconnect events
@@ -250,6 +268,7 @@ Based on your use case (long-running distributed tests in cloud environments), I
 ### For Your Current Test Setup
 
 1. **Add SSH keepalive** to prevent disconnections:
+
    ```bash
    vi ~/.ssh/config
    # Add the settings from "Short-Term Workarounds #1" above
@@ -275,7 +294,7 @@ However, you should still commit that fix because it eliminates false positives 
 
 ## Questions for You
 
-1. **How often does this happen?** 
+1. **How often does this happen?**
    - Once per 10 tests? Once per 100 tests?
    - Helps prioritize whether retry logic is worth implementing
 
@@ -291,6 +310,7 @@ However, you should still commit that fix because it eliminates false positives 
    - Fix network (cheaper, faster) vs implement retry (more robust, slower)
 
 Let me know your answers and I can either:
+
 - Help you perfect the network setup (no code changes)
 - Implement retry logic (code changes, testing required)
 - Implement best-effort continuation (code changes, simpler than retry)

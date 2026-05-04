@@ -21,6 +21,7 @@ This plan addresses two critical issues with large-scale distributed workloads:
 ## Problem
 
 When prepare phase lists millions of existing files (e.g., 4.9M), the blocking `store.list()` call takes 5-10+ minutes. During this time:
+
 - Agent sends NO stats updates to controller
 - gRPC connection goes idle
 - Network infrastructure closes idle connection after 30-60 seconds
@@ -51,6 +52,7 @@ fn list_stream<'a>(
 ```
 
 Results arrive in pages (~1000 objects per page for S3), allowing us to:
+
 1. Process results incrementally (constant memory)
 2. Send progress updates to controller via bidirectional channel
 3. Keep gRPC connection alive during long listing operations
@@ -62,12 +64,14 @@ Results arrive in pages (~1000 objects per page for S3), allowing us to:
 **File**: `src/prepare.rs`, around line 250
 
 **Current code**:
+
 ```rust
 let all_files = store.list(&list_base, true).await
     .context("Failed to list existing objects")?;
 ```
 
 **New code**:
+
 ```rust
 use futures::StreamExt;
 
@@ -210,6 +214,7 @@ This reduces listing time by factor of N (number of agents).
 ### Use Case
 
 Before running a test with millions of files, you need to clean up previous test data. Currently there's no efficient way to do this - you have to:
+
 1. Run test with `cleanup: true` (but this requires prepare + workload first)
 2. Use AWS CLI `aws s3 rm --recursive` (slow, no progress visibility)
 3. Manually delete files (not practical for millions of files)
@@ -229,6 +234,7 @@ prepare:
 ```
 
 When `cleanup_only: true`:
+
 1. **LIST** phase: Stream-list all files (with progress updates)
 2. **DELETE** phase: Batch-delete all files (with progress updates)
 3. **No PUT operations**: Skip object creation entirely
@@ -438,15 +444,18 @@ This generates the expected file paths from the manifest and deletes them direct
 ### Performance Estimates
 
 #### Cleanup with Listing (Safe)
+
 - LIST: 4.9M files @ 20k/sec = **245 seconds** (~4 min)
 - DELETE: 4.9M files @ 50k/sec with batch API = **98 seconds** (~1.5 min)
 - **Total: ~6 minutes for 4.9M files**
 
 #### Cleanup without Listing (Fast, assumes known structure)
+
 - DELETE only: 4.9M files @ 50k/sec = **98 seconds** (~1.5 min)
 - **Total: ~1.5 minutes for 4.9M files**
 
 #### Distributed Cleanup (8 agents, partitioned)
+
 - Each agent: 613k files
 - Time per agent: ~45 seconds (LIST) + ~12 seconds (DELETE) = **57 seconds**
 - **Total: <1 minute for 4.9M files with 8 agents**
@@ -479,6 +488,7 @@ This generates the expected file paths from the manifest and deletes them direct
 ## Testing Plan
 
 ### Test 1: Empty Bucket (Baseline)
+
 ```yaml
 prepare:
   ensure_objects:
@@ -489,6 +499,7 @@ prepare:
 Expected: Instant listing (no files), ~2 min create
 
 ### Test 2: Pre-populated Bucket (Real Scenario)
+
 ```yaml
 prepare:
   ensure_objects:
@@ -496,14 +507,17 @@ prepare:
       count: 4915200
 ```
 
-Expected: 
+Expected:
+
 - 5-10 min listing with progress updates every 10k files
 - Controller shows: "🔍 Listing: 450000/4915200 files (9%)"
 - NO gRPC timeout errors
 - Controller receives stats every ~1 second during listing
 
 ### Test 3: Distributed Listing (8 Agents)
+
 With partitioning enabled, each agent lists 1/8 of directories:
+
 - Agent 1: Lists 520 directories (~613k files)
 - Agent 2: Lists 520 directories (~613k files)
 - ...
@@ -512,15 +526,18 @@ With partitioning enabled, each agent lists 1/8 of directories:
 ## Performance Estimates
 
 ### S3 LIST Performance
+
 - Page size: 1000 objects
 - Latency per page: ~50ms (us-west-2, same region)
 - Throughput: ~20,000 objects/second per agent
 
 ### 4.9M Files Listing
+
 - Single agent: 4,900 pages × 50ms = **245 seconds** (~4 minutes)
 - 8 agents (partitioned): 613 pages × 50ms = **31 seconds** (8x speedup)
 
 ### Progress Update Overhead
+
 - Update every 10,000 files = ~10 page fetches
 - Stats message: ~500 bytes
 - Network overhead: negligible (<1ms per update)
@@ -538,6 +555,7 @@ With partitioning enabled, each agent lists 1/8 of directories:
 ## Conclusion
 
 Using `list_stream()` with periodic progress updates solves the gRPC timeout issue while maintaining correct existence checking. The streaming approach:
+
 - ✅ Keeps gRPC connection alive
 - ✅ Uses constant memory (no buffering millions of URIs)
 - ✅ Provides visibility into listing progress

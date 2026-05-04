@@ -259,6 +259,7 @@ mod tests {
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: std::collections::HashMap::new(),
+            dynamic_put_pool: false,
         }
     }
 
@@ -334,6 +335,7 @@ mod tests {
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
                 force_overwrite: false,
+                key_prefix_shards: 0,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -400,6 +402,7 @@ mod tests {
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
                 force_overwrite: false,
+                key_prefix_shards: 0,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -470,6 +473,7 @@ mod tests {
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
                 force_overwrite: false,
+                key_prefix_shards: 0,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );
@@ -541,6 +545,7 @@ mod tests {
                 prepare_strategy: crate::config::PrepareStrategy::Sequential,
                 skip_verification: false,
                 force_overwrite: false,
+                key_prefix_shards: 0,
                 cleanup_mode: crate::config::CleanupMode::Tolerant,
             }),
         );

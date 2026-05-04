@@ -12,6 +12,7 @@
 **File**: `tests/test_large_scale_timeouts.rs`
 
 All tests **PASSING** ✅:
+
 - ✅ `test_calculate_tree_sizes` - Validates 576/13k/331k directory calculations
 - ✅ `test_barrier_sync_timeout_config` - Tests extended timeout configuration (25 min)
 - ✅ `test_barrier_sync_default_timeout_insufficient` - Documents default config limitation (110s)
@@ -22,6 +23,7 @@ All tests **PASSING** ✅:
 - ✅ `test_calculate_required_timeouts_for_scale` - Analyzes timeout requirements for all scales
 
 **Key Insights from Tests**:
+
 ```
 ⚠ DEFAULT prepare timeout: 90s heartbeat + 20s query = 110s total
 ⚠ WARNING: Default 110s timeout may be insufficient for 331k tree (can take 90s+)
@@ -35,6 +37,7 @@ All tests **PASSING** ✅:
 **File**: `docs/LARGE_SCALE_TIMEOUT_ANALYSIS.md`
 
 **Comprehensive analysis covering**:
+
 - 3 scale levels (Simple/Medium/Large) with expected timings
 - 3 critical timeout bottlenecks identified and documented
 - Operation timelines showing exactly when timeouts occur
@@ -57,6 +60,7 @@ All tests **PASSING** ✅:
 **File**: `tests/configs/4host-test_LARGE_with_barriers.yaml`
 
 **Features**:
+
 - 4 agents × 4 endpoints = 16 mount points
 - 331,776 directories (width=24, depth=4)
 - 64,032,768 files (~500 TB)
@@ -79,6 +83,7 @@ let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configu
 ```
 
 **Problem**:
+
 - Tree generation for 331k dirs takes ~90s
 - Hardcoded 30s timeout triggers 3 retries unnecessarily
 - Works but inefficient
@@ -94,6 +99,7 @@ let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configu
 **Location**: `src/config.rs:1682-1686`
 
 **Problem**:
+
 - Default total timeout: 110s (90s heartbeat + 20s query)
 - Tree generation: ~90s
 - **Only 20s margin** - too tight for production
@@ -109,11 +115,13 @@ let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configu
 **Location**: `src/bin/controller.rs:815-816`
 
 **Problem**:
+
 - PING every 30s, PONG timeout 10s = 40s total
 - If LIST operation is very slow (< 25 files/sec), can exceed 40s without update
 - Causes connection drop
 
-**Solution**: 
+**Solution**:
+
 - Reduce LISTING_PROGRESS_INTERVAL from 1000 to 250 files
 - Or make gRPC keep-alive configurable (120s PING + 20s PONG)
 
@@ -126,12 +134,14 @@ let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configu
 ### Immediate Actions (No Code Changes)
 
 1. **Use the new test config** for large-scale testing:
+
    ```bash
    ./target/release/sai3bench-ctl run \
        --config tests/configs/4host-test_LARGE_with_barriers.yaml
    ```
 
 2. **For any test with 300k+ directories**, use this barrier sync config:
+
    ```yaml
    distributed:
      barrier_sync:
@@ -142,6 +152,7 @@ let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configu
    ```
 
 3. **Monitor for these warning signs**:
+
    ```
    WARN Barrier retry 1/5 for 'stage_prepare'
    WARN Listing speed X files/sec is dangerously slow (< 25/sec)
@@ -188,6 +199,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 **Key Validation**:
+
 - ✅ 331k directory tree size calculations correct
 - ✅ Extended timeout config (1500s) parses correctly
 - ✅ Default timeout config (110s) insufficient for large scale
@@ -209,12 +221,14 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ## Files Modified/Created
 
 ### New Files
+
 1. `tests/test_large_scale_timeouts.rs` - 8 comprehensive unit tests
 2. `docs/LARGE_SCALE_TIMEOUT_ANALYSIS.md` - Detailed timeout analysis
 3. `tests/configs/4host-test_LARGE_with_barriers.yaml` - Production-ready config
 4. `docs/LARGE_SCALE_TESTING_SUMMARY.md` - This summary
 
 ### Existing Files (Analysis Only, No Changes)
+
 - `src/bin/agent.rs` - Identified hardcoded 30s barrier timeout (line 3300)
 - `src/bin/controller.rs` - Identified gRPC keep-alive config (lines 815-816)
 - `src/config.rs` - Identified default barrier sync config (lines 1682-1686)
@@ -228,24 +242,30 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ### For Production Large-Scale Testing
 
 1. **Start with SIMPLE scale** (576 dirs, 111k files):
+
    ```bash
    ./target/release/sai3bench-ctl run \
        --config tests/configs/4host-test_SIMPLE.yaml
    ```
+
    Expected: Completes in ~2-5 minutes
 
 2. **Progress to MEDIUM scale** (13k dirs, 2.7M files):
+
    ```bash
    ./target/release/sai3bench-ctl run \
        --config tests/configs/4host-test_MEDIUM.yaml
    ```
+
    Expected: Completes in ~45-60 minutes
 
 3. **Finally test LARGE scale** (331k dirs, 64M files):
+
    ```bash
    ./target/release/sai3bench-ctl run \
        --config tests/configs/4host-test_LARGE_with_barriers.yaml
    ```
+
    Expected: Completes in ~2-5 hours (prepare phase only)
 
 ### For Code Improvements (Optional)

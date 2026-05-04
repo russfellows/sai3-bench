@@ -248,6 +248,7 @@ let store = MultiEndpointStore::new(
 **Expected Behavior**: Should work! Each `file://` URI creates a separate `FileSystemObjectStore`, and `MultiEndpointStore` round-robins between them.
 
 **Caveat**: All file paths must be identical across mounts. Example:
+
 - Mount 1: `/mnt/nfs1/data/file001.dat`
 - Mount 2: `/mnt/nfs2/data/file001.dat`
 
@@ -346,12 +347,12 @@ pub struct DistributedAgentConfig {
 }
 ```
 
-2. **Add validation**:
+1. **Add validation**:
    - Error if both `target` and `multi_endpoint.enabled=true` are set (ambiguous)
    - Error if `multi_endpoint.enabled=true` but `endpoints` is empty
    - Warn if endpoint list length doesn't evenly divide by agent count
 
-3. **Update documentation**:
+2. **Update documentation**:
    - CONFIG_SYNTAX.md: Add multi-endpoint section
    - DISTRIBUTED_TESTING_GUIDE.md: Add multi-endpoint examples
 
@@ -403,13 +404,13 @@ fn create_multi_endpoint_store(config: &MultiEndpointConfig) -> Result<Box<dyn O
 }
 ```
 
-2. **Update prepare phase**:
+1. **Update prepare phase**:
    - When multi-endpoint enabled, prepare must ensure objects exist on **all** endpoints
    - Option 1: Write to each endpoint separately (ensures replication)
    - Option 2: Write through `MultiEndpointStore` (assumes storage system replicates)
    - Recommend Option 2 for simplicity, document assumption
 
-3. **Update cleanup phase**:
+2. **Update cleanup phase**:
    - Similar to prepare: delete through `MultiEndpointStore`
    - Per-endpoint cleanup not necessary (storage system handles replication)
 
@@ -471,18 +472,21 @@ Each host runs 2 agent processes, each targeting a different endpoint:
 Then use 2 separate configs:
 
 **config_endpoints_1_2.yaml** (for agents *a):
+
 ```yaml
 target: "s3://192.168.1.10:9000/bucket/"
 # ... workload ...
 ```
 
 **config_endpoints_3_4.yaml** (for agents *b):
+
 ```yaml
 target: "s3://192.168.1.11:9000/bucket/"
 # ... workload ...
 ```
 
 Run controller twice (or use 2 controllers):
+
 ```bash
 ./sai3bench-ctl --agents testhost1:7167,testhost2:7167,testhost3:7167,testhost4:7167 \
   run --config config_endpoints_1_2.yaml &
@@ -567,6 +571,7 @@ dataset:
    - Specify load balancing preference
 
 2. **Test s3dlio multi-endpoint with file://**:
+
    ```bash
    cd /home/eval/Documents/Code/s3dlio
    # Create test with 2 local directories

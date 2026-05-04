@@ -33,6 +33,7 @@ async fn test_single_agent_creates_all() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let mut metrics = PrepareMetrics::default();
@@ -74,6 +75,7 @@ async fn test_multi_agent_no_collision() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let num_agents = 4;
@@ -157,6 +159,7 @@ async fn test_agent_assignment_balanced() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let num_agents = 3;
@@ -223,6 +226,7 @@ async fn test_exclusive_directory_distribution() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let num_agents = 3;
@@ -291,6 +295,7 @@ async fn test_all_distribution_files_at_all_levels() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let mut metrics = PrepareMetrics::default();
@@ -346,6 +351,7 @@ async fn test_bottom_distribution_files_at_leaf_only() -> Result<()> {
         prepare_strategy: Default::default(),
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let mut metrics = PrepareMetrics::default();

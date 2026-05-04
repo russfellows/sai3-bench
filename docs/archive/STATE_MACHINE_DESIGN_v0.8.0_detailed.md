@@ -3,6 +3,7 @@
 ## Analysis of Current Flow
 
 **Actual execution timeline:**
+
 1. RPC arrives → validation (sync, ~50ms)
 2. Send READY status → controller knows validation passed
 3. Wait for coordinated start time (0-60 seconds) ← **Critical: can be aborted**
@@ -11,6 +12,7 @@
 6. Send final stats → return to Idle
 
 **Key insight:** There are **TWO distinct waiting periods** where abort must work differently:
+
 - **Coordinated start delay** (0-60s): Waiting to begin, no cleanup needed, just exit stream
 - **Workload execution** (0-3600s): Active work, need cleanup (cancel tasks, close files)
 
@@ -41,11 +43,13 @@
 ### State Definitions
 
 **1. IDLE**
+
 - Ready to accept new workload RPC
 - Validation happens in this state (fast, <100ms)
 - Transition: RPC arrives → immediate inline validation → READY or FAILED
 
-**2. READY** 
+**2. READY**
+
 - Validation passed, READY status sent to controller
 - Waiting for coordinated start timestamp
 - Can wait 0-60 seconds
@@ -53,6 +57,7 @@
 - Transition: start_timestamp reached → RUNNING
 
 **3. RUNNING**
+
 - Workload task spawned and executing
 - May be in prepare phase (tracked by `in_prepare_phase` flag)
 - Sending RUNNING(2) status every 1 second
@@ -60,12 +65,14 @@
 - Transition: completion → IDLE, error → FAILED, abort → ABORTING
 
 **4. FAILED**
+
 - Error occurred during validation, prepare, or execution
 - ERROR(3) status sent to controller with error_message
 - Auto-transition to IDLE after sending error (no lingering)
 - Transition: (automatic) → IDLE
 
 **5. ABORTING**
+
 - Abort signal received (from AbortWorkload RPC or controller disconnect)
 - Workload task cancelling, cleaning up resources
 - Wait up to 5s for graceful cleanup, then force to IDLE
@@ -93,17 +100,20 @@
 ## Why 5 States (Not 4, Not 7)?
 
 **Why not 4 states?** (combining READY into RUNNING)
+
 - ❌ Can't distinguish "waiting to start" vs "actively executing"
 - ❌ Abort behavior is different: READY needs no cleanup, RUNNING needs 5-15s
 - ❌ Controller can't tell if agent is stuck in coordinated start vs stuck in workload
 - ❌ Timeout detection unclear: is 10s delay during start or during execution?
 
 **Why not 7 states?** (adding Validating, Preparing, Completed)
+
 - ❌ **Validating**: happens inline in <100ms, not worth separate state
 - ❌ **Preparing**: tracked by `in_prepare_phase` flag, doesn't change abort behavior
 - ❌ **Completed**: just sends status and immediately returns to IDLE, no intermediate state needed
 
 **5 states is optimal:**
+
 - ✅ Clear abort semantics (READY vs RUNNING)
 - ✅ Matches protocol status values (READY, RUNNING, ERROR)
 - ✅ Simple to implement and reason about
@@ -176,6 +186,7 @@
 ## Implementation Notes
 
 ### State Storage
+
 ```rust
 enum WorkloadState {
     Idle,
@@ -193,6 +204,7 @@ struct AgentState {
 ```
 
 ### Transition Validation
+
 ```rust
 fn can_transition(from: &WorkloadState, to: &WorkloadState) -> bool {
     use WorkloadState::*;
@@ -215,6 +227,7 @@ fn can_transition(from: &WorkloadState, to: &WorkloadState) -> bool {
 ### Key Transition Points in Code
 
 **1. IDLE → READY** (line ~488):
+
 ```rust
 // After validation passes
 agent_state.transition_to(WorkloadState::Ready, "validation passed").await?;
@@ -223,6 +236,7 @@ yield Ok(ready_msg);
 ```
 
 **2. READY → RUNNING** (line ~614):
+
 ```rust
 // After coordinated start delay
 agent_state.transition_to(WorkloadState::Running, "start time reached").await?;
@@ -230,6 +244,7 @@ tokio::spawn(async move { /* workload task */ });
 ```
 
 **3. READY → IDLE** (line ~602 abort case):
+
 ```rust
 // Abort during coordinated start
 _ = abort_rx.recv() => {
@@ -240,6 +255,7 @@ _ = abort_rx.recv() => {
 ```
 
 **4. RUNNING → FAILED** (line ~692 workload error):
+
 ```rust
 Some(Err(e)) => {
     agent_state.transition_to(WorkloadState::Failed, &e).await?;
@@ -249,6 +265,7 @@ Some(Err(e)) => {
 ```
 
 **5. RUNNING → ABORTING** (abort RPC):
+
 ```rust
 // In AbortWorkload handler
 if current == WorkloadState::Running {
@@ -358,12 +375,14 @@ Terminal states:
 ## Controller State Definitions
 
 **1. CONNECTING**
+
 - gRPC stream opened, waiting for first message
 - Agent may be validating config, but controller hasn't received anything yet
 - Timeout: 60 seconds (startup timeout)
 - Transition: First message → VALIDATING
 
 **2. VALIDATING**
+
 - First message received from agent
 - Agent is validating config (backend credentials, file paths, etc.)
 - Controller waiting for READY(1) or ERROR(3) status
@@ -371,6 +390,7 @@ Terminal states:
 - Transition: READY status → READY, ERROR status → FAILED
 
 **3. READY**
+
 - Agent sent READY(1) status - validation passed
 - Waiting for coordinated start_timestamp
 - Can wait 0-60 seconds
@@ -378,6 +398,7 @@ Terminal states:
 - Transition: Prepare starts → PREPARING, Start time reached → RUNNING
 
 **4. PREPARING**
+
 - Agent reported in_prepare_phase=true
 - Creating directories, generating files, pre-warming storage
 - Still sending RUNNING(2) status (not a separate protocol status)
@@ -385,6 +406,7 @@ Terminal states:
 - Transition: in_prepare_phase=false → RUNNING
 
 **5. RUNNING**
+
 - Agent executing workload operations (GET/PUT/DELETE)
 - Sending RUNNING(2) status every 1 second with metrics
 - in_prepare_phase=false
@@ -392,24 +414,28 @@ Terminal states:
 - Transition: Duration elapsed → COMPLETED, Error → FAILED
 
 **6. COMPLETED**
+
 - Workload finished successfully
 - Agent sent final LiveStats with completed=true
 - Terminal state (no further transitions)
 - Stream typically closes after this
 
 **7. FAILED**
+
 - Agent sent ERROR(3) status or validation failed
 - error_message contains details
 - Terminal state (no further transitions)
 - Controller will abort remaining agents
 
 **8. DISCONNECTED**
+
 - gRPC stream closed unexpectedly
 - No ERROR status received (just connection loss)
 - Can happen during any active state (CONNECTING, VALIDATING, READY, PREPARING, RUNNING)
 - Terminal state (no reconnect support in v0.8.0)
 
 **9. ABORTING**
+
 - Controller sent AbortWorkload RPC to agent
 - Waiting for agent cleanup (5-15s timeout)
 - Agent still sending stats during cleanup
@@ -482,6 +508,7 @@ struct AgentTracker {
 ## Why This Design?
 
 **More states enable better debugging:**
+
 - "Agent stuck at CONNECTING" → network issue, agent never started
 - "Agent stuck at VALIDATING" → config validation taking too long
 - "Agent stuck at READY" → coordinated start delay or clock skew
@@ -489,11 +516,13 @@ struct AgentTracker {
 - "Agent stuck at RUNNING" → workload hung or extremely slow
 
 **Terminal states enable proper cleanup:**
+
 - Controller knows when all agents are COMPLETED/FAILED/DISCONNECTED
 - Can aggregate final results without missing data
 - Can detect partial failures (some COMPLETED, some FAILED)
 
 **Aborting state enables tracking:**
+
 - Controller knows abort is in progress
 - Can wait for cleanup instead of immediately killing
 - Can detect hung aborts (stuck in ABORTING > 15s)
@@ -503,10 +532,12 @@ struct AgentTracker {
 ## Summary: Two State Machines Working Together
 
 **Agent (5 states)**: Internal state tracking for workload lifecycle
+
 - Idle → Ready → Running → (Completed/Failed/Aborting) → Idle
 - Focus: "What am I doing right now?"
 
 **Controller (9 states)**: External view of agent lifecycle from connection to completion
+
 - Connecting → Validating → Ready → Preparing → Running → (Completed/Failed/Disconnected/Aborting)
 - Focus: "What is this agent doing right now, and can I rely on it?"
 
@@ -515,6 +546,7 @@ struct AgentTracker {
 ## Recommendation
 
 **✅ Current implementation (v0.8.0) is correct:**
+
 - Agent: 5-state model (Idle, Ready, Running, Failed, Aborting)
 - Controller: 9-state model (Connecting, Validating, Ready, Preparing, Running, Completed, Failed, Disconnected, Aborting)
 

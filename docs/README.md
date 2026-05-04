@@ -7,6 +7,7 @@ Comprehensive documentation for sai3-bench - a high-performance distributed I/O 
 ## Quick Start
 
 **New users start here:**
+
 1. **[USAGE.md](USAGE.md)** - Complete user guide for workload configuration
 2. **[DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host testing architecture and examples
 3. **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** - SSH and container deployment options
@@ -31,6 +32,9 @@ Comprehensive documentation for sai3-bench - a high-performance distributed I/O 
 | **[CONFIG_SYNTAX.md](CONFIG_SYNTAX.md)** | YAML configuration file syntax reference |
 | **[PERF_LOG_FORMAT.md](PERF_LOG_FORMAT.md)** | Performance log format (30-column TSV specification) |
 | **[ANALYZE_TOOL.md](ANALYZE_TOOL.md)** | sai3-analyze tool - compare test runs in Excel |
+| **[CONFIG_CONVERTER.md](CONFIG_CONVERTER.md)** | YAML config conversion tool - migrate and upgrade config files |
+| **[S3DLIO_PERFORMANCE_TUNING.md](S3DLIO_PERFORMANCE_TUNING.md)** | s3dlio tuning guide (range downloads, concurrency, backends) |
+| **[METADATA_CACHE_DESIGN.md](METADATA_CACHE_DESIGN.md)** | fjall LSM-tree metadata cache design and flush policy |
 | **[CHANGELOG.md](CHANGELOG.md)** | Version history (v0.8.5+) |
 
 ---
@@ -64,6 +68,7 @@ distributed:
 ```
 
 **Examples with verification**:
+
 - [`tests/configs/multi_endpoint_prepare.yaml`](../tests/configs/multi_endpoint_prepare.yaml) - Data preparation with endpoint isolation
 - [`tests/configs/multi_endpoint_workload.yaml`](../tests/configs/multi_endpoint_workload.yaml) - Workload test with per-agent stats
 
@@ -73,7 +78,7 @@ distributed:
 
 **Architecture**: Controller orchestrates multiple agents via gRPC
 
-```
+```text
 Controller (sai3bench-ctl)
     ├─→ Agent 1 (host1:7167)
     ├─→ Agent 2 (host2:7167)
@@ -83,6 +88,7 @@ Controller (sai3bench-ctl)
 ```
 
 **Quick start**:
+
 ```bash
 # Start agents on each host
 sai3bench-agent --listen 0.0.0.0:7167
@@ -92,6 +98,7 @@ sai3bench-ctl run --config distributed-test.yaml
 ```
 
 **Examples**:
+
 - [`tests/configs/local_test_2agents.yaml`](../tests/configs/local_test_2agents.yaml) - 2-agent local testing
 - [`tests/configs/distributed_mixed_test.yaml`](../tests/configs/distributed_mixed_test.yaml) - Mixed operations
 
@@ -104,6 +111,7 @@ sai3-analyze --dirs run1,run2,run3 --output comparison.xlsx
 ```
 
 **Output includes**:
+
 - Results tabs (aggregate metrics)
 - Performance logs (time-series)
 - Endpoint statistics (multi-endpoint tests)
@@ -126,46 +134,38 @@ See [archive/README.md](archive/README.md) for complete list.
 
 ---
 
-## Implementation & Design Documentation
+## Planning & Design Notes
 
-Deep-dives into internal architecture and design decisions:
+Internal investigations, architecture decisions, and planning documents are in
+[planning/](planning/) — not needed for day-to-day use:
 
-| Document | Description |
-|----------|-------------|
-| **[YAML_DRIVEN_STAGE_ORCHESTRATION.md](YAML_DRIVEN_STAGE_ORCHESTRATION.md)** | Multi-stage workflow design with 6 stage types, completion criteria, and coordinator state machine |
-| **[DISTRIBUTED_BARRIER_SYNC_DESIGN.md](DISTRIBUTED_BARRIER_SYNC_DESIGN.md)** | Barrier synchronization architecture for coordinated multi-host testing |
-| **[PREFLIGHT_VALIDATION_IMPLEMENTATION.md](PREFLIGHT_VALIDATION_IMPLEMENTATION.md)** | Pre-flight validation system: path checks, timeout propagation, early failure detection |
-| **[TIMEOUT_FIX_IMPLEMENTATION.md](TIMEOUT_FIX_IMPLEMENTATION.md)** | Comprehensive timeout configuration: global/stage/barrier hierarchy with large-scale tuning |
-
----
-
-## Analysis & Troubleshooting
-
-Performance analysis and design validation documents:
-
-| Document | Description |
-|----------|-------------|
-| **[EXECUTION_ORDER_ANALYSIS.md](EXECUTION_ORDER_ANALYSIS.md)** | Detailed analysis of distributed execution order and timing characteristics |
-| **[LARGE_SCALE_TIMEOUT_ANALYSIS.md](LARGE_SCALE_TIMEOUT_ANALYSIS.md)** | Timeout tuning for large-scale deployments (100+ agents) with network latency modeling |
+- `trillion-object-throughput-investigation.md` — throughput investigation notes
+- `How-to-Put-1-Trillion_Objects.md` — planning for trillion-object scale
+- `BLOCK_STORAGE_ANALYSIS.md` — block storage feasibility analysis
+- `FIX_HOT_PATH.md` — hot-path optimization sprint notes (shipped)
+- `PrepareWorkloadArchitecture_v0.8.62.md` — prepare workload design (shipped)
+- `YAML_DRIVEN_STAGE_ORCHESTRATION.md` — stage orchestration design (shipped)
 
 ---
 
 ## Version Information
 
-**Current Version**: v0.8.50 (January 2026)
+**Current Version**: v0.8.97 (May 2026)
 
-**Major features in v0.8.50**:
-- **YAML-driven stage orchestration**: Multi-stage workflows with 6 stage types, 5 completion criteria
-- **Barrier synchronization**: Coordinated multi-host testing with pre/post/mid barriers
-- **Comprehensive timeouts**: Global/stage/barrier timeout hierarchy with automatic propagation
-- **Pre-flight validation**: Automated path checks, timeout validation, early failure detection
+**Major features in v0.8.97**:
+
+- **Namespace sharding** (`key_prefix_shards`): Distribute object keys across 256 hex prefix directories for hash-partitioned storage (VAST, etc.)
+- **Dynamic PUT pool** (`dynamic_put_pool`): Newly PUT objects immediately enter the GET selection pool
+- **Credential forwarding** (`sai3bench-ctl --env-file`): Automatic credential propagation to all agents (v0.8.92)
+- **S3_ENDPOINT_URIS env var**: Enable multi-endpoint without editing YAML (v0.8.96)
 
 **Recent major features**:
-- v0.8.23: Pre-flight validation system (path checks, early failure detection)
+
+- v0.8.92: Credential forwarding (controller → agents via gRPC)
+- v0.8.86: GCS RAPID (Hyperdisk ML) support
+- v0.8.50: YAML-driven stage orchestration with 6 stage types and barrier sync
+- v0.8.23: Pre-flight validation system
 - v0.8.22: Multi-endpoint statistics, per-agent endpoint assignment
-- v0.8.19: Critical race condition fixes, precise perf_log timing
-- v0.8.17: Complete perf_log percentiles (31 columns), sai3-analyze tool
-- v0.8.15: Performance logging system (perf_log.tsv)
 
 **See**: [CHANGELOG.md](CHANGELOG.md) for detailed release notes
 
@@ -174,6 +174,7 @@ Performance analysis and design validation documents:
 ## Getting Help
 
 **Documentation not clear?** File an issue with:
+
 - What you're trying to do
 - What documentation you consulted
 - Where the gap is

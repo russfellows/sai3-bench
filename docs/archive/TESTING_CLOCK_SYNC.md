@@ -24,6 +24,7 @@ SAI3_AGENT_CLOCK_SKEW_MS=-3000 ./target/release/sai3bench-agent --listen 0.0.0.0
 ```
 
 When an agent starts with this variable set, it will:
+
 1. Print a test mode message: `[TEST MODE] Simulating clock skew: 5000 ms`
 2. Add the offset to all timestamps it reports to the controller
 3. Behave exactly as if its system clock had that offset
@@ -31,6 +32,7 @@ When an agent starts with this variable set, it will:
 ### How It Works
 
 The `get_agent_timestamp_ns()` helper function in `agent.rs`:
+
 - Gets the current system time (nanoseconds since UNIX_EPOCH)
 - Checks for the `SAI3_AGENT_CLOCK_SKEW_MS` environment variable
 - If set, adds the offset (in milliseconds converted to nanoseconds)
@@ -47,6 +49,7 @@ We provide an automated test script that verifies clock synchronization with thr
 ```
 
 This script:
+
 1. Starts 3 agents with different clock skews (+5s, -3s, +1s)
 2. Runs a simple file workload via the controller
 3. Verifies that the controller detects the clock offsets
@@ -55,6 +58,7 @@ This script:
 ### Expected Output
 
 Controller should log messages like:
+
 ```
 Agent 127.0.0.1:7167 clock offset: 5000123456 ns (5000.12 ms)
 Agent 127.0.0.1:7168 clock offset: -2999876543 ns (-2999.88 ms)
@@ -67,22 +71,29 @@ All agents should start their workloads within milliseconds of each other (in ab
 ## Testing Scenarios
 
 ### Scenario 1: Moderate Skew
+
 Test with ±1-2 second offsets (typical of NTP-synced systems):
+
 ```bash
 SAI3_AGENT_CLOCK_SKEW_MS=1500 ./agent1 &
 SAI3_AGENT_CLOCK_SKEW_MS=-800 ./agent2 &
 ```
 
 ### Scenario 2: Large Skew
+
 Test with 5+ second offsets (warning threshold):
+
 ```bash
 SAI3_AGENT_CLOCK_SKEW_MS=5000 ./agent1 &
 SAI3_AGENT_CLOCK_SKEW_MS=-10000 ./agent2 &
 ```
+
 Controller should log warnings about large offsets.
 
 ### Scenario 3: Mixed Production + Test
+
 One agent with skew, others normal:
+
 ```bash
 SAI3_AGENT_CLOCK_SKEW_MS=3000 ./agent1 &
 ./agent2 &  # No skew
@@ -94,6 +105,7 @@ SAI3_AGENT_CLOCK_SKEW_MS=3000 ./agent1 &
 **IMPORTANT**: `SAI3_AGENT_CLOCK_SKEW_MS` is for testing only. Do not use in production.
 
 In production deployments:
+
 - Agents report their actual system time
 - No artificial offsets are applied
 - Clock synchronization happens automatically
@@ -112,6 +124,7 @@ The clock synchronization protocol works as follows:
 The key insight is that both controller and agents measure time from UNIX_EPOCH (January 1, 1970). Even if clocks are skewed, the absolute epoch timestamp is the same reference point for everyone.
 
 **Example**:
+
 - Controller (clock at 1000s): "Start at epoch 1010s"
 - Agent 1 (clock at 1005s, +5s skew): Waits 5 seconds → starts at epoch 1010s ✓
 - Agent 2 (clock at 997s, -3s skew): Waits 13 seconds → starts at epoch 1010s ✓
@@ -132,6 +145,7 @@ If agents start at different times, the workload durations will differ significa
 ## Future Enhancements
 
 Potential improvements to clock synchronization:
+
 - RTT measurement for more accurate offset calculation
 - Periodic re-synchronization during long workloads
 - Automatic detection and warning of excessive clock drift

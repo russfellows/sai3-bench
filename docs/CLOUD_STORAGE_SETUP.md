@@ -1,6 +1,7 @@
 # Cloud Storage Setup Guide
 
 ## Overview
+
 This guide covers authentication and configuration for all cloud storage backends supported by sai3-bench: Amazon S3, Azure Blob Storage, and Google Cloud Storage.
 
 ---
@@ -8,6 +9,7 @@ This guide covers authentication and configuration for all cloud storage backend
 ## Amazon S3 (s3://)
 
 ### Prerequisites
+
 - AWS CLI installed and configured
 - Access to an S3 bucket
 - IAM credentials with appropriate permissions
@@ -15,6 +17,7 @@ This guide covers authentication and configuration for all cloud storage backend
 ### Authentication Setup
 
 #### Option 1: AWS CLI Configuration (Recommended)
+
 ```bash
 # Configure AWS CLI (interactive)
 aws configure
@@ -27,6 +30,7 @@ aws configure
 ```
 
 #### Option 2: Environment Variables
+
 ```bash
 export AWS_ACCESS_KEY_ID="your-access-key-id"
 export AWS_SECRET_ACCESS_KEY="your-secret-access-key"
@@ -34,6 +38,7 @@ export AWS_REGION="us-west-2"  # Optional, defaults to us-east-1
 ```
 
 #### Option 3: Environment File (.env)
+
 ```bash
 # AWS S3 configuration
 AWS_ACCESS_KEY_ID=your-access-key-id
@@ -43,11 +48,13 @@ AWS_ENDPOINT_URL=https://s3.us-west-2.amazonaws.com  # Optional
 ```
 
 ### URI Format
-```
+
+```text
 s3://BUCKET_NAME/path/to/object
 ```
 
 **Examples**:
+
 ```bash
 # Bucket: my-benchmark-bucket
 s3://my-benchmark-bucket/
@@ -58,16 +65,19 @@ s3://my-benchmark-bucket/test-data/object.dat
 ### CLI Usage Examples
 
 #### Health Check
+
 ```bash
 sai3-bench util health --uri "s3://my-benchmark-bucket/"
 ```
 
 #### List Objects
+
 ```bash
 sai3-bench util list --uri "s3://my-benchmark-bucket/test-data/"
 ```
 
 #### Upload Objects
+
 ```bash
 sai3-bench put \
   --uri "s3://my-benchmark-bucket/uploads/" \
@@ -77,6 +87,7 @@ sai3-bench put \
 ```
 
 #### Download Objects
+
 ```bash
 sai3-bench get \
   --uri "s3://my-benchmark-bucket/uploads/*" \
@@ -84,6 +95,7 @@ sai3-bench get \
 ```
 
 #### Workload Configuration (s3_workload.yaml)
+
 ```yaml
 target: "s3://my-benchmark-bucket/benchmark/"
 duration: 60s
@@ -118,7 +130,9 @@ workload:
 ```
 
 ### S3-Compatible Storage (MinIO, etc.)
+
 For S3-compatible endpoints, use `AWS_ENDPOINT_URL`:
+
 ```bash
 export AWS_ENDPOINT_URL="https://minio.example.com"
 export AWS_ACCESS_KEY_ID="minioadmin"
@@ -128,6 +142,7 @@ sai3-bench util health --uri "s3://my-bucket/"
 ```
 
 ### Performance Characteristics
+
 - **Latency**: 50-200ms (region/network dependent)
 - **Throughput**: High (100+ ops/sec with sufficient concurrency)
 - **Best concurrency**: 16-64 for mixed workloads
@@ -139,6 +154,7 @@ sai3-bench util health --uri "s3://my-bucket/"
 ## Azure Blob Storage (az://)
 
 ### Prerequisites
+
 - Azure CLI installed and authenticated
 - Access to an Azure Storage Account
 - Container created in the storage account
@@ -146,6 +162,7 @@ sai3-bench util health --uri "s3://my-bucket/"
 ### Authentication Setup
 
 #### Step 1: Azure CLI Authentication
+
 ```bash
 # Login to Azure (interactive)
 az login
@@ -155,6 +172,7 @@ az account show
 ```
 
 #### Step 2: Environment Variables
+
 ```bash
 # Storage account name
 export AZURE_STORAGE_ACCOUNT="your-storage-account-name"
@@ -166,6 +184,7 @@ export AZURE_STORAGE_ACCOUNT_KEY="$(az storage account keys list \
 ```
 
 #### Step 3: Environment File (.env)
+
 ```bash
 # Azure Blob Storage configuration
 AZURE_STORAGE_ACCOUNT=your-storage-account-name
@@ -173,13 +192,15 @@ AZURE_STORAGE_ACCOUNT=your-storage-account-name
 ```
 
 ### URI Format
+
 **CRITICAL**: Azure URIs must include the storage account name:
 
-```
+```text
 az://STORAGE_ACCOUNT/CONTAINER/path
 ```
 
 **Examples**:
+
 ```bash
 # Storage Account: mystorageaccount
 # Container: mycontainer
@@ -197,6 +218,7 @@ az://mycontainer/test-data/
 ### CLI Usage Examples
 
 #### Health Check
+
 ```bash
 export AZURE_STORAGE_ACCOUNT="mystorageaccount"
 export AZURE_STORAGE_ACCOUNT_KEY="$(az storage account keys list --account-name mystorageaccount --query [0].value -o tsv)"
@@ -205,11 +227,13 @@ sai3-bench util health --uri "az://mystorageaccount/mycontainer/"
 ```
 
 #### List Objects
+
 ```bash
 sai3-bench util list --uri "az://mystorageaccount/mycontainer/test-data/"
 ```
 
 #### Upload Objects
+
 ```bash
 sai3-bench put \
   --uri "az://mystorageaccount/mycontainer/uploads/" \
@@ -219,6 +243,7 @@ sai3-bench put \
 ```
 
 #### Download Objects
+
 ```bash
 sai3-bench get \
   --uri "az://mystorageaccount/mycontainer/uploads/*" \
@@ -226,6 +251,7 @@ sai3-bench get \
 ```
 
 #### Workload Configuration (azure_workload.yaml)
+
 ```yaml
 target: "az://mystorageaccount/mycontainer/benchmark/"
 duration: 60s
@@ -258,6 +284,7 @@ workload:
 ```
 
 ### Performance Characteristics
+
 - **Latency**: Network/region dependent; expect single-digit ms on same-region or LAN, higher over WAN
 - **Throughput**: Comparable to S3/GCS on same-region deployments
 - **Best concurrency**: 16-64 for mixed workloads (tune to your network)
@@ -268,6 +295,7 @@ workload:
 ## Google Cloud Storage (gs:// or gcs://)
 
 ### Prerequisites
+
 - Google Cloud SDK (gcloud) installed
 - Service account or user credentials
 - Access to a GCS bucket
@@ -275,6 +303,7 @@ workload:
 ### Authentication Setup
 
 s3dlio requires two things before any `gs://` operation will succeed:
+
 1. Valid GCP credentials (via one of the options below)
 2. The `GCLOUD_PROJECT` environment variable set to your GCP project ID
 
@@ -292,7 +321,8 @@ s3-cli list-buckets gs://
 ```
 
 Expected output:
-```
+
+```text
 Listing containers for 'gs://'...
 
 Found N container(s):
@@ -339,14 +369,16 @@ GCLOUD_PROJECT=your-project-id
 ```
 
 ### URI Format
+
 Both `gs://` and `gcs://` schemes are supported:
 
-```
+```text
 gs://BUCKET_NAME/path/to/object
 gcs://BUCKET_NAME/path/to/object
 ```
 
 **Examples**:
+
 ```bash
 # Bucket: my-gcs-bucket
 gs://my-gcs-bucket/
@@ -360,6 +392,7 @@ gcs://my-gcs-bucket/test-data/
 ### CLI Usage Examples
 
 #### Health Check
+
 ```bash
 # Ensure credentials and project are set (see Authentication Setup above)
 export GCLOUD_PROJECT=your-project-id
@@ -368,11 +401,13 @@ sai3-bench util health --uri "gs://my-gcs-bucket/"
 ```
 
 #### List Objects
+
 ```bash
 sai3-bench util list --uri "gs://my-gcs-bucket/test-data/"
 ```
 
 #### Upload Objects
+
 ```bash
 sai3-bench put \
   --uri "gs://my-gcs-bucket/uploads/" \
@@ -382,6 +417,7 @@ sai3-bench put \
 ```
 
 #### Download Objects
+
 ```bash
 sai3-bench get \
   --uri "gs://my-gcs-bucket/uploads/*" \
@@ -389,6 +425,7 @@ sai3-bench get \
 ```
 
 #### Workload Configuration (gcs_workload.yaml)
+
 ```yaml
 target: "gs://my-gcs-bucket/benchmark/"
 duration: 60s
@@ -427,13 +464,84 @@ workload:
 ```
 
 ### Performance Characteristics
+
 - **Latency**: 50-150ms (region/network dependent)
 - **Throughput**: High (similar to S3, 100+ ops/sec standard; RAPID buckets achieve multi-GB/s)
 - **Best concurrency**: 16-64 for mixed workloads
 - **RAPID (Hyperdisk ML)**: Fully supported as of sai3-bench v0.8.86 / s3dlio v0.9.84.
   Uses `BidiWriteObject` for PUTs and `BidiReadObject` for GETs.
   Auto-detected per bucket, or force via `gcs_rapid_mode: true` in `s3dlio_optimization`.
-  See [GCS_INTEGRATION.md](GCS_INTEGRATION.md) for YAML examples.
+
+### RAPID vs Standard GCS
+
+| | Standard | RAPID (Hyperdisk ML) |
+|--|----------|---------------------|
+| **PUT API** | `InsertObject` | `BidiWriteObject` |
+| **GET API** | `ReadObject` | `BidiReadObject` |
+| **Auto-detected** | — | Yes (via `GetStorageLayout`) |
+| **Force via YAML** | `gcs_rapid_mode: false` | `gcs_rapid_mode: true` |
+
+RAPID objects must be read back with the bidi-read API. s3dlio handles this automatically.
+
+```yaml
+# Standard GCS workload — no extra config needed
+target: "gs://my-bucket/bench/"
+concurrency: 32
+
+# RAPID bucket
+target: "gs://my-rapid-bucket/bench/"
+concurrency: 32
+
+s3dlio_optimization:
+  gcs_rapid_mode: true
+  enable_range_downloads: false   # default; see Range Downloads section below
+```
+
+Omit `gcs_rapid_mode` and s3dlio will call `GetStorageLayout` on first access to
+determine the bucket type (result cached for the process lifetime).
+
+### Optional: Override gRPC Channel Count
+
+For very high concurrency or multi-host workloads, the channel count can be tuned:
+
+```yaml
+concurrency: 32
+
+s3dlio_optimization:
+  gcs_channel_count: 4    # total gRPC subchannels = 4
+  gcs_rapid_mode: true
+```
+
+When `gcs_channel_count` is absent (the usual case), sai3-bench sets one channel
+per concurrent task automatically.
+
+### Range Downloads with RAPID
+
+`enable_range_downloads: true` splits large GETs into concurrent partial reads.
+
+**Trade-off for RAPID buckets**: each range chunk issues a `ReadObject` RPC with
+a byte-range header, **not** a `BidiReadObject`. RAPID's bidi-streaming transport
+is therefore bypassed per chunk. Parallelism is real, but RAPID transport efficiency
+is sacrificed. Whether this is a net win depends on object sizes and network
+conditions — benchmark before enabling in production.
+
+```yaml
+# Enable parallel range GETs for large objects (experimental on RAPID)
+s3dlio_optimization:
+  gcs_rapid_mode: true
+  enable_range_downloads: true
+  range_threshold_mb: 64   # only split objects ≥ 64 MB
+```
+
+### GCS Environment Variable Overrides
+
+Prefer YAML fields over environment variables. Available overrides:
+
+| Variable | Purpose |
+|----------|---------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to ADC JSON (if not using `gcloud auth`) |
+| `S3DLIO_GCS_RAPID` | Force `true` / `false` / `auto` |
+| `S3DLIO_GCS_GRPC_CHANNELS` | Override subchannel count |
 
 ---
 
@@ -456,34 +564,42 @@ workload:
 ### Common Issues Across All Backends
 
 #### 1. Authentication Errors
+
 **Symptoms**: "Access Denied", "Unauthorized", "403 Forbidden"
 
 **Solutions**:
+
 - **S3**: Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set
 - **Azure**: Check `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_ACCOUNT_KEY`
 - **GCS**: Verify `GOOGLE_APPLICATION_CREDENTIALS` points to valid JSON file, or run `gcloud auth login`; also confirm `GCLOUD_PROJECT` is exported
 
 #### 2. Bucket/Container Not Found
+
 **Symptoms**: "NoSuchBucket", "Container not found", "404 Not Found"
 
 **Solutions**:
+
 - Verify bucket/container exists: `aws s3 ls` / `az storage container list` / `gsutil ls`
 - Check URI format is correct for the backend
 - For Azure: Ensure storage account name is in URI
 
 #### 3. Network/Timeout Issues
+
 **Symptoms**: "Connection timeout", "Request timeout", hanging operations
 
 **Solutions**:
+
 - Check network connectivity to cloud provider
 - Reduce concurrency if rate-limited
 - For Azure: Verify correct URI format (must include storage account)
 - Enable verbose logging: `sai3-bench -vv ...`
 
 #### 4. Permission Errors
+
 **Symptoms**: "Access Denied" for specific operations (e.g., PUT works but DELETE fails)
 
 **Solutions**:
+
 - **S3**: Check IAM policy grants required permissions (s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket)
 - **Azure**: Verify storage account key has full access, or check RBAC roles
 - **GCS**: Ensure service account has Storage Object Admin or equivalent role
@@ -491,6 +607,7 @@ workload:
 ### Debug Commands
 
 #### Test Cloud Provider CLI Access
+
 ```bash
 # S3
 aws s3 ls s3://my-bucket/ --region us-west-2
@@ -503,6 +620,7 @@ gsutil ls gs://my-gcs-bucket/
 ```
 
 #### Test with Verbose Logging
+
 ```bash
 # Enable detailed tracing
 sai3-bench -vv health --uri "s3://my-bucket/"
@@ -511,6 +629,7 @@ sai3-bench -vv health --uri "gs://my-bucket/"
 ```
 
 #### Verify Environment Variables
+
 ```bash
 # S3
 echo $AWS_ACCESS_KEY_ID
@@ -532,6 +651,7 @@ cat $GOOGLE_APPLICATION_CREDENTIALS | jq .type  # Should show "service_account"
 ## Security Best Practices
 
 ### Credential Management
+
 1. **Never commit credentials** to version control
 2. **Use environment files** (.env) for local development
 3. **Use IAM roles** in production (EC2 instance profiles, GKE workload identity)
@@ -539,6 +659,7 @@ cat $GOOGLE_APPLICATION_CREDENTIALS | jq .type  # Should show "service_account"
 5. **Use least-privilege** IAM policies
 
 ### Example .env File
+
 ```bash
 # .env file (add to .gitignore!)
 
@@ -556,6 +677,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/home/user/.config/gcloud/service-account.json
 ```
 
 ### Loading Environment File
+
 ```bash
 # Load environment variables
 source .env

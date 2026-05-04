@@ -9,11 +9,13 @@
 ## Problem with Current Design
 
 **v0.8.25 has HARDCODED stage transitions:**
+
 ```rust
 Idle → Validating → PrepareReady → Preparing → ExecuteReady → Executing → CleanupReady → Cleaning → Completed
 ```
 
 **Critical Issues:**
+
 1. ❌ Assumes cleanup always happens after execution
 2. ❌ Cannot skip stages (what if no cleanup needed?)
 3. ❌ Cannot have multiple execution stages (multi-epoch training, checkpoint testing)
@@ -21,6 +23,7 @@ Idle → Validating → PrepareReady → Preparing → ExecuteReady → Executin
 5. ❌ Agents and controller must agree on stage order via code, not config
 
 **Example Failure Cases:**
+
 - Benchmark without cleanup → stuck at CleanupReady waiting forever
 - Multi-stage training → no way to express "execute epoch 1, then epoch 2, then epoch 3"
 - Checkpoint workflow → can't do "load → execute → save" sequence
@@ -180,12 +183,14 @@ distributed:
 **CRITICAL**: Different stages have different ways of knowing when they're complete!
 
 #### 1. `duration` - Time-Based Completion
+
 - **Used By**: Execute stages (I/O workload benchmarks)
 - **Behavior**: Run for exactly N seconds, then complete
 - **Example**: `completion: duration`, `duration_secs: 300`
 - **Progress**: Report elapsed time / total time
 
 #### 2. `tasks_done` - Task-Based Completion  
+
 - **Used By**: Prepare, Cleanup stages
 - **Behavior**: Complete when all tasks finished (objects created/deleted, etc.)
 - **Example**: `completion: tasks_done`
@@ -193,18 +198,21 @@ distributed:
 - **CANNOT assign time** - takes however long it takes!
 
 #### 3. `script_exit` - Script-Based Completion
+
 - **Used By**: Custom stages
 - **Behavior**: Complete when script/command exits successfully (exit code 0)
 - **Example**: `completion: script_exit`, `script: "load_checkpoint.sh"`
 - **Progress**: Report script running/completed
 
 #### 4. `validation_passed` - Validation-Based Completion
+
 - **Used By**: Preflight stages
 - **Behavior**: Complete when all validation checks pass
 - **Example**: `completion: validation_passed`
 - **Progress**: Report checks_passed / checks_total
 
 #### 5. `duration_or_tasks` - Hybrid Completion (Whichever First)
+
 - **Used By**: Any stage
 - **Behavior**: Complete when EITHER duration reached OR all tasks done
 - **Example**: `completion: duration_or_tasks`, `duration_secs: 600`, `max_objects: 10000`
@@ -216,12 +224,14 @@ distributed:
 ### Stage Type Details
 
 ### 1. `preflight` - Pre-flight Validation
+
 - **Behavior**: Runs validation checks (storage access, permissions, etc.)
 - **Completion**: `validation_passed` (when all checks pass)
 - **Typical Duration**: 10-60 seconds
 - **Default Barrier**: `all_or_nothing` (any failure aborts workload)
 
 ### 2. `prepare` - Object/Data Preparation
+
 - **Behavior**: Creates objects, generates data, sets up test environment
 - **Completion**: `tasks_done` (when all objects created) - NOT time-based!
 - **Typical Duration**: Varies widely (seconds to hours based on object count/size)
@@ -229,6 +239,7 @@ distributed:
 - **Progress Tracking**: Objects created / total objects
 
 ### 3. `execute` - Workload Execution
+
 - **Behavior**: Runs I/O workload (GET/PUT/LIST operations)
 - **Completion**: `duration` (runs for fixed time) - TIME-based!
 - **Typical Duration**: Seconds to hours (config-dependent)
@@ -237,6 +248,7 @@ distributed:
 - **Progress Tracking**: Elapsed time / duration
 
 ### 4. `cleanup` - Post-Execution Cleanup
+
 - **Behavior**: Deletes objects, removes temporary files
 - **Completion**: `tasks_done` (when all objects deleted) - NOT time-based!
 - **Typical Duration**: Varies widely (seconds to hours based on object count)
@@ -245,6 +257,7 @@ distributed:
 - **Progress Tracking**: Objects deleted / total objects
 
 ### 5. `custom` - User-Defined Stage
+
 - **Behavior**: Runs custom script/command on each agent
 - **Completion**: `script_exit` (when script exits successfully)
 - **Examples**: Load checkpoint, save checkpoint, process results, archive logs
@@ -298,6 +311,7 @@ Idle
 ```
 
 **Key Advantages:**
+
 - ✅ No hardcoded stage names in state machine
 - ✅ Supports any number of stages (1 to N)
 - ✅ Supports stage reordering via YAML
@@ -546,6 +560,7 @@ transition_to(WorkloadState::Completed).await?;
 
 1. Add `stages` field to DistributedConfig (optional for now)
 2. If `stages` not specified, generate default stage sequence:
+
    ```rust
    vec![
        StageConfig { name: "validation", order: 1, type: Preflight, ... },
@@ -554,6 +569,7 @@ transition_to(WorkloadState::Completed).await?;
        StageConfig { name: "cleanup", order: 4, type: Cleanup, optional: true, ... },
    ]
    ```
+
 3. Existing configs work without changes (use default stages)
 
 ### Phase 2: Update State Machine
@@ -581,6 +597,7 @@ transition_to(WorkloadState::Completed).await?;
 ## Benefits
 
 ### For Users
+
 - ✅ **Flexible workflows** - define any stage sequence
 - ✅ **Clear intent** - explicit `order` field shows execution sequence
 - ✅ **Multi-stage support** - epochs, rounds, checkpoints, etc.
@@ -588,12 +605,14 @@ transition_to(WorkloadState::Completed).await?;
 - ✅ **Custom stages** - run user scripts at any point
 
 ### For Developers
+
 - ✅ **No hardcoded assumptions** - stage order in YAML, not code
 - ✅ **Simpler state machine** - one `AtStage` state, not 8 specific states
 - ✅ **Easier testing** - mock stage sequences via config
 - ✅ **Better maintainability** - add new stage types without code changes
 
 ### For Distributed Coordination
+
 - ✅ **Guaranteed agreement** - controller and agents read same YAML
 - ✅ **Explicit synchronization** - barrier at each stage boundary
 - ✅ **Clear progress tracking** - always know which stage executing
@@ -751,6 +770,7 @@ confirm which path the agent will take before you commit to a long run.
 ## Example Configs
 
 ### Simple Benchmark (No Cleanup)
+
 ```yaml
 distributed:
   stages:
@@ -776,6 +796,7 @@ distributed:
 ```
 
 ### Multi-Epoch Training
+
 ```yaml
 distributed:
   stages:
@@ -823,6 +844,7 @@ distributed:
 ```
 
 ### Checkpoint Workflow
+
 ```yaml
 distributed:
   stages:
@@ -857,6 +879,7 @@ distributed:
 ```
 
 ### Hybrid Example (Prepare with Timeout)
+
 ```yaml
 distributed:
   stages:

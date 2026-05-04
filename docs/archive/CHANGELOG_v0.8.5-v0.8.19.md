@@ -139,6 +139,7 @@ This archive contains historical changes for sai3-bench versions 0.8.5 through 0
 In distributed mode, the aggregate perf_log.tsv uses weighted averaging to combine percentiles from multiple agents. This is a mathematical approximation, not statistically exact. Percentiles should ideally be computed from merged HDR histograms, not averaged.
 
 **For accurate percentile analysis, use:**
+
 1. **Per-agent perf_log files** (`agents/{agent-id}/perf_log.tsv`) - Accurate, computed from local HDR histograms
 2. **Final workload_results.tsv** - Accurate, uses HDR histogram merging across all agents
 
@@ -756,6 +757,7 @@ The aggregate perf_log is suitable for monitoring and visualization during test 
 **No breaking changes.** Existing oplogs continue to work (client_id was always present but empty before).
 
 **New capabilities**:
+
 - Set custom client_id via SAI3_CLIENT_ID environment variable
 - first_byte field now populated (was empty before v0.9.22)
 - Distributed agents automatically sync timestamps to controller
@@ -846,7 +848,7 @@ The aggregate perf_log is suitable for monitoring and visualization during test 
 
 ### Fixed
 
-- **Critical: Repeated READY messages bug** 
+- **Critical: Repeated READY messages bug**
   - Old: Agents sent READY status every second (keepalive in single channel)
   - New: Agents send READY exactly once, wait silently for coordinated start
   - Agents now start within milliseconds of each other

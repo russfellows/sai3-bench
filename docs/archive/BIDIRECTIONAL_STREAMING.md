@@ -22,6 +22,7 @@ Controller ───────→ Control Channel ──────→ Agent
 ```
 
 **Key Features:**
+
 - Single gRPC bidirectional stream (`ExecuteWorkload`)
 - Logically separated message types (stats vs control)
 - Non-blocking: Agent can send stats while waiting for control messages
@@ -148,15 +149,18 @@ Agent continuously listens for control messages:
 **Environment:** 2 local agents, file:// backend, 320-file prepare phase
 
 **Synchronization:**
+
 - READY phase: Agents sent READY within **0.049 ms** of each other
 - START phase: Agents began workload within **0.55 ms** of each other
 
 **Performance:**
+
 - 105,729 GET operations in 30 seconds
 - 10.1 GiB/s aggregate throughput
 - Prepare metrics collected correctly (640 PUTs)
 
 **Reliability:**
+
 - ✅ All 148 tests pass (55 unit + 93 integration)
 - ✅ Zero compiler warnings
 - ✅ READY sent exactly once per agent
@@ -167,11 +171,13 @@ Agent continuously listens for control messages:
 ## Implementation Files
 
 **Core Implementation:**
+
 - `src/bin/agent.rs`: Lines 1463-2726 (execute_workload RPC)
 - `src/bin/controller.rs`: Full bidirectional streaming controller
 - `proto/iobench.proto`: ControlMessage and status codes
 
 **Documentation:**
+
 - This file: High-level architecture overview
 - `DISTRIBUTED_TESTING_GUIDE.md`: Usage guide for distributed testing
 - `CHANGELOG.md`: Version history and release notes
