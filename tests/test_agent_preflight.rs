@@ -37,6 +37,7 @@ fn make_test_config(target: Option<String>) -> Config {
         enable_metadata_cache: true,
         s3dlio_optimization: None,
         distributed_env: std::collections::HashMap::new(),
+        dynamic_put_pool: false,
     }
 }
 

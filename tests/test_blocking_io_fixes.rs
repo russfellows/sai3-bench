@@ -312,6 +312,7 @@ async fn test_prepare_yields_during_creation() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     // Track concurrent task progress during prepare
@@ -409,6 +410,7 @@ async fn test_prepare_sequential_yields() -> Result<()> {
         prepare_strategy: PrepareStrategy::Sequential, // Sequential mode
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let (tx, mut rx) = mpsc::channel(100);
@@ -492,6 +494,7 @@ async fn test_executor_responsiveness_large_prepare() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     // Simulate stats writer (sends every 1 second in real code)
@@ -770,6 +773,7 @@ async fn test_small_prepare_still_works() -> Result<()> {
         prepare_strategy: PrepareStrategy::Parallel,
         skip_verification: false,
         force_overwrite: false,
+        key_prefix_shards: 0,
     };
 
     let multi_ep_cache = Arc::new(Mutex::new(HashMap::new()));

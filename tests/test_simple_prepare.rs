@@ -36,6 +36,7 @@ async fn test_single_agent_prepare() {
         cleanup: false,
         cleanup_mode: CleanupMode::Tolerant,
         cleanup_only: Some(false),
+        key_prefix_shards: 0,
     };
     println!("Config created");
 

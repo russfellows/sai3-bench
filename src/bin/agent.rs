@@ -5760,6 +5760,7 @@ workload:
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: env_map,
+            dynamic_put_pool: false,
         };
 
         apply_distributed_env(&config);
@@ -5805,6 +5806,7 @@ workload:
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: env_map,
+            dynamic_put_pool: false,
         };
 
         apply_distributed_env(&config);
@@ -5844,6 +5846,7 @@ workload:
             enable_metadata_cache: true,
             s3dlio_optimization: None,
             distributed_env: std::collections::HashMap::new(),
+            dynamic_put_pool: false,
         };
 
         // Should complete without panic

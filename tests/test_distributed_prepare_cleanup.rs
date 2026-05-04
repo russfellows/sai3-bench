@@ -41,6 +41,7 @@ fn create_test_config(base_uri: &str, total_files: u64) -> PrepareConfig {
         cleanup: true,
         cleanup_mode: CleanupMode::Tolerant,
         cleanup_only: Some(false),
+        key_prefix_shards: 0,
     }
 }
 
