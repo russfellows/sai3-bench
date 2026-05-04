@@ -28,6 +28,7 @@ sai3bench-ctl ssh-setup --hosts vm1,vm2,vm3 --user ubuntu
 ```
 
 **What it does:**
+
 1. Generates SSH key pair (`~/.ssh/sai3bench_id_rsa`)
 2. Distributes public key to each VM (prompts for password once)
 3. Verifies passwordless access
@@ -35,7 +36,8 @@ sai3bench-ctl ssh-setup --hosts vm1,vm2,vm3 --user ubuntu
 5. Generates config template
 
 **Example output:**
-```
+
+```text
 === Setting up SSH access to ubuntu@vm1.aws.com ===
 ✓ SSH key generated: /home/user/.ssh/sai3bench_id_rsa
 ✓ SSH key copied to vm1.aws.com
@@ -101,6 +103,7 @@ distributed:
 ```
 
 The controller will automatically:
+
 - SSH to each host
 - Start `sai3bench-agent` in background
 - Connect via gRPC
@@ -116,6 +119,7 @@ The controller will automatically:
 Simplest setup - agents bind directly to host ports:
 
 **On each agent host:**
+
 ```bash
 docker run -d \
   --name sai3-agent \
@@ -129,12 +133,14 @@ docker run -d \
 ```
 
 **Check status:**
+
 ```bash
 docker logs sai3-agent
 # Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Controller config:**
+
 ```yaml
 distributed:
   agents:
@@ -162,6 +168,7 @@ docker run -d \
 ### Passing Cloud Credentials
 
 **AWS:**
+
 ```bash
 docker run -d --net=host \
   -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
@@ -172,6 +179,7 @@ docker run -d --net=host \
 ```
 
 **Azure:**
+
 ```bash
 docker run -d --net=host \
   -e AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT}" \
@@ -181,6 +189,7 @@ docker run -d --net=host \
 ```
 
 **GCS (via service account file):**
+
 ```bash
 docker run -d --net=host \
   -v /path/to/gcs-key.json:/gcs-key.json:ro \
@@ -217,6 +226,7 @@ docker push myregistry/sai3-bench:v0.8.22
 ### Problem: SSH Disconnection During Long Tests
 
 When running distributed tests in cloud environments:
+
 - **Interactive mode** (`-it`): See output, but SSH disconnect kills test
 - **Daemon mode** (`-d`): Survives disconnect, but no visibility
 
@@ -252,6 +262,7 @@ echo "Or: tail -f ${LOG_DIR}/agent-${AGENT_ID}.log"
 ```
 
 Run on each host:
+
 ```bash
 ./run_agent.sh agent-1 7167
 ```
@@ -276,12 +287,14 @@ sai3bench-ctl run --config distributed-test.yaml
 While controller runs:
 
 **View live stats:**
+
 ```bash
 # Controller output shows aggregate stats every second
 # Ctrl-B, then D to detach without stopping
 ```
 
 **Check agent logs:**
+
 ```bash
 # SSH to agent host
 tail -f /home/ubuntu/sai3-logs/agent-1.log
@@ -291,6 +304,7 @@ docker logs -f sai3-agent-agent-1
 ```
 
 **Check running status:**
+
 ```bash
 # List all running agents
 docker ps | grep sai3-agent
@@ -301,6 +315,7 @@ docker ps | grep sai3-agent
 For cross-region testing:
 
 **Agent hosts in different regions:**
+
 ```yaml
 distributed:
   agents:
@@ -324,6 +339,7 @@ workload:
 ```
 
 **Region-specific configurations:**
+
 ```bash
 # US East agent
 docker run -d --net=host \
@@ -341,11 +357,13 @@ docker run -d --net=host \
 ### Firewall/Security Group Configuration
 
 **Required ports:**
+
 - Agent: TCP 7167 (or custom port) - inbound from controller
 - Controller: No inbound required (initiates connections)
 
 **AWS Security Group example:**
-```
+
+```text
 Type: Custom TCP
 Port: 7167
 Source: <controller-security-group-id>
@@ -353,6 +371,7 @@ Description: sai3-bench agent gRPC
 ```
 
 **Verify connectivity:**
+
 ```bash
 # From controller
 telnet vm1.example.com 7167
@@ -362,6 +381,7 @@ telnet vm1.example.com 7167
 ### Cleanup
 
 **Stop all agents:**
+
 ```bash
 # Via Docker
 docker stop sai3-agent
@@ -372,6 +392,7 @@ docker rm sai3-agent
 ```
 
 **Remove logs:**
+
 ```bash
 rm -rf /home/ubuntu/sai3-logs
 ```
@@ -383,11 +404,13 @@ rm -rf /home/ubuntu/sai3-logs
 ### Agent won't start
 
 **Check logs:**
+
 ```bash
 docker logs sai3-agent
 ```
 
 **Common issues:**
+
 - Port already in use: `lsof -i :7167`
 - Missing credentials: verify env vars are set
 - Network: ensure port is accessible from controller
@@ -395,17 +418,20 @@ docker logs sai3-agent
 ### Controller can't connect to agent
 
 **Test network:**
+
 ```bash
 telnet agent-host 7167
 ```
 
 **Check agent is listening:**
+
 ```bash
 docker logs sai3-agent | grep "listening"
 # Should show: "sai3bench-agent listening (PLAINTEXT) on 0.0.0.0:7167"
 ```
 
 **Verify credentials:**
+
 ```bash
 docker exec sai3-agent env | grep AWS
 ```
@@ -413,6 +439,7 @@ docker exec sai3-agent env | grep AWS
 ### SSH timeout/disconnection
 
 **Use tmux:**
+
 ```bash
 tmux new -s sai3-test
 sai3bench-ctl run --config test.yaml
@@ -420,6 +447,7 @@ sai3bench-ctl run --config test.yaml
 ```
 
 **Monitor from outside tmux:**
+
 ```bash
 tail -f sai3-*/results.tsv
 ```
@@ -427,10 +455,12 @@ tail -f sai3-*/results.tsv
 ### Results not appearing
 
 **Check controller output:**
+
 - Look for "Results saved to:" message
 - Verify directory was created
 
 **Check agent results:**
+
 ```bash
 docker exec sai3-agent ls -lh /tmp/sai3-*
 ```
@@ -500,7 +530,8 @@ environment (e.g. an instance IAM role sets `AWS_ROLE_ARN`), the forwarded
 value is silently skipped.
 
 **Audit trail**: The controller logs the key names (never values) it is forwarding:
-```
+
+```text
 🔑 Forwarding 2 credential variables from controller environment to all agents: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 ```
 
@@ -515,7 +546,7 @@ files, dry-run output, or results saved to disk.
 
 ### CLI Reference
 
-```
+```text
 sai3bench-ctl [OPTIONS] run --config <FILE>
 
   --env-file <FILE>     Path to a .env file whose credential variables are

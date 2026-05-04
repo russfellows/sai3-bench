@@ -80,37 +80,43 @@ This document combines feature comparison, command mapping, and implementation p
 ### ✅ Fully Implemented (v0.8.0)
 
 **Core Operations**:
+
 - GET, PUT, LIST, DELETE, STAT, MKDIR, RMDIR
 - file://, direct://, s3://, az://, gs:// backends
 - Async I/O with tokio runtime
 - Concurrent workers with semaphore control
 
 **State Machines** (v0.8.0):
+
 - 5-state agent model (Idle/Ready/Running/Failed/Aborting)
 - 9-state controller model with transition validation
 - Auto-reset on errors (agents accept new requests immediately)
 
 **Error Handling** (v0.8.0):
+
 - Configurable thresholds (MAX_ERRORS, MAX_ERROR_RATE, MAX_RETRIES)
 - Smart backoff on high error rates
 - Retry logging at different verbosity levels
 
 **I/O Rate Control** (v0.7.1):
+
 - IOPS target configuration (max or fixed)
 - Three distributions: Exponential (Poisson), Uniform, Deterministic
 - Per-worker rate throttling
 
 **Directory Trees** (v0.7.0):
+
 - Width/depth hierarchical structures
 - Path selection strategies (random, partitioned, exclusive)
 
 ### 🚧 Planned Features
 
 **v0.8.1 High Priority** (Q4 2025):
+
 1. **GET I/O Size Control** - Byte range requests for cloud storage
    - Use cases: CDN caching, video streaming, progressive loading
    - Cloud native: S3/Azure/GCS Range headers
-   
+
 2. **System Metrics** - CPU, memory, network stats
    - Universal value: Useful for ALL workloads
    - rdf-bench parity: Matches CpuStats.java capabilities
@@ -139,6 +145,7 @@ This document combines feature comparison, command mapping, and implementation p
 **Current Gap**: sai3-bench GET always reads full object (no size control)
 
 **Real-world use cases**:
+
 - **CDN edge caching**: Read first 256KB headers only
 - **Video streaming**: Progressive loading with Range requests
 - **Image optimization**: Load preview thumbnails before full image
@@ -146,6 +153,7 @@ This document combines feature comparison, command mapping, and implementation p
 - **Header inspection**: Check file magic bytes without full download
 
 **Cloud storage native**: All major providers support Range headers
+
 ```yaml
 # Proposed v0.8.1 syntax
 workload:
@@ -163,12 +171,14 @@ workload:
 **Current limitation**: No CPU/memory correlation with I/O performance
 
 **Use cases**:
+
 - Identify CPU bottlenecks during high-throughput tests
 - Correlate memory pressure with latency spikes
 - Detect network saturation
 - Compare system impact across backends (S3 vs file://)
 
 **Implementation approach**:
+
 - Linux /proc/stat for CPU utilization
 - /proc/meminfo for memory stats
 - Export alongside I/O metrics in TSV
@@ -178,6 +188,7 @@ workload:
 **Revised assessment**: Initially underestimated - many workload categories need this
 
 **Applications using random I/O within files**:
+
 1. VM/container images (VMDK, QCOW2) - Guest OS block-level I/O
 2. Search engines (Lucene, Elasticsearch) - Random segment lookups
 3. Key-value stores (RocksDB, LevelDB) - SSTable reads
@@ -187,6 +198,7 @@ workload:
 7. HPC post-processing - Hyperslab reads, strided access
 
 **Implementation phases**:
+
 1. Uniform random (4KB-1MB I/O sizes, configurable)
 2. Strided access patterns (HPC-specific)
 3. Hotset/Zipfian (cache behavior simulation)
@@ -212,6 +224,7 @@ workload:
 ### Example Conversion
 
 **rdf-bench config**:
+
 ```
 sd=sd1,lun=/testdata,openflags=o_direct
 wd=wd1,sd=sd1,xfersize=4k,rdpct=70,seekpct=random
@@ -219,6 +232,7 @@ rd=run1,wd=wd1,iorate=1000,elapsed=60,threads=8
 ```
 
 **sai3-bench config**:
+
 ```yaml
 target: "direct:///testdata/"
 duration: 60s
@@ -247,6 +261,7 @@ workload:
 This comparison focuses on **rdf-bench file workloads (fwd=)** vs sai3-bench. Block device features (wd=) are documented but not compared since sai3-bench doesn't support block I/O yet.
 
 **rdf-bench has two workload modes**:
+
 - `fwd=` (file workloads) - Filesystem and file I/O operations
 - `wd=` (block workloads) - Raw block device I/O
 
@@ -263,10 +278,12 @@ This comparison focuses on **rdf-bench file workloads (fwd=)** vs sai3-bench. Bl
 ### Operations Count
 
 **rdf-bench file workloads**: 15 operations
+
 - read, write, mkdir, rmdir, copy, move, create, delete
 - getattr, setattr, access, open, close, put, get
 
 **sai3-bench**: 7 operations
+
 - Get, Put, List, Stat, Delete, Mkdir, Rmdir
 
 **Gap**: Copy, Move, extended metadata operations
@@ -274,12 +291,14 @@ This comparison focuses on **rdf-bench file workloads (fwd=)** vs sai3-bench. Bl
 ### Critical Feature Gaps
 
 **rdf-bench fwd= has (sai3-bench lacks)**:
+
 1. GET I/O size control (xfersizes for reads) - **CRITICAL**
 2. System metrics (CPU, kstat, NFS) - **HIGH PRIORITY**
 3. Sequential/Random I/O within files (fileio=) - **MEDIUM-HIGH**
 4. 15 file operations vs 7 - **MODERATE**
 
 **sai3-bench has (rdf-bench lacks)**:
+
 1. Cloud storage (S3, Azure, GCS) - **CRITICAL**
 2. PUT size distributions (lognormal, exponential) - **CRITICAL**
 3. Modern async architecture - **MAJOR**
@@ -292,14 +311,16 @@ This comparison focuses on **rdf-bench file workloads (fwd=)** vs sai3-bench. Bl
 
 ## Use Case Recommendations
 
-### Use rdf-bench File Workloads When:
+### Use rdf-bench File Workloads When
+
 - ✅ Testing filesystem I/O with specific read sizes
 - ✅ Need sequential vs random I/O patterns within files
 - ✅ File copy and move operations required
 - ✅ NFS testing with NFS-specific metrics
 - ✅ Solaris kstat integration needed
 
-### Use sai3-bench When:
+### Use sai3-bench When
+
 - ✅ Testing cloud storage (S3, Azure, GCS)
 - ✅ Modern distributed object storage (MinIO, Ceph)
 - ✅ Need high throughput async I/O
@@ -323,7 +344,8 @@ See CHANGELOG.md for complete version history.
 
 ---
 
-**Analysis Methodology**: 
+**Analysis Methodology**:
+
 - Examined 200+ Java classes in rdf-bench
 - Analyzed 20 Rust modules in sai3-bench
 - Cross-referenced feature claims with implementations

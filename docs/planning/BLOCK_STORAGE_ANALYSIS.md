@@ -20,6 +20,7 @@ rdf-bench is a Java workload generator originally developed by Henk Vandenbergh 
 The JNI layer (`Jni/rdfblinux.c`) implements the actual I/O: `open64()` with configurable flags (`O_DIRECT`, `O_SYNC`, `O_DSYNC`), then `pread64()`/`pwrite64()` for random seeks, or sequential offset tracking in the Java layer. Block device sizes are discovered via `fstat()`. The key architectural point is that rdf-bench operates on a **single large file or device partitioned across worker threads**, not on many separate named objects.
 
 **Block-specific capabilities in rdf-bench:**
+
 - Raw block device (`/dev/sdX`, `/dev/raw/rawN`) access via `pread64`/`pwrite64` JNI
 - Configurable `O_DIRECT`, `O_SYNC`, `O_DSYNC`, `fsync`-on-close flags
 - Sequential and random access patterns over a defined LBA range
@@ -38,6 +39,7 @@ The JNI layer (`Jni/rdfblinux.c`) implements the actual I/O: `open64()` with con
 elbencho is a modern C++17 benchmark written by Sven Breuner. It handles three storage tiers: block devices, large shared files, and many small files, plus S3 objects. Block device and large shared file testing are its strongest domain.
 
 **Block-specific capabilities in elbencho:**
+
 - Direct block device path (`/dev/nvme0n1`, `/dev/sdb`, etc.) — detected and opened with `O_RDWR` (no truncation), size discovered via `ioctl(BLKGETSIZE64)`
 - `O_DIRECT` (bypasses page cache) with alignment validation and configurable bypass (`--nodiocheck`)
 - **Async I/O via libaio**: configurable I/O queue depth (`--iodepth`); iodepth ≥ 2 activates asynchronous submission through the Linux AIO kernel interface
@@ -65,6 +67,7 @@ sai3-bench is built around the **s3dlio** object/file storage library and operat
 `GET`, `PUT`, `LIST`, `STAT`, `DELETE`, `MKDIR`, `RMDIR`
 
 **What sai3-bench does well today:**
+
 - Multi-protocol: `s3://`, `az://`, `gs://`, `file://`, `direct://`
 - Multi-endpoint load balancing with round-robin and least-connections strategies
 - Distributed execution via gRPC controller/agent architecture (SSH deploy, coordinated start/stop)
@@ -125,6 +128,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench has no concept of a block device path or a single large file that multiple threads share and seek within. Every operation creates or fetches a named object.
 
 **What's needed**: A new backend or target type — tentatively `block://` or `raw://` — that:
+
 - Accepts a device path (`/dev/nvme0n1`) or a large pre-existing file (`/mnt/data/testfile`)
 - Auto-discovers device/file size via `ioctl(BLKGETSIZE64)` or `fstat()`
 - Opens with `O_RDWR | O_DIRECT` (and optionally `O_SYNC`/`O_DSYNC`)
@@ -142,6 +146,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench uses Tokio async I/O. For object storage (S3/GCS/Azure) this is entirely network-bound and Tokio is the right model. For local NVMe testing, however, the kernel I/O path matters: to saturate modern NVMe SSDs (1–7 million IOPS), you need either many threads or a kernel-bypass queue depth much deeper than one I/O per thread.
 
 **What's needed**: For block device and large-file testing:
+
 - `io_uring` based I/O engine (preferred over libaio on modern Linux) with configurable queue depth per thread
 - Or libaio (`io_setup` / `io_submit` / `io_getevents`) as a fallback
 - YAML parameter: `io_depth: 16` or similar
@@ -157,6 +162,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench's GET and PUT operate on named objects of configurable sizes. There is no notion of seeking to offset X within a large file and reading N bytes.
 
 **What's needed**:
+
 - Sequential mode: threads advance their offset by `block_size` after each I/O, wrapping or stopping at end of file/device
 - Random mode: threads generate random aligned offsets within their assigned range for each I/O
 - Configuration: `block_size: 4k`, `io_pattern: sequential | random`, optional `random_amount` (limit total random I/O bytes)
@@ -171,6 +177,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: The `direct://` backend uses `O_DIRECT`. Neither `O_SYNC` nor `O_DSYNC` are exposed, and there is no fsync-on-close option.
 
 **What's needed**:
+
 - YAML config option, e.g., `write_flags: [o_direct, o_sync]`  
 - Applied via `fcntl()` or by passing the flags to `open()`
 - For file backends, this can be added independently of the full block device work
@@ -184,6 +191,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench supports a weighted mix of GET and PUT operations in the `workload:` array, but GET reads objects that PUT previously created (different names, different sizes). There is no mode where reads and writes occur at the same offsets of the same large file.
 
 **What's needed** (for block/large-file mode):
+
 - `io_mix: 70r/30w` or similar — percentage of block I/Os that are reads vs. writes
 - Thread-split model: some threads issue reads, others writes, all within the same address space
 - Required for accurate RAID and cache-effect testing
@@ -197,6 +205,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench has no write-then-read integrity checking. Data patterns are generated for dedup/compression testing but are not stored and verified on readback.
 
 **What's needed**:
+
 - Write a known pattern keyed by LBA (offset + sequence number), similar to elbencho's `--verify` or rdf-bench's data validation engine
 - On subsequent reads, regenerate the expected pattern from the same seed and verify it matches
 - Report miscompares with LBA/offset details
@@ -213,6 +222,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench spawns Tokio worker threads but does not pin them to CPU cores or NUMA zones.
 
 **What's needed**:
+
 - YAML option: `numa_zones: [0, 1]` or `cpu_cores: [0-7]`
 - Applied via `sched_setaffinity()` (Linux) before each worker starts its I/O loop
 - Important for benchmarking asymmetric hardware (e.g., NUMA-sensitive NVMe placement)
@@ -226,6 +236,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench has `posix_fadvise()` hints via `page_cache_mode`. There is no option to drop caches between phases.
 
 **What's needed**:
+
 - `drop_caches: true` config option — writes `3` to `/proc/sys/vm/drop_caches` between phases (requires root)
 - File sync (`sync` syscall) before cache drop, to ensure dirty data is on disk
 - Useful for cold-cache read benchmarks and between write and read phases
@@ -239,6 +250,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: No mmap support.
 
 **What's needed**:
+
 - `io_engine: mmap` config option
 - Memory-map the target file, then use `memcpy()`-based access for reads/writes
 - Optional `madvise()` hints for sequential/random workloads
@@ -253,6 +265,7 @@ The following table summarizes capabilities present in rdf-bench and/or elbencho
 **Current state**: sai3-bench reports aggregate throughput over the total `duration:` window. It does not distinguish between the throughput while all workers are active ("first done") and the tail phase when some workers have finished.
 
 **What's needed**:
+
 - Track the timestamp when the first and last worker completes its assigned work
 - Report two result columns: `FirstDone_MBPS` and `LastDone_MBPS`
 - Relevant only in fixed-work-quantity mode, not time-limited mode
@@ -312,6 +325,7 @@ Below is a suggested priority ranking for implementing block storage features, b
 The fundamental challenge is that sai3-bench's architecture is built around the `ObjectStore` trait, which maps operations to named objects (`get(uri)`, `put(uri, data)`, `list(prefix)`). Block device I/O is fundamentally different — it operates on a single address space divided by byte offsets. Forcing block device semantics through the `ObjectStore` trait would be awkward at best.
 
 The cleanest approach is a **parallel code path** via a dedicated `BlockEngine` module:
+
 - Keep the existing `ObjectStore`-based path for `file://`, `direct://`, `s3://`, `az://`, `gs://`
 - Add a new `BlockEngine` trait for block device and large-file random/sequential I/O; it treats the target as a single linear address space of N blocks, which matches the mental model of both rdf-bench and elbencho
 - The YAML config gains a `block_target:` section (distinct from `workload:`) that activates the block path; the existing `OpSpec` enum is not extended
@@ -320,6 +334,7 @@ The cleanest approach is a **parallel code path** via a dedicated `BlockEngine` 
 ### 6.2 io_uring vs. Synchronous pread/pwrite
 
 Recommended progression:
+
 1. **Phase 1 — `nix` + `pread`/`pwrite` in `spawn_blocking`**: Simplest to implement; correct; adequate for latency and moderate throughput testing.
 2. **Phase 2 — `tokio-uring`**: Adds configurable queue depth per thread; integrates with existing Tokio runtime; required to saturate modern NVMe at low thread counts.
 3. **Phase 3 (optional) — raw `io-uring`**: Only if `tokio-uring`'s abstraction imposes measurable overhead at extreme IOPS; requires a separate thread pool bypassing Tokio.
@@ -391,6 +406,7 @@ lseek(fd, 0, SEEK_SET); // seek back to start
 **Key design decision**: elbencho's block type detection happens during argument parsing by `stat()`-ing each path and checking `S_ISBLK`. It sets a `BenchPathType_BLOCKDEV` enum. The same file descriptor is then opened `O_RDWR` without `O_CREAT` and without any truncation.
 
 **Rust/sai3-bench mapping:**
+
 ```rust
 // Idiomatic Rust equivalent using nix crate
 use nix::fcntl::{open, OFlag};
@@ -418,12 +434,14 @@ let size = file.seek(SeekFrom::End(0))?; // works for both block dev and file
 **rdf-bench reference:** `RdfBench/OpenFlags.java` (lines 27–50, 118–240)
 
 rdf-bench separates flags into two groups:
+
 1. **`openflags`** — flags passed directly to `open()`: `O_DIRECT`, `O_SYNC`, `O_DSYNC`, `O_RSYNC` (as integer bitmask)
 2. **`otherflags`** — post-open behavior: `FSYNC_ON_CLOSE` (line 33), `SOL_CLEAR_CACHE`
 
 `fsync` is NOT an open flag — it is a close-time action triggered by `FSYNC_ON_CLOSE`. The two groups are stored separately and tested with `isOther(FSYNC_ON_CLOSE)` at close time.
 
 **Rust/sai3-bench mapping:**
+
 ```rust
 // In sai3-bench block config: separate the two categories
 #[derive(Debug, Deserialize, Clone)]
@@ -451,6 +469,7 @@ The rdf-bench precedent is important: `fsync` as a workload-level option (on eve
 **elbencho reference:** `source/toolkits/offsetgen/OffsetGenerator.h` — `OffsetGenSequential` class (lines 48–100)
 
 elbencho uses a clean **trait object** (abstract class) pattern:
+
 ```cpp
 class OffsetGenerator {
     virtual uint64_t getNextOffset() = 0;
@@ -459,9 +478,11 @@ class OffsetGenerator {
     virtual void addBytesSubmitted(size_t numBytes) = 0;
 };
 ```
+
 `rwBlockSized()` and `aioBlockSized()` both call `rwOffsetGen->getNextOffset()` polymorphically — no conditional logic in the hot I/O loop itself. This is exactly the Rust trait pattern.
 
 **Rust/sai3-bench mapping:**
+
 ```rust
 pub trait OffsetGen: Send {
     fn next_offset(&mut self) -> u64;
@@ -507,12 +528,14 @@ int rc = pread64((int) fhandle, (void*) buffer, (size_t) length, (off64_t) seek)
 **elbencho reference:** `source/workers/LocalWorker.cpp` — `rwBlockSized()` (lines ~1670–1820)
 
 elbencho's pread/pwrite loop features:
+
 1. `rwOffsetGen->getNumBytesLeftToSubmit()` controls the loop — not a fixed iteration count
 2. The RW-mix decision happens per-I/O: `( (workerRank + numIOPSSubmitted) % 100) < rwMixReadPercent` (line 1709-1710)  — deterministic, no atomics needed for the percentage check
 3. Function pointer dispatch: `((*this).*funcPositionalRead)(fileHandleIdx, buf, blockSize, offset)` — the actual syscall is chosen at phase init time, not each loop iteration
 4. Latency is measured per I/O with `std::chrono::steady_clock`
 
 **Rust/sai3-bench mapping:**
+
 ```rust
 // In spawn_blocking (Phase 1 implementation):
 async fn run_block_worker(cfg: BlockWorkerConfig, mut offset_gen: Box<dyn OffsetGen>) {
@@ -561,6 +584,7 @@ async fn run_block_worker(cfg: BlockWorkerConfig, mut offset_gen: Box<dyn Offset
 The libaio pattern is a **two-phase loop**:
 
 **Phase 1 — seed** (lines ~1826–1865): Fill the submission queue to `maxIODepth`:
+
 ```cpp
 while(rwOffsetGen->getNumBytesLeftToSubmit() && (numPending < maxIODepth)) {
     libaioContext.iocbPointerVec[ioVecIdx] = &libaioContext.iocbVec[ioVecIdx];
@@ -572,6 +596,7 @@ while(rwOffsetGen->getNumBytesLeftToSubmit() && (numPending < maxIODepth)) {
 ```
 
 **Phase 2 — completion + resubmit** (lines ~1867–2060): Wait for one or more completions, then immediately resubmit:
+
 ```cpp
 while(numPending) {
     int eventsRes = io_getevents(ioContext, 1, AIO_MAX_EVENTS, ioEvents, &timeout);
@@ -591,12 +616,14 @@ while(numPending) {
 ```
 
 **Key design decisions from elbencho libaio:**
+
 - Each in-flight I/O has its own **buffer** (`ioBufVec[ioVecIdx]`) — `ioBufVec.count == iodepth`
 - `iocb.data` carries the buffer index back through the completion event — no lookup table needed
 - `io_getevents` timeout (1 second) prevents deadlock; the loop checks `checkInterruptionRequest()` on timeout
 - `io_queue_init(maxIODepth, &ioContext)` call is paired with `io_queue_release()` in uninit
 
 **tokio-uring mapping for sai3-bench:**
+
 ```rust
 // Phase 2 implementation: tokio-uring provides the same two-phase pattern natively
 use tokio_uring::fs::File;
@@ -635,6 +662,7 @@ async fn run_block_worker_async(cfg: BlockWorkerConfig, mut offset_gen: Box<dyn 
 **elbencho reference:** `source/workers/LocalWorker.cpp` — `initPhaseFunctionPointers()` (lines ~1193–1330) and `rwBlockSized()` (lines 1709–1712)
 
 elbencho uses two strategies for RW mix:
+
 1. **Percentage-based** (`--rwmixpct`): per-I/O modular arithmetic: `(workerRank + numIOPSSubmitted) % 100 < rwMixReadPercent`. All threads do both reads and writes against the same file; the mix is achieved across the stream, not between threads.
 2. **Thread-split** (`--rwmixthr`): a configurable number of threads run in `BenchPhase_READFILES` mode while the rest run in `BenchPhase_CREATEFILES` mode. A `RateLimiterRWMixThreads` object (file: `source/toolkits/RateLimiterRWMixThreads.cpp`) rate-balances the two groups to achieve the target mix.
 
@@ -643,6 +671,7 @@ The function pointer `funcPositionalWrite` / `funcPositionalRead` is set once at
 **rdf-bench reference:** `RdfBench/WD_entry.java` line 62: `double readpct = 100` — the workload definition carries `rdpct` which is applied in the Java I/O loop similarly.
 
 **Rust/sai3-bench mapping**: Use an enum to select the I/O mode at worker initialization:
+
 ```rust
 enum IoDirection { Read, Write, ReadWriteMix { read_pct: u8 } }
 
@@ -679,6 +708,7 @@ NumaTk::bindToCPUCore(coreNum);  // calls sched_setaffinity() with CPU_SET
 **Key design decision**: binding is **round-robin per worker rank** — if you have 4 workers and 2 NUMA zones, workers 0 and 2 bind to zone 0, workers 1 and 3 bind to zone 1. This is the standard distribution model and is trivial to implement.
 
 **Rust/sai3-bench mapping** using `core_affinity` crate:
+
 ```rust
 // In spawn_blocking or thread spawn, called before any I/O
 fn apply_cpu_binding(worker_rank: usize, cpu_cores: &[usize]) {
@@ -715,6 +745,7 @@ close(fd);
 This runs as a **named benchmark phase** (`BenchPhase_DROPCACHES`), not as part of a workload operation. The coordinator sequences it between the write phase and read phase automatically.
 
 **Rust/sai3-bench mapping**: A dedicated phase in the block engine runner:
+
 ```rust
 async fn drop_page_cache() -> anyhow::Result<()> {
     // Only worker_rank == 0 executes this
@@ -754,6 +785,7 @@ The mmap is set up via `FileTk::mmapAndMadvise()` — `mmap(MAP_SHARED)` + `madv
 **Critical constraint** (elbencho `ProgArgs.cpp` line 1249): `iodepth > 1` is incompatible with mmap. `madvise()` is the performance knob for mmap, not queue depth.
 
 **Rust/sai3-bench mapping** using `memmap2` crate:
+
 ```rust
 use memmap2::{MmapMut, MmapOptions};
 
@@ -799,6 +831,7 @@ void WorkersSharedData::incNumWorkersDoneUnlocked(bool triggerStoneWall) {
 The `triggerStoneWall` flag is set when the calling worker has actually done work (i.e., not a no-op worker that got zero bytes assigned). The `elapsedUSecVec[0]` captures each worker's finish time, allowing the coordinator to identify min/max finish times in `Statistics::calcPhaseResults()`.
 
 **Rust/sai3-bench mapping**: sai3-bench already has a `CompletionTracker` pattern for distributed mode. For block storage:
+
 ```rust
 pub struct StoneWallTracker {
     first_done_at: Option<Instant>,
@@ -844,6 +877,7 @@ void LocalWorker::preWriteIntegrityCheckFillBuf(char* buf, ..., off_t fileOffset
 **rdf-bench reference:** `Jni/rdfb_dv.c` (data validation C layer) and `Jni/tinymt64.c` — TinyMT64 RNG seeded per-block. rdf-bench stores the RNG seed that produced each 512-byte block, allowing later verification by regenerating from seed.
 
 **Rust/sai3-bench mapping** (using dgen-data for generation, crc32fast for verification):
+
 ```rust
 // Write side: dgen-data fills buffer seeded by LBA (offset)
 dgen_data::fill_aligned(&mut buf, offset /* LBA seed */, &cfg.dgen_params);
@@ -911,40 +945,52 @@ Because `sai3-bench` is designed for object/file workflows (named resources), an
 ### 1. Breakdown of New Code (~1,600 lines)
 
 #### A. Block Workload Driver (~550 LOC)
+
 The current `sai3-bench` worker loop is likely an async `while` loop performing `get()` or `put()` on a specific URI. For block storage, you need a new worker type that:
-* Pre-calculates offset ranges for each thread (slicing the LUN).
-* Manages a ring buffer (if using `io_uring`).
-* Handles sequential/random logic and stride-based seek calculation.
-* **Location**: `sai3-bench` needs a new module like `src/workload/block_engine.rs`.
+
+- Pre-calculates offset ranges for each thread (slicing the LUN).
+- Manages a ring buffer (if using `io_uring`).
+- Handles sequential/random logic and stride-based seek calculation.
+- **Location**: `sai3-bench` needs a new module like `src/workload/block_engine.rs`.
 
 #### B. `s3dlio` Block Backend (~450 LOC)
-You need to add a `BlockDeviceStore` to `s3dlio`. 
-* Uses `nix` for `ioctl(BLKGETSIZE64)` and `open(O_DIRECT)`.
-* Provides the glue between the high-level `BlockEngine` and the Linux kernel.
-* **Location**: `s3dlio/src/backends/block.rs`.
+
+You need to add a `BlockDeviceStore` to `s3dlio`.
+
+- Uses `nix` for `ioctl(BLKGETSIZE64)` and `open(O_DIRECT)`.
+- Provides the glue between the high-level `BlockEngine` and the Linux kernel.
+- **Location**: `s3dlio/src/backends/block.rs`.
 
 #### C. Data Integrity Module (~220 LOC)
+
 To implement `rdf-bench` style validation, you need a deterministic pattern generator.
-* Implementation of a PCG-based generator that uses `LBA + Seed` as the state.
-* Logic to interleave `Verify` ops after `Write` ops.
-* **Location**: `sai3-bench/src/verify.rs`.
+
+- Implementation of a PCG-based generator that uses `LBA + Seed` as the state.
+- Logic to interleave `Verify` ops after `Write` ops.
+- **Location**: `sai3-bench/src/verify.rs`.
 
 #### D. Hardware & Cache Utils (~120 LOC)
+
 Small but critical utilities for:
-* Pinning threads using `core_affinity`.
-* Dropping caches via `/proc/sys/vm/drop_caches`.
-* Detecting NUMA topology.
+
+- Pinning threads using `core_affinity`.
+- Dropping caches via `/proc/sys/vm/drop_caches`.
+- Detecting NUMA topology.
 
 ---
 
 ### 2. Breakdown of Changed Code (~340 lines)
 
 #### A. Config Parsing (~100 LOC)
-Your existing `Config` and `OpSpec` structs need to support the new `block://` URI scheme and its parameters (queue depth, block size, etc.). 
-* **Files**: `sai3-bench/src/config/workload.rs` and `sai3-bench/src/config/args.rs`.
+
+Your existing `Config` and `OpSpec` structs need to support the new `block://` URI scheme and its parameters (queue depth, block size, etc.).
+
+- **Files**: `sai3-bench/src/config/workload.rs` and `sai3-bench/src/config/args.rs`.
 
 #### B. Workload Dispatcher (~120 LOC)
+
 The main entry point where threads are spawned needs to branch:
+
 ```rust
 // Conceptual change in main worker spawn logic
 if workload.uri.starts_with("block://") {
@@ -955,18 +1001,22 @@ if workload.uri.starts_with("block://") {
 ```
 
 #### C. Reporting & Stats (~60 LOC)
-Adding "Stonewalling" support. 
-* The `Summary` struct needs two new timestamps: `first_worker_done` and `last_worker_done`.
-* The TSV/Console output logic needs to be updated to calculate throughput based on these specific windows.
+
+Adding "Stonewalling" support.
+
+- The `Summary` struct needs two new timestamps: `first_worker_done` and `last_worker_done`.
+- The TSV/Console output logic needs to be updated to calculate throughput based on these specific windows.
 
 ---
 
 ### Implementation Advice
-The most complex part will be the **Asynchronous Queue Depth (io_uring)**. 
+
+The most complex part will be the **Asynchronous Queue Depth (io_uring)**.
 
 Since `sai3-bench` is built on a standard `Tokio` runtime, you will face a choice:
-1.  **The Easy Path**: Use `tokio-uring`. It integrates well but requires you to use its specific `Runtime`. This will involve changing ~100 lines in your `main.rs` to initialize the `tokio_uring` runtime instead of standard `tokio`.
-2.  **The Performance Path**: Run a dedicated thread pool for block I/O that uses raw `io-uring` submission queues, bypassing the `Tokio` executor for the actual I/O calls to minimize overhead. This is what `elbencho` essentially does in C++.
+
+1. **The Easy Path**: Use `tokio-uring`. It integrates well but requires you to use its specific `Runtime`. This will involve changing ~100 lines in your `main.rs` to initialize the `tokio_uring` runtime instead of standard `tokio`.
+2. **The Performance Path**: Run a dedicated thread pool for block I/O that uses raw `io-uring` submission queues, bypassing the `Tokio` executor for the actual I/O calls to minimize overhead. This is what `elbencho` essentially does in C++.
 
 **Recommendation**: Start with the **Data Integrity** and **Write Durability Flags** (Gaps 4 & 6). These are the "lowest-hanging fruit" and can be implemented in the existing `direct://` and `file://` backends with minimal architectural changes.
 

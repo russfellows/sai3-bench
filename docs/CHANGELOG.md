@@ -3,6 +3,7 @@
 All notable changes to sai3-bench are documented in this file.
 
 **For historical changes:**
+
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
@@ -19,7 +20,7 @@ All notable changes to sai3-bench are documented in this file.
   When set to a value greater than 0 (recommended: `256`), every object key gains a
   two-hex-character prefix shard directory:
 
-  ```
+  ```text
   # key_prefix_shards: 0 (default — all keys share the same namespace prefix)
   prepared-00000000.dat
   prepared-00000001.dat
@@ -108,6 +109,7 @@ All notable changes to sai3-bench are documented in this file.
   and lists all resolved endpoints.
 
   Example:
+
   ```bash
   export S3_ENDPOINT_URIS="s3://10.9.0.17:80/bucket/,s3://10.9.0.18:80/bucket/,s3://10.9.0.19:80/bucket/"
   sai3-bench run --config my_existing_config.yaml   # automatically uses all 3 endpoints
@@ -213,7 +215,8 @@ All notable changes to sai3-bench are documented in this file.
 
 - **Agent version check before pre-flight** — the controller now pings all agents and prints a
   version table before starting pre-flight validation:
-  ```
+
+  ```text
   🔌 Agent Version Check
   agent-1 (host1:7167) ✅ v0.8.92
   agent-2 (host2:7167) ⚠️  v0.8.88 (controller is v0.8.92 — update recommended)
@@ -293,9 +296,11 @@ All notable changes to sai3-bench are documented in this file.
   The cache tracks per-object creation state and enables crash/resume for long-running
   prepares; it now has a documented sweet-spot and can be turned off for very large or
   simple workloads:
+
   ```yaml
   enable_metadata_cache: false   # disable for > ~1 Billion objects/batch
   ```
+
   - **Default: `true`** — fully backward-compatible, no config changes required for
     existing workloads.
   - **Sweet spot: 1 M – 1 B objects per batch** — crash-resume value exceeds overhead.
@@ -314,6 +319,7 @@ All notable changes to sai3-bench are documented in this file.
     `objects_existed`, `total_objects`, `total_bytes`, `avg_bytes`, `wall_seconds`,
     `ops_per_sec`
   - Sum across batches without listing:
+
     ```sh
     awk -F'\t' 'NR>1 && $3!="AGGREGATE" {sum += $5} END {print sum}' \
         sai3-*/populate_ledger.tsv
@@ -431,10 +437,12 @@ All notable changes to sai3-bench are documented in this file.
 
 - **KV cache coverage summary at startup** — after a KV cache checkpoint is restored,
   both `sequential.rs` and `parallel.rs` now log a one-line human-readable summary:
-  ```
+
+  ```text
   ⚡ KV cache checkpoint shows all 64032768 objects already Created — skipping LIST
   📊 Cache summary: 64032768 objects | 7.63 GiB total storage
   ```
+
   The storage total is accumulated in the same single fjall scan that counts objects
   by state, so there is zero additional I/O overhead.
 
@@ -593,7 +601,6 @@ All notable changes to sai3-bench are documented in this file.
   - **Fix 2 (correct listing if it does happen)**: `glob_list_params()` helper fixes both
     listing bugs — safe prefix (strips to last `/` before first `*`) and `recursive=true`
     when `*` appears inside a directory component.
-
 
   - Workload start: duration, drain budget, total max wall time
   - Worker join phase: worker count, drain deadline offset
@@ -939,11 +946,13 @@ This release completes the checkpoint implementation with automatic restoration 
 ### Configuration
 
 **New top-level field:**
+
 ```yaml
 cache_checkpoint_interval_secs: 300  # Default: 5 minutes, 0 = disabled
 ```
 
 **Checkpoint locations:**
+
 - `file:///path/` → `{path}/.sai3-cache-agent-{id}.tar.zst`
 - `s3://bucket/` → `s3://bucket/.sai3-cache-agent-{id}.tar.zst`
 - `az://container/` → `az://container/.sai3-cache-agent-{id}.tar.zst`
@@ -1097,13 +1106,16 @@ This release improves code maintainability, enhances prepare phase resilience wi
 **No breaking changes** - All updates are backward compatible.
 
 **Optional enhancements:**
+
 1. Use thousand separators in YAML configs for better readability:
+
    ```yaml
    prepare:
      ensure_objects:
        - count: 10,000,000  # More readable than 10000000
          min_size: 1,048,576  # Clearly shows 1 MiB
    ```
+
 2. Review prepare phase retry behavior in logs - new adaptive strategy may change retry patterns
 3. Monitor prepare phase warnings for configuration conflicts
 
@@ -1182,6 +1194,7 @@ This release addresses four critical executor starvation issues identified in pr
 **No breaking changes** - All fixes are backward compatible. Existing configurations will use default timeout values.
 
 **Recommended actions for large-scale deployments:**
+
 1. Add `agent_ready_timeout` to distributed config based on file count
 2. Verify glob patterns resolve quickly or increase timeout accordingly
 3. Monitor agent READY times in logs to tune timeout values
@@ -1339,6 +1352,7 @@ This release represents a fundamental architectural evolution of sai3-bench, tra
 ### Configuration Examples
 
 **Multi-stage workflow with barriers:**
+
 ```yaml
 stages:
   - name: preflight
@@ -1377,6 +1391,7 @@ stages:
 ```
 
 **Per-stage timeout customization:**
+
 ```yaml
 # Global gRPC timeout
 distributed:
@@ -1408,12 +1423,14 @@ stages:
 ### Migration Notes
 
 **From v0.8.23 and earlier:**
+
 - Old single-stage configs still work (auto-converted to single execute stage)
 - To use multi-stage features, restructure config with `stages` array
 - sai3-analyze automatically detects numbered vs legacy TSV format
 - No action required for existing test scripts or automation
 
 **Excel workbook changes:**
+
 - Tab names no longer include timestamps (cleaner, more readable)
 - Tab names now include stage numbers for proper ordering (01_, 02_, etc.)
 - Multi-stage tests produce multiple tabs per workload (one per stage)
@@ -1504,7 +1521,7 @@ stages:
   - Added `create_multi_endpoint_store()` internal helper function
 
 - **Excel timestamp formatting** in sai3-analyze
-  - Auto-detects timestamp columns by suffix (_ms, _us, _ns)
+  - Auto-detects timestamp columns by suffix (_ms,_us, _ns)
   - Converts epoch timestamps to Excel datetime format: "2026-01-29 22:21:51.000"
   - Column width: 22 for timestamps, 15 for regular columns
   - Fixes scientific notation display (1.77E+18 → readable dates)
@@ -1531,6 +1548,7 @@ stages:
 ### Configuration Examples
 
 **Global multi-endpoint** (all agents share endpoints):
+
 ```yaml
 multi_endpoint:
   strategy: round_robin
@@ -1541,6 +1559,7 @@ multi_endpoint:
 ```
 
 **Per-agent static mapping** (each agent gets specific endpoints):
+
 ```yaml
 distributed:
   agents:
@@ -1560,6 +1579,7 @@ distributed:
 ```
 
 **NFS multi-mount**:
+
 ```yaml
 multi_endpoint:
   strategy: round_robin

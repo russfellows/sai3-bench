@@ -215,6 +215,7 @@ a more invasive refactor of the metrics module.
 ## 5. Expected Impact
 
 ### Performance
+
 - P0 + P1 alone should reduce per-operation overhead by 50–80%.
 - At 650 IOPS baseline: may unlock 800–1000+ IOPS at concurrency=32.
 - Combined with increasing concurrency to 128 (config change, no code):
@@ -222,5 +223,6 @@ a more invasive refactor of the metrics module.
 - Combined with increasing `gcs_channel_count` to 128: matches s3-cli parallelism.
 
 ### Reliability
+
 - P5 prevents 5,554+ silent zero-byte failures from being counted as success.
 - P6 closes the last timeout gap (LIST operations).

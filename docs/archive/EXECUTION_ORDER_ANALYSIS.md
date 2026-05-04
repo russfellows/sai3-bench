@@ -82,6 +82,7 @@
 4. ✅ **Prepare phase** (happens on agent after validation)
 
 The issue is **NOT the order** - the issue is:
+
 - TreeManifest creation (30-90s) happens **inside** prepare phase
 - Old code: No progress reporting during tree generation → timeout
 - **FIXED in v0.8.24a**: Progress every 5000 dirs → no timeout
@@ -99,21 +100,24 @@ TreeManifest generation **must** happen on each agent because:
 **Options**:
 
 ### Option A: Keep Current Order with Progress Reporting (v0.8.24a) ✅ IMPLEMENTED
+
 - TreeManifest creation stays in prepare phase
 - Progress updates every 5000 dirs prevent timeout
 - **Pros**: No architectural changes, minimal risk
 - **Cons**: Still takes 30-90s for 331k dirs
 
 ### Option B: Move Tree Generation to Pre-flight (risky architectural change)
+
 - Pre-flight creates tree manifest and validates it exists
 - Prepare phase skips tree creation if manifest cached
 - **Pros**: Front-loads expensive operation to pre-flight
-- **Cons**: 
+- **Cons**:
   - Adds 30-90s to pre-flight (defeats "quick validation" purpose)
   - Requires caching manifest across RPC boundary
   - More complex error handling
 
 ### Option C: Reduce Tree Complexity for Testing (RECOMMENDED) ✅
+
 - Use simpler configs to validate fixes work
 - Progression: depth=2 (576 dirs, ~1s) → depth=3 (13k dirs, ~5s) → depth=4 (331k dirs, ~90s)
 - **Pros**: Validates incrementally, reduces risk
@@ -124,19 +128,25 @@ TreeManifest generation **must** happen on each agent because:
 ## Recommended Testing Strategy
 
 ### Phase 1: Validate Fixes Work (depth=2)
+
 **Config**: `4host-test_SIMPLE.yaml`
+
 - Width=24, Depth=2 → **576 directories** (tree generation ~1-2 seconds)
 - 111,168 files × 8MB = **~889 GB total**
 - **Expected**: No timeout, completes in ~5-10 minutes
 
 ### Phase 2: Stress Test (depth=3)
+
 **Config**: `4host-test_MEDIUM.yaml`
+
 - Width=24, Depth=3 → **13,824 directories** (tree generation ~5-10 seconds)
 - 2,668,032 files × 8MB = **~21 TB total**
 - **Expected**: Progress updates visible, completes in ~1-2 hours
 
 ### Phase 3: Production Scale (depth=4)
+
 **Config**: `4host-test_config-corrected.yaml`
+
 - Width=24, Depth=4 → **331,776 directories** (tree generation ~30-90 seconds)
 - 64,032,768 files × 8MB = **~500 TB total**
 - **Expected**: Progress updates every 1-2s, completes in ~10-20 hours
@@ -146,6 +156,7 @@ TreeManifest generation **must** happen on each agent because:
 ## Timeline Comparison
 
 ### Old Code (v0.8.23)
+
 ```
 0s:  Connect to agents
 5s:  Pre-flight validation complete
@@ -156,6 +167,7 @@ TreeManifest generation **must** happen on each agent because:
 ```
 
 ### Fixed Code (v0.8.24a)
+
 ```
 0s:   Connect to agents
 5s:   Pre-flight validation complete
@@ -171,6 +183,7 @@ TreeManifest generation **must** happen on each agent because:
 ```
 
 ### With SIMPLE Config (depth=2)
+
 ```
 0s:  Connect to agents
 5s:  Pre-flight validation complete

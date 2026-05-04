@@ -15,6 +15,7 @@
 ### Root Cause
 
 sai3-bench workload loop (workload.rs:1723):
+
 ```rust
 // BEFORE: Creates thread pool EVERY time
 let buf = s3dlio::generate_controlled_data(
@@ -42,12 +43,14 @@ let buf = crate::data_gen_pool::generate_data_optimized(
 ```
 
 **Benefits:**
+
 - ✅ No code changes to s3dlio dependency
 - ✅ Works with current git tag version
 - ✅ Significant speedup for fixed-size workloads
 - ⚠️ Limited benefit for variable-size workloads (cache misses)
 
 **Limitations:**
+
 - Only helps when same size is requested repeatedly
 - Each unique size still requires full generation
 - Not as optimal as streaming API
@@ -101,6 +104,7 @@ let buf = GEN_POOL.with(|pool| {
 ```
 
 **Benefits:**
+
 - ✅ **50+ GB/s sustained throughput**
 - ✅ Thread pool created ONCE per worker thread
 - ✅ Works for ANY size distribution
@@ -109,9 +113,11 @@ let buf = GEN_POOL.with(|pool| {
 ## Files Modified
 
 ### New Files
+
 - `src/data_gen_pool.rs` - Thread-local data caching module
 
 ### Modified Files
+
 - `src/lib.rs` - Added `data_gen_pool` module
 - `src/workload.rs` - Main workload loop optimization
 - `src/prepare.rs` - Preparation phase optimization (3 locations)
@@ -121,6 +127,7 @@ let buf = GEN_POOL.with(|pool| {
 ## Performance Testing
 
 ### Test Configuration
+
 ```bash
 cd sai3-bench
 cargo test --release test_cached_same_size -- --ignored --nocapture
@@ -130,6 +137,7 @@ cargo test --release test_variable_sizes -- --ignored --nocapture
 ### Expected Results
 
 #### Fixed-Size Workload
+
 ```
 With caching (same size):
   Total: 1000 MB
@@ -139,6 +147,7 @@ With caching (same size):
 ```
 
 #### Variable-Size Workload
+
 ```
 Variable sizes:
   Total: 500 MB  
@@ -150,17 +159,21 @@ Variable sizes:
 ## Migration Path
 
 ### Phase 1: Immediate (DONE ✅)
+
 - Use data caching for compatibility
 - Significant speedup for fixed-size workloads
 - No s3dlio dependency changes needed
 
 ### Phase 2: Optimal (RECOMMENDED)
+
 1. Update sai3-bench to use local s3dlio:
+
    ```toml
    s3dlio = { path = "../s3dlio" }
    ```
 
 2. Replace `data_gen_pool` with streaming API:
+
    ```rust
    use s3dlio::data_gen_alt::DataGenerator;
    
@@ -176,6 +189,7 @@ Variable sizes:
 5. When stable, update git tag dependency
 
 ### Phase 3: Production
+
 - Tag new s3dlio version with streaming API
 - Update sai3-bench to use new git tag
 - Remove local path override
@@ -183,17 +197,22 @@ Variable sizes:
 ## Workload-Specific Recommendations
 
 ### Fixed-Size Objects (e.g., 100 MB each)
+
 **Current optimization works great!**
+
 - First PUT: ~50 GB/s (generates data)
 - Subsequent PUTs: Near-instant (clones Bytes reference)
 - Effective throughput: Limited only by storage speed
 
 ### Variable-Size Objects (e.g., power-law distribution)
+
 **Streaming API highly recommended!**
+
 - Current: ~1-2 GB/s (cache misses frequently)
 - Streaming API: ~50 GB/s (reuses thread pool regardless of size)
 
 ### Mixed Workloads
+
 - Small objects (< 1 MB): Current approach fine (generation is fast)
 - Large objects (>= 100 MB): Streaming API crucial for performance
 
@@ -235,6 +254,7 @@ cargo build --release
 ### Why Caching Works
 
 Bytes is **reference-counted** (Arc internally):
+
 ```rust
 let original = Bytes::from(vec![...]);  // Allocates
 let clone1 = original.clone();  // Cheap (just increments ref count)

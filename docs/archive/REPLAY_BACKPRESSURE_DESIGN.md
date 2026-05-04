@@ -7,6 +7,7 @@ Implement intelligent backpressure handling for replay workloads to gracefully h
 ## Problem Statement
 
 When replaying an op-log with `--speed` multiplier (or even at 1.0x), the target storage system may not be able to keep up with the required I/O rate. Currently:
+
 - Operations queue up to `max_concurrent` (1000)
 - We silently fall behind with no visibility
 - No graceful failure mechanism
@@ -14,17 +15,20 @@ When replaying an op-log with `--speed` multiplier (or even at 1.0x), the target
 ## Design Decisions
 
 ### Mode Switching
+
 1. **Normal Mode**: Operations execute at scheduled times (timing-faithful replay)
 2. **Best-Effort Mode**: Operations execute as fast as possible (no artificial delays)
 3. **Transition**: Normal → Best-Effort when lag exceeds `lag_threshold`
 4. **Recovery**: Best-Effort → Normal when lag drops below `recovery_threshold`
 
 ### Flap Detection
+
 - Track mode transitions in a sliding 60-second window
 - Exit gracefully if transitions exceed `max_flaps_per_minute`
 - Indicates target system is borderline - can't sustain load consistently
 
 ### Exit Behavior
+
 - Graceful drain of in-flight operations (up to `drain_timeout`)
 - Clear error message with remediation suggestions
 
@@ -203,6 +207,7 @@ pub struct ReplayStats {
 ## Logging Examples
 
 ### Entering Best-Effort Mode
+
 ```
 2025-12-02T15:30:45.123Z  WARN sai3_bench::replay: ⚠️ Falling behind schedule by 5.2s, switching to best-effort mode
 2025-12-02T15:30:45.123Z  INFO sai3_bench::replay:    Target system may be unable to sustain required I/O rate
@@ -210,17 +215,20 @@ pub struct ReplayStats {
 ```
 
 ### Recovering to Normal Mode
+
 ```
 2025-12-02T15:31:02.456Z  INFO sai3_bench::replay: ✅ Caught up (lag=0.8s), resuming timed replay
 ```
 
 ### Flap Warning
+
 ```
 2025-12-02T15:32:15.789Z  WARN sai3_bench::replay: ⚠️ Mode transition 2/3 in last 60s (normal → best-effort)
 2025-12-02T15:32:15.789Z  WARN sai3_bench::replay:    Target system is borderline - oscillating between modes
 ```
 
 ### Flap Exit
+
 ```
 2025-12-02T15:33:30.012Z ERROR sai3_bench::replay: ❌ Exceeded maximum mode transitions (3/min)
 2025-12-02T15:33:30.012Z ERROR sai3_bench::replay:    Target system cannot sustain the required I/O rate
@@ -251,6 +259,7 @@ Aborted:              No
 ## CLI Integration
 
 The `replay` subcommand will read the `replay:` section from:
+
 1. A standalone YAML config file (if provided via `--config`)
 2. Defaults if no config provided
 

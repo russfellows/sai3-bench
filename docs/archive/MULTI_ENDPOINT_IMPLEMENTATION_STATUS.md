@@ -10,29 +10,37 @@
 ## Implementation History (Git Commits)
 
 ### Phase 1: Configuration Layer ✅
+
 **Commit**: `1a9af22` - "feat: Add multi-endpoint configuration layer and dry-run display"
+
 - Added `MultiEndpointConfig` struct to config.rs
 - Added global and per-agent multi-endpoint fields
 - Created test configuration files
 - Implemented dry-run display showing multi-endpoint config
 
 ### Phase 2: Runtime Integration ✅
+
 **Commit**: `26b2005` - "feat: Wire up multi-endpoint runtime integration (Phase 2)"
+
 - Modified `workload::run()` to accept `agent_config`
 - Updated all `create_store_for_uri()` calls to use `create_store_from_config()`
 - Implemented store creation priority: per-agent > global > target
 - Updated agent.rs to pass agent_config through to workload
 
 ### Phase 3: Prepare Phase Support ✅
+
 **Commit**: `f90ed86` - "feat: Add use_multi_endpoint flag to prepare phase (Phase 3)"
+
 - Added `use_multi_endpoint` field to `EnsureSpec` config
 - Updated prepare phase to create multi-endpoint stores when flag is true
 - Implemented object distribution across all configured endpoints
 
 ### Phase 4: Statistics Infrastructure ✅ (PARTIAL)
+
 **Commit**: `a5f1e48` - "feat(stats): Add per-endpoint statistics collection infrastructure (partial)"
 
 **Completed**:
+
 - ✅ Added `MultiEndpointCache` type: `Arc<Mutex<HashMap<String, Arc<MultiEndpointStore>>>>`
 - ✅ Modified `create_multi_endpoint_store()` to return tuple `(Box<dyn ObjectStore>, Arc<MultiEndpointStore>)`
 - ✅ Updated `get_cached_store()` to populate both StoreCache and MultiEndpointCache
@@ -46,6 +54,7 @@
 **Build Status**: ✅ Zero errors, zero warnings (ZERO_WARNINGS_POLICY compliant)
 
 **Pending**:
+
 - ❌ Routing logic to actually use MultiEndpointStore when `use_multi_endpoint: true`
 - ❌ Operations currently ignore the per-operation flag (use global/agent-level detection only)
 
@@ -84,6 +93,7 @@ workload:
 ### 2. Store Creation Infrastructure ✅
 
 **MultiEndpointStore creation works**:
+
 - ✅ `create_store_from_config()` creates MultiEndpointStore when global/agent config exists
 - ✅ `create_multi_endpoint_store()` returns both trait object and Arc for stats collection
 - ✅ Stores are cached properly in both StoreCache and MultiEndpointCache
@@ -133,6 +143,7 @@ $ ./sai3-bench run --config multi_endpoint_file.yaml --dry-run
 **Problem**: The `use_multi_endpoint: true` flag exists in config but is **not consulted during operation execution**.
 
 **Current Behavior**:
+
 ```rust
 // In workload execution:
 match op {
@@ -148,6 +159,7 @@ match op {
 ```
 
 **Expected Behavior**:
+
 ```rust
 match op {
     OpSpec::Get { use_multi_endpoint, .. } => {  // ← Should destructure flag
@@ -164,7 +176,8 @@ match op {
 }
 ```
 
-**Impact**: 
+**Impact**:
+
 - Benchmark runs successfully
 - Statistics display works
 - **BUT all endpoint stats show 0** because operations use single-endpoint stores
@@ -232,7 +245,8 @@ Per-Endpoint Statistics:
     ...
 ```
 
-**Diagnosis**: 
+**Diagnosis**:
+
 - ✅ Benchmark executes correctly
 - ✅ Statistics infrastructure works
 - ❌ Operations don't route to MultiEndpointStore
@@ -277,9 +291,11 @@ Per-Endpoint Statistics:
 #### 1. Configuration Schema (✅ Complete)
 
 **Files Modified**:
+
 - `src/config.rs` - Added `MultiEndpointConfig` struct and integration
 
 **New Structures**:
+
 ```rust
 pub struct MultiEndpointConfig {
     pub strategy: String,  // "round_robin" or "least_connections"
@@ -298,6 +314,7 @@ pub struct AgentConfig {
 ```
 
 **Features**:
+
 - ✅ Global multi-endpoint configuration
 - ✅ Per-agent multi-endpoint override
 - ✅ Load balancing strategy selection
@@ -307,9 +324,11 @@ pub struct AgentConfig {
 #### 2. Runtime Store Creation (✅ Complete)
 
 **Files Modified**:
+
 - `src/workload.rs` - Added multi-endpoint store creation functions
 
 **New Functions**:
+
 ```rust
 pub fn create_store_from_config(
     config: &Config,
@@ -324,12 +343,14 @@ fn create_multi_endpoint_store(
 ```
 
 **Priority Order**:
+
 1. Per-agent `multi_endpoint` (highest)
 2. Global `multi_endpoint`
 3. Per-agent `target_override`
 4. Global `target` (lowest)
 
 **Cache Architecture**:
+
 - `StoreCache`: Maps URIs to `Arc<Box<dyn ObjectStore>>` for operation execution
 - `MultiEndpointCache`: Maps cache keys to `Arc<MultiEndpointStore>` for statistics collection
 - Dual cache system enables both trait object use AND direct access for stats
@@ -337,12 +358,14 @@ fn create_multi_endpoint_store(
 #### 3. Statistics Collection (✅ Complete)
 
 **New Files**:
+
 - `tests/configs/multi_endpoint_global.yaml` - Global shared endpoint pool
 - `tests/configs/multi_endpoint_per_agent.yaml` - Static per-agent mapping (4×2 example)
 - `tests/configs/multi_endpoint_nfs.yaml` - NFS multi-mount example
 - `tests/configs/MULTI_ENDPOINT_README.md` - Comprehensive usage guide
 
 **Display Features**:
+
 - Per-endpoint request counts, bytes read/written, error counts
 - Load distribution percentages across all endpoints
 - Verification of load balancing strategies (round-robin, least-connections)
@@ -353,17 +376,20 @@ fn create_multi_endpoint_store(
 **Files Modified**: `src/prepare.rs`
 
 **Features**:
+
 - ✅ Multi-endpoint object creation in prepare phase
 - ✅ Objects distributed across all configured endpoints
 - ✅ Separate multi_ep_cache for prepare vs workload
 - ✅ Cache keys distinguish sequential vs parallel prepare strategies
 
 #### 5. Test Configurations (✅ Complete)
+
 - `tests/configs/multi_endpoint_file.yaml` - Local file:// testing (updated with /tmp/ep* paths)
 - `tests/configs/multi_endpoint_distributed_mixed.yaml` - Mixed global/per-agent config
 - `tests/configs/MULTI_ENDPOINT_README.md` - Comprehensive usage guide
 
 **Test Results**:
+
 - ✅ Configuration parsing works (`--dry-run` tested)
 - ✅ Benchmark executes without errors
 - ✅ Statistics display renders correctly
@@ -372,6 +398,7 @@ fn create_multi_endpoint_store(
 #### 6. Documentation (✅ Complete)
 
 **Files Updated**:
+
 - `README.md` - Updated version badge and feature list
 - `docs/CHANGELOG.md` - Added v0.8.22 release notes
 - `docs/CONFIG_SYNTAX.md` - Added multi-endpoint configuration section
@@ -380,6 +407,7 @@ fn create_multi_endpoint_store(
 - `MULTI_ENDPOINT_ROUTING_ANALYSIS.md` - NEW: Architectural analysis for routing logic (Jan 29, 2026)
 
 **Coverage**:
+
 - Configuration syntax with examples
 - Per-agent vs global configuration
 - Load balancing strategies
@@ -396,6 +424,7 @@ fn create_multi_endpoint_store(
 **Current**: Operations have `use_multi_endpoint` field in config, but it's ignored during execution.
 
 **Required**: When `use_multi_endpoint: true`, operations should:
+
 1. Check if multi_endpoint config exists
 2. Extract path component from URI
 3. Create/reuse MultiEndpointStore instead of single-endpoint store
@@ -404,6 +433,7 @@ fn create_multi_endpoint_store(
 ### Architectural Complexity
 
 **Challenge**: URIs are fully resolved before reaching store creation:
+
 - Input URI: `file:///tmp/ep1/testdata/obj_123`
 - Multi-endpoint config: `[file:///tmp/ep1/, file:///tmp/ep2/, file:///tmp/ep3/, file:///tmp/ep4/]`
 - Need to extract: `testdata/obj_123`
@@ -414,6 +444,7 @@ fn create_multi_endpoint_store(
 ### Estimated Effort
 
 **Routing Implementation**: 1-2 days
+
 - Update cached operation function signatures
 - Thread use_multi_endpoint parameter
 - Implement URI path extraction logic
@@ -421,6 +452,7 @@ fn create_multi_endpoint_store(
 - Test with various URI formats
 
 **Testing & Validation**: 1 day
+
 - Unit tests for path extraction
 - Integration tests with file:// endpoints  
 - Verify statistics show correct values
@@ -435,12 +467,14 @@ fn create_multi_endpoint_store(
 **Branch**: `feature/multi-endpoint-support`
 
 **Commits**:
+
 1. `1a9af22` - Configuration layer ✅
 2. `26b2005` - Runtime integration ✅
 3. `f90ed86` - Prepare phase support ✅
 4. `a5f1e48` - Statistics infrastructure (partial) ⚠️
 
 **Uncommitted**:
+
 - `MULTI_ENDPOINT_ROUTING_ANALYSIS.md` - Architectural analysis document
 - This updated status file
 
@@ -467,6 +501,7 @@ fn create_multi_endpoint_store(
 ### Why It's Blocked
 
 **Need architectural decision** on routing implementation approach:
+
 - Option 1: Thread parameter through call chain (explicit, compiler-enforced)
 - Option 2: Encode in URI/cache key (fragile, not recommended)
 - Option 3: Dual cache lookup (code duplication)
@@ -477,11 +512,13 @@ fn create_multi_endpoint_store(
 ### User Impact
 
 **Can Use Now**:
+
 - Global multi-endpoint configuration
 - Per-agent endpoint mapping (distributed mode)
 - Dry-run validation
 
 **Cannot Use Until Routing Complete**:
+
 - Per-operation multi-endpoint control
 - Actual load balancing across endpoints
 - Meaningful per-endpoint statistics
@@ -501,4 +538,3 @@ fn create_multi_endpoint_store(
 7. ⏳ Merge to main and tag release
 
 **Estimated Timeline**: 1 week from architectural decision to merge.
-

@@ -11,6 +11,7 @@
 ## Example Scenarios
 
 ### Scenario 1: High-Throughput Cloud Storage Testing
+
 **Goal**: Saturate network bandwidth to cloud storage
 
 ```yaml
@@ -27,6 +28,7 @@ distributed:
 **Why scale-out**: Each VM has dedicated NIC → 8× network bandwidth
 
 ### Scenario 2: Cost-Optimized CPU-Intensive Workload
+
 **Goal**: Maximize CPU utilization, minimize cloud costs
 
 ```yaml
@@ -43,6 +45,7 @@ distributed:
 **Why scale-up**: 1 large VM typically 10-20% cheaper than 8 small VMs
 
 ### Scenario 3: Multi-Region Latency Testing
+
 **Goal**: Test from multiple geographic locations
 
 ```yaml
@@ -58,6 +61,7 @@ distributed:
 **Why scale-out**: Must use separate VMs in different regions
 
 ### Scenario 4: Hybrid Approach
+
 **Goal**: Balance cost, throughput, and flexibility
 
 ```yaml
@@ -78,42 +82,49 @@ distributed:
 ## Performance Characteristics
 
 ### Network Bandwidth
+
 - **Scale-Out (8 VMs)**: 8× 10 Gbps = 80 Gbps theoretical
 - **Scale-Up (1 VM)**: 1× 10 Gbps = 10 Gbps theoretical
 - **Real-world**: Cloud storage often bottleneck before network
 
 ### CPU Utilization
+
 - **Scale-Out**: Better NUMA locality per VM
 - **Scale-Up**: More efficient CPU cache sharing
 - **Difference**: Usually < 5% for I/O-bound workloads
 
 ### Cost Comparison (GCP example)
+
 - **8× n2-standard-8**: 8 × $0.3896/hr = $3.12/hr
 - **1× n2-standard-64**: $3.1168/hr (≈ $0.20/hr savings = 6% cheaper)
 - **Hybrid (4× n2-standard-16)**: 4 × $0.7792/hr = $3.12/hr (same cost, 4× bandwidth)
 
 ### Latency
+
 - **Scale-Out**: Higher inter-agent latency (irrelevant for independent workloads)
 - **Scale-Up**: Lower container-to-container latency (rarely matters)
 - **Impact**: Negligible for cloud storage testing
 
 ## When to Use Each Strategy
 
-### Use Scale-Out When:
+### Use Scale-Out When
+
 ✅ Network bandwidth is critical  
 ✅ Testing from multiple regions  
 ✅ Need fault tolerance (one VM failure doesn't stop all)  
 ✅ Comparing geographic latency differences  
 ✅ Testing distributed coordination overhead  
 
-### Use Scale-Up When:
+### Use Scale-Up When
+
 ✅ Cost optimization is priority  
 ✅ Single-region testing  
 ✅ CPU-bound workloads  
 ✅ Simpler deployment/management  
 ✅ Testing maximum per-node load  
 
-### Use Hybrid When:
+### Use Hybrid When
+
 ✅ Need balanced network bandwidth and cost  
 ✅ Fault tolerance with some redundancy  
 ✅ Flexible capacity scaling  
@@ -122,6 +133,7 @@ distributed:
 ## Configuration Templates
 
 ### Scale-Out (8 VMs)
+
 ```yaml
 # See examples/distributed-scale-out.yaml
 distributed:
@@ -137,6 +149,7 @@ distributed:
 ```
 
 ### Scale-Up (1 VM, 8 containers)
+
 ```yaml
 # See examples/distributed-scale-up.yaml
 distributed:
@@ -152,6 +165,7 @@ distributed:
 ```
 
 ### Hybrid (4 VMs, 2 containers each)
+
 ```yaml
 distributed:
   agents:

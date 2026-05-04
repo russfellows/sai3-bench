@@ -18,6 +18,7 @@ Previous documentation incorrectly stated that setting `S3DLIO_OPLOG_SORT=1` wou
 ## Why Logs Are Unsorted
 
 Operation logs are NOT sorted during capture due to:
+
 - **Concurrent writes**: Multiple threads complete operations at different times
 - **Out-of-order completion**: Operations may complete in different order than they started
 - **Buffer flushing**: Write buffering further mixes entry order
@@ -47,6 +48,7 @@ Operation logs MUST be sorted **after capture** using the `sai3-bench sort` comm
 ### Performance Characteristics
 
 **Test Results** (14,497 operations):
+
 - Original unsorted: 319 KB
 - Post-processed sorted: 199 KB (38% reduction)
 - Compression improvement: ~30-40% typical
@@ -71,15 +73,18 @@ $ ./sai3-bench replay --op-log /tmp/sorted-oplog.sorted.tsv.zst --dry-run
 The following files have been corrected to remove S3DLIO_OPLOG_SORT references:
 
 ### sai3-bench
+
 - `src/config.rs` - Updated op_log_path documentation
 - `src/bin/agent.rs` - Updated --op-log flag documentation
 - `docs/USAGE.md` - Added post-processing section, removed S3DLIO_OPLOG_SORT
 - `docs/CONFIG_SYNTAX.md` - Clarified sorting is post-processing only
 
 ### s3dlio
+
 - `docs/OPERATION_LOGGING.md` - Added "Post-Processing: Sorting Operation Logs" section
 
 ### Unchanged (Historical)
+
 - `docs/archive/CHANGELOG_v0.1.0-v0.8.4.md` - Archived changelog preserved for history
 
 ## Supported Environment Variables
@@ -106,6 +111,7 @@ export S3DLIO_OPLOG_ZSTD_LEVEL=5
 If you were using `S3DLIO_OPLOG_SORT=1` (which had no effect):
 
 **Before** (ineffective):
+
 ```bash
 export S3DLIO_OPLOG_SORT=1
 ./sai3-bench run --config test.yaml
@@ -113,6 +119,7 @@ export S3DLIO_OPLOG_SORT=1
 ```
 
 **After** (correct):
+
 ```bash
 # Step 1: Capture oplog (no special env var needed)
 ./sai3-bench run --config test.yaml

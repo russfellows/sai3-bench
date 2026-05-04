@@ -9,6 +9,7 @@ This guide covers s3dlio v0.9.50+ performance optimizations and how to enable th
 - **HTTP/2 (h2c) support**: sai3-bench v0.8.92+ / s3dlio v0.9.90+
 
 To update:
+
 ```bash
 cd /path/to/sai3-bench
 # Edit Cargo.toml to update s3dlio tag to v0.9.50
@@ -21,25 +22,32 @@ cargo build --release
 ## 🚀 Features Overview
 
 ### 1. Range Download Optimization (Opt-In)
+
 **76% faster downloads** for large objects using parallel range requests.
 
 **Performance Benchmark** (16× 148 MB objects, MinIO):
+
 - Without: 429 MB/s (5.52s)
 - With 64 MB threshold: **755 MB/s (3.14s) - 76% faster** 🏆
 
 **When to enable**:
+
 - ✅ Objects ≥64 MB, cross-region traffic, high-latency scenarios, GET-heavy workloads
 
 **When to disable**:
+
 - ❌ Small files (< 64 MB), same-region high-bandwidth, PUT-heavy workloads, rate-limited HEAD requests
 
 ### 2. Multipart Upload Improvements (Automatic)
+
 Zero-copy chunking for objects > 5 MB. **Always enabled**, no configuration needed.
 
 ### 3. HTTP/2 and h2c Support (s3dlio v0.9.90+)
+
 HTTP/2 for S3-protocol endpoints — reduces per-request overhead via multiplexing.
 
 **Mode selection via `S3DLIO_H2C`** (or `s3dlio_optimization.h2c` in YAML):
+
 - **Unset / Auto** (default) — probes h2c on first `http://` connection; falls back silently to
   HTTP/1.1 if the server refuses the HTTP/2 preface.  `https://` endpoints negotiate via TLS
   ALPN automatically with no probe overhead.
@@ -51,10 +59,12 @@ The resolved mode is logged at `INFO` on startup so operators can confirm the ac
 without a packet capture.
 
 **When to use h2c**:
+
 - ✅ Plain-HTTP (`http://`) S3-compatible stores that advertise HTTP/2 (MinIO v21+, VAST, etc.)
 - ✅ High-concurrency workloads where per-connection TCP overhead is a bottleneck
 
 **When NOT to use**:
+
 - ❌ `https://` endpoints (ALPN already handles it; setting `h2c: true` has no extra effect)
 - ❌ Stores that do not support HTTP/2 (auto mode falls back gracefully; force mode may error)
 
@@ -97,6 +107,7 @@ workload:
 ```
 
 Run normally - optimization settings applied automatically:
+
 ```bash
 sai3-bench run --config workload.yaml
 ```
@@ -139,6 +150,7 @@ sai3-bench run --config workload.yaml
 **Note**: `h2_stream_window_mb` and `h2_conn_window_mb` are only used when `h2_adaptive_window: false`.
 
 **HTTP/2 YAML example**:
+
 ```yaml
 s3dlio_optimization:
   enable_range_downloads: true
@@ -156,6 +168,7 @@ s3dlio_optimization:
 ## 🔧 Tuning Scenarios
 
 **Cross-Region / High Latency**:
+
 ```yaml
 s3dlio_optimization:
   enable_range_downloads: true
@@ -164,6 +177,7 @@ s3dlio_optimization:
 ```
 
 **Same-Region / Low Latency**:
+
 ```yaml
 s3dlio_optimization:
   enable_range_downloads: true
@@ -171,6 +185,7 @@ s3dlio_optimization:
 ```
 
 **Small Files (< 64 MB average)**:
+
 ```yaml
 # DON'T include s3dlio_optimization - range optimization adds HEAD overhead
 # Multipart upload improvements work automatically
@@ -181,6 +196,7 @@ s3dlio_optimization:
 ## 🧪 Verification
 
 **Check logs** for confirmation:
+
 ```bash
 export RUST_LOG=sai3_bench=info
 sai3-bench run --config workload.yaml
@@ -191,6 +207,7 @@ sai3-bench run --config workload.yaml
 ```
 
 **Compare performance**:
+
 ```bash
 # Baseline (without optimization)
 sai3-bench run --config workload_no_opt.yaml
@@ -206,15 +223,18 @@ sai3-bench run --config workload_optimized.yaml
 ## 🐛 Troubleshooting
 
 **No performance improvement?**
+
 - Verify objects ≥ threshold size
 - Check logs for "Applied s3dlio optimization" message
 - Ensure using newly built binary (`which sai3-bench`)
 
 **Slower after enabling?**
+
 - Objects may be smaller than threshold
 - Increase threshold to 128 MB or disable for your workload
 
 **Permission denied on HEAD requests?**
+
 - Some S3-compatible stores don't allow HEAD operations
 - Disable range optimization for that backend
 
@@ -271,6 +291,7 @@ sai3-bench run --config workload.yaml
 ```
 
 **For distributed**, set on each agent host or via systemd:
+
 ```ini
 [Service]
 Environment="S3DLIO_ENABLE_RANGE_OPTIMIZATION=1"
@@ -366,12 +387,14 @@ s3dlio_optimization:
 ```
 
 Start each of the 4 agents with:
+
 ```bash
 sai3bench-agent --listen 0.0.0.0:7167 --worker-threads 384
 ```
 
 The agent logs the active thread counts at startup:
-```
+
+```text
 INFO Tokio runtime started with 384 worker threads (set via --worker-threads CLI flag)
 INFO Auto-set s3dlio runtime threads: 576 (concurrency=384)
 ```
@@ -393,6 +416,7 @@ INFO Auto-set s3dlio runtime threads: 576 (concurrency=384)
 | **Auto thread derive** | `s3dlio_optimization.auto_threads: true` *(default)* | — | Auto-set from concurrency |
 
 **Recommended for most workloads**:
+
 ```yaml
 s3dlio_optimization:
   enable_range_downloads: true
@@ -400,6 +424,7 @@ s3dlio_optimization:
 ```
 
 **Recommended for high-concurrency small-object S3 workloads** (`concurrency: ≥64`):
+
 ```yaml
 s3dlio_optimization:
   enable_range_downloads: true

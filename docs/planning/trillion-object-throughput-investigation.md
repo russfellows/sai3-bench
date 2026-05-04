@@ -1,4 +1,5 @@
 # Trillion-Object Throughput Investigation
+
 ## Achieving 70,000 PUT ops/sec per Client Node with sai3-bench
 
 **Date**: April 2026  
@@ -52,6 +53,7 @@ static CLIENT: OnceCell<Client> = OnceCell::const_new();  // one client, forever
 ```
 
 Default construction path (what runs unless `S3DLIO_USE_OPTIMIZED_HTTP=true`):
+
 ```rust
 // http_client = None → AWS SDK picks its built-in default
 let s3_config = aws_sdk_s3::config::Builder::from(&cfg)
@@ -62,6 +64,7 @@ Client::from_conf(s3_config)
 
 The built-in default is `aws-smithy-http-client` v1.1.x → `hyper v0.14` + `hyper-rustls v0.24`.  
 For cleartext (`http://`) endpoints:  
+
 - `hyper-rustls` provides TLS — not used on cleartext  
 - `hyper v0.14` falls back to HTTP/1.1 on cleartext, one request per connection  
 - **No ALPN negotiation possible on cleartext → HTTP/2 is impossible via this path**
@@ -71,6 +74,7 @@ For cleartext (`http://`) endpoints:
 `src/http/client.rs` contains `HttpClientConfig::http2_prior_knowledge: true` and the corresponding `builder.http2_prior_knowledge()` call. **This code is never reached on the PUT path.** It is only referenced by `src/performance/mod.rs` (the performance metrics module, not storage operations).
 
 The `experimental-http-client` feature in s3dlio builds a `hyper-util` based connector with `http2_adaptive_window(true)`, but:
+
 - It requires a "patched `aws-smithy-http-client`" (noted in comments) — not production ready
 - Even with the feature enabled, it sets `http2_only(false)` — still falls back to HTTP/1.1
 - The `Connector::builder().hyper_builder(hyper_builder)` API does not exist in the published crate
@@ -78,6 +82,7 @@ The `experimental-http-client` feature in s3dlio builds a `hyper-util` based con
 ### 4. `ShardedS3Clients`: Also Dead Code
 
 `src/sharded_client.rs` has the right idea — multiple client shards to reduce pool contention — but:
+
 - `create_aws_client` has a `// TODO: Apply HTTP client optimizations per shard` comment
 - The shard clients are created with `aws_config::defaults(...)` — no custom connection pool, no HTTP/2
 - Not wired into `S3ObjectStore::put()` or `put_object_async()` at all
@@ -88,6 +93,7 @@ The `experimental-http-client` feature in s3dlio builds a `hyper-util` based con
 When running **4 separate agent processes**, each process sets its own `AWS_ENDPOINT_URL` pointing at one endpoint. This is the correct model and works. The global singleton client per process points at its own endpoint.
 
 When running **standalone** (no agents, one process, `multi_endpoint:` in config):  
+
 - `MultiEndpointStore` correctly distributes URI selection across 4 endpoint URIs  
 - But all 4 endpoints' PUTs hit `AWS_ENDPOINT_URL` (first endpoint)  
 - Net result: all traffic goes to endpoint 1, endpoints 2–4 are idle  
@@ -101,11 +107,13 @@ When running **standalone** (no agents, one process, `multi_endpoint:` in config
 ### HTTP/1.1 Connection Math
 
 At 1 KiB objects with a 4-node object storage cluster, expect round-trip latency:
+
 - Network RTT: ~100–200 µs (LAN)
 - Server processing time: ~50–150 µs (metadata + write commit)
 - Total per-PUT: ~200–400 µs = call it **300 µs average**
 
 With HTTP/1.1 (one request per connection):
+
 ```
 Connections needed = ops/sec × latency = 70,000 × 0.0003 = 21 connections
 ```
@@ -121,6 +129,7 @@ Wait, that seems low. The issue is that at high-enough concurrency *within* the 
    - TCP socket recycling overhead under sustained load
 
 With HTTP/2 multiplexing (multiple streams per connection):
+
 - 100 concurrent streams × 1 connection = same throughput, 1 socket
 - Server-side connection overhead reduced by 100×
 - Linux socket table stress eliminated
@@ -171,7 +180,7 @@ builder
     .tcp_keepalive(Some(Duration::from_secs(30)));
 ```
 
-The obstacle: `aws-smithy-http-client`'s public API does not yet expose a clean `build_with_connector` that takes an arbitrary `hyper_util` connector without the "patched" crate. 
+The obstacle: `aws-smithy-http-client`'s public API does not yet expose a clean `build_with_connector` that takes an arbitrary `hyper_util` connector without the "patched" crate.
 
 **Practical options**:
 
@@ -183,6 +192,7 @@ Wrap the `hyper-util` client in a newtype that implements `aws_smithy_runtime_ap
 
 **Option C** — Enable `S3DLIO_USE_OPTIMIZED_HTTP=true` + add `http2_prior_knowledge()`:  
 Fix the `experimental-http-client` path. The current code has the right structure but is missing `http2_prior_knowledge()` and has a non-compiling `build_with_connector_fn` call. This is the closest existing code to what's needed. The fix is:
+
 1. Replace `build_with_connector_fn` with the correct `aws-smithy-http-client` API
 2. Add `http2_prior_knowledge()` to the hyper builder
 
@@ -208,6 +218,7 @@ struct EndpointInfo {
 ```
 
 Each client is constructed with its own `endpoint_url`. The `S3ObjectStore` backing each endpoint would need to be given that specific client rather than using the global singleton. This requires either:
+
 - Passing a `client: Arc<Client>` into `S3ObjectStore::new()` (breaking the current static singleton pattern)
 - Or creating per-endpoint `S3Ops` instances directly in `MultiEndpointStore`
 
@@ -297,6 +308,7 @@ net.netfilter.nf_conntrack_max = 2000000   # if conntrack is in use
 ```
 
 **Apply per session** (or add to `/etc/security/limits.conf`):
+
 ```bash
 ulimit -n 1048576    # file descriptors per process
 ```
@@ -306,17 +318,20 @@ ulimit -n 1048576    # file descriptors per process
 ### P6 — HTTP/2 Stream Concurrency Limits
 
 Even after enabling h2c, check the server-side `MAX_CONCURRENT_STREAMS` setting:
+
 - Default in most S3 implementations: 100 concurrent streams per connection
 - At 70k ops/sec × 300 µs = 21 concurrent streams needed → **one TCP connection is theoretically sufficient**
 - In practice, use 8–16 connections with 100 streams each for headroom and load spreading
 
 Check the server limit:
+
 ```bash
 # Send HTTP/2 preface and examine SETTINGS frame
 curl -v --http2-prior-knowledge http://<endpoint>:80/ 2>&1 | grep -i "settings\|streams\|window"
 ```
 
 Client-side, configure hyper:
+
 ```rust
 builder.http2_initial_connection_window_size(64 * 1024 * 1024)
        .http2_initial_stream_window_size(16 * 1024 * 1024)

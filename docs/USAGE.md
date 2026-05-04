@@ -20,6 +20,7 @@ sai3-bench is a multi-protocol I/O benchmarking suite with optional distributed 
 The perf_log feature captures time-series performance metrics with exact 1-second timing during test execution, providing detailed visibility into performance trends.
 
 **Timing Precision** (v0.8.19):
+
 - Perf_log updates: Exactly 1000ms intervals using dedicated timer with `MissedTickBehavior::Burst`
 - Display updates: 500ms intervals for responsive feedback (independent of perf_log timing)
 - All perf_log files (aggregate + per-agent) use synchronized timestamps
@@ -27,6 +28,7 @@ The perf_log feature captures time-series performance metrics with exact 1-secon
 **Format**: TSV (tab-separated values) with 31 columns (v0.8.17+)
 
 **Columns**:
+
 - Metadata: agent_id, timestamp_epoch_ms, elapsed_s, stage, is_warmup
 - GET metrics: ops, bytes, iops, mbps, mean_us, p50_us, p90_us, p99_us
 - PUT metrics: ops, bytes, iops, mbps, mean_us, p50_us, p90_us, p99_us  
@@ -35,6 +37,7 @@ The perf_log feature captures time-series performance metrics with exact 1-secon
 - Error tracking: errors
 
 **Output files** (automatically created):
+
 - Standalone mode: `results/perf_log.tsv`
 - Distributed mode:
   - Per-agent: `results/agents/{agent-id}/perf_log.tsv` (accurate percentiles)
@@ -43,6 +46,7 @@ The perf_log feature captures time-series performance metrics with exact 1-secon
 **⚠️ Important - Aggregate Percentile Limitation:**
 
 In distributed mode, the aggregate perf_log.tsv percentiles are computed using weighted averaging, which is a mathematical approximation. For statistically accurate percentile analysis:
+
 - Use **per-agent perf_log files** (`agents/{agent-id}/perf_log.tsv`) - Computed from local HDR histograms
 - Use **final workload_results.tsv** - Uses correct HDR histogram merging across agents
 
@@ -66,6 +70,7 @@ The aggregate perf_log is suitable for monitoring during execution, but final an
 ### Performance Impact
 
 **Real-world benchmarks** (4 endpoints, 64M files):
+
 - **Tree generation**: 45 seconds → 0.5 seconds (90x speedup on subsequent runs)
 - **LIST operations**: 53 minutes → 8 seconds (400x faster with cached metadata)
 - **Path lookups**: O(n) iteration → O(1) hash lookups (10,000x improvement)
@@ -73,12 +78,14 @@ The aggregate perf_log is suitable for monitoring during execution, but final an
 ### Architecture
 
 **Per-Endpoint Caches** (distributed ownership):
+
 - Each endpoint stores metadata ONLY for objects it owns
 - Cache location: `{endpoint_uri}/sai3-kv-cache/`
 - Example: `file:///mnt/nvme1/sai3-kv-cache/` stores metadata for files on nvme1
 - File ownership: Round-robin by file index (`file_idx % num_endpoints == endpoint_idx`)
 
 **Coordinator Cache** (shared global state):
+
 - Stores tree manifests, endpoint registry, global configuration
 - Location: `{results_dir}/.sai3-coordinator-cache/`
 - Shared across all agents for distributed coordination
@@ -96,6 +103,7 @@ The cache tracks **BOTH** desired state (plan) and current state (actual):
 | `Deleted` | Was created, now missing | Drift detection, cleanup verification |
 
 **Example workflow**:
+
 1. **Prepare phase**: Plans 64M objects → `Planned` state, creates them → `Created` state
 2. **Interrupt**: CTRL-C during prepare at 32M objects
 3. **Restart**: Cache knows 32M are `Created`, 32M are `Planned` → continues from 32M
@@ -105,6 +113,7 @@ The cache tracks **BOTH** desired state (plan) and current state (actual):
 ### Usage Pattern
 
 **Automatic operation** - No configuration required:
+
 ```bash
 # Cache automatically created during prepare
 ./sai3-bench run --config workload.yaml
@@ -114,7 +123,8 @@ The cache tracks **BOTH** desired state (plan) and current state (actual):
 ```
 
 **Cache locations** (automatically created):
-```
+
+```text
 # Standalone mode
 file:///mnt/test/sai3-kv-cache/               # Endpoint cache
 /tmp/sai3-results-20260209/.sai3-coordinator-cache/  # Coordinator cache
@@ -132,13 +142,15 @@ file:///mnt/nvme4/sai3-kv-cache/              # Agent 2, endpoint 1
 The metadata cache **eliminates stat() overhead** by providing instant size lookups:
 
 **Without cache** (v0.8.59):
-```
+
+```text
 GET operation → stat() to fetch size → read file → process
               ↑ Network round-trip for every file!
 ```
 
 **With cache** (v0.8.60+):
-```
+
+```text
 Prepare phase → Stores size in cache → Persist to disk
 Workload phase → O(1) cache lookup → read file → process
                 ↑ ZERO stat() calls, ZERO network round-trips!
@@ -149,12 +161,14 @@ Workload phase → O(1) cache lookup → read file → process
 ### When Cache is Used
 
 **Automatically enabled**:
+
 - ✅ All `prepare` stages with `ensure_objects` (creates and tracks objects)
 - ✅ Workload phases with `glob_prepared_objects` (uses cached metadata for reads)
 - ✅ Directory tree generation (`directory_tree` config) - stores tree manifest
 - ✅ Cleanup phases - deletes tracked objects, verifies deletion
 
 **Cache bypassed** (not an error):
+
 - ℹ️ Utility commands (`util ls`, `util health`) - read-only operations
 - ℹ️ Replay mode - uses operation log, not live objects
 - ℹ️ Manual cleanup (`cleanup_mode: delete_all_test_data`) - scans storage directly
@@ -173,6 +187,7 @@ Workload phase → O(1) cache lookup → read file → process
 ```
 
 **Common issues**:
+
 - **"Cache not found"**: Normal for first run - cache created during prepare
 - **"Low cache hit rate"**: Objects may not be from current prepare phase (use `cleanup` first)
 - **"State mismatch"**: Concurrent modifications or interrupted prepare (restart from checkpoint)
@@ -180,12 +195,14 @@ Workload phase → O(1) cache lookup → read file → process
 ### Cache Persistence and Cleanup
 
 **Cache lifecycle**:
+
 - Created during first `prepare` stage
 - Persisted to disk after batch updates (every 1000 objects)
 - Reused across runs until cleanup
 - Deleted when cleanup runs (configurable via `cleanup_mode`)
 
 **Manual cache cleanup** (if needed):
+
 ```bash
 # Remove endpoint cache
 rm -rf /mnt/test/sai3-kv-cache/
@@ -268,11 +285,12 @@ autotune:
 
 When `size_range` + `size_steps` is used, sizes are computed with **log-spacing**:
 
-```
+```text
 size[i] = lo × (hi / lo) ^ (i / (steps - 1))   for i = 0 … steps-1
 ```
 
 Each value is rounded to the nearest 1 KiB boundary. Example with `size_range: "32MiB-64MiB"` and `size_steps: 3`:
+
 - Step 0: 32.0 MiB
 - Step 1: 45.3 MiB  ← geometric mean
 - Step 2: 64.0 MiB
@@ -300,7 +318,8 @@ Always use `--dry-run` first to verify the sweep before committing to a long run
 ```
 
 Example output:
-```
+
+```text
 ┌─ Autotune Configuration ──────────────────────────────────────────┐
 │ URI:          gs://my-bucket/bench/autotune/obj*.dat
 │ Size Range:   32MiB-64MiB (log-spaced, 3 steps) → 3 size(s): ["32.0 MiB", "45.3 MiB", "64.0 MiB"]
@@ -347,10 +366,12 @@ Use these commands to validate YAML parsing and distributed preflight before exe
 ## Configuration Syntax
 
 For detailed YAML configuration syntax, see:
+
 - **[Configuration Syntax Reference](CONFIG_SYNTAX.md)** - Complete syntax guide
 - **[Example Configurations](../examples/)** - Ready-to-use example configs
 
 **Quick syntax reminder**:
+
 ```yaml
 # Use glob patterns with wildcards (*)
 - op: get
@@ -446,7 +467,8 @@ cargo build --release
 Binaries will be in target/release/
 
 # Agent & Controller CLI Summary
-```
+
+```text
 sai3bench-agent
 USAGE:
   sai3bench-agent [--listen <addr>] [--tls] [--tls-domain <name>]
@@ -464,7 +486,7 @@ FLAGS/OPTIONS:
                         Supports s3dlio oplog environment variable: S3DLIO_OPLOG_BUF (buffer size)
 ```
 
-```
+```text
 sai3bench-ctl
 USAGE:
   sai3bench-ctl [--agents <csv>] [--tls] [--agent-ca <path>] [--agent-domain <name>] <SUBCOMMAND> ...
@@ -496,6 +518,7 @@ By default (no --tls flag), both controller and agents use plaintext HTTP.
 You have three flexible options for specifying agent addresses:
 
 ### Option 1: YAML Config Only (Recommended)
+
 ```yaml
 distributed:
   agents:
@@ -511,12 +534,14 @@ distributed:
 ```
 
 ### Option 2: CLI Only (Quick Testing)
+
 ```bash
 # Specify on command line
 ./sai3bench-ctl --agents node1:7167,node2:7167 run --config workload.yaml
 ```
 
 ### Option 3: Both (Config Takes Precedence)
+
 ```bash
 # Config YAML agents override CLI agents
 ./sai3bench-ctl --agents localhost:7167,localhost:7168 run --config workload.yaml
@@ -541,6 +566,7 @@ The controller performs pre-flight validation of distributed configurations to c
 **The Problem**: When using `tree_creation_mode: isolated` with `shared_filesystem: false` and `use_multi_endpoint: true`, specifying `base_uri` causes listing failures because agents try to list from storage they're not configured to access.
 
 **❌ WRONG** (causes h2 protocol errors):
+
 ```yaml
 distributed:
   shared_filesystem: false      # Per-agent storage
@@ -560,6 +586,7 @@ prepare:
 ```
 
 **✅ CORRECT** (each agent uses its own endpoints):
+
 ```yaml
 prepare:
   ensure_objects:
@@ -595,6 +622,7 @@ prepare:
 ## Multi-Endpoint Load Balancing (v0.8.22+)
 
 Distribute I/O operations across multiple storage endpoints to maximize bandwidth utilization. Perfect for:
+
 - **Multi-NIC storage systems** (VAST, Weka, MinIO clusters)
 - **Regional redundancy** (multiple S3 buckets, Azure regions)
 - **NFS multi-path** (same namespace via different mount points)
@@ -618,6 +646,7 @@ workload:
 ```
 
 **Load balancing strategies:**
+
 - `round_robin`: Simple sequential rotation (default, predictable)
 - `least_connections`: Adaptive routing to least-loaded endpoint
 
@@ -662,14 +691,16 @@ prepare:
 ```
 
 Object keys produced:
-```
+
+```text
 00/prepared-00000000.dat    ← shard 00  (index % 256 = 0)
 a3/prepared-00000001.dat    ← shard a3
 ff/prepared-00000002.dat    ← shard ff
 ```
 
 Workload PUT operations are also sharded automatically — no extra config needed:
-```
+
+```text
 2b/obj_13792847362          ← live PUT (random key % 256)
 ```
 
@@ -704,15 +735,15 @@ negligible overhead relative to millisecond network I/O.  The pool grows monoton
 throughout the run; no objects are ever removed.
 
 **When to use `dynamic_put_pool: true`**:
+
 - Warp-style mixed workloads where organic object population growth is the test scenario
 - Validating that a storage system scales smoothly as the namespace grows during load
 
 **Why the default is `false`** (frozen pool):
+
 - Reproducibility: two runs with the same pre-populated dataset produce identical GET
   pool membership regardless of PUT throughput variation
 - Simpler latency analysis: GET latency doesn't drift as pool size changes
-
-
 
 ## YAML-Driven Stage Orchestration (v0.8.50+)
 
@@ -769,6 +800,7 @@ distributed:
 ```
 
 **Stage types:**
+
 - **Execute**: Run workload for fixed duration
 - **Prepare**: Create baseline objects
 - **Cleanup**: Delete objects
@@ -777,6 +809,7 @@ distributed:
 - **Custom**: Run custom scripts/commands
 
 **Completion criteria:**
+
 - `duration`: Complete after time period (execute stages)
 - `tasks_done`: Complete when all tasks finished (prepare/cleanup)
 - `validation_passed`: Complete when checks pass (validation)
@@ -784,6 +817,7 @@ distributed:
 - `script_exit`: Complete when command exits (custom)
 
 **Real-world use cases:**
+
 - Multi-epoch ML training with checkpointing between stages
 - Tiered testing (smoke test → medium test → full test)
 - Complex workflows (generate → convert → validate → benchmark)
@@ -801,14 +835,16 @@ Ensure all agents reach coordination points before proceeding. Critical for mult
 ### Why Barriers Matter
 
 **Without barriers:**
-```
+
+```text
 Agent 1: Prepare (30s) → Execute starts at T=30
 Agent 2: Prepare (45s) → Execute starts at T=45
 Result: 15-second timing skew ❌
 ```
 
 **With barriers:**
-```
+
+```text
 Agent 1: Prepare (30s) → Wait at barrier
 Agent 2: Prepare (45s) → Reach barrier
 Both: Execute starts at T=45 (synchronized) ✅
@@ -837,11 +873,13 @@ distributed:
 ```
 
 **Barrier types:**
+
 - `all_or_nothing`: ALL agents must reach barrier (strict)
 - `majority`: >50% agents sufficient (fault-tolerant)
 - `best_effort`: Proceed when stragglers fail liveness check (opportunistic)
 
 **Scaling for large tests (300k+ directories):**
+
 ```yaml
 barrier_sync:
   prepare:
@@ -858,6 +896,7 @@ Prevent indefinite hangs in distributed testing with comprehensive timeout contr
 ### Three Timeout Categories
 
 **1. Agent operation timeouts** (per-stage):
+
 ```yaml
 stages:
   - name: "prepare"
@@ -871,6 +910,7 @@ stages:
 ```
 
 **2. Barrier synchronization timeouts**:
+
 ```yaml
 barrier_sync:
   prepare:
@@ -878,6 +918,7 @@ barrier_sync:
 ```
 
 **3. gRPC communication timeouts**:
+
 ```yaml
 distributed:
   grpc_keepalive_interval: 30   # PING every 30 seconds
@@ -885,6 +926,7 @@ distributed:
 ```
 
 **Default timeouts** (if not specified):
+
 - Prepare: 600s (10 minutes)
 - Execute: 3600s (1 hour)
 - Cleanup: 3600s (1 hour)
@@ -893,6 +935,7 @@ distributed:
 - gRPC keepalive: 30s interval + 10s timeout
 
 **For slow operations (>60s latency):**
+
 ```yaml
 distributed:
   grpc_keepalive_interval: 120  # Avoid spurious disconnects
@@ -926,20 +969,25 @@ prepare:
 ```
 
 # 3 Quick Start — Single Host (PLAINTEXT)
+
 In one terminal:
 
 ## Run agent without TLS on port 7167
+
 ./target/release/sai3bench-agent --listen 127.0.0.1:7167
 In another terminal:
 
-## Controller talking to that agent (plaintext is default):
+## Controller talking to that agent (plaintext is default)
+
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7167 ping
 
 ## Example GET workload (jobs = concurrency for downloads)
+
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7167 get \
   --uri s3://my-bucket/path/ --jobs 8
 
 # 4 Multi-Host (PLAINTEXT)
+
 On each agent host (e.g., node1, node2):
 
 ./sai3bench-agent --listen 0.0.0.0:7167
@@ -951,15 +999,18 @@ From the controller host:
   --uri s3://my-bucket/data/ --jobs 16
 
 # 5 TLS with Self‑Signed Certificates (No CA hassles)
+
 You can enable TLS on the agent with an ephemeral self‑signed certificate
 generated at startup. You do not need a public CA. The controller just needs
 the generated cert to trust the agent connection.
 
 ## 5.1 Start the Agent with TLS and write the cert
+
 Pick a DNS name (CN) you’ll use from the controller—typically the agent’s
 resolvable hostname or IP. If you need multiple names or IPs, use --tls-sans.
 
 ### Example: agent runs on loki-node3, reachable by name and IP
+
 Write cert & key into /tmp/agent-ca/  (for you to scp to controller)
 ./sai3bench-agent \
   --listen 0.0.0.0:7167 \
@@ -972,7 +1023,6 @@ This produces:
    /tmp/agent-ca/agent_cert.pem
    /tmp/agent-ca/agent_key.pem
 
-
 **Tip:** --tls-domain is the CN; if --tls-sans is not specified,
 it will be used as a single SAN. If --tls-sans is provided, the SANs
 list replaces the default and should include all names (or IPs) you plan to
@@ -980,13 +1030,15 @@ use to connect to this agent.
 
 Copy the certificate to the controller host (key stays on the agent):
 
-### From controller host:
+### From controller host
+
 scp user@loki-node3:/tmp/agent-ca/agent_cert.pem /tmp/agent_ca.pem
 
 ## 5.2 Connect from the Controller (TLS)
+
 Single agent:
 
-```
+```text
 ./sai3bench-ctl \
   --agents loki-node3:7167 \
   --agent-ca /tmp/agent_ca.pem \
@@ -997,7 +1049,8 @@ If you connect by an alternate name or IP that’s in the SANs, you may need
 --agent-domain to set the SNI / TLS server_name to match the certificate:
 
 ## Connecting to the agent by IP, telling TLS to expect "loki-node3" (in SANs)
-```
+
+```text
 ./sai3bench-ctl \
   --agents 10.10.0.23:7167 \
   --agent-ca /tmp/agent_ca.pem \
@@ -1007,13 +1060,14 @@ If you connect by an alternate name or IP that’s in the SANs, you may need
 
 Multiple agents (all in TLS mode):
 
-```
+```text
 ./sai3bench-ctl \
   --agents loki-node3:7167,loki-node4:7167 \
   --agent-ca /tmp/agent_ca.pem \
   ping
 ```
-```
+
+```text
 ./sai3bench-ctl \
   --agents loki-node3:7167,loki-node4:7167 \
   --agent-ca /tmp/agent_ca.pem \
@@ -1051,7 +1105,7 @@ This allows you to monitor individual agent progress when running agents in sepa
 
 ### Example Controller Output
 
-```
+```text
 === Distributed Workload ===
 Config: tests/configs/workload.yaml
 Agents: 2
@@ -1105,7 +1159,7 @@ The controller implements a sophisticated startup handshake with improved timing
 
 If agents detect configuration issues, you'll see clear error messages:
 
-```
+```text
 ⏳ Waiting for agents to validate configuration...
   ✅ agent-1 ready
   ❌ agent-2 error: Pattern 'data/*.dat' matches no files
@@ -1123,7 +1177,7 @@ Error: 1 agent(s) failed startup validation
 
 The improved startup sequence provides better visibility:
 
-```
+```text
 ⏳ Waiting for agents to validate configuration...
   ✅ agent-1 ready
   ✅ agent-2 ready
@@ -1150,28 +1204,34 @@ The default start delay is 2 seconds (on top of the 10-second coordinated start)
 For more details on the implementation, see `docs/DISTRIBUTED_LIVE_STATS_IMPLEMENTATION.md`.
 
 # 7 Examples for Workloads
+
 GET (download) via controller
+
 ### PLAINTEXT (Default)
-```
+
+```text
 ./sai3bench-ctl --agents node1:7167 get \
   --uri s3://my-bucket/prefix/ --jobs 16
 ```
 
 ### TLS
-```
+
+```text
 ./sai3bench-ctl --agents node1:7167 \
   --agent-ca /tmp/agent_ca.pem \
   get --uri s3://my-bucket/prefix/ --jobs 16
 ```
+
 --uri accepts a single object (s3://bucket/key), a prefix (s3://bucket/prefix/), or a simple glob under a prefix (e.g., s3://bucket/prefix/*).
 
 --jobs controls per-agent concurrency for GET.
 PUT (upload) via controller
 
-## Create N objects of size S under bucket/prefix, using M concurrency per agent.
+## Create N objects of size S under bucket/prefix, using M concurrency per agent
 
 ### PLAINTEXT
-```
+
+```text
 ./sai3bench-ctl --agents node1:7167 put \
   --bucket my-bucket \
   --prefix test/ \
@@ -1181,7 +1241,8 @@ PUT (upload) via controller
 ```
 
 ### TLS
-```
+
+```text
 ./sai3bench-ctl --agents node1:7167 \
   --agent-ca /tmp/agent_ca.pem \
   put --bucket my-bucket \
@@ -1192,17 +1253,20 @@ PUT (upload) via controller
 ```
 
 # 8 Localhost Demo (No Makefile Needed)
+
 ### Terminal A — agent (PLAINTEXT)
-```
+
+```text
 ./target/release/sai3bench-agent --listen 127.0.0.1:7167
 ```
 
 ### Terminal B — controller
-```
+
+```text
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7167 ping
 ```
 
-```
+```text
 ./target/release/sai3bench-ctl --agents 127.0.0.1:7167 get \
   --uri s3://my-bucket/prefix/ --jobs 4
 ```
@@ -1210,16 +1274,17 @@ PUT (upload) via controller
 ## For TLS on localhost
 
 ### Terminal A — agent with TLS & SANs covering "localhost" and "127.0.0.1"
-```
+
+```text
 ./sai3bench-agent --listen 127.0.0.1:7167 --tls \
   --tls-domain localhost \
   --tls-sans "localhost,127.0.0.1" \
   --tls-write-ca /tmp/agent-ca
 ```
 
-
 ### Terminal B — controller
-```
+
+```text
 ./sai3bench-ctl --agents 127.0.0.1:7167 \
   --agent-ca /tmp/agent-ca/agent_cert.pem \
   --agent-domain localhost \
@@ -1227,6 +1292,7 @@ PUT (upload) via controller
 ```
 
 # 9 Troubleshooting
+
 TLS is enabled ... but --agent-ca was not provided
 You're connecting to a TLS-enabled agent, but the controller is missing
 --agent-ca. Provide the agent's agent_cert.pem or run the controller with
@@ -1251,6 +1317,7 @@ Check CPU/network utilization on agent hosts.
 Agent startup validation timeout
 One or more agents didn't respond within the validation window (3 seconds).
 Check that:
+
 - Agents are running and reachable
 - Network connectivity is stable
 - Agents have access to required files/resources
@@ -1258,6 +1325,7 @@ Check that:
 
 Configuration validation failed
 Agents perform pre-flight validation before starting workload. Common issues:
+
 - file:// patterns don't match any files: Verify path is correct and files exist
 - PUT operation missing object_size: Add object_size to PUT operations
 - Empty workload: Ensure workload array has at least one operation
@@ -1267,11 +1335,13 @@ Agents perform pre-flight validation before starting workload. Common issues:
 Agents implement comprehensive error handling with automatic recovery:
 
 ### Error Thresholds (Default Values)
+
 - **max_total_errors**: 100 total errors before aborting
 - **error_rate_threshold**: 5.0 errors/second triggers smart backoff
 - **max_retries**: 3 retry attempts per operation (when retry_on_error=true)
 
 These defaults can be overridden in your config YAML:
+
 ```yaml
 error_handling:
   max_total_errors: 200
@@ -1281,14 +1351,17 @@ error_handling:
 ```
 
 ### Smart Backoff
+
 When error rate exceeds threshold, agents skip operations to reduce system load,
 allowing the backend to recover. Retries use exponential backoff.
 
 ### Agent Auto-Reset
+
 After encountering errors, agents automatically reset to listening state.
 This means agents accept new workload requests immediately without requiring restart.
 
 **Example**: If agent encounters I/O errors during workload execution:
+
 1. Agent reports errors to controller
 2. Agent transitions: Failed → Idle state
 3. Agent ready for next workload request
@@ -1299,17 +1372,20 @@ This means agents accept new workload requests immediately without requiring res
 Control error/retry logging with verbosity flags:
 
 **Default** (no flags): Shows only critical failures and threshold warnings
+
 ```bash
 ./sai3bench-agent --listen 0.0.0.0:7167
 ```
 
 **`-v` (info level)**: Adds retry attempt logging with 🔄 emoji
+
 ```bash
 ./sai3bench-agent --listen 0.0.0.0:7167 -v
 # Output: 🔄 Retry 1/3 for operation get on s3://bucket/key
 ```
 
 **`-vv` (debug level)**: Shows individual errors with full context
+
 ```bash
 ./sai3bench-agent --listen 0.0.0.0:7167 -vv
 # Output: ❌ Error on get s3://bucket/key: Connection timeout (attempt 1/3)
@@ -1322,27 +1398,32 @@ Control error/retry logging with verbosity flags:
 Capture detailed operation traces for performance analysis and replay using s3dlio oplogs.
 
 **Oplog Format** (s3dlio v0.9.22+):
-```
+
+```text
 idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
 ```
 
 **Key Fields**:
+
 - `client_id`: Agent identifier (set automatically, or via SAI3_CLIENT_ID env var)
 - `first_byte`: Approximate time-to-first-byte for GET operations (see limitations below)
 - `start`/`end`: ISO 8601 timestamps (synchronized to controller time in distributed mode)
 - `duration_ns`: Operation duration in nanoseconds
 
 **Clock Synchronization** (Distributed Mode):
+
 - Agent automatically calculates clock offset from controller's start_timestamp_ns
 - All operation timestamps adjusted to controller's reference time
 - Enables accurate cross-agent analysis even with clock skew
 
 **Client Identification**:
+
 - Standalone mode: Uses "standalone" or SAI3_CLIENT_ID env var
 - Distributed mode: Uses agent_id from config (e.g., "agent-1", "agent-2")
 - Enables per-agent filtering in merged oplogs
 
 **First Byte Tracking** (Approximate):
+
 - GET operations: first_byte ≈ end (when complete data available)
 - PUT operations: first_byte = start (upload begins immediately)
 - Metadata operations (LIST/HEAD/DELETE): first_byte empty (not applicable)
@@ -1352,6 +1433,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 - See [s3dlio OPERATION_LOGGING.md](https://github.com/russfellows/s3dlio/blob/main/docs/OPERATION_LOGGING.md) for detailed explanation
 
 **CLI Flag** (applies to all workloads on agent):
+
 ```bash
 # Enable oplog via CLI flag
 ./sai3bench-agent --listen 0.0.0.0:7167 --op-log /data/oplogs/trace.tsv.zst
@@ -1359,6 +1441,7 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 ```
 
 **YAML Config** (per-workload control, takes precedence over CLI):
+
 ```yaml
 # Enable in config YAML
 op_log_path: /shared/storage/oplogs/benchmark.tsv.zst
@@ -1372,10 +1455,12 @@ distributed:
 ```
 
 Results in per-agent files:
+
 - `/shared/storage/oplogs/benchmark-agent1.tsv.zst`
 - `/shared/storage/oplogs/benchmark-agent2.tsv.zst`
 
 **Environment Variables** (s3dlio oplog settings):
+
 ```bash
 # Optional: configure buffer size (default: 64KB)
 export S3DLIO_OPLOG_BUF=131072
@@ -1399,11 +1484,13 @@ Operation logs are NOT sorted during capture due to concurrent writes. To sort c
 ```
 
 **Benefits of Sorting**:
+
 - Better compression (sorted files are ~30-40% smaller)
 - Enables chronological replay for debugging
 - Required for accurate latency analysis
 
 **Oplog Analysis**:
+
 ```bash
 # Decompress and view oplog
 zstd -d < /data/oplogs/trace-agent1.tsv.zst | head -20
@@ -1416,6 +1503,7 @@ zstd -d < /data/oplogs/trace-agent1.tsv.zst | tail -n +2 | sort -t$'\t' -k13 -n 
 ```
 
 **Use Cases**:
+
 - **Performance Analysis**: Identify slow operations, latency percentiles per agent
 - **Workload Replay**: Capture production traffic and replay at different speeds
 - **Debugging**: Trace specific operations that failed or exceeded thresholds
@@ -1474,7 +1562,7 @@ replay:
 
 Replay summary includes backpressure metrics:
 
-```
+```text
 === Replay Statistics ===
 Operations: 25000 completed (1024 errors)
 Throughput: 1234.5 ops/s
@@ -1507,6 +1595,7 @@ Validate your config before running:
 ```
 
 # 11 Notes and Best Practices
+
 Use resolvable hostnames for agents and include them in --tls-sans when
 using TLS. If connecting by IP from the controller, add that IP to
 --tls-sans or set --agent-domain to a SAN value.
@@ -1520,6 +1609,7 @@ All latency metrics are reported in microseconds (µs) for precision with
 fast operations.
 
 # 12 Running Tests
+
 Unit + integration tests:
 
 cargo test
@@ -1528,12 +1618,14 @@ connectivity (plaintext). For full TLS tests between hosts, use the examples in
 Sections 3–4.
 
 # 13 Versioning
+
 The agent reports its version on ping:
 
-```
+```text
 ./sai3bench-ctl --agents node1:7167 ping
 # connected to node1:7167 (agent version X.Y.Z)
 ```
+
 Keep controller/agent binaries from the same source build when testing.
 
 ---
@@ -1650,6 +1742,7 @@ prepare:
 > **Fill pattern**: Always use `fill: random` for benchmarks. `zero` triggers storage dedup/compression and produces unrealistic results.
 
 **Key notes**:
+
 - `distribution: bottom` — files only in leaf directories (most realistic for filesystem workloads)
 - `distribution: all` — files at every level
 - `--dry-run` shows total directory/file counts and data size before execution
@@ -1836,6 +1929,7 @@ workload:
 ```
 
 **Distribution types**:
+
 - `lognormal` — realistic; requires `mean` and `std_dev`
 - `uniform` — even spread between `min` and `max`
 - Fixed integer — e.g. `size_spec: 1048576`
@@ -1883,6 +1977,7 @@ distributed:
 ### Scale-Out vs Scale-Up
 
 **Scale-Out** (multiple VMs — maximum bandwidth, fault tolerance):
+
 ```yaml
 agents:
   - { address: "vm1:7167", id: "agent-1" }
@@ -1891,6 +1986,7 @@ agents:
 ```
 
 **Scale-Up** (single large VM — cost optimization, lower latency):
+
 ```yaml
 agents:
   - { address: "big-vm:7167", id: "c1", listen_port: 7167 }

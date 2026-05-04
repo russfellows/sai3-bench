@@ -16,7 +16,7 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                     CONTROLLER (sai3bench-ctl)                  │
 │  • Parses workload config                                       │
@@ -47,12 +47,14 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ### Components
 
 **Controller (`sai3bench-ctl`)**
+
 - Runs on a single host (can be your laptop or one of the test VMs)
 - Orchestrates the entire test workflow
 - Communicates with agents via gRPC (bidirectional streaming)
 - Aggregates results and generates reports
 
 **Agents (`sai3bench-agent`)**
+
 - Run on each test host (VMs, bare metal, containers)
 - Execute actual I/O operations
 - Collect per-host performance metrics
@@ -76,12 +78,14 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ### Shared vs Independent Filesystems
 
 **Shared Filesystem (`shared_filesystem: true`)**
+
 - All agents access the SAME data
 - Common in distributed storage testing (NAS, parallel filesystems, object stores)
 - File creation is distributed (each agent creates subset of files)
 - Example: Multiple VMs accessing same S3 bucket
 
 **Independent Filesystem (`shared_filesystem: false`)**
+
 - Each agent creates and accesses its OWN data
 - Common in local storage testing (DAS, node-local SSDs)
 - Each agent creates full dataset independently
@@ -90,15 +94,18 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ### Tree Creation Modes
 
 **Coordinator Mode (`tree_creation_mode: coordinator`)**
+
 - Controller creates directory tree before test starts
 - Agents only create files (distributed across agents)
 - **Use when**: Testing object stores or shared filesystems where directory structure matters
 
 **Agent Mode (`tree_creation_mode: agent`)**
+
 - Each agent creates its own directory tree
 - **Use when**: Testing independent filesystems or when agents need different tree structures
 
 **Controller Mode (`tree_creation_mode: controller`)**
+
 - Controller creates EVERYTHING (tree + files) before agents start
 - Agents only perform workload operations
 - **Use when**: Testing read-only workloads or specific data layouts
@@ -106,11 +113,13 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ### Path Selection Strategies
 
 **Random (`path_selection: random`)**
+
 - Each agent randomly selects from available files
 - Simulates independent clients accessing shared data
 - **Use when**: Modeling multi-user workloads
 
 **Distributed (`path_selection: distributed`)**
+
 - Each agent accesses a specific subset of files
 - No overlap between agents
 - **Use when**: Maximizing aggregate throughput or avoiding contention
@@ -118,6 +127,7 @@ Complete guide to running distributed I/O benchmarks with sai3-bench across mult
 ### Agent ID Assignment
 
 **Explicit IDs (Recommended)**
+
 ```yaml
 distributed:
   agents:
@@ -129,6 +139,7 @@ distributed:
 ```
 
 **Auto-generated IDs**
+
 ```yaml
 distributed:
   agents:
@@ -137,6 +148,7 @@ distributed:
 ```
 
 Agent IDs appear in:
+
 - Results directory names (`sai3-*/agents/agent-us-east-1a/`)
 - Performance logs
 - Console output
@@ -161,6 +173,7 @@ nohup sai3bench-agent --listen 0.0.0.0:7167 > agent.log 2>&1 &
 ```
 
 **Verify agents are listening:**
+
 ```bash
 # Check agent log
 tail -f agent.log
@@ -231,7 +244,8 @@ sai3bench-ctl run --config distributed-test.yaml
 ```
 
 **Expected output:**
-```
+
+```text
 === Distributed Workload ===
 Config: distributed-test.yaml
 Agents: 3
@@ -337,6 +351,7 @@ workload:
 ```
 
 **Run:**
+
 ```bash
 # Start 2 agents locally
 ./scripts/start_local_agents.sh 2
@@ -413,7 +428,7 @@ workload:
 
 ### Architecture: Per-Agent Endpoint Assignment
 
-```
+```text
 ┌─────────────┐
 │ CONTROLLER  │
 └──────┬──────┘
@@ -485,6 +500,7 @@ prepare:
 ```
 
 **Key points:**
+
 - Global `multi_endpoint` defines all 4 endpoints (fallback)
 - Agent-1 override: ONLY endpoints A & B (round_robin)
 - Agent-2 override: ONLY endpoints C & D (least_connections)
@@ -492,6 +508,7 @@ prepare:
 - Files are created in agent's assigned endpoints only
 
 **Run:**
+
 ```bash
 # Phase 1: Prepare (creates data in per-agent endpoints)
 sai3bench-ctl run --config tests/configs/multi_endpoint_prepare.yaml
@@ -505,6 +522,7 @@ done
 ```
 
 **Verify endpoint isolation:**
+
 ```bash
 # Check per-agent endpoint stats
 cat sai3-*/agents/agent-dc-a/prepare_endpoint_stats.tsv
@@ -587,6 +605,7 @@ perf_log:
 ```
 
 **Run:**
+
 ```bash
 # Must complete prepare phase first (Example 3)
 # Then run workload test
@@ -594,6 +613,7 @@ sai3bench-ctl run --config tests/configs/multi_endpoint_workload.yaml
 ```
 
 **Verify endpoint isolation:**
+
 ```bash
 # Check per-agent endpoint stats
 cat sai3-*/agents/agent-dc-a/workload_endpoint_stats.tsv
@@ -604,7 +624,8 @@ cat sai3-*/agents/agent-dc-b/workload_endpoint_stats.tsv
 ```
 
 **Output includes endpoint statistics:**
-```
+
+```text
 sai3-20260129-2221-multi_endpoint_workload/
 ├── results.tsv                    # Aggregate results
 ├── perf_log.tsv                   # Time-series performance
@@ -623,6 +644,7 @@ sai3-20260129-2221-multi_endpoint_workload/
 ### Real-World Multi-Endpoint Use Cases
 
 **1. Multi-Region Cloud Testing**
+
 ```yaml
 # Agent in US East accesses S3 us-east-1
 # Agent in EU West accesses S3 eu-west-1
@@ -644,6 +666,7 @@ distributed:
 ```
 
 **2. Multi-Account Testing**
+
 ```yaml
 # Different agents use different cloud accounts/credentials
 # Agent 1 uses account A endpoints
@@ -651,6 +674,7 @@ distributed:
 ```
 
 **3. Load Balancing Across MinIO Instances**
+
 ```yaml
 # Each agent talks to specific MinIO nodes
 distributed:
@@ -681,6 +705,7 @@ sai3-bench run --config my_config.yaml   # automatically uses all 3 endpoints
 ```
 
 **Priority rules** (highest wins):
+
 1. YAML `multi_endpoint:` block — always takes precedence
 2. `S3_ENDPOINT_URIS` env var — round-robin; used when no YAML block is present
 3. `AWS_ENDPOINT_URL` — single-endpoint fallback
@@ -697,12 +722,14 @@ At startup, sai3-bench logs which source is active and lists all resolved endpoi
 
 With a hash-distributed object store (MinIO, VAST, Pure, etc.), all endpoint IPs are
 gateways into the same storage pool. A single bucket means:
+
 - ✅ All agents share one namespace — no data replication needed
 - ✅ Simpler prepare phase
 - ✅ Realistic: tests actual storage-side load distribution
 - ✅ Works with any S3-compatible storage
 
 Using a separate bucket per endpoint is almost always wrong:
+
 - ❌ Requires preparing/replicating 64M× objects separately for each bucket
 - ❌ Doesn't reflect real object storage architecture
 
@@ -805,12 +832,14 @@ distributed:
 ```
 
 Controller will:
+
 1. SSH to each host
 2. Start `sai3bench-agent` in background
 3. Connect via gRPC
 4. Stop agents when test completes
 
 **Setup:**
+
 ```bash
 # Automated setup
 sai3bench-ctl ssh-setup --hosts ubuntu@host1,ubuntu@host2
@@ -829,12 +858,14 @@ ssh-copy-id -i ~/.ssh/sai3bench_id_rsa.pub ubuntu@host1
 **Symptom**: Controller can't connect to agent
 
 **Check 1: Agent is running**
+
 ```bash
 # On agent host
 ps aux | grep sai3bench-agent
 ```
 
 **Check 2: Port is listening**
+
 ```bash
 # On agent host
 netstat -tlnp | grep 7167
@@ -843,6 +874,7 @@ lsof -i :7167
 ```
 
 **Check 3: Network connectivity**
+
 ```bash
 # From controller host
 telnet agent-host 7167
@@ -850,6 +882,7 @@ telnet agent-host 7167
 ```
 
 **Check 4: Firewall rules**
+
 ```bash
 # Allow port 7167 inbound on agent host
 sudo ufw allow 7167/tcp
@@ -865,6 +898,7 @@ sudo ufw allow 7167/tcp
 **Cause**: Agent is running but config validation failed
 
 **Check agent logs:**
+
 ```bash
 # Agent console output
 docker logs sai3-agent
@@ -876,6 +910,7 @@ docker logs sai3-agent
 ```
 
 **Common fixes:**
+
 - Verify cloud credentials are set (AWS_ACCESS_KEY_ID, etc.)
 - Check URI syntax in config
 - Ensure agent has write permissions to target directory
@@ -885,12 +920,14 @@ docker logs sai3-agent
 **Symptom**: One agent much slower than others
 
 **Check 1: Network latency**
+
 ```bash
 # From slow agent to storage
 ping s3.amazonaws.com
 ```
 
 **Check 2: CPU/Memory resources**
+
 ```bash
 # During test
 htop
@@ -899,6 +936,7 @@ docker stats sai3-agent
 ```
 
 **Check 3: Per-agent results**
+
 ```bash
 # Compare per-agent metrics
 cat sai3-*/agents/agent-1/results.tsv
@@ -910,12 +948,14 @@ cat sai3-*/agents/agent-2/results.tsv
 **Symptom**: Agent accessing endpoints it shouldn't
 
 **Verify config:**
+
 ```bash
 # Dry-run to see what each agent gets
 sai3bench-ctl run --config test.yaml --dry-run | grep -A 10 "Agent List"
 ```
 
 **Check per-agent endpoint stats:**
+
 ```bash
 # Should show ONLY assigned endpoints
 cat sai3-*/agents/agent-1/workload_endpoint_stats.tsv
@@ -930,10 +970,12 @@ cat sai3-*/agents/agent-1/workload_endpoint_stats.tsv
 **Check**: Controller output for "Results saved to:" message
 
 **Common causes:**
+
 - Controller doesn't have write permission in current directory
 - Test failed during execution (check error messages)
 
 **Verify:**
+
 ```bash
 ls -ld sai3-*
 ```
@@ -952,12 +994,14 @@ sai3-analyze --dirs sai3-run1,sai3-run2,sai3-run3 --output comparison.xlsx
 ```
 
 **Output includes:**
+
 - Results tabs for each run
 - Performance logs (time-series)
 - Endpoint statistics (multi-endpoint tests)
 - Timestamps formatted as readable dates
 
 **Usage:**
+
 ```bash
 # Compare two multi-endpoint tests
 sai3-analyze \
@@ -970,6 +1014,7 @@ sai3-analyze \
 ### Performance Log Analysis
 
 **Time-series performance data:**
+
 ```bash
 # View aggregate performance over time
 cat sai3-*/perf_log.tsv | column -t
@@ -979,6 +1024,7 @@ cat sai3-*/agents/agent-1/perf_log.tsv | column -t
 ```
 
 **Columns include** (30 total):
+
 - `timestamp_epoch_ms` - Millisecond timestamp
 - `elapsed_s` - Seconds since test start
 - `get_iops`, `put_iops`, `meta_iops` - Operations per second

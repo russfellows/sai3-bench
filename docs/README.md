@@ -7,6 +7,7 @@ Comprehensive documentation for sai3-bench - a high-performance distributed I/O 
 ## Quick Start
 
 **New users start here:**
+
 1. **[USAGE.md](USAGE.md)** - Complete user guide for workload configuration
 2. **[DISTRIBUTED_TESTING_GUIDE.md](DISTRIBUTED_TESTING_GUIDE.md)** - Multi-host testing architecture and examples
 3. **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** - SSH and container deployment options
@@ -67,6 +68,7 @@ distributed:
 ```
 
 **Examples with verification**:
+
 - [`tests/configs/multi_endpoint_prepare.yaml`](../tests/configs/multi_endpoint_prepare.yaml) - Data preparation with endpoint isolation
 - [`tests/configs/multi_endpoint_workload.yaml`](../tests/configs/multi_endpoint_workload.yaml) - Workload test with per-agent stats
 
@@ -76,7 +78,7 @@ distributed:
 
 **Architecture**: Controller orchestrates multiple agents via gRPC
 
-```
+```text
 Controller (sai3bench-ctl)
     ├─→ Agent 1 (host1:7167)
     ├─→ Agent 2 (host2:7167)
@@ -86,6 +88,7 @@ Controller (sai3bench-ctl)
 ```
 
 **Quick start**:
+
 ```bash
 # Start agents on each host
 sai3bench-agent --listen 0.0.0.0:7167
@@ -95,6 +98,7 @@ sai3bench-ctl run --config distributed-test.yaml
 ```
 
 **Examples**:
+
 - [`tests/configs/local_test_2agents.yaml`](../tests/configs/local_test_2agents.yaml) - 2-agent local testing
 - [`tests/configs/distributed_mixed_test.yaml`](../tests/configs/distributed_mixed_test.yaml) - Mixed operations
 
@@ -107,6 +111,7 @@ sai3-analyze --dirs run1,run2,run3 --output comparison.xlsx
 ```
 
 **Output includes**:
+
 - Results tabs (aggregate metrics)
 - Performance logs (time-series)
 - Endpoint statistics (multi-endpoint tests)
@@ -148,12 +153,14 @@ Internal investigations, architecture decisions, and planning documents are in
 **Current Version**: v0.8.97 (May 2026)
 
 **Major features in v0.8.97**:
+
 - **Namespace sharding** (`key_prefix_shards`): Distribute object keys across 256 hex prefix directories for hash-partitioned storage (VAST, etc.)
 - **Dynamic PUT pool** (`dynamic_put_pool`): Newly PUT objects immediately enter the GET selection pool
 - **Credential forwarding** (`sai3bench-ctl --env-file`): Automatic credential propagation to all agents (v0.8.92)
 - **S3_ENDPOINT_URIS env var**: Enable multi-endpoint without editing YAML (v0.8.96)
 
 **Recent major features**:
+
 - v0.8.92: Credential forwarding (controller → agents via gRPC)
 - v0.8.86: GCS RAPID (Hyperdisk ML) support
 - v0.8.50: YAML-driven stage orchestration with 6 stage types and barrier sync
@@ -167,6 +174,7 @@ Internal investigations, architecture decisions, and planning documents are in
 ## Getting Help
 
 **Documentation not clear?** File an issue with:
+
 - What you're trying to do
 - What documentation you consulted
 - Where the gap is

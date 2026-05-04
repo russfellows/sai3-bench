@@ -13,6 +13,7 @@
 ### ✅ COMPLETED (Phase 1 - Filesystem Validation)
 
 **Phase 1.1 - File System Validation** ✅
+
 - [x] Created `src/preflight/filesystem.rs` with complete implementation
 - [x] Progressive access testing (stat → list → read → write → mkdir → delete)
 - [x] User/Group ID analysis (`check_user_identity`)
@@ -23,40 +24,47 @@
 - [x] **BONUS**: No directory creation suggestions - require manual creation for safety
 
 **Phase 1.3 - Structured Error Types** ✅
+
 - [x] Created `src/preflight/mod.rs` with ValidationResult/ValidationSummary
 - [x] ErrorType enum (Authentication, Permission, Network, Configuration, Resource, System)
 - [x] ResultLevel enum (Success, Info, Warning, Error)
 - [x] `display_validation_results()` with emoji icons and formatted output
 
 **Phase 1.4 - Agent Integration** ✅
+
 - [x] Modified `src/bin/agent.rs` with `pre_flight_validation()` gRPC handler
 - [x] PREFLIGHT command handling in agent state machine
 - [x] Validation results converted to proto format
 
 **Phase 1.5 - gRPC Protocol Update** ✅
+
 - [x] Modified `proto/iobench.proto` with PreFlightValidation RPC
 - [x] PreFlightRequest/PreFlightResponse messages
 - [x] ValidationResult proto message with all fields
 - [x] ResultLevel and ErrorType proto enums
 
 **Phase 1.6 - Controller Display** ✅
+
 - [x] Modified `src/bin/controller.rs` with `run_preflight_validation()`
 - [x] Aggregates errors across all agents
 - [x] Per-agent and aggregate error display
 - [x] Shared `display_validation_results()` for both distributed and standalone modes
 
 **Standalone Mode Integration** ✅
+
 - [x] Modified `src/main.rs` to run pre-flight before prepare phase
 - [x] Same validation logic as distributed mode
 - [x] Uses shared display function
 
 **Test Coverage** ✅
+
 - [x] `tests/test_preflight_validation.rs` - 6 filesystem validation tests
 - [x] `tests/test_agent_preflight.rs` - 9 agent unit tests
 - [x] `tests/test_preflight_integration.rs` - 4 gRPC integration tests
 - [x] **Total: 19 tests passing, zero warnings**
 
 **Test Configurations** ✅
+
 - [x] `tests/configs/preflight_test_protected_etc.yaml` - /etc protection
 - [x] `tests/configs/preflight_test_dev_null.yaml` - device file detection
 - [x] `tests/configs/preflight_test_var_lib.yaml` - sensitive directory warning
@@ -67,6 +75,7 @@
 - [x] `scripts/setup_preflight_tests.sh` - sudo script for permission tests
 
 **Safety Features (Beyond Original Plan)** ✅
+
 - [x] Protected system directories (/etc, /usr, /sys, /proc, /boot, /root) → ERROR
 - [x] Device files (/dev/*) → WARN for existing devices, ERROR for missing
 - [x] Sensitive directories (/var/lib, /var/log, /var/spool) → WARN
@@ -75,6 +84,7 @@
 ### ❌ NOT YET IMPLEMENTED
 
 **Phase 1.2 - Object Storage Validation** ❌
+
 - [ ] `src/preflight/object_storage.rs` is a stub - needs full implementation
 - [ ] Progressive access testing (head → list → get → put → delete)
 - [ ] Instance-level permission detection (EC2 IAM, GCP SA, Azure MI)
@@ -83,11 +93,13 @@
 - [ ] Authentication error mapping (NoCredentials, AccessDenied, etc.)
 
 **Phase 2 - Resource Validation** ❌
+
 - [ ] Memory & thread validation
 - [ ] File descriptor limits
 - [ ] Disk space for PUT workloads (partial - filesystem validation only)
 
 **Phase 3 - Enhanced Features** ❌
+
 - [ ] Network pre-checks (DNS, connectivity, latency)
 - [ ] `--skip-preflight` flag (backwards compatibility)
 - [ ] `--strict-validation` flag (fail on warnings)
@@ -105,6 +117,7 @@ CRITICAL: Zero operations completed - workload did not execute!
 ```
 
 **Root causes include:**
+
 - File paths don't exist or lack permissions
 - Invalid S3 credentials or bucket access
 - Insufficient memory/resources
@@ -119,6 +132,7 @@ CRITICAL: Zero operations completed - workload did not execute!
 ## Architecture Overview
 
 ### Current Flow
+
 ```
 Controller → Agent: Send Config
 Agent: Validate Config (syntax only)
@@ -128,6 +142,7 @@ Agent: Begin Workload → [CRASH with cryptic error]
 ```
 
 ### Proposed Flow (NEW PRE-FLIGHT PHASE)
+
 ```
 Controller → Agent: Send Config
 Agent: Validate Config (syntax only)
@@ -163,6 +178,7 @@ Agent: Begin Workload
 **Dependencies**: Added `users` crate for uid/gid lookup  
 
 **Implemented Functions**:
+
 - ✅ `validate_filesystem()` - Main entry point with progressive testing
 - ✅ `check_user_identity()` - Current uid/gid detection
 - ✅ `check_directory_ownership()` - Directory owner comparison
@@ -177,12 +193,14 @@ Agent: Begin Workload
 - ✅ `check_protected_paths()` - Safety check for system directories (BONUS FEATURE)
 
 **Safety Features** (Beyond original plan):
+
 - ✅ Protected directories (/etc, /usr, /sys, /proc, /boot, /root) → ERROR and refuse to run
 - ✅ Device files (/dev/*) → Proper detection with warnings
 - ✅ Sensitive directories (/var/lib, /var/log, /var/spool) → WARN
 - ✅ Nonexistent directories → ERROR with "must create manually" message (no mkdir -p suggestion)
 
 **Tests**: ✅ 6 filesystem tests passing
+
 - ✅ test_validate_nonexistent_directory
 - ✅ test_validate_readonly_directory
 - ✅ test_validate_existing_writable_directory
@@ -266,6 +284,7 @@ async fn test_delete_access(path: &Path) -> Result<ValidationResult> {
 ```
 
 **New Dependencies**:
+
 ```toml
 # For uid/gid and file metadata on Unix
 libc = "0.2"
@@ -393,12 +412,14 @@ async fn test_delete_object(endpoint: &str) -> Result<ValidationResult> {
 ```
 
 **Authentication error mapping**:
+
 - `NoCredentialsError` → "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY or use EC2 IAM role"
 - `InvalidCredentials` → "Check credentials are valid for this account"
 - `AccessDenied` → "Grant s3:ListBucket, s3:GetObject, s3:PutObject permissions"
 - `BucketNotFound` → "Check bucket name and region in configuration"
 
 **New Dependencies**:
+
 ```toml
 # For metadata service queries
 reqwest = { version = "0.11", features = ["json"] }
@@ -412,6 +433,7 @@ reqwest = { version = "0.11", features = ["json"] }
 **File**: `src/preflight/mod.rs` ✅ Created
 
 **Implemented Types**:
+
 ```rust
 pub enum ErrorType {  // ✅ Implemented
     Authentication,   // Invalid credentials, missing auth
@@ -465,12 +487,14 @@ impl ValidationSummary {  // ✅ All methods implemented
 **File**: `src/bin/agent.rs` ✅ Modified
 
 **Implemented**:
+
 - ✅ `pre_flight_validation()` gRPC handler
 - ✅ PREFLIGHT command in agent state machine
 - ✅ Validation result to proto conversion
 - ✅ File path extraction from config (file://, direct://, no_target)
 
 **Tests**: ✅ 9 agent unit tests passing
+
 - ✅ test_extract_filesystem_path_file_uri
 - ✅ test_extract_filesystem_path_direct_uri
 - ✅ test_extract_filesystem_path_no_target
@@ -539,6 +563,7 @@ async fn run_preflight_checks(config: &Config) -> Result<ValidationSummary> {
 #### 1.5 gRPC Protocol Update (NEW PRE_FLIGHT RPC)
 
 **Implemented**: ✅ All proto definitions added
+
 ```proto
 service AgentService {
   rpc SendConfig(ConfigMessage) returns (StatusResponse);
@@ -597,6 +622,7 @@ enum ErrorType {  // ✅ ADDED
 **File**: `src/bin/controller.rs` ✅ Modified
 
 **Implemented**:
+
 - ✅ `run_preflight_validation()` - Calls PreFlightValidation RPC on all agents
 - ✅ Aggregates errors by type across all agents
 - ✅ Per-agent error display with emojis and icons
@@ -604,6 +630,7 @@ enum ErrorType {  // ✅ ADDED
 - ✅ Shared `display_validation_results()` function (in mod.rs)
 
 **Standalone Mode Integration**: ✅ **COMPLETED**
+
 - **File**: `src/main.rs` ✅ Modified
 - ✅ Pre-flight validation runs BEFORE prepare phase
 - ✅ Uses same validation logic as distributed mode
@@ -611,6 +638,7 @@ enum ErrorType {  // ✅ ADDED
 - ✅ Exits with error if validation fails
 
 **Tests**: ✅ 4 gRPC integration tests passing
+
 - ✅ test_preflight_grpc_success
 - ✅ test_preflight_grpc_detects_readonly_directory
 - ✅ test_preflight_grpc_detects_nonexistent_directory
@@ -730,13 +758,15 @@ fn display_validation_result(agent_id: &str, result: &ValidationResult) {
 **File**: `src/validation/resources.rs` ❌ Does not exist
 
 **TODO**:
-- [ ] Estimate memory usage (buffer_size * threads * 2)
+
+- [ ] Estimate memory usage (buffer_size *threads* 2)
 - [ ] Check available system memory
 - [ ] Warn if >80% memory usage
 - [ ] Check thread count vs system limits
 - [ ] Check file descriptor limits
 
 **Platform-specific dependencies needed**:
+
 - Linux: Read `/proc/meminfo`, `/proc/sys/kernel/threads-max`, `ulimit -n`
 - macOS: Use `sysctl` APIs
 - Windows: WMI queries
@@ -744,6 +774,7 @@ fn display_validation_result(agent_id: &str, result: &ValidationResult) {
 #### 2.2 Disk Space Validation ✅ **PARTIAL** (Filesystem only)
 
 **Status**: ✅ Implemented in `check_disk_space()` for filesystem validation
+
 - ✅ Validates disk space for PUT workloads
 - ✅ 20% safety margin
 - ❌ Not implemented for object storage validation
@@ -777,6 +808,7 @@ if available < total_size * 1.2 {  // 20% safety margin
 **File**: `src/validation/network.rs` ❌ Does not exist
 
 **TODO**:
+
 - [ ] DNS resolution for S3 endpoints
 - [ ] TCP connectivity test (5-second timeout)
 - [ ] Optional latency measurement
@@ -786,6 +818,7 @@ if available < total_size * 1.2 {  // 20% safety margin
 **Controller flag**: `--skip-preflight` ❌ Not added
 
 **TODO**:
+
 ```bash
 # Default: run pre-flight validation (CURRENT BEHAVIOR)
 sai3bench-ctl run --config test.yaml
@@ -822,6 +855,7 @@ struct CliArgs {
 ## Key Files to Review
 
 ### Existing Architecture
+
 1. **`crates/agent/src/workload.rs`** - Agent workload execution entry point
 2. **`crates/controller/src/distributed.rs`** - Controller agent coordination
 3. **`proto/agent.proto`** - gRPC protocol definition
@@ -829,6 +863,7 @@ struct CliArgs {
 5. **`crates/core/src/storage/mod.rs`** - Storage backend abstractions
 
 ### Files to Create
+
 1. **`crates/core/src/validation/mod.rs`** - Validation framework
 2. **`crates/core/src/validation/filesystem.rs`** - File system checks
 3. **`crates/core/src/validation/object_storage.rs`** - S3/Azure/GCS checks
@@ -836,6 +871,7 @@ struct CliArgs {
 5. **`crates/core/src/validation/network.rs`** - Network connectivity checks
 
 ### Files to Modify
+
 1. **`crates/agent/src/workload.rs`** - Add validation calls
 2. **`crates/controller/src/distributed.rs`** - Display validation results
 3. **`proto/agent.proto`** - Add validation message types
@@ -852,6 +888,7 @@ struct CliArgs {
 **Status**: ✅ 19 tests passing, zero warnings
 
 **Filesystem Tests** (6 tests in `tests/test_preflight_validation.rs`):
+
 - ✅ test_validate_nonexistent_directory
 - ✅ test_validate_readonly_directory
 - ✅ test_validate_existing_writable_directory
@@ -860,6 +897,7 @@ struct CliArgs {
 - ✅ test_validate_display_output
 
 **Agent Tests** (9 tests in `tests/test_agent_preflight.rs`):
+
 - ✅ test_extract_filesystem_path_file_uri
 - ✅ test_extract_filesystem_path_direct_uri
 - ✅ test_extract_filesystem_path_no_target
@@ -871,23 +909,27 @@ struct CliArgs {
 - ✅ test_validation_summary_error_count
 
 **Integration Tests** (4 tests in `tests/test_preflight_integration.rs`):
+
 - ✅ test_preflight_grpc_success
 - ✅ test_preflight_grpc_detects_readonly_directory
 - ✅ test_preflight_grpc_detects_nonexistent_directory
 - ✅ (1 test filtered out - removed duplicate)
 
 **TODO - Object Storage Tests**: ❌ Not implemented
+
 - [ ] Test with invalid S3 credentials (mocked)
 - [ ] Test with missing bucket
 - [ ] Test with permission denied
 
 **TODO - Resource Tests**: ❌ Not implemented
+
 - [ ] Test with excessive memory requirements
 - [ ] Test with insufficient disk space (for object storage)
 
 ### Manual Testing Checklist ✅ **COMPLETED FOR FILESYSTEM**
 
 **Filesystem Tests** (all verified with real configs):
+
 - ✅ File path doesn't exist → Clear error "Directory must be created manually before running benchmarks for safety"
 - ✅ Permission denied → Clear error with chmod/chgrp suggestion and uid/gid details
 - ✅ Protected directory (/etc) → ERROR "Do not use /etc for benchmarking - use /tmp or a dedicated mount point"
@@ -896,6 +938,7 @@ struct CliArgs {
 - ✅ All checks pass → Workload executes normally
 
 **Object Storage Tests**: ❌ Not implemented
+
 - [ ] Invalid AWS credentials → Auth error with env var suggestion
 - [ ] Bucket doesn't exist → Config error with bucket name check
 - [ ] Insufficient disk space → Resource error with space needed
@@ -927,6 +970,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ## Success Criteria
 
 **Phase 1 FILESYSTEM Complete When**: ✅ **ALL CRITERIA MET**
+
 1. ✅ Pre-flight runs as separate phase before PREPARE
 2. ✅ Progressive access testing works (stat → list → read → write → mkdir → delete)
 3. ✅ User/group ID mismatches detected and reported with details
@@ -941,6 +985,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 12. ✅ Manual testing with real permission scenarios verified
 
 **Phase 1 OBJECT STORAGE Complete When**: ❌ **NOT STARTED**
+
 1. ❌ All endpoints in multi-endpoint configs validated
 2. ❌ Instance-level permissions detected (EC2 IAM, GCP SA, Azure MI)
 3. ❌ S3 auth errors show credential source and troubleshooting
@@ -953,6 +998,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ## Example Success Output
 
 **Filesystem Validation** ✅ **IMPLEMENTED AND WORKING**
+
 ```
 🔍 Running pre-flight validation on 4 agents...
 
@@ -984,6 +1030,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ```
 
 **Example Success Output (Object Storage)**:
+
 ```
 🔍 Running pre-flight validation on 2 agents...
 
@@ -1012,6 +1059,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ```
 
 **Object Storage Validation** ❌ **NOT IMPLEMENTED - EXAMPLE ONLY**
+
 ```
 🔍 Running pre-flight validation on 2 agents...
 
@@ -1032,11 +1080,13 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ## Timeline Estimate
 
 **ACTUAL TIME SPENT**:
+
 - ✅ **Phase 1.1-1.6 (Filesystem Validation)**: ~3 days (includes bonus safety features)
 - ✅ **Testing & Manual Validation**: ~0.5 days
 - ✅ **Total Phase 1 Filesystem**: ~3.5 days
 
 **REMAINING ESTIMATES**:
+
 - ❌ **Phase 1.2 (Object Storage)**: 2-3 days
 - ❌ **Phase 2 (Resource Checks)**: 1-2 days  
 - ❌ **Phase 3 (Enhanced Features)**: 2-3 days
@@ -1048,6 +1098,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 ## Notes for Next Session
 
 ### ✅ COMPLETED TONIGHT (February 2, 2026)
+
 1. ✅ Phase 1.1 - Full filesystem validation with progressive testing
 2. ✅ Phase 1.3 - Structured error types and display functions
 3. ✅ Phase 1.4 - Agent integration with gRPC handlers
@@ -1060,6 +1111,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 10. ✅ All changes committed to `feature/preflight-validation` branch
 
 ### 🎯 NEXT PRIORITY (Phase 1.2 - Object Storage)
+
 1. ❌ Implement `src/preflight/object_storage.rs` (currently stub)
 2. ❌ Progressive access testing: head → list → get → put → delete
 3. ❌ Instance-level permission detection (EC2 IAM, GCP SA, Azure MI)
@@ -1068,6 +1120,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 6. ❌ Object storage unit tests
 
 ### 📝 KEY INSIGHTS FROM TONIGHT
+
 - Progressive testing works well - stop on first error
 - Protected path detection prevents dangerous operations
 - Shared display function reduces code duplication
@@ -1075,6 +1128,7 @@ users = "0.11"  # ✅ ADDED - For uid/gid lookup and username/groupname resoluti
 - Emojis and icons make errors easier to scan visually
 
 ### 🚀 WHEN READY TO CONTINUE
+
 **Start with**: Phase 1.2 (Object Storage Validation)  
 **Reference**: s3dlio library for object storage operations  
 **Test approach**: Mock S3 responses for auth failures, missing buckets, permission denied  

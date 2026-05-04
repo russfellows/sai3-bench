@@ -7,11 +7,13 @@
 ### The Golden Rule: NO LISTING IN DISTRIBUTED MODE
 
 **NEVER attempt to:**
+
 - List all objects and distribute them across agents
 - Build a "master list" that agents share
 - Coordinate which agent deletes which object at runtime
 
 **Instead:**
+
 - Each agent uses the SAME deterministic algorithm to compute its subset
 - The algorithm is: `object_index % num_agents == agent_id`
 - This works for BOTH creation (prepare) AND deletion (cleanup)
@@ -41,6 +43,7 @@ for index in 0..total_count {
 ### Object Naming Convention
 
 Objects MUST be named with sequential indices for modulo distribution to work:
+
 - `prepared-00000000.dat` (agent 0)
 - `prepared-00000001.dat` (agent 1)
 - `prepared-00000002.dat` (agent 0)
@@ -50,17 +53,20 @@ Objects MUST be named with sequential indices for modulo distribution to work:
 ### Cleanup Modes
 
 #### cleanup_mode: tolerant (RECOMMENDED for shared storage)
+
 - Ignore "not found" errors
 - Perfect for distributed cleanup where object may have been deleted already
 - Use when resuming interrupted cleanup operations
 
 #### skip_verification: true (REQUIRED for cleanup-only without listing)
+
 - DO NOT list existing objects
 - Generate the list of objects this agent WOULD have created
 - Delete them using the deterministic algorithm
 - Ignore "not found" errors (via `cleanup_mode: tolerant`)
 
 #### skip_verification: false (USE WITH CAUTION)
+
 - List existing objects FIRST
 - Filter to objects matching this agent's modulo pattern
 - Delete what was found
@@ -85,6 +91,7 @@ prepare:
 ```
 
 Each agent will:
+
 1. **Skip listing** (because `skip_verification: true`)
 2. **Generate its subset**: indices where `i % num_agents == agent_id`
 3. **Delete deterministically**: `prepared-00000000.dat`, `prepared-00000002.dat`, ... (for agent 0 of 2)
@@ -93,6 +100,7 @@ Each agent will:
 ### Per-Agent Storage Mode
 
 When `shared_filesystem: false`:
+
 - Each agent operates in its own namespace: `agent-{id}/prepared-00000000.dat`
 - No modulo distribution needed
 - Each agent creates/deletes ALL objects in its namespace
@@ -101,20 +109,24 @@ When `shared_filesystem: false`:
 ### Common Mistakes to Avoid
 
 ❌ **WRONG**: "Let's list all objects and distribute them across agents"
+
 - This requires expensive listing operation
 - Defeats the purpose of distributed execution
 - Not scalable
 
 ❌ **WRONG**: "Agent should only delete objects it created during THIS run"
+
 - Cleanup-only mode has no prepare phase - nothing was created this run
 - Must use deterministic algorithm to know what to delete
 
 ❌ **WRONG**: "Build PreparedObject list with obj.created=true from prepare phase"
+
 - In cleanup-only mode, there is no prepare phase
 - PreparedObject list doesn't exist
 - Must generate deletion list from config
 
 ✅ **CORRECT**: "Each agent generates its deletion list using modulo algorithm"
+
 - Same algorithm used for creation
 - No coordination needed
 - No listing required (with skip_verification: true)
@@ -123,6 +135,7 @@ When `shared_filesystem: false`:
 ### Implementation Location
 
 **As of v0.8.7**, cleanup logic is organized in dedicated module:
+
 - `src/cleanup.rs`: Dedicated cleanup module
   - `list_existing_objects()`: Lists ALL objects without filtering (cleanup distributes work)
   - `cleanup_prepared_objects()`: Deletes objects with modulo distribution and error tolerance
@@ -132,12 +145,14 @@ When `shared_filesystem: false`:
   - `prepare_objects()`: Creates/verifies objects during prepare phase
   - `generate_cleanup_objects()`: Generates deletion list from config (for skip_verification=true)
 
-**Key architectural insight**: 
+**Key architectural insight**:
+
 - `list_existing_objects()` returns the COMPLETE list of objects found in storage
 - `cleanup_prepared_objects()` handles the modulo distribution across agents
 - This ensures each agent sees all objects and can filter to its subset correctly
 
 The deterministic deletion logic uses the same algorithm as prepare phase:
+
 - Takes: `PrepareConfig`, `agent_id`, `num_agents`
 - Returns: List of URIs this agent should delete (via modulo: `index % num_agents == agent_id`)
 
@@ -146,6 +161,7 @@ The deterministic deletion logic uses the same algorithm as prepare phase:
 **Setup**: 2 agents, 30 objects total, cleanup-only mode
 
 **Agent 0 generates**:
+
 ```
 file:///tmp/test/prepared-00000000.dat  (0 % 2 == 0) ✓
 file:///tmp/test/prepared-00000002.dat  (2 % 2 == 0) ✓
@@ -153,9 +169,11 @@ file:///tmp/test/prepared-00000004.dat  (4 % 2 == 0) ✓
 ...
 file:///tmp/test/prepared-00000028.dat  (28 % 2 == 0) ✓
 ```
+
 Total: 15 objects
 
 **Agent 1 generates**:
+
 ```
 file:///tmp/test/prepared-00000001.dat  (1 % 2 == 1) ✓
 file:///tmp/test/prepared-00000003.dat  (3 % 2 == 1) ✓
@@ -163,6 +181,7 @@ file:///tmp/test/prepared-00000005.dat  (5 % 2 == 1) ✓
 ...
 file:///tmp/test/prepared-00000029.dat  (29 % 2 == 1) ✓
 ```
+
 Total: 15 objects
 
 **Result**: All 30 objects deleted, NO listing required, NO coordination needed!
@@ -170,6 +189,7 @@ Total: 15 objects
 ### Testing
 
 When testing distributed cleanup:
+
 1. Verify each agent deletes ONLY its modulo subset
 2. Verify total deletions == total objects
 3. Verify NO listing calls were made (check s3dlio logs)

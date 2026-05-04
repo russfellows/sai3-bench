@@ -3,6 +3,7 @@
 ## Problem Statement
 
 Current implementation generates random directory names (`dir_<random>`), making it impossible to:
+
 - Test specific directory removal scenarios
 - Create deterministic, reproducible workloads
 - Test operations on known directory structures
@@ -13,12 +14,14 @@ Current implementation generates random directory names (`dir_<random>`), making
 rdf-bench uses a width/depth model for directory tree generation:
 
 ### Formula
+
 - **Width (W)**: Number of subdirectories per directory level
 - **Depth (D)**: Number of levels in the tree
 - **Total directories**: Σ(W^i) for i=1 to D
   - Example: W=4, D=3 → 4¹ + 4² + 4³ = 4 + 16 + 64 = 84 directories
 
 ### Directory Naming Pattern
+
 - Format: `vdb.{depth}_{width}.dir`
 - Examples:
   - Level 1: `vdb.1_1.dir`, `vdb.1_2.dir`, `vdb.1_3.dir`, `vdb.1_4.dir`
@@ -26,6 +29,7 @@ rdf-bench uses a width/depth model for directory tree generation:
   - Level 3: `vdb.3_1.dir`, `vdb.3_2.dir`, ... (under each Level 2 dir)
 
 ### File Distribution
+
 - **dist=bottom**: Files only at deepest level (W^D directories × files_per_dir)
 - **dist=all**: Files at all levels (total_directories × files_per_dir)
 
@@ -48,9 +52,10 @@ directory_structure:
 ### Implementation Plan
 
 #### Phase 1: Directory Tree Generation
+
 1. **Add DirectoryStructure config struct** (`src/config.rs`)
    - `width`, `depth`, `files_per_dir`, `distribution`, `dir_mask`
-   
+
 2. **Create DirectoryTree struct** (`src/directory_tree.rs`)
    - Build tree structure from width/depth
    - Generate all directory paths up front
@@ -58,21 +63,23 @@ directory_structure:
    - Provide path enumeration/selection methods
 
 #### Phase 2: Prepare Phase Integration
-3. **Update PrepareConfig** to support directory structure
+
+1. **Update PrepareConfig** to support directory structure
    - Auto-generate directory hierarchy before workload
    - Create files according to distribution setting
-   
-4. **Add mkdir operation to prepare phase**
+
+2. **Add mkdir operation to prepare phase**
    - Create all directories using `store.mkdir()`
    - Then populate with files if specified
 
 #### Phase 3: Workload Integration
-5. **Update operation path resolution**
+
+1. **Update operation path resolution**
    - When `directory_structure` is set, select from known paths
    - Support patterns like `bench.2_*.dir` to select all level-2 dirs
    - Maintain backward compatibility with random generation
 
-6. **Add directory-aware operations**
+2. **Add directory-aware operations**
    - RMDIR: Select from known directory list
    - PUT: Select from known directory list for parent
    - LIST: Target specific directory levels
@@ -80,6 +87,7 @@ directory_structure:
 ### Example Use Cases
 
 #### Test Case 1: Deep Directory Tree Stress
+
 ```yaml
 directory_structure:
   width: 10
@@ -102,6 +110,7 @@ workload:
 ```
 
 #### Test Case 2: Realistic ML Dataset Layout
+
 ```yaml
 directory_structure:
   width: 8               # 8 categories
@@ -123,6 +132,7 @@ workload:
 ```
 
 #### Test Case 3: Directory Removal Test
+
 ```yaml
 directory_structure:
   width: 4

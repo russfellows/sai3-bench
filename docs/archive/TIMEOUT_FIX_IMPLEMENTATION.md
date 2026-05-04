@@ -5,6 +5,7 @@
 **PROBLEM**: Large-scale distributed testing (4 agents, 16 NFS endpoints, 331k directories, 64M files) was failing with consistent timeout errors during directory tree generation and file listing operations.
 
 **ROOT CAUSE**: Three critical timeout bottlenecks:
+
 1. **Agent barrier timeout**: Hardcoded 30s (insufficient for 90s tree generation)
 2. **Barrier sync total timeout**: Default 110s (only 20s safety margin)
 3. **gRPC keep-alive**: Default 40s total (30s PING + 10s PONG drops slow connections)
@@ -20,27 +21,35 @@
 ### 1. Code Changes (v0.8.27)
 
 #### A. Made Agent Barrier Timeout Configurable
+
 **File**: `src/config.rs`
+
 - Added `agent_barrier_timeout` field to `PhaseBarrierConfig` struct
 - Default: 120s (was hardcoded 30s)
 - Per-phase configurable via YAML
 
 **File**: `src/bin/agent.rs` (Line ~3300)
+
 - **BEFORE**: `let barrier_timeout = std::time::Duration::from_secs(30);  // TODO: Make configurable`
 - **AFTER**: Reads from `stage.barrier.agent_barrier_timeout` config (default: 120s)
 
 #### B. Added Slow Listing Warning
+
 **File**: `src/prepare.rs` (Line ~428)
+
 - Detects listing rates <500 files/s with >10k files processed
 - Warns: *"Slow listing may cause barrier timeout - increase agent_barrier_timeout"*
 - Helps diagnose performance issues during large-scale tests
 
 #### C. Made gRPC Keep-Alive Configurable
+
 **File**: `src/config.rs`
+
 - Added `grpc_keepalive_interval` (default: 30s) to `DistributedConfig`
 - Added `grpc_keepalive_timeout` (default: 10s) to `DistributedConfig`
 
 **File**: `src/bin/controller.rs` (Lines ~815-825)
+
 - **BEFORE**: Hardcoded 30s PING interval, 10s PONG timeout
 - **AFTER**: Reads from `distributed.grpc_keepalive_*` config
 - All 7 `mk_client()` call sites updated to pass config values
@@ -50,6 +59,7 @@
 **File**: `tests/configs/distributed_4node_16endpoint_test.yaml`
 
 **Added**:
+
 ```yaml
 distributed:
   # Extended gRPC keep-alive for slow operations
@@ -86,6 +96,7 @@ distributed:
 ### Timeline Analysis: Prepare Phase (Worst Case)
 
 **OLD CONFIGURATION** (guaranteed failure):
+
 ```
 Tree generation:     90s  (actual measured time)
 Agent barrier:       30s  (hardcoded timeout)
@@ -100,6 +111,7 @@ FAILURE MODE:
 ```
 
 **NEW CONFIGURATION** (guaranteed success):
+
 ```
 Tree generation:       90s  (unchanged - actual work)
 Agent barrier:       1500s  (25 min - agent waits patiently)
@@ -124,6 +136,7 @@ GUARANTEES:
 ### Mathematical Proof
 
 **Barrier Sync Total Timeout Calculation**:
+
 ```
 Best case (all agents ready):
   Agent reports "done" → barrier releases immediately → 0s wait
@@ -140,6 +153,7 @@ Agent barrier timeout: 1500s
 ```
 
 **gRPC Keep-Alive Calculation**:
+
 ```
 Old: PING every 30s, PONG timeout 10s = 40s total
   → Connection drops if no message for 40s
@@ -163,14 +177,17 @@ EDGE CASE: Extremely slow LIST operation
 ## Verification Steps Performed
 
 ### 1. Code Compilation
+
 ```bash
 $ cargo build --release
    Compiling sai3-bench v0.8.26
     Finished `release` profile [optimized] target(s) in 33.43s
 ```
+
 ✅ **Zero warnings, zero errors**
 
 ### 2. Configuration Parsing
+
 ```bash
 $ ./target/release/sai3bench-ctl run --config ./tests/configs/distributed_4node_16endpoint_test.yaml --dry-run
 ✅ Config file parsed successfully
@@ -182,13 +199,16 @@ $ ./target/release/sai3bench-ctl run --config ./tests/configs/distributed_4node_
 ```
 
 ### 3. Unit Test Validation
+
 ```bash
 $ cargo test --test test_large_scale_timeouts
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured
 ```
+
 ✅ **All large-scale timeout calculations validated**
 
 ### 4. Code Review
+
 - ✅ Agent barrier timeout: Reads from config correctly ([agent.rs:3300](../src/bin/agent.rs#L3300))
 - ✅ Barrier sync config: Applied per-phase ([config.rs:1501](../src/config.rs#L1501))
 - ✅ gRPC keep-alive: Injected into all 7 client creation sites ([controller.rs:815](../src/bin/controller.rs#L815))
@@ -199,6 +219,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured
 ## Deployment Confidence Checklist
 
 ### Pre-Deployment (Completed ✅)
+
 - [✅] Code changes made all timeouts configurable
 - [✅] YAML config updated with extended timeouts
 - [✅] Config file parses successfully with barriers enabled
@@ -207,12 +228,14 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured
 - [✅] Unit tests validate timeout calculations
 
 ### Runtime Monitoring (To Do During Test)
+
 - [ ] Monitor agent logs for "Slow listing" warnings (should not appear if listing >500/s)
 - [ ] Check barrier wait times in controller output (should be <90s for prepare)
 - [ ] Verify gRPC connections stay alive (no "connection lost" errors)
 - [ ] Confirm tree generation completes successfully (331,776 directories created)
 
 ### Success Criteria
+
 - [ ] All 4 agents complete prepare phase without timeout
 - [ ] Barrier releases when all agents report "done" (should be ~90s, not 1500s)
 - [ ] No gRPC connection drops during slow operations
@@ -224,7 +247,9 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured
 ## Fallback Options (If Issues Persist)
 
 ### If Prepare Still Times Out
+
 **Unlikely** - but if tree generation takes >1500s:
+
 ```yaml
 barrier_sync:
   prepare:
@@ -232,7 +257,9 @@ barrier_sync:
 ```
 
 ### If gRPC Connections Drop
+
 **Unlikely** - but if message gaps exceed 80s:
+
 ```yaml
 distributed:
   grpc_keepalive_interval: 120  # Increase to 2 minutes
@@ -240,7 +267,9 @@ distributed:
 ```
 
 ### If Listing is Extremely Slow (<500 files/s)
+
 **Indicates storage issue** - check NFS performance:
+
 ```bash
 # On agent node, test NFS latency
 $ time ls -1 /mnt/filesys*/benchmark/ | wc -l
@@ -302,6 +331,7 @@ $ time ls -1 /mnt/filesys*/benchmark/ | wc -l
    - Have NFS tuning options if storage is the bottleneck
 
 **The only way this fails now**:
+
 - Tree generation takes >1500s (16x longer than measured 90s)
 - Storage is critically broken (NFS completely unresponsive)
 - Network partitions agents from controller for >80s straight
@@ -326,6 +356,7 @@ $ tail -f sai3-*/console.log
 ```
 
 Expected output:
+
 ```
 [Controller] Connecting to 4 agents for pre-flight validation
 [Controller] Stage 1: preflight - ValidationPassed
