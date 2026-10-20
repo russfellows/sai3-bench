@@ -7,6 +7,109 @@ All notable changes to sai3-bench are documented in this file.
 - **v0.8.5 - v0.8.19**: See [archive/CHANGELOG_v0.8.5-v0.8.19.md](archive/CHANGELOG_v0.8.5-v0.8.19.md)
 - **v0.1.0 - v0.8.4**: See [archive/CHANGELOG_v0.1.0-v0.8.4.md](archive/CHANGELOG_v0.1.0-v0.8.4.md)
 
+## [0.9.0] - 2026-10-20
+
+### Changed
+
+- **Minimum Rust version: 1.94.1**, matching s3dlio 0.10.0. The package declares this
+  requirement; active build instructions and Docker builder examples use it. The Rust edition
+  remains 2021.
+- **s3dlio v0.9.96 → v0.10.0** (`s3dlio` and `s3dlio-oplog`), with `aws-config` 1.12.0 and `aws-sdk-s3`
+  1.152.0 (the versions s3dlio v0.10.0 is tested with) and a `cargo update` of the other dependencies. Azure
+  now uses the stable 1.x SDK (`azure_storage_blob` 1.1, `azure_core` 1.1, `azure_identity` 1.0).
+- **Faster I/O from s3dlio's zero-copy work.** Against the same local targets, old vs new (single runs):
+  about 2x the operations on `file://` (s3dlio now uses positional file I/O instead of tokio's copying file
+  layer), about 12-13% more on `s3://` mixed GET/PUT, and 1.5x on multi-endpoint PUT. With identical S3
+  requests on both builds, 4 KiB PUT is 11-12% faster, with lower p99 latency.
+
+### Behaviour changes inherited from s3dlio (v0.9.97 – v0.10.0)
+
+Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
+
+- **`.env` is no longer loaded by `sai3-bench`.** s3dlio used to read a `.env` file implicitly; since s3dlio
+  0.9.128 it does so only when `S3DLIO_LOAD_DOTENV=1` (or a file path) is set. `sai3-bench` itself never
+  loads `.env`, so credentials kept only in `.env` are not seen by `sai3-bench run`: export them, or set
+  `S3DLIO_LOAD_DOTENV=1`. `sai3bench-agent` and `sai3bench-ctl` still load `.env` themselves.
+- **S3 checksums are sent only when S3 requires them** (s3dlio 0.9.100). Earlier builds used the AWS SDK
+  default: a CRC32 on every PUT and checksum validation on every GET. Some S3-compatible servers that
+  return mismatching checksums (for example generated bodies) now work without
+  `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required`.
+- **`https://` S3 endpoints use HTTP/1.1 by default.** Earlier builds negotiated HTTP/2 through ALPN on
+  `https://` with no way to turn it off; opt in with `S3DLIO_HTTPS_H2=1` (`S3DLIO_H2C=1` for `http://`).
+- **Exact `s3://` object selection** (s3dlio 0.9.126): a URI selects the exact object name or its directory
+  (`name/`); a bare prefix such as `s3://bucket/data/obj` no longer matches `obj-1`, `obj-2`. Use an explicit
+  `*` glob.
+- **Limits of 0 are errors** (s3dlio 0.9.126, 0.10.0), for example `S3DLIO_CHUNK_SIZE=0` or
+  `S3DLIO_RANGE_CONCURRENCY=0`, which used to hang or exhaust memory.
+- **`mkdir` / `rmdir` are no-ops on object stores** (s3dlio 0.9.126); they still create and remove
+  directories on `file://` and `direct://`.
+- **Azure credentials** default to `S3DLIO_AZURE_CREDENTIAL=auto` (workload identity, client-secret
+  service principal, managed identity or developer-tool login). SAS requires explicitly setting
+  `S3DLIO_AZURE_CREDENTIAL=sas` and `S3DLIO_AZURE_SAS_TOKEN`; `auto` does not select it.
+  `cli` restores the old CLI-only behaviour (s3dlio 0.9.128).
+- **Op-log: one row per operation, one session per process.** Earlier S3 builds wrote two rows per call
+  (one from sai3-bench, one from s3dlio) and dropped rows under load; single-URI calls through the
+  logged wrapper now have one row owner. This does not imply complete coverage or zero dropped rows.
+  s3dlio allows one op-log session per process: once finalized, a new op-log cannot be started in the same
+  process. `sai3bench-agent` therefore keeps a single session for its whole life (see Fixed). The file
+  format (13-column zstd TSV) is unchanged.
+
+### Fixed
+
+- **Op-log coverage.** With s3dlio's one-row-per-call model (0.9.122) only stores that carry the op-logger
+  record rows, so prepare PUTs, cleanup DELETEs and the metadata-cache (`sai3-kv-cache.tar.zst`) restore GET
+  were missing from `--op-log` output. Every single-URI store is now wrapped with the op-logger when an
+  op-log is active.
+- **`--op-log` no longer changes the workload.** With the op-log on, `page_cache_mode` and range-engine
+  settings were silently dropped, and `gs://` stores were not logged at all. Both store factories now share
+  one build path.
+- Replay never records its own operations in an active op-log.
+- **`direct://` with `page_cache_mode`.** The store factory sent `direct://` URIs with a `page_cache_mode`
+  to the `file://` store, which rejects them (`FileSystemObjectStore expected file:// URI`); since the
+  op-log fix the logged workload path hit the same builder, so `--op-log` + `direct://` +
+  `page_cache_mode` failed. `page_cache_mode` (posix_fadvise hints) now applies to `file://` only;
+  `direct://` always gets its O_DIRECT store, which bypasses the page cache, and the mode is ignored for
+  it (debug log).
+- **Agent op-log lifecycle: one session per agent process.** The agent used to initialise the op-log per
+  run and finalize it after the first run or `EXECUTE` stage, so a second `EXECUTE` stage in a job, and
+  every later job on the same agent process, ran unlogged (staged path) or failed to start (per-run
+  path), and prepare/cleanup stages ran before the op-log existed. The agent now starts its op-log
+  session when the first job that asks for one is accepted, before any storage work (prepare and
+  cleanup included), keeps it active across stages and jobs, and finalizes it once at shutdown
+  (SIGINT/SIGTERM or a server error), so the zstd file is complete. A job that requests the same resolved
+  path continues in the active session; a job that requests a different path is rejected before any
+  storage mutation (at the controller's pre-flight RPC, and again at `START`) with an error naming both
+  paths, and a request after the session was finalized is rejected the same way. Jobs that request no
+  op-log while a session is active are still recorded in it, because the session is process-wide.
+  `sai3-bench run` is unchanged.
+- **Replay of unsupported rows with `--continue-on-error`.** `DELETE_PREFIX` (written by `rmdir` on
+  `file://` / `direct://`) and the other ops `s3dlio-oplog` does not model (`GET_RANGE`, `DELETE_BATCH`,
+  `CREATE_CONTAINER`, `DELETE_CONTAINER`) stay unsupported for replay and are never translated into
+  `DELETE`. An unsupported or malformed FIRST row used to abort replay even with `--continue-on-error`;
+  it is now skipped and counted like any later row. Without `--continue-on-error` the error names the
+  operation, the file line and row index, and says it is not supported.
+- **Strict replay no longer leaves scheduled operations running after an error.** Without
+  `--continue-on-error`, when replay stopped at an unsupported or unreadable row (or at a failed
+  operation), operations already scheduled for later times kept running in the background and could still
+  write or delete objects after the error was reported. Replay now cancels them and waits for them to
+  stop before it returns the error. Operations already submitted may still have changed storage.
+- **An invalid `run_workload` request no longer blocks the agent's op-log path.** A request whose start
+  time was more than 60 seconds in the future was rejected only after the agent had already started its
+  process-wide op-log session at that request's path, so a later valid request with a different op-log
+  path was refused until the agent restarted. The start time is now checked before the session is started.
+
+### Known issues
+
+- **Replay of `DELETE_PREFIX` and other unmodelled rows:** `rmdir` on `file://` / `direct://` writes
+  `DELETE_PREFIX` rows, which replay does not support (nor `GET_RANGE`, `DELETE_BATCH`,
+  `CREATE_CONTAINER`, `DELETE_CONTAINER`). With `--continue-on-error` such rows are skipped and counted,
+  including the first row, so that mode does not reproduce prefix deletion. Without it replay stops at
+  the first unsupported row, possibly after earlier operations have already run: there is no pre-scan of
+  the trace.
+- **Not in the op-log:** multi-endpoint LIST/DELETE/STAT (s3dlio logs only their GET/PUT, s3dlio #175),
+  preflight probes, the agent's gRPC GET/LIST, multi-endpoint pattern LISTs, and multi-process post-run
+  cleanup.
+
 ## [0.8.97] - 2026-05-03
 
 ### Added

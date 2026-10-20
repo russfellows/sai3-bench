@@ -166,7 +166,7 @@ build_image() {
         log_warn "No Dockerfile found. You may need to build the image manually."
         log_info "Example Dockerfile:"
         cat << 'EOF'
-FROM rust:1.75 AS builder
+FROM rust:1.94.1 AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release --bin sai3bench-agent

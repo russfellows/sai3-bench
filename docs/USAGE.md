@@ -388,7 +388,7 @@ This doc focuses on the distributed controller/agent mode, including plaintext a
 
 # Prerequisites
 
-- **Rust toolchain** (stable, 2024 edition)  
+- **Rust toolchain** 1.94.1 or newer (2021 edition)
 - **Protobuf compiler** (`protoc`) — required by `tonic-build`  
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
 - **Storage Backend Credentials** on each agent host:

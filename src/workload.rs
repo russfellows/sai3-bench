@@ -22,9 +22,8 @@ use crate::bucket_index;
 use std::collections::HashMap;
 
 use s3dlio::file_store::{FileSystemConfig, FileSystemObjectStore};
-use s3dlio::object_store::{
-    store_for_uri, store_for_uri_with_logger, GcsConfig, GcsObjectStore, ObjectStore,
-};
+use s3dlio::object_store::{store_for_uri, GcsConfig, GcsObjectStore, ObjectStore};
+use s3dlio::object_store_logger::LoggedObjectStore;
 use s3dlio::PageCacheMode as S3dlioPageCacheMode;
 use s3dlio::{finalize_op_logger, global_logger, init_op_logger};
 
@@ -173,20 +172,78 @@ impl ObjectStore for ArcMultiEndpointWrapper {
     }
 }
 
+/// Wrap `store` so its operations are recorded in the op-log, when one is active.
+///
+/// Since s3dlio 0.9.122 each op-log row has ONE owner: only a store wrapped with
+/// `LoggedObjectStore` records rows (the backends no longer write their own). This is
+/// the single place sai3-bench applies that wrapper. It covers the single-URI stores
+/// built by `create_store_for_uri_with_config` and `create_store_with_logger_and_config`
+/// (prepare, cleanup, directory tree, metadata cache, workload). With no op-log active
+/// the store is returned unchanged (no wrapper).
+///
+/// Multi-endpoint stores (`MultiEndpointStore`) are deliberately NOT wrapped: s3dlio
+/// builds their bucket-form `s3://` endpoints with `S3ObjectStore::with_helper_rows()`,
+/// which writes its own GET/PUT rows and assumes it is never wrapped, so wrapping would
+/// log every GET/PUT twice. Their LIST/DELETE/STAT rows are not logged (s3dlio #175).
+fn with_op_logger(store: Box<dyn ObjectStore>) -> Box<dyn ObjectStore> {
+    match global_logger() {
+        Some(logger) => Box::new(LoggedObjectStore::new(Arc::from(store), logger)),
+        None => store,
+    }
+}
+
 /// Create ObjectStore instance for given URI with optional RangeEngine and PageCache configuration
 ///
 /// If range_config is provided and enabled=true for GCS/Azure/S3 backends, creates
 /// store with custom RangeEngine settings. Otherwise uses defaults (RangeEngine disabled).
 ///
-/// If page_cache_mode is provided for file:// or direct:// backends, configures
-/// posix_fadvise hints for kernel page cache optimization (Linux/Unix only).
+/// If page_cache_mode is provided for a file:// backend, configures posix_fadvise hints
+/// for kernel page cache optimization (Linux/Unix only). direct:// stores use O_DIRECT,
+/// which bypasses the page cache, so the mode is ignored for them (debug log).
+///
+/// When an op-log is active the configured store is wrapped by `with_op_logger`, so
+/// the operations performed through it are recorded once. Multi-endpoint stores are
+/// not created here (see `with_op_logger`).
 pub fn create_store_for_uri_with_config(
     uri: &str,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For file:// and direct:// URIs, apply FileSystemConfig with page_cache_mode
-    if uri.starts_with("file://") || uri.starts_with("direct://") {
+    Ok(with_op_logger(build_configured_store(
+        uri,
+        range_config,
+        page_cache_mode,
+    )?))
+}
+
+/// Create the configured ObjectStore for `uri` WITHOUT op-log wrapping (replay helpers,
+/// which must not record their own operations in an active op-log).
+pub fn create_store_for_uri_unlogged(uri: &str) -> anyhow::Result<Box<dyn ObjectStore>> {
+    build_configured_store(uri, None, None)
+}
+
+/// Build the configured (never op-log-wrapped) ObjectStore for `uri`.
+fn build_configured_store(
+    uri: &str,
+    range_config: Option<&crate::config::RangeEngineConfig>,
+    page_cache_mode: Option<crate::config::PageCacheMode>,
+) -> anyhow::Result<Box<dyn ObjectStore>> {
+    // direct:// opens files with O_DIRECT, which bypasses the page cache, so
+    // page_cache_mode (posix_fadvise hints) does not apply to it. s3dlio's file-store
+    // config (FileSystemConfig) is file://-only and its store rejects direct:// URIs,
+    // so direct:// always gets its own O_DIRECT store from store_for_uri.
+    if uri.starts_with("direct://") {
+        if let Some(mode) = page_cache_mode {
+            debug!(
+                "direct:// URI: page_cache_mode {:?} does not apply to O_DIRECT I/O (ignored)",
+                mode
+            );
+        }
+        return store_for_uri(uri).context("Failed to create object store");
+    }
+
+    // For file:// URIs, apply FileSystemConfig with page_cache_mode
+    if uri.starts_with("file://") {
         if let Some(mode) = page_cache_mode {
             // Convert config::PageCacheMode to s3dlio::PageCacheMode
             let s3dlio_mode = match mode {
@@ -208,7 +265,6 @@ pub fn create_store_for_uri_with_config(
             let store = FileSystemObjectStore::with_config(config);
             return Ok(Box::new(store));
         } else {
-            // No page cache mode specified - use store_for_uri which handles direct://
             return store_for_uri(uri).context("Failed to create object store");
         }
     }
@@ -473,78 +529,16 @@ fn extract_file_index_from_path(path: &str) -> Option<usize> {
 }
 
 /// Create ObjectStore instance with op-logger and optional RangeEngine/PageCache configuration
+///
+/// Identical to [`create_store_for_uri_with_config`]: the configured store (GCS range
+/// settings, file/direct page cache mode) is wrapped by `with_op_logger` when an
+/// op-log is active.
 pub fn create_store_with_logger_and_config(
     uri: &str,
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For GCS URIs, apply RangeEngine configuration (same priority logic as
-    // create_store_for_uri_with_config — see that function for full comments).
-    if uri.starts_with("gs://") || uri.starts_with("gcs://") {
-        let env_range_enabled = std::env::var("S3DLIO_ENABLE_RANGE_OPTIMIZATION")
-            .map(|v| {
-                !matches!(
-                    v.to_lowercase().as_str(),
-                    "0" | "false" | "no" | "off" | "disable" | "disabled"
-                )
-            })
-            .unwrap_or(false);
-        let env_threshold_bytes: u64 = std::env::var("S3DLIO_RANGE_THRESHOLD_MB")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE);
-
-        let config = if let Some(cfg) = range_config {
-            debug!(
-                "GCS RangeEngine: enabled via range_engine: config block for {}",
-                uri
-            );
-            GcsConfig {
-                enable_range_engine: cfg.enabled,
-                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
-                    chunk_size: cfg.chunk_size as usize,
-                    max_concurrent_ranges: cfg.max_concurrent_ranges,
-                    min_split_size: cfg.min_split_size,
-                    range_timeout: std::time::Duration::from_secs(cfg.range_timeout_secs),
-                },
-                size_cache_ttl_secs: 60,
-            }
-        } else if env_range_enabled {
-            info!(
-                "GCS RangeEngine: enabled via s3dlio_optimization.enable_range_downloads \
-                 (threshold {} MiB) for {}",
-                env_threshold_bytes / (1024 * 1024),
-                uri
-            );
-            GcsConfig {
-                enable_range_engine: true,
-                range_engine: s3dlio::range_engine_generic::RangeEngineConfig {
-                    min_split_size: env_threshold_bytes,
-                    ..Default::default()
-                },
-                size_cache_ttl_secs: 60,
-            }
-        } else {
-            debug!("GCS RangeEngine: disabled for {}", uri);
-            GcsConfig {
-                enable_range_engine: false,
-                size_cache_ttl_secs: 60,
-                ..Default::default()
-            }
-        };
-
-        let store = GcsObjectStore::with_config(config);
-        return Ok(Box::new(store));
-    }
-
-    // For other backends, use logger if available
-    let logger = global_logger();
-    if logger.is_some() {
-        store_for_uri_with_logger(uri, logger).context("Failed to create object store with logger")
-    } else {
-        create_store_for_uri_with_config(uri, range_config, page_cache_mode)
-    }
+    create_store_for_uri_with_config(uri, range_config, page_cache_mode)
 }
 
 /// Create ObjectStore instance with op-logger if available (backward compatible)
@@ -1233,7 +1227,7 @@ async fn rmdir_with_config(
 
 /// GET operation WITHOUT logging (for replay)
 pub async fn get_object_no_log(uri: &str) -> anyhow::Result<bytes::Bytes> {
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     let bytes = store
         .get(uri)
         .await
@@ -1244,7 +1238,7 @@ pub async fn get_object_no_log(uri: &str) -> anyhow::Result<bytes::Bytes> {
 
 /// PUT operation WITHOUT logging (for replay)
 pub async fn put_object_no_log(uri: &str, data: bytes::Bytes) -> anyhow::Result<()> {
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     store
         .put(uri, data)
         .await // Zero-copy: Bytes passed directly
@@ -1253,7 +1247,7 @@ pub async fn put_object_no_log(uri: &str, data: bytes::Bytes) -> anyhow::Result<
 
 /// LIST operation WITHOUT logging (for replay)
 pub async fn list_objects_no_log(uri: &str) -> anyhow::Result<Vec<String>> {
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     store
         .list(uri, true)
         .await
@@ -1262,7 +1256,7 @@ pub async fn list_objects_no_log(uri: &str) -> anyhow::Result<Vec<String>> {
 
 /// STAT operation WITHOUT logging (for replay)
 pub async fn stat_object_no_log(uri: &str) -> anyhow::Result<u64> {
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     let metadata = store
         .stat(uri)
         .await
@@ -1272,7 +1266,7 @@ pub async fn stat_object_no_log(uri: &str) -> anyhow::Result<u64> {
 
 /// DELETE operation WITHOUT logging (for replay)
 pub async fn delete_object_no_log(uri: &str) -> anyhow::Result<()> {
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     store
         .delete(uri)
         .await
@@ -1310,7 +1304,7 @@ pub fn get_or_create_store(
     }
 
     // Not in cache - create new store
-    let store = create_store_for_uri(uri)?;
+    let store = create_store_for_uri_unlogged(uri)?;
     let arc_store = Arc::new(store);
 
     // Add to cache

@@ -104,7 +104,9 @@ struct Cli {
     tls_sans: Option<String>,
 
     /// Optional operation log path (s3dlio oplog) - applies to all workloads executed by this agent
-    /// Can be overridden per-workload via config YAML op_log_path field
+    /// Can be overridden per-workload via config YAML op_log_path field, but the agent keeps ONE
+    /// op-log session per process: every job must resolve to the same file (a job asking for a
+    /// different path is rejected), and the log is finalized when the agent shuts down
     /// Agent appends agent_id to filename to avoid collisions (e.g., oplog-agent1.tsv.zst)
     /// Supports environment variables: S3DLIO_OPLOG_BUF=8192 (buffer size)
     /// Note: For sorted oplogs, use 'sai3-bench sort' post-processing after capture
@@ -815,6 +817,22 @@ impl Agent for AgentSvc {
                 Status::invalid_argument(format!("Invalid YAML config: {}", e))
             })?;
 
+        // Reject a job whose op-log path conflicts with this process's op-log session
+        // before the probes below touch any storage (read-only check; the session itself
+        // is started when the job's START is accepted).
+        if let Some(op_log_base) = config
+            .op_log_path
+            .as_ref()
+            .or(self.state.agent_op_log_path.as_ref())
+        {
+            sai3_bench::oplog_session::check(&staged_op_log_path(op_log_base, &agent_id)).map_err(
+                |e| {
+                    error!("Pre-flight: op-log session rejected: {:#}", e);
+                    Status::failed_precondition(format!("Op-log rejected: {:#}", e))
+                },
+            )?;
+        }
+
         // Apply credentials forwarded from the controller (v0.8.92+)
         apply_distributed_env(&config);
 
@@ -1352,7 +1370,8 @@ impl Agent for AgentSvc {
 
         debug!("Path prefix applied successfully");
 
-        // Wait until coordinated start time
+        // Reject a start time too far in the future BEFORE the op-log session is started: a
+        // rejected request must not claim the process-wide session for its path.
         let start_time =
             std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
         if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
@@ -1362,6 +1381,32 @@ impl Agent for AgentSvc {
                     "Start time is too far in the future (>60s)",
                 ));
             }
+        }
+
+        // Op-log session (one per agent PROCESS, see `sai3_bench::oplog_session`).
+        // Priority: config YAML op_log_path > agent CLI --op-log > None. Started before
+        // ANY storage work (prepare included) and rejected here, before that work, if it
+        // conflicts with the session already active in this process. The session is
+        // finalized once at agent shutdown, never per run.
+        let final_op_log_path = config
+            .op_log_path
+            .as_ref()
+            .or(self.state.agent_op_log_path.as_ref());
+
+        if let Some(op_log_base) = final_op_log_path {
+            let op_log_path = unary_op_log_path(op_log_base, &agent_id);
+            info!(
+                "Starting/continuing s3dlio operation logger session: {}",
+                op_log_path.display()
+            );
+            sai3_bench::oplog_session::begin(&op_log_path).map_err(|e| {
+                error!("Failed to start operation logger: {:#}", e);
+                Status::failed_precondition(format!("Failed to start operation logger: {:#}", e))
+            })?;
+        }
+
+        // Wait until coordinated start time
+        if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
             debug!("Waiting {:?} until coordinated start", wait_duration);
             tokio::time::sleep(wait_duration).await;
         }
@@ -1532,58 +1577,6 @@ impl Agent for AgentSvc {
             (Vec::new(), None)
         };
 
-        // Initialize s3dlio oplog if configured (v0.8.2+)
-        // Priority: config YAML op_log_path > agent CLI --op-log > None
-        let final_op_log_path = config
-            .op_log_path
-            .as_ref()
-            .or(self.state.agent_op_log_path.as_ref());
-
-        if let Some(op_log_base) = final_op_log_path {
-            // Append agent_id to filename to avoid collisions
-            let op_log_path = if let Some(parent) = op_log_base.parent() {
-                let filename = op_log_base
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("oplog.tsv.zst");
-
-                // Insert agent_id before extension (e.g., oplog.tsv.zst -> oplog-agent1.tsv.zst)
-                let base_name = if filename.ends_with(".tsv.zst") {
-                    filename.strip_suffix(".tsv.zst").unwrap()
-                } else if filename.ends_with(".tsv") {
-                    filename.strip_suffix(".tsv").unwrap()
-                } else {
-                    filename
-                };
-
-                let extension = if filename.ends_with(".tsv.zst") {
-                    ".tsv.zst"
-                } else if filename.ends_with(".tsv") {
-                    ".tsv"
-                } else {
-                    ""
-                };
-
-                parent.join(format!("{}-{}{}", base_name, agent_id, extension))
-            } else {
-                // No parent directory, just append agent_id
-                let filename = op_log_base
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("oplog.tsv.zst");
-                std::path::PathBuf::from(format!("{}-{}", filename, agent_id))
-            };
-
-            info!(
-                "Initializing s3dlio operation logger: {}",
-                op_log_path.display()
-            );
-            sai3_bench::workload::init_operation_logger(&op_log_path).map_err(|e| {
-                error!("Failed to initialize operation logger: {}", e);
-                Status::internal(format!("Failed to initialize operation logger: {}", e))
-            })?;
-        }
-
         // Execute the workload using existing workload::run function
         // In cleanup-only mode, run cleanup AS the workload
         let is_cleanup_only = config
@@ -1697,24 +1690,12 @@ impl Agent for AgentSvc {
                 .await
                 .map_err(|e| {
                     error!("Workload execution failed: {}", e);
-                    // Finalize oplog on error
-                    if final_op_log_path.is_some() {
-                        if let Err(finalize_err) = sai3_bench::workload::finalize_operation_logger()
-                        {
-                            error!("Failed to finalize operation logger: {}", finalize_err);
-                        }
-                    }
                     Status::internal(format!("Workload execution failed: {}", e))
                 })?
         };
 
-        // Finalize s3dlio oplog if initialized
-        if final_op_log_path.is_some() {
-            info!("Finalizing s3dlio operation logger");
-            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                error!("Failed to finalize operation logger: {}", e);
-            }
-        }
+        // The op-log session stays active: it spans stages and jobs and is finalized once,
+        // at agent shutdown (see `async_main`).
 
         // v0.8.7: Execute cleanup phase if configured (skip if cleanup-only since we already did it)
         if !is_cleanup_only {
@@ -2860,6 +2841,58 @@ impl Agent for AgentSvc {
                                                 None
                                             };
 
+                                            // Setup op_log_path
+                                            let final_op_log_path = config.op_log_path.as_ref()
+                                                .or(agent_op_log_path_reader.as_ref())
+                                                .cloned();
+
+                                            // Op-log session (one per agent PROCESS, see
+                                            // `sai3_bench::oplog_session`): start it, or continue the
+                                            // active one, BEFORE any stage runs (prepare and cleanup
+                                            // included). A job asking for a different path is rejected
+                                            // here, before any storage mutation. Finalized once at shutdown.
+                                            if let Some(ref op_log_base) = final_op_log_path {
+                                                let op_log_path = staged_op_log_path(op_log_base, &agent_id);
+                                                info!("Control reader: starting/continuing op-log session: {}", op_log_path.display());
+                                                if let Err(e) = sai3_bench::oplog_session::begin(&op_log_path) {
+                                                    error!("Control reader: op-log session rejected: {:#}", e);
+                                                    let reason = format!("Op-log rejected: {:#}", e);
+                                                    agent_state_reader.set_error(reason.clone()).await;
+                                                    // Nothing has run yet (the agent is still Idle and the stats
+                                                    // writer has already exited), so tell the controller directly.
+                                                    let error_msg = LiveStats {
+                                                        agent_id: agent_id.clone(),
+                                                        timestamp_s: 0.0,
+                                                        get_ops: 0, get_bytes: 0, get_mean_us: 0.0, get_p50_us: 0.0, get_p90_us: 0.0, get_p95_us: 0.0, get_p99_us: 0.0,
+                                                        put_ops: 0, put_bytes: 0, put_mean_us: 0.0, put_p50_us: 0.0, put_p90_us: 0.0, put_p95_us: 0.0, put_p99_us: 0.0,
+                                                        meta_ops: 0, meta_mean_us: 0.0, meta_p50_us: 0.0, meta_p90_us: 0.0, meta_p99_us: 0.0,
+                                                        elapsed_s: 0.0,
+                                                        completed: false,
+                                                        final_summary: None,
+                                                        status: 3,  // ERROR
+                                                        error_message: reason,
+                                                        in_prepare_phase: false,
+                                                        prepare_objects_created: 0,
+                                                        prepare_objects_total: 0,
+                                                        prepare_summary: None,
+                                                        cpu_user_percent: 0.0,
+                                                        cpu_system_percent: 0.0,
+                                                        cpu_iowait_percent: 0.0,
+                                                        cpu_total_percent: 0.0,
+                                                        agent_timestamp_ns: 0,
+                                                        sequence: 0,
+                                                        current_stage: 0, stage_name: String::new(), stage_progress_current: 0, stage_progress_total: 0, stage_elapsed_s: 0.0,
+                                                        concurrency: 0,
+                                                        at_barrier: false,
+                                                        barrier_name: String::new(),
+                                                        barrier_sequence: 0,
+                                                        stage_summary: None,
+                                                    };
+                                                    let _ = tx_stats_for_control.send(error_msg).await;
+                                                    return;
+                                                }
+                                            }
+
                                             // Store stages in AgentState for use during execution
                                             agent_state_reader.set_stages(stages).await;
 
@@ -2890,11 +2923,6 @@ impl Agent for AgentSvc {
                                             // Store tracker in state for stats writer
                                             agent_state_reader.set_tracker(tracker.clone()).await;
 
-                                            // Setup op_log_path
-                                            let final_op_log_path = config.op_log_path.as_ref()
-                                                .or(agent_op_log_path_reader.as_ref())
-                                                .cloned();
-
                                             agent_state_reader.set_op_log_path(
                                                 final_op_log_path.as_ref().map(|p| p.display().to_string())
                                             ).await;
@@ -2905,7 +2933,6 @@ impl Agent for AgentSvc {
                                             let tx_done_exec = tx_done.clone();
                                             let tx_prepare_exec = tx_prepare.clone();
                                             let tx_stats_exec = tx_stats_for_control.clone();
-                                            let agent_op_log_path_exec = agent_op_log_path_reader.clone();
                                             let tracker_for_prepare = tracker.clone();
                                             let agent_state_for_task = agent_state_reader.clone();
 
@@ -2933,8 +2960,6 @@ impl Agent for AgentSvc {
                                                     tx_done_exec.clone(),
                                                     tx_prepare_exec.clone(),
                                                     tx_stats_exec.clone(),
-                                                    final_op_log_path.clone(),
-                                                    agent_op_log_path_exec.clone(),
                                                     agent_id_exec.clone(),
                                                     agent_index,
                                                     num_agents,
@@ -3548,6 +3573,55 @@ impl Agent for AgentSvc {
     }
 }
 
+/// Op-log file written for a staged (`ExecuteWorkload`) job: `<stem>_<agent_id>.tsv.zst`,
+/// where `<stem>` is the configured path without its `.tsv.zst` / `.tsv` suffix.
+fn staged_op_log_path(base: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
+    if let Some(parent) = base.parent() {
+        let filename = base
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("oplog.tsv.zst");
+        let base_name = if filename.ends_with(".tsv.zst") {
+            filename.strip_suffix(".tsv.zst").unwrap()
+        } else if filename.ends_with(".tsv") {
+            filename.strip_suffix(".tsv").unwrap()
+        } else {
+            filename
+        };
+        parent.join(format!("{}_{}.tsv.zst", base_name, agent_id))
+    } else {
+        base.join(format!("oplog_{}.tsv.zst", agent_id))
+    }
+}
+
+/// Op-log file written for a unary `RunWorkload` job: `<stem>-<agent_id><ext>`
+/// (e.g. `oplog.tsv.zst` -> `oplog-agent1.tsv.zst`).
+fn unary_op_log_path(base: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
+    let filename = base
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("oplog.tsv.zst");
+    if let Some(parent) = base.parent() {
+        let base_name = if filename.ends_with(".tsv.zst") {
+            filename.strip_suffix(".tsv.zst").unwrap()
+        } else if filename.ends_with(".tsv") {
+            filename.strip_suffix(".tsv").unwrap()
+        } else {
+            filename
+        };
+        let extension = if filename.ends_with(".tsv.zst") {
+            ".tsv.zst"
+        } else if filename.ends_with(".tsv") {
+            ".tsv"
+        } else {
+            ""
+        };
+        parent.join(format!("{}-{}{}", base_name, agent_id, extension))
+    } else {
+        std::path::PathBuf::from(format!("{}-{}", filename, agent_id))
+    }
+}
+
 // Phase 2b: YAML-driven stage execution workflow
 // Executes stages in order, checking completion criteria and transitioning state
 #[allow(dead_code)] // Will be used when stages are configured
@@ -3560,8 +3634,6 @@ async fn execute_stages_workflow(
     _tx_done: tokio::sync::mpsc::Sender<Result<sai3_bench::workload::Summary, String>>,
     tx_prepare: tokio::sync::mpsc::Sender<sai3_bench::workload::PrepareMetrics>,
     tx_stats: tokio::sync::mpsc::Sender<LiveStats>, // v0.8.26: For barrier coordination
-    final_op_log_path: Option<std::path::PathBuf>,
-    agent_op_log_path: Option<std::path::PathBuf>,
     agent_id: String,
     agent_index: usize,
     num_agents: usize,
@@ -3820,31 +3892,8 @@ async fn execute_stages_workflow(
                 use sai3_bench::live_stats::WorkloadStage;
                 tracker.set_stage(WorkloadStage::Workload, 0); // time-based
 
-                // Setup operation logger if configured
-                if let Some(op_log_base) = final_op_log_path.as_ref().or(agent_op_log_path.as_ref())
-                {
-                    let op_log_path = if let Some(parent) = op_log_base.parent() {
-                        let filename = op_log_base
-                            .file_name()
-                            .and_then(|f| f.to_str())
-                            .unwrap_or("oplog.tsv.zst");
-                        let base_name = if filename.ends_with(".tsv.zst") {
-                            filename.strip_suffix(".tsv.zst").unwrap()
-                        } else if filename.ends_with(".tsv") {
-                            filename.strip_suffix(".tsv").unwrap()
-                        } else {
-                            filename
-                        };
-                        parent.join(format!("{}_{}.tsv.zst", base_name, agent_id))
-                    } else {
-                        op_log_base.join(format!("oplog_{}.tsv.zst", agent_id))
-                    };
-
-                    info!("Initializing operation logger: {}", op_log_path.display());
-                    if let Err(e) = sai3_bench::workload::init_operation_logger(&op_log_path) {
-                        error!("Failed to initialize operation logger: {}", e);
-                    }
-                }
+                // The op-log session was started when the job was accepted (control reader) and
+                // stays active across stages and jobs; it is finalized once at agent shutdown.
 
                 // Override config.duration with stage duration
                 // NOTE: This is stage-local — the timer will be reset fresh inside workload::run()
@@ -3877,13 +3926,6 @@ async fn execute_stages_workflow(
                         stage_get_bins = Some(summary.get_bins.clone());
                         stage_put_bins = Some(summary.put_bins.clone());
                         stage_meta_bins = Some(summary.meta_bins.clone());
-
-                        // Finalize oplog
-                        if final_op_log_path.is_some() || agent_op_log_path.is_some() {
-                            if let Err(e) = sai3_bench::workload::finalize_operation_logger() {
-                                error!("Failed to finalize operation logger: {}", e);
-                            }
-                        }
                     }
                     Err(e) => {
                         error!(
@@ -4973,6 +5015,18 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
+/// Finalize the process's op-log session (if any jobs started one) so the zstd stream is
+/// complete. Runs once, after the gRPC server has stopped, on every exit from serving
+/// (SIGINT/SIGTERM or a server error).
+fn finalize_op_log_session() {
+    if let Some(path) = sai3_bench::oplog_session::active_path() {
+        info!("Finalizing op-log session: {}", path.display());
+    }
+    if let Err(e) = sai3_bench::oplog_session::end() {
+        error!("Failed to finalize operation logger: {:#}", e);
+    }
+}
+
 fn main() -> Result<()> {
     dotenv().ok();
     let args = Cli::parse();
@@ -5081,14 +5135,15 @@ async fn async_main(args: Cli, worker_threads: usize) -> Result<()> {
         info!("Agent starting in PLAINTEXT mode on {}", addr);
         println!("sai3bench-agent listening (PLAINTEXT) on {}", addr);
         let agent_state = AgentState::new(args.op_log.clone());
-        Server::builder()
+        let served = Server::builder()
             .add_service(AgentServer::new(AgentSvc::new(agent_state)))
             .serve_with_shutdown(addr, async {
                 let sig = wait_for_shutdown_signal().await;
                 info!("Received {} - initiating graceful shutdown", sig);
             })
-            .await
-            .context("tonic server failed")?;
+            .await;
+        finalize_op_log_session();
+        served.context("tonic server failed")?;
         info!("Agent shutdown complete");
         return Ok(());
     }
@@ -5135,15 +5190,16 @@ async fn async_main(args: Cli, worker_threads: usize) -> Result<()> {
     );
 
     let agent_state = AgentState::new(args.op_log.clone());
-    Server::builder()
+    let served = Server::builder()
         .tls_config(tls)?
         .add_service(AgentServer::new(AgentSvc::new(agent_state)))
         .serve_with_shutdown(addr, async {
             let sig = wait_for_shutdown_signal().await;
             info!("Received {} - initiating graceful shutdown", sig);
         })
-        .await
-        .context("tonic server (TLS) failed")?;
+        .await;
+    finalize_op_log_session();
+    served.context("tonic server (TLS) failed")?;
 
     info!("Agent shutdown complete");
     Ok(())

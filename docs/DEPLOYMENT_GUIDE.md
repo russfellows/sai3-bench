@@ -202,7 +202,7 @@ docker run -d --net=host \
 
 ```dockerfile
 # Dockerfile
-FROM rust:1.75 as builder
+FROM rust:1.94.1 AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release
