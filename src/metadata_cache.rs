@@ -70,9 +70,6 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use url::Url;
 
-// ObjectStore for cloud storage checkpoint uploads
-use s3dlio::object_store::store_for_uri;
-
 // ============================================================================
 // Flush Policy (copied from io-stack/fjall_engine.rs)
 // ============================================================================
@@ -1679,8 +1676,8 @@ impl EndpointCache {
                 self.endpoint_uri
             );
 
-            let store =
-                store_for_uri(&self.endpoint_uri).context("Failed to create object store")?;
+            let store = crate::workload::create_store_for_uri(&self.endpoint_uri)
+                .context("Failed to create object store")?;
 
             // Upload checkpoint archive
             let checkpoint_uri = format!("{}{}", self.endpoint_uri, checkpoint_name);
@@ -2039,7 +2036,7 @@ impl EndpointCache {
             let store_result = timeout(Duration::from_secs(15), async {
                 // Retry store creation up to 3 times
                 for attempt in 1..=3 {
-                    match store_for_uri(endpoint_uri) {
+                    match crate::workload::create_store_for_uri(endpoint_uri) {
                         Ok(store) => {
                             debug!("   ObjectStore created successfully (attempt {})", attempt);
                             return Ok(store);
