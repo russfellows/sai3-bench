@@ -78,7 +78,7 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
   cleanup included), keeps it active across stages and jobs, and finalizes it once at shutdown
   (SIGINT/SIGTERM or a server error), so the zstd file is complete. A job that requests the same resolved
   path continues in the active session; a job that requests a different path is rejected before any
-  storage I/O (at the controller's pre-flight RPC, and again at `START`) with an error naming both
+  storage mutation (at the controller's pre-flight RPC, and again at `START`) with an error naming both
   paths, and a request after the session was finalized is rejected the same way. Jobs that request no
   op-log while a session is active are still recorded in it, because the session is process-wide.
   `sai3-bench run` is unchanged.
@@ -88,6 +88,15 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
   `DELETE`. An unsupported or malformed FIRST row used to abort replay even with `--continue-on-error`;
   it is now skipped and counted like any later row. Without `--continue-on-error` the error names the
   operation, the file line and row index, and says it is not supported.
+- **Strict replay no longer leaves scheduled operations running after an error.** Without
+  `--continue-on-error`, when replay stopped at an unsupported or unreadable row (or at a failed
+  operation), operations already scheduled for later times kept running in the background and could still
+  write or delete objects after the error was reported. Replay now cancels them and waits for them to
+  stop before it returns the error. Operations already submitted may still have changed storage.
+- **An invalid `run_workload` request no longer blocks the agent's op-log path.** A request whose start
+  time was more than 60 seconds in the future was rejected only after the agent had already started its
+  process-wide op-log session at that request's path, so a later valid request with a different op-log
+  path was refused until the agent restarted. The start time is now checked before the session is started.
 
 ### Known issues
 

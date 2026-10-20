@@ -1370,6 +1370,19 @@ impl Agent for AgentSvc {
 
         debug!("Path prefix applied successfully");
 
+        // Reject a start time too far in the future BEFORE the op-log session is started: a
+        // rejected request must not claim the process-wide session for its path.
+        let start_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
+        if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
+            if wait_duration > std::time::Duration::from_secs(60) {
+                error!("Start time is too far in the future: {:?}", wait_duration);
+                return Err(Status::invalid_argument(
+                    "Start time is too far in the future (>60s)",
+                ));
+            }
+        }
+
         // Op-log session (one per agent PROCESS, see `sai3_bench::oplog_session`).
         // Priority: config YAML op_log_path > agent CLI --op-log > None. Started before
         // ANY storage work (prepare included) and rejected here, before that work, if it
@@ -1393,15 +1406,7 @@ impl Agent for AgentSvc {
         }
 
         // Wait until coordinated start time
-        let start_time =
-            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(start_timestamp_ns as u64);
         if let Ok(wait_duration) = start_time.duration_since(std::time::SystemTime::now()) {
-            if wait_duration > std::time::Duration::from_secs(60) {
-                error!("Start time is too far in the future: {:?}", wait_duration);
-                return Err(Status::invalid_argument(
-                    "Start time is too far in the future (>60s)",
-                ));
-            }
             debug!("Waiting {:?} until coordinated start", wait_duration);
             tokio::time::sleep(wait_duration).await;
         }
@@ -2845,7 +2850,7 @@ impl Agent for AgentSvc {
                                             // `sai3_bench::oplog_session`): start it, or continue the
                                             // active one, BEFORE any stage runs (prepare and cleanup
                                             // included). A job asking for a different path is rejected
-                                            // here, before any storage I/O. Finalized once at shutdown.
+                                            // here, before any storage mutation. Finalized once at shutdown.
                                             if let Some(ref op_log_base) = final_op_log_path {
                                                 let op_log_path = staged_op_log_path(op_log_base, &agent_id);
                                                 info!("Control reader: starting/continuing op-log session: {}", op_log_path.display());

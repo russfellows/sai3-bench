@@ -10,10 +10,12 @@
 //! * without it: stop with an error that names the op, the row and "not supported".
 //!
 //! There is no pre-scan, so operations before a later unsupported row have already run
-//! when replay stops there.
+//! when replay stops there. Operations scheduled for LATER times than the failing row
+//! must not run after the error is returned: strict replay aborts them first.
 
 use sai3_bench::replay_streaming::{replay_workload_streaming, ReplayRunConfig};
 use std::path::Path;
+use std::time::Duration;
 use tempfile::TempDir;
 
 const HEADER: &str =
@@ -157,5 +159,49 @@ async fn later_row_unsupported_follows_the_same_policy() {
             && shown.contains("row index 1")
             && shown.contains("line 3"),
         "{shown}"
+    );
+}
+
+/// A strict failure must cancel operations that are scheduled for a later time. Row 0
+/// (the epoch) runs at once; row 1 is a PUT scheduled 3 s later; row 2 is the unsupported
+/// row, read immediately. After the error is returned the PUT must never happen, even
+/// though the runtime is still alive past its scheduled time.
+#[tokio::test]
+async fn strict_failure_cancels_operations_scheduled_for_later() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let d = data.display();
+    let at = |idx: usize, op: &str, file: &str, bytes: u64, ms: u32| {
+        let ts = format!("2026-01-01T00:00:{:02}.{:03}000000Z", ms / 1000, ms % 1000);
+        format!("{idx}\t1\t{op}\t\t1\t{bytes}\tfile://\t{file}\t\t{ts}\t\t{ts}\t1000")
+    };
+    let trace = write_trace(
+        tmp.path(),
+        &[
+            at(0, "PUT", &format!("{d}/epoch.dat"), 1024, 0),
+            at(1, "PUT", &format!("{d}/late.dat"), 1024, 3000),
+            at(2, "DELETE_PREFIX", &format!("{d}/"), 0, 3100),
+        ],
+    );
+
+    let mut cfg = config(trace, false);
+    cfg.speed = 1.0;
+    let err = replay_workload_streaming(cfg)
+        .await
+        .expect_err("strict replay must stop at the unsupported row");
+    let shown = err.to_string();
+    assert!(shown.contains("DELETE_PREFIX"), "{shown}");
+
+    // Wait well past the PUT's scheduled time (3 s after the epoch).
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let files = data_files(&data);
+    assert!(
+        !files.contains(&"late.dat".to_string()),
+        "the PUT scheduled after the failing row must not run: {files:?}"
+    );
+    assert!(
+        shown.contains("may have changed storage"),
+        "error must say submitted operations may have changed storage: {shown}"
     );
 }

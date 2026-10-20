@@ -395,7 +395,7 @@ fn two_sequential_jobs_on_one_agent_share_one_complete_log() {
     );
 }
 
-/// A job asking for a DIFFERENT op-log path is rejected before any storage I/O, with an
+/// A job asking for a DIFFERENT op-log path is rejected before any storage mutation, with an
 /// error naming both paths; the agent stays usable and the first log stays intact.
 #[test]
 fn job_with_a_different_oplog_path_is_rejected_before_any_io() {
@@ -624,5 +624,105 @@ workload:
         rows_of(&rows, "PUT", "/prepared-"),
         2 * PREPARED,
         "prepare PUTs of job 1 and job 3 (the unary prepare rewrites the objects)"
+    );
+}
+
+/// A unary `RunWorkload` request that is rejected by pure validation (a start time more
+/// than 60 s ahead) must not start the process-wide op-log session: it creates no log at
+/// its path, and a later valid request with a DIFFERENT path is accepted and logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_unary_request_does_not_claim_the_oplog_path() {
+    use sai3_bench::pb::iobench::agent_client::AgentClient;
+    use sai3_bench::pb::iobench::RunWorkloadRequest;
+
+    let tmp = TempDir::new().unwrap();
+    let work = tmp.path();
+    let data = work.join("data");
+    std::fs::create_dir(&data).unwrap();
+    let uri = format!("file://{}/", data.display());
+    let base_a = work.join("a.tsv.zst");
+    let base_b = work.join("b.tsv.zst");
+
+    let mut agent = Agent::start(work);
+    let mut client = AgentClient::connect(format!("http://127.0.0.1:{}", agent.port))
+        .await
+        .unwrap();
+
+    let cfg_for = |base: &Path| {
+        format!(
+            r#"target: "{uri}"
+duration: 1s
+concurrency: 2
+op_log_path: "{op}"
+prepare:
+  prepare_strategy: sequential
+  ensure_objects:
+    - base_uri: "{uri}"
+      count: {PREPARED}
+      size_spec: 1024
+      fill: random
+  cleanup: false
+workload:
+  - op: get
+    path: "prepared-*.dat"
+    weight: 100
+"#,
+            op = base.display()
+        )
+    };
+    let request = |cfg: String, start_timestamp_ns: i64| RunWorkloadRequest {
+        config_yaml: cfg,
+        agent_id: AGENT_ID.to_string(),
+        path_prefix: String::new(),
+        start_timestamp_ns,
+        shared_storage: true,
+        agent_index: 0,
+        num_agents: 1,
+    };
+
+    // Request A: start time 1 hour ahead -> rejected, and nothing is created at path A.
+    let far_future_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64
+        + 3_600_000_000_000;
+    let err = client
+        .run_workload(request(cfg_for(&base_a), far_future_ns))
+        .await
+        .expect_err("a start time >60s ahead must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    let file_a = work.join("a-agent-1.tsv.zst");
+    assert!(
+        !file_a.exists() && !base_a.exists(),
+        "rejected request must not create its op-log\n{}",
+        agent.agent_log()
+    );
+
+    // Request B: valid, different path -> accepted and logged.
+    let summary = client
+        .run_workload(request(cfg_for(&base_b), 0))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "valid request after a rejected one: {e}\n{}",
+                agent.agent_log()
+            )
+        })
+        .into_inner();
+    let gets = summary.get.as_ref().map(|g| g.ops).unwrap_or(0);
+    assert!(gets > 0, "request B ran GETs");
+    agent.stop(libc::SIGTERM);
+
+    assert!(!file_a.exists(), "path A must never have been created");
+    let rows = read_oplog(&work.join("b-agent-1.tsv.zst"));
+    assert_eq!(
+        rows_of(&rows, "GET", "/prepared-"),
+        gets as usize,
+        "log B holds request B's GETs"
+    );
+    assert_eq!(
+        rows_of(&rows, "PUT", "/prepared-"),
+        PREPARED,
+        "prepare PUTs"
     );
 }
