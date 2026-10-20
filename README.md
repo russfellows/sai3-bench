@@ -2,11 +2,11 @@
 
 [![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/russfellows/sai3-bench/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
-[![Tests](https://img.shields.io/badge/tests-731%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
+[![Tests](https://img.shields.io/badge/tests-746%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94.1%2B-green.svg)](https://www.rust-lang.org/)
 
-**Latest: v0.9.0** — Moves to s3dlio v0.10.0 (faster GET/PUT, stable Azure 1.x SDK) and logs prepare, cleanup and metadata-cache operations in the op-log again. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
+**Latest: v0.9.0** — Moves to s3dlio v0.10.0 (faster GET/PUT, stable Azure 1.x SDK); op-log fixes for prepare/cleanup, `direct://`, long-running agents and replay. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 
 A comprehensive storage performance testing tool supporting multiple backends through a unified interface. Built on the [s3dlio Rust library](https://github.com/russfellows/s3dlio) for multi-protocol support.
 
