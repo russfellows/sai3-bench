@@ -51,7 +51,8 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
   (one from sai3-bench, one from s3dlio) and dropped rows under load; single-URI calls through the
   logged wrapper now have one row owner. This does not imply complete coverage or zero dropped rows.
   s3dlio allows one op-log session per process: once finalized, a new op-log cannot be started in the same
-  process (see Known issues). The file format (13-column zstd TSV) is unchanged.
+  process. `sai3bench-agent` therefore keeps a single session for its whole life (see Fixed). The file
+  format (13-column zstd TSV) is unchanged.
 
 ### Fixed
 
@@ -63,21 +64,42 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
   settings were silently dropped, and `gs://` stores were not logged at all. Both store factories now share
   one build path.
 - Replay never records its own operations in an active op-log.
+- **`direct://` with `page_cache_mode`.** The store factory sent `direct://` URIs with a `page_cache_mode`
+  to the `file://` store, which rejects them (`FileSystemObjectStore expected file:// URI`); since the
+  op-log fix the logged workload path hit the same builder, so `--op-log` + `direct://` +
+  `page_cache_mode` failed. `page_cache_mode` (posix_fadvise hints) now applies to `file://` only;
+  `direct://` always gets its O_DIRECT store, which bypasses the page cache, and the mode is ignored for
+  it (debug log).
+- **Agent op-log lifecycle: one session per agent process.** The agent used to initialise the op-log per
+  run and finalize it after the first run or `EXECUTE` stage, so a second `EXECUTE` stage in a job, and
+  every later job on the same agent process, ran unlogged (staged path) or failed to start (per-run
+  path), and prepare/cleanup stages ran before the op-log existed. The agent now starts its op-log
+  session when the first job that asks for one is accepted, before any storage work (prepare and
+  cleanup included), keeps it active across stages and jobs, and finalizes it once at shutdown
+  (SIGINT/SIGTERM or a server error), so the zstd file is complete. A job that requests the same resolved
+  path continues in the active session; a job that requests a different path is rejected before any
+  storage I/O (at the controller's pre-flight RPC, and again at `START`) with an error naming both
+  paths, and a request after the session was finalized is rejected the same way. Jobs that request no
+  op-log while a session is active are still recorded in it, because the session is process-wide.
+  `sai3-bench run` is unchanged.
+- **Replay of unsupported rows with `--continue-on-error`.** `DELETE_PREFIX` (written by `rmdir` on
+  `file://` / `direct://`) and the other ops `s3dlio-oplog` does not model (`GET_RANGE`, `DELETE_BATCH`,
+  `CREATE_CONTAINER`, `DELETE_CONTAINER`) stay unsupported for replay and are never translated into
+  `DELETE`. An unsupported or malformed FIRST row used to abort replay even with `--continue-on-error`;
+  it is now skipped and counted like any later row. Without `--continue-on-error` the error names the
+  operation, the file line and row index, and says it is not supported.
 
 ### Known issues
 
-- **Op-log on a long-lived `sai3bench-agent`:** because s3dlio allows one op-log session per process, the
-  second op-logged job on the same agent process fails to start its op-log (the per-run path returns an
-  error; the staged path runs without an op-log). A second `EXECUTE` stage within the same job also
-  runs without an op-log after the first stage finalizes it. Restarting between jobs only addresses
-  single-`EXECUTE` jobs; a multi-`EXECUTE` job needs the agent logger lifecycle corrected.
-- **Replay of `DELETE_PREFIX` rows:** `rmdir` on `file://` / `direct://` now writes `DELETE_PREFIX` rows,
-  which replay does not support. A first-row rejection aborts even with `--continue-on-error`;
-  a later rejection aborts by default after earlier operations may have executed. Later rejected
-  rows are skipped with `--continue-on-error`, so that mode does not reproduce prefix deletion.
+- **Replay of `DELETE_PREFIX` and other unmodelled rows:** `rmdir` on `file://` / `direct://` writes
+  `DELETE_PREFIX` rows, which replay does not support (nor `GET_RANGE`, `DELETE_BATCH`,
+  `CREATE_CONTAINER`, `DELETE_CONTAINER`). With `--continue-on-error` such rows are skipped and counted,
+  including the first row, so that mode does not reproduce prefix deletion. Without it replay stops at
+  the first unsupported row, possibly after earlier operations have already run: there is no pre-scan of
+  the trace.
 - **Not in the op-log:** multi-endpoint LIST/DELETE/STAT (s3dlio logs only their GET/PUT, s3dlio #175),
-  preflight probes, the agent's gRPC GET/LIST, multi-endpoint pattern LISTs, prepare/cleanup on staged
-  agents before the op-log starts, and multi-process post-run cleanup.
+  preflight probes, the agent's gRPC GET/LIST, multi-endpoint pattern LISTs, and multi-process post-run
+  cleanup.
 
 ## [0.8.97] - 2026-05-03
 

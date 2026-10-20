@@ -10,9 +10,10 @@
 //! an object-store operation, so it has no row; the restore GET does.
 //!
 //! NOT covered by the op-log (use stores that bypass the factory, unchanged here):
-//! preflight probes, agent gRPC get/list, raw `MultiEndpointStore` pattern LISTs,
-//! staged-agent prepare/cleanup that runs before the op-log is initialized, and
-//! multiprocess post-run cleanup that runs after finalize. Multi-endpoint stores are
+//! preflight probes, agent gRPC get/list, raw `MultiEndpointStore` pattern LISTs, and
+//! multiprocess post-run cleanup that runs after finalize. (Agent prepare/cleanup stages
+//! ARE covered: the agent starts its op-log session before the first stage, see
+//! `agent_oplog_lifecycle_tests.rs`.) Multi-endpoint stores are
 //! deliberately not wrapped (s3dlio logs their bucket-form GET/PUT itself); see
 //! `oplog_multi_endpoint_tests.rs`.
 //!

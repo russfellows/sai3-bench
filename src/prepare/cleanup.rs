@@ -324,7 +324,12 @@ pub fn generate_cleanup_objects(
 
                 // Generate URI using same naming convention as prepare
                 let key = if config.key_prefix_shards > 0 {
-                    format!("{:02x}/{}-{:08}.dat", i as u64 % config.key_prefix_shards as u64, prefix, i)
+                    format!(
+                        "{:02x}/{}-{:08}.dat",
+                        i % config.key_prefix_shards as u64,
+                        prefix,
+                        i
+                    )
                 } else {
                     format!("{}-{:08}.dat", prefix, i)
                 };

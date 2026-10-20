@@ -313,11 +313,7 @@ fn calculate_mean(ophists: &crate::metrics::OpHists) -> u64 {
         }
     }
 
-    if total_count > 0 {
-        weighted_sum / total_count
-    } else {
-        0
-    }
+    weighted_sum.checked_div(total_count).unwrap_or(0)
 }
 
 /// Internal worker mode - run workload and output JSON to stdout

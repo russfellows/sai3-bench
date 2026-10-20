@@ -291,6 +291,18 @@ pub struct ReplayStats {
     pub best_effort_time: Duration,
 }
 
+/// The error returned when replay stops at a row the reader rejects. The reader's message
+/// already names the file line, the row index and the operation (and says an op such as
+/// DELETE_PREFIX is "not supported for exact replay"); it is repeated in the outermost
+/// message so that it is shown without the error chain being expanded.
+fn row_error(e: anyhow::Error) -> anyhow::Error {
+    let msg = format!(
+        "replay stopped at an unsupported or unreadable op-log row: {e:#} \
+         (operations before this row, if any, have already run; use --continue-on-error to skip such rows)"
+    );
+    anyhow::anyhow!(msg)
+}
+
 /// Main replay orchestrator with streaming op-log processing
 ///
 /// This version uses OpLogStreamReader for constant memory usage (~1.5 MB)
@@ -361,14 +373,29 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
     // v0.8.9: Create shared store cache to avoid per-operation store creation
     let store_cache: StoreCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-    // First pass: Get the first operation to establish epoch
+    // First pass: Get the first operation to establish epoch.
+    //
+    // A row the reader rejects (an op s3dlio-oplog does not model, e.g. DELETE_PREFIX, or a
+    // malformed row) is handled here exactly like the same row later in the log: with
+    // `--continue-on-error` it is warned about, counted in `skipped_operations` and replay
+    // goes on with the next row; without it replay stops with an error naming the row.
+    // There is deliberately no pre-scan: operations before a later rejected row have
+    // already run when replay stops there.
     let mut stream_iter = stream;
-    let first_entry = match stream_iter.next() {
-        Some(Ok(entry)) => entry,
-        Some(Err(e)) => return Err(e).context("Failed to parse first op-log entry"),
-        None => {
-            info!("Empty op-log file");
-            return Ok(stats);
+    let first_entry = loop {
+        match stream_iter.next() {
+            Some(Ok(entry)) => break entry,
+            Some(Err(e)) => {
+                warn!("Skipping unreadable or unsupported op-log row: {:#}", e);
+                stats.skipped_operations += 1;
+                if !config.continue_on_error {
+                    return Err(row_error(e));
+                }
+            }
+            None => {
+                info!("Empty op-log file (no replayable rows)");
+                return Ok(stats);
+            }
         }
     };
 
@@ -400,10 +427,10 @@ pub async fn replay_workload_streaming(config: ReplayRunConfig) -> Result<Replay
         let entry = match entry_result {
             Ok(e) => e,
             Err(e) => {
-                warn!("Failed to parse op-log entry: {}", e);
+                warn!("Skipping unreadable or unsupported op-log row: {:#}", e);
                 stats.skipped_operations += 1;
                 if !config.continue_on_error {
-                    return Err(e).context("Failed to parse op-log entry");
+                    return Err(row_error(e));
                 }
                 continue;
             }

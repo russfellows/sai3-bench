@@ -197,8 +197,9 @@ fn with_op_logger(store: Box<dyn ObjectStore>) -> Box<dyn ObjectStore> {
 /// If range_config is provided and enabled=true for GCS/Azure/S3 backends, creates
 /// store with custom RangeEngine settings. Otherwise uses defaults (RangeEngine disabled).
 ///
-/// If page_cache_mode is provided for file:// or direct:// backends, configures
-/// posix_fadvise hints for kernel page cache optimization (Linux/Unix only).
+/// If page_cache_mode is provided for a file:// backend, configures posix_fadvise hints
+/// for kernel page cache optimization (Linux/Unix only). direct:// stores use O_DIRECT,
+/// which bypasses the page cache, so the mode is ignored for them (debug log).
 ///
 /// When an op-log is active the configured store is wrapped by `with_op_logger`, so
 /// the operations performed through it are recorded once. Multi-endpoint stores are
@@ -227,8 +228,22 @@ fn build_configured_store(
     range_config: Option<&crate::config::RangeEngineConfig>,
     page_cache_mode: Option<crate::config::PageCacheMode>,
 ) -> anyhow::Result<Box<dyn ObjectStore>> {
-    // For file:// and direct:// URIs, apply FileSystemConfig with page_cache_mode
-    if uri.starts_with("file://") || uri.starts_with("direct://") {
+    // direct:// opens files with O_DIRECT, which bypasses the page cache, so
+    // page_cache_mode (posix_fadvise hints) does not apply to it. s3dlio's file-store
+    // config (FileSystemConfig) is file://-only and its store rejects direct:// URIs,
+    // so direct:// always gets its own O_DIRECT store from store_for_uri.
+    if uri.starts_with("direct://") {
+        if let Some(mode) = page_cache_mode {
+            debug!(
+                "direct:// URI: page_cache_mode {:?} does not apply to O_DIRECT I/O (ignored)",
+                mode
+            );
+        }
+        return store_for_uri(uri).context("Failed to create object store");
+    }
+
+    // For file:// URIs, apply FileSystemConfig with page_cache_mode
+    if uri.starts_with("file://") {
         if let Some(mode) = page_cache_mode {
             // Convert config::PageCacheMode to s3dlio::PageCacheMode
             let s3dlio_mode = match mode {
@@ -250,7 +265,6 @@ fn build_configured_store(
             let store = FileSystemObjectStore::with_config(config);
             return Ok(Box::new(store));
         } else {
-            // No page cache mode specified - use store_for_uri which handles direct://
             return store_for_uri(uri).context("Failed to create object store");
         }
     }
