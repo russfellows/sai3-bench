@@ -11,6 +11,9 @@ All notable changes to sai3-bench are documented in this file.
 
 ### Changed
 
+- **Minimum Rust version: 1.94.1**, matching s3dlio 0.10.0. The package declares this
+  requirement; active build instructions and Docker builder examples use it. The Rust edition
+  remains 2021.
 - **s3dlio v0.9.96 → v0.10.0** (`s3dlio` and `s3dlio-oplog`), with `aws-config` 1.12.0 and `aws-sdk-s3`
   1.152.0 (the versions s3dlio v0.10.0 is tested with) and a `cargo update` of the other dependencies. Azure
   now uses the stable 1.x SDK (`azure_storage_blob` 1.1, `azure_core` 1.1, `azure_identity` 1.0).

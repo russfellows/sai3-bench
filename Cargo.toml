@@ -2,6 +2,7 @@
 name = "sai3-bench"
 version = "0.9.0"
 edition = "2021"
+rust-version = "1.94.1"
 build   = "build.rs"
 
 [dependencies]

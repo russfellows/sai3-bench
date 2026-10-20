@@ -4,7 +4,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/russfellows/sai3-bench)
 [![Tests](https://img.shields.io/badge/tests-731%20passing-success.svg)](https://github.com/russfellows/sai3-bench)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.90%2B-green.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94.1%2B-green.svg)](https://www.rust-lang.org/)
 
 **Latest: v0.9.0** — Moves to s3dlio v0.10.0 (faster GET/PUT, stable Azure 1.x SDK) and logs prepare, cleanup and metadata-cache operations in the op-log again. See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 
@@ -42,7 +42,7 @@ See [Cloud Storage Setup](docs/CLOUD_STORAGE_SETUP.md) for authentication guides
 
 ### One-Time Setup
 
-**1. Install Rust** (if not already installed):
+**1. Install Rust 1.94.1 or newer** (if not already installed):
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
@@ -256,7 +256,7 @@ See [Config Syntax](docs/CONFIG_SYNTAX.md) for complete reference.
 ## 🛠️ Development
 
 ### Requirements
-- Rust stable toolchain (2024 edition)
+- Rust 1.94.1 or newer (2021 edition)
 - `protoc` compiler for gRPC (distributed mode)
 - Storage credentials for cloud backends
 
