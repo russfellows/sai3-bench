@@ -150,7 +150,9 @@ Internal investigations, architecture decisions, and planning documents are in
 
 ## Version Information
 
-**Current Version**: v0.8.97 (May 2026)
+**Current Version**: v0.9.0 (October 2026)
+
+**v0.9.0**: moves to s3dlio v0.10.0 (zero-copy I/O: faster s3:// and file://; stable Azure 1.x SDK) and logs prepare, cleanup and metadata-cache operations in the op-log again. See [CHANGELOG.md](CHANGELOG.md) for the behaviour changes inherited from s3dlio.
 
 **Major features in v0.8.97**:
 
