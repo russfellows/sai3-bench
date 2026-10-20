@@ -43,10 +43,13 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
   `S3DLIO_RANGE_CONCURRENCY=0`, which used to hang or exhaust memory.
 - **`mkdir` / `rmdir` are no-ops on object stores** (s3dlio 0.9.126); they still create and remove
   directories on `file://` and `direct://`.
-- **Azure credentials** default to `S3DLIO_AZURE_CREDENTIAL=auto` (managed identity, service principal,
-  workload identity, SAS or the `az` CLI login); `cli` restores the old CLI-only behaviour (s3dlio 0.9.128).
+- **Azure credentials** default to `S3DLIO_AZURE_CREDENTIAL=auto` (workload identity, client-secret
+  service principal, managed identity or developer-tool login). SAS requires explicitly setting
+  `S3DLIO_AZURE_CREDENTIAL=sas` and `S3DLIO_AZURE_SAS_TOKEN`; `auto` does not select it.
+  `cli` restores the old CLI-only behaviour (s3dlio 0.9.128).
 - **Op-log: one row per operation, one session per process.** Earlier S3 builds wrote two rows per call
-  (one from sai3-bench, one from s3dlio) and dropped rows under load; each call is now recorded once.
+  (one from sai3-bench, one from s3dlio) and dropped rows under load; single-URI calls through the
+  logged wrapper now have one row owner. This does not imply complete coverage or zero dropped rows.
   s3dlio allows one op-log session per process: once finalized, a new op-log cannot be started in the same
   process (see Known issues). The file format (13-column zstd TSV) is unchanged.
 
@@ -65,9 +68,13 @@ Read these before upgrading; the full list is in s3dlio's `docs/Changelog.md`.
 
 - **Op-log on a long-lived `sai3bench-agent`:** because s3dlio allows one op-log session per process, the
   second op-logged job on the same agent process fails to start its op-log (the per-run path returns an
-  error; the staged path runs without an op-log). Restart the agent between op-logged runs.
+  error; the staged path runs without an op-log). A second `EXECUTE` stage within the same job also
+  runs without an op-log after the first stage finalizes it. Restarting between jobs only addresses
+  single-`EXECUTE` jobs; a multi-`EXECUTE` job needs the agent logger lifecycle corrected.
 - **Replay of `DELETE_PREFIX` rows:** `rmdir` on `file://` / `direct://` now writes `DELETE_PREFIX` rows,
-  which replay does not support; a run whose first row is one aborts.
+  which replay does not support. A first-row rejection aborts even with `--continue-on-error`;
+  a later rejection aborts by default after earlier operations may have executed. Later rejected
+  rows are skipped with `--continue-on-error`, so that mode does not reproduce prefix deletion.
 - **Not in the op-log:** multi-endpoint LIST/DELETE/STAT (s3dlio logs only their GET/PUT, s3dlio #175),
   preflight probes, the agent's gRPC GET/LIST, multi-endpoint pattern LISTs, prepare/cleanup on staged
   agents before the op-log starts, and multi-process post-run cleanup.
